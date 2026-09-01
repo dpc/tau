@@ -10,6 +10,7 @@ use tau_proto::{
 use tracing_subscriber::EnvFilter;
 
 use super::*;
+use crate::agent_turn_state::{AgentTurnPhase, DeferredPriorPhase};
 
 /// Shared byte sink used by tests that run tau-client's writer thread.
 #[derive(Clone, Default)]
@@ -73,6 +74,79 @@ fn with_initial_configure(input: Vec<u8>) -> Vec<u8> {
     writer.flush().expect("flush initial configure");
     framed.extend(input);
     framed
+}
+
+/// Covers all seven stable legacy raw-state families and prevents the typed
+/// phase model from merging their distinct prompt-id and deferral semantics.
+#[test]
+fn phase_transitions_preserve_all_seven_stable_families() {
+    let prompt_id =
+        |value: &str| tau_proto::AgentPromptId::parse(value).expect("valid test prompt id");
+    let mut turn = AgentTurnState::default();
+    assert_eq!(
+        turn.phase(),
+        &AgentTurnPhase::Idle {
+            current_prompt_id: None
+        }
+    );
+
+    turn.record_prompt_started(prompt_id("sp-current"));
+    assert_eq!(
+        turn.phase(),
+        &AgentTurnPhase::Idle {
+            current_prompt_id: Some(prompt_id("sp-current"))
+        }
+    );
+
+    assert!(turn.begin_prompt("hello".into()));
+    assert_eq!(
+        turn.phase(),
+        &AgentTurnPhase::AwaitingFinal {
+            current_prompt_id: None
+        }
+    );
+
+    turn.record_prompt_started(prompt_id("sp-0"));
+    assert_eq!(
+        turn.phase(),
+        &AgentTurnPhase::AwaitingFinal {
+            current_prompt_id: Some(prompt_id("sp-0"))
+        }
+    );
+
+    turn.mark_completed();
+    assert_eq!(
+        turn.phase(),
+        &AgentTurnPhase::Completed {
+            current_prompt_id: prompt_id("sp-0")
+        }
+    );
+
+    turn.terminate_prompt_preserving_backgrounds();
+    turn.defer_final_response(prompt_id("sp-idle"), String::new());
+    assert_eq!(
+        turn.phase(),
+        &AgentTurnPhase::DeferredFinal {
+            prior: DeferredPriorPhase::Idle,
+            final_prompt_id: prompt_id("sp-idle"),
+            current_prompt_id: prompt_id("sp-idle"),
+            response_text: String::new(),
+        }
+    );
+
+    turn.terminate_prompt_preserving_backgrounds();
+    assert!(turn.begin_prompt("again".into()));
+    turn.defer_final_response(prompt_id("sp-awaiting"), "done".into());
+    turn.record_prompt_started(prompt_id("sp-reordered"));
+    assert_eq!(
+        turn.phase(),
+        &AgentTurnPhase::DeferredFinal {
+            prior: DeferredPriorPhase::AwaitingFinal,
+            final_prompt_id: prompt_id("sp-awaiting"),
+            current_prompt_id: prompt_id("sp-reordered"),
+            response_text: "done".into(),
+        }
+    );
 }
 
 /// Corrupted protocol input should surface as a fatal decode/read error under
@@ -474,13 +548,25 @@ fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
 }
 
 fn agent_prompt_terminated(agent_id: &str, agent_prompt_id: &str) -> Event {
+    agent_prompt_terminated_with_reason(
+        agent_id,
+        agent_prompt_id,
+        tau_proto::AgentPromptTerminationReason::Canceled,
+    )
+}
+
+fn agent_prompt_terminated_with_reason(
+    agent_id: &str,
+    agent_prompt_id: &str,
+    reason: tau_proto::AgentPromptTerminationReason,
+) -> Event {
     Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
         automatic_compaction_decision: None,
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         agent_prompt_id: agent_prompt_id
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
-        reason: tau_proto::AgentPromptTerminationReason::Canceled,
+        reason,
         originator: tau_proto::PromptOriginator::User,
     })
 }
@@ -1267,6 +1353,466 @@ fn final_response_without_background_completion_does_not_emit_end_sound() {
     };
     assert_eq!(osc.value, VALUE_AGENT_START);
     assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// A prompt-start event without a prior visible submit must retain its
+/// idle-like current id while still allowing the next visible submit to emit a
+/// start hook.
+#[test]
+fn prompt_start_only_state_accepts_fresh_visible_submit() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&agent_prompt_started_for_agent("main", "sp-current"))
+        .expect("write started");
+    writer
+        .write_event(&user_prompt_submitted(
+            "fresh",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write submit");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let Event::Osc1337SetUserVar(start) = reader.read_event().expect("read").expect("start") else {
+        panic!("expected start OSC");
+    };
+    assert_eq!(start.value, VALUE_AGENT_START);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// Canceled and stale current-prompt terminals must clear notification state
+/// identically, preserve no false end hook, and allow a fresh start afterward.
+#[test]
+fn current_canceled_and_stale_terminations_have_identical_notification_behavior() {
+    for reason in [
+        tau_proto::AgentPromptTerminationReason::Canceled,
+        tau_proto::AgentPromptTerminationReason::Stale,
+    ] {
+        let mut input = Vec::new();
+        let mut writer = EventWriter::new(&mut input);
+        writer
+            .write_frame(&default_notifications_config_frame())
+            .expect("write config");
+        writer
+            .write_event(&user_prompt_submitted(
+                "first",
+                tau_proto::PromptOriginator::User,
+            ))
+            .expect("write first");
+        writer
+            .write_event(&agent_prompt_started_for_agent("main", "sp-first"))
+            .expect("write started");
+        writer
+            .write_event(&agent_prompt_terminated_with_reason(
+                "main", "sp-first", reason,
+            ))
+            .expect("write terminated");
+        writer
+            .write_event(&user_prompt_submitted(
+                "second",
+                tau_proto::PromptOriginator::User,
+            ))
+            .expect("write second");
+        writer.write_frame(&disconnect_frame(None)).expect("write");
+        writer.flush().expect("flush");
+
+        let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+            input,
+            Duration::from_secs(3600),
+        )));
+        drain_lifecycle(&mut reader);
+        let mut values = Vec::new();
+        while let Some(Event::Osc1337SetUserVar(osc)) = reader.read_event().expect("read") {
+            values.push(osc.value);
+        }
+        assert_eq!(values, vec![VALUE_AGENT_START, VALUE_AGENT_START]);
+    }
+}
+
+/// A literal empty deferred response remains present state and emits exactly
+/// after the final background blocker, rather than being treated as absent.
+#[test]
+fn empty_deferred_response_emits_only_after_final_blocker() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "start:{{agent.id}}" },
+                }],
+                "agent_end": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "end:{{turn.agent_response}}" },
+                }],
+                "agent_idle": [],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            "empty",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write prompt");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write final");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "marker",
+            "barrier",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write marker");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write result");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let mut values = Vec::new();
+    while let Some(Event::Osc1337SetUserVar(osc)) = reader.read_event().expect("read") {
+        values.push(osc.value);
+    }
+    assert_eq!(values, vec!["start:main", "start:marker", "end:"]);
+}
+
+/// Terminating a deferred current prompt must preserve its background blocker,
+/// while that blocker's later terminal event must not resurrect a false end.
+#[test]
+fn terminating_deferred_prompt_preserves_blocker_without_late_end() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            "slow",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write prompt");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write final");
+    writer
+        .write_event(&agent_prompt_terminated("main", "sp-0"))
+        .expect("write terminated");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write result");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let Event::Osc1337SetUserVar(start) = reader.read_event().expect("read").expect("start") else {
+        panic!("expected start OSC");
+    };
+    assert_eq!(start.value, VALUE_AGENT_START);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// Reordering a new started id behind a deferred final must keep the final id
+/// distinct, so terminating the old id mismatches current state and does not
+/// cancel.
+#[test]
+fn reordered_started_id_preserves_deferred_final_and_current_ids() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            "slow",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write prompt");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write final");
+    writer
+        .write_event(&agent_prompt_started_for_agent("main", "sp-new"))
+        .expect("write reordered start");
+    writer
+        .write_event(&agent_prompt_terminated("main", "sp-0"))
+        .expect("write old termination");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write result");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let mut values = Vec::new();
+    while let Some(Event::Osc1337SetUserVar(osc)) = reader.read_event().expect("read") {
+        values.push(osc.value);
+    }
+    assert_eq!(values, vec![VALUE_AGENT_START, VALUE_AGENT_END]);
+}
+
+/// A deferred final reached without a visible submit remains W=false: it must
+/// not become the unique-waiting-agent fallback owner for an unrelated blocker.
+#[test]
+fn idle_prior_deferred_final_does_not_join_unique_waiting_fallback() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            tool_call_finished_response(
+                "sp-tools",
+                ToolCallItem {
+                    call_id: "call-bg".into(),
+                    name: tau_proto::ToolName::new("shell"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: tau_proto::CborValue::Null,
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                },
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("write tool owner");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write owned placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-final", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write final");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-unowned",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write unowned placeholder");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write result");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let Event::Osc1337SetUserVar(end) = reader.read_event().expect("read").expect("end") else {
+        panic!("expected end OSC");
+    };
+    assert_eq!(end.value, VALUE_AGENT_END);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// Clean EOF during a deferred final must drop unfinished turn state without
+/// draining a completion hook, independently of explicit-disconnect behavior.
+#[test]
+fn clean_eof_during_deferred_final_does_not_emit_end() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            "slow",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write prompt");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write final");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let Event::Osc1337SetUserVar(start) = reader.read_event().expect("read").expect("start") else {
+        panic!("expected start OSC");
+    };
+    assert_eq!(start.value, VALUE_AGENT_START);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// Immediate and deferred completed phases must retain their exact current ids:
+/// a later non-current termination must not reopen either completed turn.
+#[test]
+fn completed_phases_retain_prompt_ids_for_termination_mismatch() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [],
+                "agent_end": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "end:{{agent.id}}" },
+                }],
+                "agent_idle": [],
+            }),
+        )))
+        .expect("write config");
+
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "immediate",
+            "now",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write immediate prompt");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "immediate",
+                "sp-immediate",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("write immediate final");
+    writer
+        .write_event(&agent_prompt_terminated("immediate", "sp-other"))
+        .expect("write immediate mismatch");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "immediate",
+                "sp-reopened",
+                "wrong",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("write skipped immediate final");
+
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "deferred",
+            "later",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write deferred prompt");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-deferred",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write deferred placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "deferred",
+                "sp-deferred",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("write deferred final");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-deferred",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write deferred result");
+    writer
+        .write_event(&agent_prompt_terminated("deferred", "sp-other"))
+        .expect("write deferred mismatch");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "deferred",
+                "sp-reopened",
+                "wrong",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("write skipped deferred final");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let mut values = Vec::new();
+    while let Some(Event::Osc1337SetUserVar(osc)) = reader.read_event().expect("read") {
+        values.push(osc.value);
+    }
+    assert_eq!(values, vec!["end:immediate", "end:deferred"]);
 }
 
 /// After ProviderResponseFinished we should see the end-sound OSC

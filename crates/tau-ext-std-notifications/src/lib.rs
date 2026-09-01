@@ -40,6 +40,10 @@ use tau_proto::{
     Event, EventSelector, HarnessOutputMessage, Osc1337SetUserVar, StartAgentRequest, TermBell,
 };
 
+mod agent_turn_state;
+
+use agent_turn_state::AgentTurnState;
+
 /// `tracing` target for events emitted from this extension. Matches
 /// the convention described in [`tau_client`]: a short identifier
 /// the user can name in `TAU_LOG=std-notifications=trace`.
@@ -296,83 +300,6 @@ struct AllIdleTurnContext {
     user_prompt: String,
     /// Last final assistant response seen for this agent.
     agent_response: String,
-}
-
-/// Per-agent visible-turn notification state.
-#[derive(Default)]
-struct AgentTurnState {
-    /// Whether a visible user prompt has started and is awaiting a final
-    /// response.
-    waiting_for_final_response: bool,
-    /// Whether the current visible turn has already emitted its completion
-    /// hook.
-    turn_end_emitted: bool,
-    /// Whether the final response is deferred until this agent's background
-    /// tools finish.
-    final_response_pending_background_tools: bool,
-    /// Prompt id for a final response deferred behind background tool
-    /// completion.
-    pending_final_response_prompt: Option<tau_proto::AgentPromptId>,
-    /// Current agent prompt id for this agent's visible turn, when the
-    /// harness has published it.
-    current_agent_prompt_id: Option<tau_proto::AgentPromptId>,
-    /// Assistant text for a final response deferred behind background tool
-    /// completion.
-    pending_final_response_text: String,
-    /// Last visible user prompt text supplied to turn-aware hook templates.
-    last_user_prompt: String,
-    /// User-originated background tool calls still blocking this agent's
-    /// completion notification.
-    active_background_tools: HashSet<tau_proto::ToolCallId>,
-}
-
-impl AgentTurnState {
-    fn begin_prompt(&mut self, text: String) -> bool {
-        if self.waiting_for_final_response {
-            return false;
-        }
-        self.current_agent_prompt_id = None;
-        self.last_user_prompt = text;
-        self.waiting_for_final_response = true;
-        self.turn_end_emitted = false;
-        true
-    }
-
-    fn record_prompt_started(&mut self, prompt_id: tau_proto::AgentPromptId) {
-        self.current_agent_prompt_id = Some(prompt_id);
-    }
-
-    fn defer_final_response(&mut self, prompt_id: tau_proto::AgentPromptId, response_text: String) {
-        self.final_response_pending_background_tools = true;
-        self.pending_final_response_prompt = Some(prompt_id);
-        self.current_agent_prompt_id = self.pending_final_response_prompt.clone();
-        self.pending_final_response_text = response_text;
-    }
-
-    fn terminate_prompt_preserving_backgrounds(&mut self) {
-        self.waiting_for_final_response = false;
-        self.turn_end_emitted = false;
-        self.final_response_pending_background_tools = false;
-        self.pending_final_response_prompt = None;
-        self.pending_final_response_text.clear();
-        self.current_agent_prompt_id = None;
-    }
-
-    fn cancel_deferred_final_response(
-        &mut self,
-        completed_response_prompts: &mut HashSet<tau_proto::AgentPromptId>,
-    ) -> Option<tau_proto::AgentPromptId> {
-        let canceled_prompt_id = self.pending_final_response_prompt.take();
-        if let Some(prompt_id) = &canceled_prompt_id {
-            completed_response_prompts.insert(prompt_id.clone());
-        }
-        self.final_response_pending_background_tools = false;
-        self.pending_final_response_text.clear();
-        self.current_agent_prompt_id = None;
-        self.waiting_for_final_response = false;
-        self.turn_end_emitted = false;
-        canceled_prompt_id
-    }
 }
 
 /// Per-session state used to detect all-agents-idle transitions.
@@ -971,7 +898,7 @@ impl NotificationLoop {
                 let user_prompt = self
                     .agent_turns
                     .get(&finished.agent_id)
-                    .map(|turn| turn.last_user_prompt.clone())
+                    .map(|turn| turn.last_user_prompt().to_owned())
                     .unwrap_or_default();
                 self.all_idle_context.insert(
                     finished.agent_id.clone(),
@@ -1151,10 +1078,8 @@ impl NotificationLoop {
             return Ok(());
         }
         let turn = self.agent_turns.entry(prompt.agent_id.clone()).or_default();
-        if turn.final_response_pending_background_tools
-            && let Some(prompt_id) =
-                turn.cancel_deferred_final_response(&mut self.completed_response_prompts)
-        {
+        if let Some(prompt_id) = turn.cancel_deferred_final_response() {
+            self.completed_response_prompts.insert(prompt_id.clone());
             self.agent_prompt_agents.remove(&prompt_id);
         }
         if turn.begin_prompt(prompt.text) {
@@ -1163,7 +1088,7 @@ impl NotificationLoop {
                 NotificationHook::Start,
                 &prompt.agent_id,
                 &agent_name,
-                &turn.last_user_prompt,
+                turn.last_user_prompt(),
                 "",
                 "",
             );
@@ -1208,14 +1133,13 @@ impl NotificationLoop {
         self.agent_prompt_agents.remove(&terminated.agent_prompt_id);
         if let Some(turn) = self.agent_turns.get_mut(&terminated.agent_id) {
             if turn
-                .current_agent_prompt_id
-                .as_ref()
+                .current_prompt_id()
                 .is_some_and(|prompt_id| prompt_id != &terminated.agent_prompt_id)
             {
                 return;
             }
-            if turn.pending_final_response_prompt.as_ref() == Some(&terminated.agent_prompt_id) {
-                let _ = turn.cancel_deferred_final_response(&mut self.completed_response_prompts);
+            if turn.deferred_final_matches(&terminated.agent_prompt_id) {
+                let _ = turn.cancel_deferred_final_response();
             } else {
                 turn.terminate_prompt_preserving_backgrounds();
             }
@@ -1250,7 +1174,7 @@ impl NotificationLoop {
         let active_background_tools_empty = self
             .agent_turns
             .get(&finished.agent_id)
-            .is_none_or(|turn| turn.active_background_tools.is_empty());
+            .is_none_or(AgentTurnState::background_tools_are_empty);
         if active_background_tools_empty {
             self.emit_finished_response(finished, handle)?;
         } else {
@@ -1277,7 +1201,7 @@ impl NotificationLoop {
         if self
             .agent_turns
             .get(&finished.agent_id)
-            .is_some_and(|turn| turn.turn_end_emitted)
+            .is_some_and(AgentTurnState::is_completed)
         {
             tracing::trace!(target: LOG_TARGET, "skipping already-completed turn");
             return true;
@@ -1312,7 +1236,7 @@ impl NotificationLoop {
             &self.config,
             agent_id,
             agent_name,
-            turn.last_user_prompt.clone(),
+            turn.last_user_prompt().to_owned(),
             agent_response,
         )?;
         self.completed_response_prompts
@@ -1331,7 +1255,7 @@ impl NotificationLoop {
         );
         tracing::debug!(
             target: LOG_TARGET,
-            active_background_tools = turn.active_background_tools.len(),
+            active_background_tools = turn.background_tool_count(),
             "deferring end notification until background tools complete",
         );
     }
@@ -1356,10 +1280,10 @@ impl NotificationLoop {
             self.tool_call_agents
                 .insert(result.call_id.clone(), agent_id.clone());
             let turn = self.agent_turns.entry(agent_id).or_default();
-            turn.active_background_tools.insert(result.call_id);
+            turn.insert_background_tool(result.call_id);
             tracing::trace!(
                 target: LOG_TARGET,
-                active_background_tools = turn.active_background_tools.len(),
+                active_background_tools = turn.background_tool_count(),
                 "background tool started",
             );
         } else if result.originator.is_user() {
@@ -1375,7 +1299,7 @@ impl NotificationLoop {
             let mut waiting_agents = self
                 .agent_turns
                 .iter()
-                .filter(|(_, turn)| turn.waiting_for_final_response)
+                .filter(|(_, turn)| turn.is_waiting_for_final_response())
                 .map(|(agent_id, _)| agent_id.clone());
             let agent_id = waiting_agents.next()?;
             waiting_agents.next().is_none().then_some(agent_id)
@@ -1397,8 +1321,8 @@ impl NotificationLoop {
         let Some(turn) = self.agent_turns.get_mut(&agent_id) else {
             return Ok(());
         };
-        turn.active_background_tools.remove(&call_id);
-        if maybe_emit_deferred_agent_end(
+        turn.remove_background_tool(&call_id);
+        if let Some(prompt_id) = maybe_emit_deferred_agent_end(
             handle,
             turn,
             &mut self.idle,
@@ -1406,8 +1330,7 @@ impl NotificationLoop {
             &self.config,
             &self.agent_display_names,
             &agent_id,
-        )? && let Some(prompt_id) = turn.pending_final_response_prompt.take()
-        {
+        )? {
             self.completed_response_prompts.insert(prompt_id.clone());
             self.agent_prompt_agents.remove(&prompt_id);
         }
@@ -1693,8 +1616,7 @@ fn emit_agent_end(
         "",
     );
     emit_hooks(handle, &config.agent_end, &ctx)?;
-    turn.waiting_for_final_response = false;
-    turn.turn_end_emitted = true;
+    turn.mark_completed();
     arm_idle_hooks(
         idle,
         default_idle_duration,
@@ -1714,11 +1636,11 @@ fn maybe_emit_deferred_agent_end(
     config: &ExtConfig,
     agent_display_names: &HashMap<tau_proto::AgentId, String>,
     agent_id: &tau_proto::AgentId,
-) -> Result<bool, Box<dyn Error>> {
-    if turn.final_response_pending_background_tools && turn.active_background_tools.is_empty() {
-        turn.final_response_pending_background_tools = false;
+) -> Result<Option<tau_proto::AgentPromptId>, Box<dyn Error>> {
+    if let Some((prompt_id, agent_response)) = turn.ready_deferred_final() {
+        let prompt_id = prompt_id.clone();
+        let agent_response = agent_response.to_owned();
         let agent_name = display_name_for_agent(agent_display_names, agent_id);
-        let agent_response = std::mem::take(&mut turn.pending_final_response_text);
         emit_agent_end(
             handle,
             turn,
@@ -1727,12 +1649,12 @@ fn maybe_emit_deferred_agent_end(
             config,
             agent_id.clone(),
             agent_name,
-            turn.last_user_prompt.clone(),
+            turn.last_user_prompt().to_owned(),
             agent_response,
         )?;
-        return Ok(true);
+        return Ok(Some(prompt_id));
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn arm_idle_hooks(
