@@ -2506,6 +2506,18 @@ fn muc_presence_cache_per_room_limit_is_inclusive_and_replacement_safe() {
     assert!(cache.is_quarantined(&room));
     assert_eq!(cache.room_len(&room), 0);
     assert_eq!(cache.total_len(), 0);
+    let post_overflow_occupant = full_jid("room@conference.example.org/post-overflow");
+    assert_eq!(
+        cache.admit(
+            post_overflow_occupant.clone(),
+            full_jid("post-overflow@example.org/resource"),
+        ),
+        Admission::AlreadyQuarantined
+    );
+    assert!(cache.is_quarantined(&room));
+    assert_eq!(cache.room_len(&room), 0);
+    assert_eq!(cache.total_len(), 0);
+    assert_eq!(cache.get(&post_overflow_occupant), None);
 }
 
 /// The 1,024th worker mapping and replacement at capacity are accepted; the

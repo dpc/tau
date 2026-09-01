@@ -24,20 +24,26 @@ pub(crate) enum Admission {
     AlreadyQuarantined,
 }
 
-/// Complete occupant mappings and fail-closed quarantine state for one room.
-#[derive(Default)]
-struct RoomState {
-    /// Full occupant JIDs mapped to server-asserted real JIDs.
-    occupants: HashMap<FullJid, FullJid>,
-    /// Whether an overflow made this room's roster incomplete.
-    quarantined: bool,
+/// Lifecycle state for one room's retained occupant roster.
+enum RoomRosterState {
+    /// A complete set of full occupant JIDs mapped to server-asserted real
+    /// JIDs.
+    Complete(HashMap<FullJid, FullJid>),
+    /// An overflow made the roster incomplete, so the room must fail closed.
+    Quarantined,
+}
+
+impl Default for RoomRosterState {
+    fn default() -> Self {
+        Self::Complete(HashMap::new())
+    }
 }
 
 /// Bounded MUC presence authentication state for one XMPP connection.
 #[derive(Default)]
 pub(crate) struct MucPresenceCache {
     /// Per-room complete mappings and quarantine markers.
-    rooms: HashMap<BareJid, RoomState>,
+    rooms: HashMap<BareJid, RoomRosterState>,
     /// Number of mappings retained across all rooms.
     total_occupants: usize,
     /// Rooms whose one content-free overflow warning was already emitted.
@@ -57,22 +63,21 @@ impl MucPresenceCache {
     pub(crate) fn admit(&mut self, occupant: FullJid, real_jid: FullJid) -> Admission {
         let room = occupant.to_bare();
         let state = self.rooms.entry(room.clone()).or_default();
-        if state.quarantined {
+        let RoomRosterState::Complete(occupants) = state else {
             return Admission::AlreadyQuarantined;
-        }
-        if let Some(retained) = state.occupants.get_mut(&occupant) {
+        };
+        if let Some(retained) = occupants.get_mut(&occupant) {
             *retained = real_jid;
             return Admission::Retained;
         }
-        if MAX_MUC_OCCUPANTS_PER_ROOM <= state.occupants.len()
+        if MAX_MUC_OCCUPANTS_PER_ROOM <= occupants.len()
             || MAX_MUC_OCCUPANTS_TOTAL <= self.total_occupants
         {
-            self.total_occupants -= state.occupants.len();
-            state.occupants.clear();
-            state.quarantined = true;
+            self.total_occupants -= occupants.len();
+            *state = RoomRosterState::Quarantined;
             return Admission::Quarantined;
         }
-        state.occupants.insert(occupant, real_jid);
+        occupants.insert(occupant, real_jid);
         self.total_occupants += 1;
         Admission::Retained
     }
@@ -83,7 +88,10 @@ impl MucPresenceCache {
         let Some(state) = self.rooms.get_mut(&room) else {
             return;
         };
-        if state.occupants.remove(occupant).is_some() {
+        let RoomRosterState::Complete(occupants) = state else {
+            return;
+        };
+        if occupants.remove(occupant).is_some() {
             self.total_occupants -= 1;
         }
     }
@@ -91,14 +99,15 @@ impl MucPresenceCache {
     /// Return the retained real JID for one exact occupant.
     pub(crate) fn get(&self, occupant: &FullJid) -> Option<&FullJid> {
         let room = occupant.to_bare();
-        self.rooms
-            .get(&room)
-            .and_then(|state| state.occupants.get(occupant))
+        self.rooms.get(&room).and_then(|state| match state {
+            RoomRosterState::Complete(occupants) => occupants.get(occupant),
+            RoomRosterState::Quarantined => None,
+        })
     }
 
     /// Return whether one room must fail closed after overflow.
     pub(crate) fn is_quarantined(&self, room: &BareJid) -> bool {
-        self.rooms.get(room).is_some_and(|state| state.quarantined)
+        matches!(self.rooms.get(room), Some(RoomRosterState::Quarantined))
     }
 
     /// Claim the single active-room overflow warning allowed per connection.
@@ -115,8 +124,8 @@ impl MucPresenceCache {
 
     /// Purge mappings and quarantine state for one retired or rolled-back room.
     pub(crate) fn purge_room(&mut self, room: &BareJid) {
-        if let Some(state) = self.rooms.remove(room) {
-            self.total_occupants -= state.occupants.len();
+        if let Some(RoomRosterState::Complete(occupants)) = self.rooms.remove(room) {
+            self.total_occupants -= occupants.len();
         }
     }
 
@@ -128,9 +137,10 @@ impl MucPresenceCache {
     #[cfg(test)]
     /// Return the number of mappings retained in one room.
     pub(crate) fn room_len(&self, room: &BareJid) -> usize {
-        self.rooms
-            .get(room)
-            .map_or(0, |state| state.occupants.len())
+        self.rooms.get(room).map_or(0, |state| match state {
+            RoomRosterState::Complete(occupants) => occupants.len(),
+            RoomRosterState::Quarantined => 0,
+        })
     }
 
     #[cfg(test)]
