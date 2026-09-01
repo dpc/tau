@@ -674,13 +674,11 @@ fn standard_tool_registrations_share_rostra_group() {
         }))
         .expect("configure Rostra");
     writer.flush().expect("flush configuration");
-    wait_for_output_event(&output, |_event| {
-        output_events(&output)
-            .iter()
-            .filter(|event| matches!(event, Event::ToolRegistrationDeclared(_)))
-            .count()
-            == 11
-    });
+    drop(writer);
+    runner
+        .join()
+        .expect("Rostra runner thread")
+        .expect("Rostra runner succeeds");
 
     let registrations = output_events(&output)
         .into_iter()
@@ -715,12 +713,6 @@ fn standard_tool_registrations_share_rostra_group() {
             .as_ref()
             .is_some_and(|group| group.name.as_str() == TOOL_GROUP)
     }));
-
-    drop(writer);
-    runner
-        .join()
-        .expect("Rostra runner thread")
-        .expect("Rostra runner succeeds");
 }
 
 /// Ensures private setup removes inherited group/world directory access.
