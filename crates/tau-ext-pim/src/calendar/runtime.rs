@@ -28,6 +28,38 @@ use super::tool::{
 };
 use crate::storage::SharedStorage;
 
+/// One validated outbound calendar invitation response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InviteResponse {
+    /// Accept the invitation.
+    Accepted,
+    /// Tentatively accept the invitation.
+    Tentative,
+    /// Decline the invitation.
+    Declined,
+}
+
+impl InviteResponse {
+    /// Parse the exact outbound invitation-response vocabulary.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "accepted" => Ok(Self::Accepted),
+            "tentative" => Ok(Self::Tentative),
+            "declined" => Ok(Self::Declined),
+            _ => Err("response must be accepted, tentative, or declined".to_owned()),
+        }
+    }
+
+    /// Return the exact provider and persistence spelling.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Tentative => "tentative",
+            Self::Declined => "declined",
+        }
+    }
+}
+
 const LIST_CALENDARS_FORMAT: &str = "calendar_id flags display_name";
 const LIST_EVENTS_FORMAT: &str = "event_id start end flags status summary...";
 const FREE_BUSY_FORMAT: &str = "event_id start end flags";
@@ -1356,7 +1388,11 @@ impl Engine {
     ) -> Result<(), String> {
         change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
         change.etag = Some(self.cached_etag_for_change(change)?);
-        change.response = Some(required_response(args.response.as_deref())?);
+        change.response = Some(
+            required_response(args.response.as_deref())?
+                .as_str()
+                .to_owned(),
+        );
         Ok(())
     }
 
@@ -1574,7 +1610,7 @@ impl Engine {
                     .map_err(GoogleWriteError::NotDispatched)?;
                 let etag = required_change_field(change.etag.as_deref(), "etag")
                     .map_err(GoogleWriteError::NotDispatched)?;
-                let response = required_change_field(change.response.as_deref(), "response")
+                let response = persisted_response(change.response.as_deref())
                     .map_err(GoogleWriteError::NotDispatched)?;
                 let event_id = EventId::new(event_id);
                 let etag = EventEtag::new(etag);
@@ -2285,12 +2321,14 @@ fn is_datetime_before(left: time::OffsetDateTime, right: time::OffsetDateTime) -
     left < right
 }
 
-fn required_response(value: Option<&str>) -> Result<String, String> {
+fn required_response(value: Option<&str>) -> Result<InviteResponse, String> {
     let response = required_arg(value, "response")?;
-    if !matches!(response, "accepted" | "tentative" | "declined") {
-        return Err("response must be accepted, tentative, or declined".to_owned());
-    }
-    Ok(response.to_owned())
+    InviteResponse::parse(response)
+}
+
+fn persisted_response(value: Option<&str>) -> Result<InviteResponse, String> {
+    let response = required_change_field(value, "response")?;
+    InviteResponse::parse(response)
 }
 
 fn ensure_google_write_backend(account: &ValidatedAccount) -> Result<(), String> {

@@ -10,6 +10,7 @@ use url::form_urlencoded;
 use super::config::{ValidatedAccount, ValidatedBackendConfig};
 use super::ics_feed::TimeRange;
 use super::identity::{EventEtag, EventId, ICalUid, ProviderCalendarId};
+use super::runtime::InviteResponse;
 use crate::google_oauth::{
     GoogleDeviceAuthFinish, GoogleDeviceAuthStart, GoogleOauthClient, GoogleOauthSecretConfig,
     google_http_agent,
@@ -659,13 +660,13 @@ impl GoogleBackend {
         etag: &str,
         response_status: &str,
     ) -> Result<GoogleEvent, String> {
-        self.respond_invite_classified(
+        self.respond_invite_classified_with(
             account,
             stored_refresh_token,
             &ProviderCalendarId::new(calendar_id),
             &EventId::new(event_id),
             &EventEtag::new(etag),
-            response_status,
+            || InviteResponse::parse(response_status),
         )
         .map(GoogleEvent::from)
         .map_err(GoogleWriteError::into_string)
@@ -679,7 +680,26 @@ impl GoogleBackend {
         calendar_id: &ProviderCalendarId,
         event_id: &EventId,
         etag: &EventEtag,
-        response_status: &str,
+        response: InviteResponse,
+    ) -> Result<GoogleEventRecord, GoogleWriteError> {
+        self.respond_invite_classified_with(
+            account,
+            stored_refresh_token,
+            calendar_id,
+            event_id,
+            etag,
+            || Ok(response),
+        )
+    }
+
+    fn respond_invite_classified_with(
+        &self,
+        account: &ValidatedAccount,
+        stored_refresh_token: Option<&str>,
+        calendar_id: &ProviderCalendarId,
+        event_id: &EventId,
+        etag: &EventEtag,
+        response: impl FnOnce() -> Result<InviteResponse, String>,
     ) -> Result<GoogleEventRecord, GoogleWriteError> {
         ensure_google_calendar_allowed(account, calendar_id)
             .map_err(GoogleWriteError::NotDispatched)?;
@@ -696,8 +716,9 @@ impl GoogleBackend {
         let current = self
             .get_json(&event_url, &token, api_base.custom)
             .map_err(GoogleWriteError::NotDispatched)?;
-        let patch = attendee_response_patch(&current, response_status)
-            .map_err(GoogleWriteError::NotDispatched)?;
+        let response = response().map_err(GoogleWriteError::NotDispatched)?;
+        let patch =
+            attendee_response_patch(&current, response).map_err(GoogleWriteError::NotDispatched)?;
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let patch_url = format!("{event_url}?{}", query.finish());
@@ -1220,10 +1241,7 @@ fn is_datetime_before(left: OffsetDateTime, right: OffsetDateTime) -> bool {
     left < right
 }
 
-fn attendee_response_patch(event: &Value, response_status: &str) -> Result<Value, String> {
-    if !matches!(response_status, "accepted" | "tentative" | "declined") {
-        return Err("response must be accepted, tentative, or declined".to_owned());
-    }
+fn attendee_response_patch(event: &Value, response: InviteResponse) -> Result<Value, String> {
     let attendees = event
         .get("attendees")
         .and_then(Value::as_array)
@@ -1240,7 +1258,7 @@ fn attendee_response_patch(event: &Value, response_status: &str) -> Result<Value
             if is_self && let Some(object) = attendee.as_object_mut() {
                 object.insert(
                     "responseStatus".to_owned(),
-                    Value::String(response_status.to_owned()),
+                    Value::String(response.as_str().to_owned()),
                 );
                 found_self = true;
             }

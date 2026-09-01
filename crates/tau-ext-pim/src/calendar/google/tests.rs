@@ -300,10 +300,35 @@ fn attendee_response_patch_preserves_other_attendees() {
         ]
     });
 
-    let patch = attendee_response_patch(&event, "accepted").expect("patch");
+    for (response, expected) in [
+        (InviteResponse::Accepted, "accepted"),
+        (InviteResponse::Tentative, "tentative"),
+        (InviteResponse::Declined, "declined"),
+    ] {
+        let patch = attendee_response_patch(&event, response).expect("patch");
 
-    assert_eq!(patch["attendees"][0]["responseStatus"], "needsAction");
-    assert_eq!(patch["attendees"][1]["responseStatus"], "accepted");
+        assert_eq!(patch["attendees"][0], event["attendees"][0]);
+        assert_eq!(patch["attendees"][1]["responseStatus"], expected);
+    }
+}
+
+/// The public raw RSVP compatibility API must preserve preflight diagnostic
+/// precedence when both the calendar and response are invalid.
+#[test]
+fn public_rsvp_checks_calendar_before_raw_response() {
+    let backend = GoogleBackend::new(BTreeMap::new());
+    let account = google_account(vec!["primary"]);
+
+    let error =
+        match backend.respond_invite(&account, None, "forbidden", "event", "etag", "needsAction") {
+            Ok(_) => panic!("disallowed calendar must reject before response"),
+            Err(error) => error,
+        };
+
+    assert_eq!(
+        error,
+        "calendar `forbidden` is not allowed for account `google`"
+    );
 }
 
 fn google_account(allowed_calendars: Vec<&str>) -> ValidatedAccount {

@@ -10,6 +10,26 @@ use crate::calendar::config::{
     CalendarWritePolicyConfig, ValidatedReadPolicy, ValidatedWritePolicy,
 };
 
+/// The private RSVP type must preserve every exact accepted spelling and the
+/// existing invalid-value diagnostic.
+#[test]
+fn invite_response_parses_exact_vocabulary() {
+    for (raw, expected) in [
+        ("accepted", InviteResponse::Accepted),
+        ("tentative", InviteResponse::Tentative),
+        ("declined", InviteResponse::Declined),
+    ] {
+        let response = InviteResponse::parse(raw).expect("valid response");
+        assert_eq!(response, expected);
+        assert_eq!(response.as_str(), raw);
+    }
+
+    assert_eq!(
+        InviteResponse::parse("needsAction").expect_err("provider-only status is invalid outbound"),
+        "response must be accepted, tentative, or declined"
+    );
+}
+
 /// Calendar ids in the first list column are opaque tokens for follow-up tool
 /// calls. Encode lossy display characters reversibly instead of applying
 /// display sanitization that would change spaces, percent signs, or slashes.
@@ -1965,6 +1985,77 @@ fn persisted_wildcard_etag_is_rejected_before_execution() {
         .expect_err("wildcard must be rejected");
 
     assert_eq!(error, "calendar change contains unsafe wildcard etag");
+}
+
+/// RSVP approvals must keep their raw JSON representation while runtime reload
+/// validation continues to accept only the closed outbound vocabulary.
+#[test]
+fn persisted_invite_response_keeps_raw_json_and_validates_after_load() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = google_test_engine(temp.path());
+    let mut change = CalendarChangeApproval::pending("respond_invite", "google", "primary");
+    change.event_id = Some("evt".to_owned());
+    change.etag = Some("etag".to_owned());
+    assert_eq!(
+        engine
+            .validate_persisted_change(&change)
+            .expect_err("missing response must reject"),
+        "response is required"
+    );
+    change.response = Some(" ".to_owned());
+    assert_eq!(
+        engine
+            .validate_persisted_change(&change)
+            .expect_err("blank response must reject"),
+        "response is required"
+    );
+    change.response = Some("tentative".to_owned());
+    let id = engine.state.pending_change(&change).expect("pending");
+    let path = temp
+        .path()
+        .join(format!("state/approvals/calendar-change/pending/{id}.json"));
+
+    assert_eq!(
+        std::fs::read(&path).expect("approval bytes"),
+        br#"{
+  "schema": 0,
+  "id": "1",
+  "kind": "calendar_change",
+  "status": "pending",
+  "command": "respond_invite",
+  "account": "google",
+  "calendar": "primary",
+  "event_id": "evt",
+  "etag": "etag",
+  "response": "tentative",
+  "reason": "user_approval_required"
+}"#
+    );
+    let loaded = engine
+        .state
+        .pending_change_by_id(&id)
+        .expect("approval reload");
+    engine
+        .validate_persisted_change(&loaded)
+        .expect("valid persisted response");
+
+    let mut invalid = loaded;
+    invalid.response = Some("needsAction".to_owned());
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&invalid).expect("invalid approval JSON"),
+    )
+    .expect("replace approval");
+    let loaded = engine
+        .state
+        .pending_change_by_id(&id)
+        .expect("raw response still loads");
+    assert_eq!(
+        engine
+            .validate_persisted_change(&loaded)
+            .expect_err("provider-only response must reject before execution"),
+        "response must be accepted, tentative, or declined"
+    );
 }
 
 #[test]

@@ -77,6 +77,18 @@ fn calendar_schema_hides_timezone_and_has_command_conditionals() {
         &serde_json::json!(["title", "description", "location", "start", "attendees"])
     );
     assert!(update_schema.pointer("/anyOf").is_none());
+
+    let respond_schema = schemas
+        .iter()
+        .find(|spec| spec.name.as_str() == "calendar_respond")
+        .and_then(|spec| spec.parameters.as_ref())
+        .expect("respond parameters");
+    assert_eq!(
+        respond_schema
+            .pointer("/properties/response/enum")
+            .expect("responses"),
+        &serde_json::json!(["accepted", "tentative", "declined"])
+    );
 }
 
 /// The model-visible schema must advertise the runtime's conservative 20-row
