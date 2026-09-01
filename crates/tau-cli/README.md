@@ -38,8 +38,9 @@ running turn. An idle watched target retains its status row, and one that
 watches an active descendant adds `watching -> @descendant`. This recursive
 projection is exact over the live watch graph. It shows the full visible
 deduplicated closure through eight rows, then falls back to every direct watch
-without truncating that direct set. Indirect rows identify their chosen
-predecessor as `via @parent`. Activity projection separately contributes unique
+without truncating that direct set. Indirect rows attribute their chosen
+predecessor before the watched target as `@parent -> @watched`; watched-agent
+metadata follows the watched target. Activity projection separately contributes unique
 effective targets to the session-wide bottom `@N` chip. Merely live, selectable,
 non-suspended, or idle leaf agents do not appear as active watched-agent work or
 contribute to that count.

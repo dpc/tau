@@ -1705,19 +1705,21 @@ pub(crate) fn watched_agent_tool_display(
         status_text: String::new(),
         ..Default::default()
     };
-    let mut rendered = render_tool_use_state_without_status(&format!("@{agent_id}"), &display);
+    let primary_agent_id = via.unwrap_or(agent_id);
+    let mut rendered =
+        render_tool_use_state_without_status(&format!("@{primary_agent_id}"), &display);
     rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
+    if via.is_some() {
+        rendered.leading_segments.push(ToolLineSegment {
+            text: format!("-> @{agent_id}"),
+            status: ToolStatus::AgentContext,
+            no_leading_space: false,
+        });
+    }
     if let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) {
         rendered.leading_segments.push(ToolLineSegment {
             text: format!("({})", tau_proto::visible_escape_metadata(display_name)),
             status: ToolStatus::Info,
-            no_leading_space: false,
-        });
-    }
-    if let Some(via) = via {
-        rendered.leading_segments.push(ToolLineSegment {
-            text: format!("via @{via}"),
-            status: ToolStatus::AgentContext,
             no_leading_space: false,
         });
     }

@@ -1087,10 +1087,11 @@ fn tool_line_text(
     StyledText::from(Span::new(normalize_inline_text(&text.into()), style))
 }
 
-/// Renders recursive-watch context with a semantic watched-agent identity.
+/// Renders recursive-watch attribution with a semantic watched-agent identity.
 ///
-/// The surrounding `via` label retains ordinary agent-context styling while the
-/// parent identity uses the same style as the watched row's primary identity.
+/// The relationship marker retains ordinary agent-context styling while the
+/// attributed identity uses the same style as the watched row's primary
+/// identity.
 fn watched_agent_context_text(
     theme: &tau_themes::Theme,
     context: &str,

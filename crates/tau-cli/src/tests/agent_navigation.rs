@@ -1957,13 +1957,13 @@ fn pending_agent_response_stays_above_watched_agent_rows() {
 }
 
 /// Recursive watched rows must include topology-only descendants before any
-/// stats arrive, label their deterministic parent, and retain distinct
-/// descendant-witness activity on direct rows.
+/// stats arrive, place their deterministic parent before the descendant, and
+/// retain distinct descendant-witness activity on direct rows.
 ///
 /// This prevents a parent row from flickering out between child model rounds or
 /// losing the reason an indirect child appears in the selected transcript.
 #[test]
-fn watched_agent_recursive_rows_keep_via_and_distinct_witness_context() {
+fn watched_agent_recursive_rows_keep_attribution_and_distinct_witness_context() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1989,7 +1989,7 @@ fn watched_agent_recursive_rows_keep_via_and_distinct_witness_context() {
     sync(&handle);
     assert!(vt.screen_contains(100, "❓💤 @reviewer"));
     assert!(
-        vt.screen_contains(100, "❓💤 @worker via @reviewer"),
+        vt.screen_contains(100, "❓💤 @reviewer -> @worker"),
         "topology-only indirect rows must remain visible without stats"
     );
     let prompt_started = |agent: &str| {
@@ -2011,16 +2011,16 @@ fn watched_agent_recursive_rows_keep_via_and_distinct_witness_context() {
     sync(&handle);
     assert!(vt.screen_contains(100, "❓💤 @reviewer watching -> @worker"));
     assert!(
-        vt.screen_contains(100, "❓✨ @worker via @reviewer"),
-        "via context and direct running state must coexist"
+        vt.screen_contains(100, "❓✨ @reviewer -> @worker"),
+        "parent-first attribution and direct running state must coexist"
     );
 
     renderer.handle(&prompt_started("reviewer"));
     sync(&handle);
     assert!(vt.screen_contains(100, "❓✨ @reviewer"));
-    assert!(vt.screen_contains(100, "❓✨ @worker via @reviewer"));
+    assert!(vt.screen_contains(100, "❓✨ @reviewer -> @worker"));
     assert!(
-        !vt.screen_contains(100, "@reviewer -> @worker"),
+        !vt.screen_contains(100, "@reviewer watching -> @worker"),
         "direct-running state must replace the transitive witness"
     );
 }
@@ -2045,12 +2045,15 @@ fn info_chip_agent_classification_is_strict() {
     assert!(matches!(display.suffixes[1].status, ToolStatus::Info));
 }
 
-/// Indirect-row context styles its parent ID as a watched-agent identity while
-/// retaining the `via` label's context style. It also follows stable identity
-/// at practical widths, while narrow layouts retain the fixed work-status
-/// prefix and a distinguishable identity within the exact terminal budget.
+/// Indirect rows place their parent first and arrow-label their watched
+/// descendant.
+///
+/// Both identities retain watched-agent styling, while the arrow keeps
+/// contextual styling. The parent remains the essential identity at narrow
+/// widths; the atomic descendant attribution yields without reversing their
+/// relationship.
 #[test]
-fn watched_agent_indirect_context_respects_width_priorities() {
+fn watched_agent_indirect_attribution_respects_width_priorities() {
     let theme = cli_test_theme();
     let status = tau_proto::AgentWatchWorkStatusNotification {
         session_id: test_session_id("s1"),
@@ -2081,7 +2084,7 @@ fn watched_agent_indirect_context_respects_width_priorities() {
         work_status: Default::default(),
     };
     let display = watched_agent_tool_display(
-        None,
+        Some("worker name"),
         "worker-with-long-id",
         Some("reviewer"),
         Some(&stats),
@@ -2092,29 +2095,29 @@ fn watched_agent_indirect_context_respects_width_priorities() {
 
     assert_eq!(
         priority_header_text(&block, 100),
-        "🚀💤 @worker-with-long-id via @reviewer review changes %1/1 #67%"
+        "🚀💤 @reviewer -> @worker-with-long-id (worker name) review changes %1/1 #67%"
     );
     let cells = priority_header_cells(&block, 100);
-    let parent_identity_start = cells
+    let watched_identity_start = cells
         .iter()
         .rposition(|cell| cell.ch == '@')
-        .expect("recursive watch parent identity");
+        .expect("recursive watched descendant identity");
     assert_eq!(
-        cells[parent_identity_start].style,
+        cells[watched_identity_start].style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME),
-        "recursive watch parent identity uses the watched-agent identity style"
+        "recursive watched descendant identity uses the watched-agent style"
     );
-    let via_start = cells
+    let arrow_start = cells
         .iter()
-        .position(|cell| cell.ch == 'v')
-        .expect("recursive watch context label");
+        .position(|cell| cell.ch == '-')
+        .expect("recursive watch relationship marker");
     assert_eq!(
-        cells[via_start].style,
+        cells[arrow_start].style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_INFO),
-        "recursive watch context label remains agent-context metadata"
+        "recursive watch relationship marker remains agent-context metadata"
     );
     let boundary = priority_header_text(&block, 39);
-    assert!(boundary.contains("via @reviewer"), "{boundary:?}");
+    assert_eq!(boundary, "🚀💤 @r┄er -> @worker-with-long-id %1/1");
     assert!(boundary.starts_with("🚀💤 @"), "{boundary:?}");
     for width in [12, 16, 24, 40] {
         let text = priority_header_text(&block, width);
@@ -2124,4 +2127,5 @@ fn watched_agent_indirect_context_respects_width_priorities() {
             "{width}: {text:?}"
         );
     }
+    assert_eq!(priority_header_text(&block, 24), "🚀💤 @reviewer");
 }

@@ -94,10 +94,11 @@ target onto a shortest path with lexicographic path ties. It traverses through
 Done targets while hiding their rows and retains topology targets that lack
 stats or status. Up to eight visible targets produce the complete closure; a
 ninth switches atomically to all visible direct watches, without truncating the
-direct set. Expanded rows use `(depth, agent-id)` order. Each indirect row shows
-its deterministic immediate predecessor as `via @parent`; the `via` label retains
-agent-context styling while `@parent` uses the same watched-agent identity style
-as the row's primary `@id`.
+direct set. Expanded rows use `(depth, agent-id)` order. Each indirect row
+attributes its deterministic immediate predecessor before its watched target as
+`@parent -> @id`; both identities use the watched-agent identity style while the
+arrow retains agent-context styling. The watched target's optional display name
+follows `@id`, so it cannot visually describe the parent.
 
 A direct target renders as `<phase-emoji><turn-emoji> @id (display name)
 title`, followed by existing tool/context telemetry. The two fixed-width emoji and
@@ -108,7 +109,7 @@ name yields before the title, while identity and phase retain their existing
 higher priority. An otherwise non-Running edge whose target watches an effective
 descendant adds `watching -> @witness`, where the witness is the nearest directly
 running descendant and equal-depth candidates use stable agent-id order. Direct
-activity wins when both apply. Indirect `via @parent` context and
+activity wins when both apply. Indirect `@parent -> @id` attribution and
 `watching -> @witness` activity are independent and may coexist.
 
 The session-wide `@N` count deduplicates all recursively effective watch targets
