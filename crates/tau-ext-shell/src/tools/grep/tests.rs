@@ -14,6 +14,91 @@ fn args(extra: (&str, CborValue)) -> CborValue {
     ])
 }
 
+/// Ensures omitted and explicit `false` preserve literal matching while `true`
+/// selects regex matching, without changing display text or argument placement.
+#[test]
+fn grep_pattern_mode_preserves_schema_defaults_display_and_ripgrep_argv() {
+    let cases = [
+        (
+            "omitted regex defaults to literal",
+            None,
+            true,
+            "needle.*",
+            "./search-root",
+        ),
+        (
+            "false regex selects literal",
+            Some(CborValue::Bool(false)),
+            true,
+            "needle.*",
+            "./search-root",
+        ),
+        (
+            "true regex selects regex",
+            Some(CborValue::Bool(true)),
+            false,
+            "needle.*",
+            "./search-root",
+        ),
+    ];
+
+    for (label, regex, expects_fixed_strings, pattern, path) in cases {
+        let mut entries = vec![
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text(pattern.to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(path.to_owned()),
+            ),
+        ];
+        if let Some(regex) = regex {
+            entries.push((CborValue::Text("regex".to_owned()), regex));
+        }
+        let options = GrepOptions::parse(&CborValue::Map(entries))
+            .unwrap_or_else(|error| panic!("{label}: parse failed: {error:?}"));
+        let args = options.ripgrep_args();
+        let separator = args
+            .iter()
+            .position(|argument| argument == "--")
+            .unwrap_or_else(|| panic!("{label}: missing -- separator"));
+        let mut expected = vec![
+            "--json",
+            "--hidden",
+            "--with-filename",
+            "--max-columns",
+            "500",
+            "--max-columns-preview",
+        ];
+        if expects_fixed_strings {
+            expected.push("--fixed-strings");
+        }
+        expected.extend(["--", pattern, path]);
+
+        assert_eq!(
+            matches!(&options.pattern, GrepPattern::Literal(_)),
+            expects_fixed_strings,
+            "{label}"
+        );
+        assert_eq!(
+            options.display_args(),
+            format!("{pattern:?} in {path}"),
+            "{label}"
+        );
+        assert_eq!(
+            args[separator + 1..],
+            [pattern.to_owned(), path.to_owned()],
+            "{label}: pattern and path must follow -- in order"
+        );
+        assert_eq!(
+            args,
+            expected.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            "{label}: ripgrep argv"
+        );
+    }
+}
+
 /// Ensures grep rejects wrong-typed path/glob instead of searching the
 /// default directory or dropping the glob.
 #[test]

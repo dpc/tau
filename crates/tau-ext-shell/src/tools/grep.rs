@@ -77,20 +77,40 @@ pub(crate) fn run_grep_cancellable(
 
 /// Parsed model-facing grep arguments after validation and defaults.
 struct GrepOptions {
-    /// Search pattern passed to ripgrep after the `--` separator.
-    pattern: String,
+    /// Search-pattern mode and text passed to ripgrep after the `--` separator.
+    pattern: GrepPattern,
     /// Optional user-supplied search root; defaults to the current directory.
     path: Option<String>,
     /// Optional ripgrep glob filter passed as `--glob`.
     glob: Option<String>,
     /// Whether matching should ignore case.
     ignore_case: bool,
-    /// Whether `pattern` is a regular expression instead of a fixed string.
-    regex: bool,
     /// Optional number of context lines requested around each match.
     context: Option<usize>,
     /// Maximum number of match records to render before stopping ripgrep.
     limit: usize,
+}
+
+/// A grep pattern with its explicit ripgrep matching mode.
+enum GrepPattern {
+    /// Match the pattern text as a fixed string.
+    Literal(String),
+    /// Interpret the pattern text as a regular expression.
+    Regex(String),
+}
+
+impl GrepPattern {
+    fn text(&self) -> &str {
+        match self {
+            Self::Literal(text) | Self::Regex(text) => text,
+        }
+    }
+
+    fn push_ripgrep_args(&self, args: &mut Vec<String>) {
+        if matches!(self, Self::Literal(_)) {
+            args.push("--fixed-strings".to_owned());
+        }
+    }
 }
 
 impl GrepOptions {
@@ -104,7 +124,10 @@ impl GrepOptions {
         // `(`, `.`, `?`, `+`, `*`, `|`, `{`, `\`) would otherwise either
         // fail to parse or silently match something unintended. Regex
         // users opt in explicitly with `regex: true`.
-        let regex = optional_bool_argument(arguments, "regex")?;
+        let pattern = match optional_bool_argument(arguments, "regex")? {
+            true => GrepPattern::Regex(pattern),
+            false => GrepPattern::Literal(pattern),
+        };
         let context =
             optional_bounded_usize_argument(arguments, "context", 0, MAX_GREP_CONTEXT, None)?;
         let limit = optional_bounded_usize_argument(
@@ -121,7 +144,6 @@ impl GrepOptions {
             path,
             glob,
             ignore_case,
-            regex,
             context,
             limit,
         })
@@ -133,8 +155,8 @@ impl GrepOptions {
 
     fn display_args(&self) -> String {
         match self.glob.as_deref() {
-            Some(g) => format!("{:?} in {} [{g}]", self.pattern, self.search_path()),
-            None => format!("{:?} in {}", self.pattern, self.search_path()),
+            Some(g) => format!("{:?} in {} [{g}]", self.pattern.text(), self.search_path()),
+            None => format!("{:?} in {}", self.pattern.text(), self.search_path()),
         }
     }
 
@@ -162,7 +184,7 @@ impl GrepOptions {
         ];
         self.push_optional_ripgrep_args(&mut args);
         args.push("--".to_owned());
-        args.push(self.pattern.clone());
+        args.push(self.pattern.text().to_owned());
         args.push(self.search_path().to_owned());
         args
     }
@@ -171,9 +193,7 @@ impl GrepOptions {
         if self.ignore_case {
             args.push("--ignore-case".to_owned());
         }
-        if !self.regex {
-            args.push("--fixed-strings".to_owned());
-        }
+        self.pattern.push_ripgrep_args(args);
         if let Some(glob) = &self.glob {
             args.push("--glob".to_owned());
             args.push(glob.clone());
