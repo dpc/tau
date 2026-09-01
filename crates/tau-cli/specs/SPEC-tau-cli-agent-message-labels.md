@@ -120,7 +120,7 @@ their compatibility fallback contribution.
 
 Harness-authored watched-agent `WorkStatus` records are structured
 state rather than ordinary messages. Working, waiting, done, and blocked reports render
-as `▤ Status update from <sender>: <phase-emoji> (<reported task>)`, suppress their
+as `▤ Status update from <sender>: <phase-emoji> <reported task>`, suppress their
 empty compatibility body, and bypass `show-messages`. Compact mode suppresses
 these status-update transcript rows entirely, including their headers and reported
 task text; verbose mode retains the existing form.

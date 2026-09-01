@@ -3727,7 +3727,7 @@ fn watch_work_status_renders_all_reportable_states() {
         assert_eq!(
             block_text(&renderer.render_agent_message_block(&event)),
             format!(
-                "{}Status update from @worker (implementation): {symbol} ({label} task)",
+                "{}Status update from @worker (implementation): {symbol} {label} task",
                 crate::transcript_markers::STATUS_UPDATE
             )
         );
@@ -3736,7 +3736,7 @@ fn watch_work_status_renders_all_reportable_states() {
 
 /// Initial watch snapshots establish the status-row state without creating a
 /// pointless transcript notification, while a later explicit report remains
-/// visible to the watcher.
+/// visible to the watcher and a missing task retains its fallback text.
 #[test]
 fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     let mut renderer = renderer_for_agent_id_tests();
@@ -3821,7 +3821,17 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
             &renderer
                 .render_agent_message_block(&renderer.transcript.history.message_history[0].event)
         ),
-        "▤ Status update from @worker: 🚀 (implementation)"
+        "▤ Status update from @worker: 🚀 implementation"
+    );
+    let missing_task = status_event(
+        "missing-task-status",
+        tau_proto::AgentWorkStatusPhase::Working,
+        None,
+        false,
+    );
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&missing_task)),
+        "▤ Status update from @worker: 🚀 no reported task"
     );
 }
 

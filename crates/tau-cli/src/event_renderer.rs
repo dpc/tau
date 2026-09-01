@@ -6488,7 +6488,7 @@ impl EventRenderer {
             .map(tau_proto::visible_escape_metadata)
             .unwrap_or_else(|| "no reported task".to_owned());
         Some(format!(
-            "Status update from {sender}: {phase_symbol} ({title})"
+            "Status update from {sender}: {phase_symbol} {title}"
         ))
     }
 

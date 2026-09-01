@@ -1434,7 +1434,7 @@ fn compact_mode_reprojects_agent_activity_without_content_leaks() {
     sync(&live_handle);
     assert!(live_vt.screen_contains(
         120,
-        "▤ Status update from @researcher-iDAo: 🚀 (COMPACT_STATUS_LEAK)"
+        "▤ Status update from @researcher-iDAo: 🚀 COMPACT_STATUS_LEAK"
     ));
     assert!(live_vt.screen_contains(120, "■ Message from @researcher-iDAo:"));
     assert!(live_vt.screen_contains(120, "COMPACT_MESSAGE_LEAK Δ"));
