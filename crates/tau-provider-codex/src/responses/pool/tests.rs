@@ -760,6 +760,82 @@ fn invalidate_profile_preserves_other_typed_profile_socket() {
     );
 }
 
+/// The prewarm owner namespace must preserve the full wrapping `u64` domain,
+/// including returning `u64::MAX` before advancing the source to zero.
+#[test]
+fn prewarm_owner_generation_wraps_exactly() {
+    let mut source = PrewarmOwnerGeneration(u64::MAX);
+
+    let allocated = source.allocate();
+
+    assert_eq!(allocated.0, u64::MAX);
+    assert_eq!(source.0, 0);
+}
+
+/// Old prewarm authority must not invalidate, publish, abandon, or wake work
+/// owned by a newer generation for the same pool key.
+#[test]
+fn stale_prewarm_owner_generation_cannot_mutate_current_owner() {
+    let (addr, _server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
+    run_shared_turn(&pool, &config, "stale-owner", "sp-warm");
+    let key = pool_key_for(
+        &config,
+        "test-agent",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    let TryCheckout::Reserved(Some(conn)) = pool
+        .try_checkout(&key, &config.api_key)
+        .expect("reserve warm socket")
+    else {
+        panic!("expected warm socket");
+    };
+    let stale_generation = pool.claim_prewarm(&key).expect("claim stale owner");
+    let current_generation = pool.claim_prewarm(&key).expect("claim current owner");
+    pool.stage_prewarm_release(&key, conn)
+        .expect("stage current owner's socket");
+
+    pool.invalidate_prewarm(&key, stale_generation)
+        .expect("ignore stale invalidation");
+    pool.finish_prewarm_release(&key, stale_generation)
+        .expect("ignore stale finish");
+    pool.abandon_prewarm(&key, stale_generation)
+        .expect("ignore stale abandonment");
+
+    {
+        let inner = pool.inner.lock().expect("pool state");
+        assert!(
+            inner.prewarm_owners.get(&key) == Some(&current_generation),
+            "stale authority must preserve the current owner",
+        );
+        assert!(inner.busy.contains(&key), "current owner must remain busy");
+        assert!(
+            !inner.invalidated_busy.contains(&key),
+            "stale invalidation must not mark the current owner invalid",
+        );
+        assert!(
+            inner.pool.conns.contains(&key),
+            "stale authority must preserve the staged socket",
+        );
+    }
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("checkout while current owner remains active"),
+        TryCheckout::Busy
+    ));
+
+    pool.finish_prewarm_release(&key, current_generation)
+        .expect("finish current owner");
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("checkout after current owner publishes"),
+        TryCheckout::Reserved(Some(_))
+    ));
+    pool.abandon(&key).expect("release test reservation");
+}
+
 /// Cancellation landing after socket installation but before reservation
 /// publication must remove the staged socket before a waiter can reuse it.
 #[test]

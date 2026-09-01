@@ -213,6 +213,21 @@ impl Default for WsPool {
 #[cfg(test)]
 type CheckoutWaitHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+struct PrewarmOwnerGeneration(
+    /// Process-local scalar identifying one exact prewarm owner.
+    u64,
+);
+
+impl PrewarmOwnerGeneration {
+    /// Returns the current generation and advances this wrapping source.
+    fn allocate(&mut self) -> Self {
+        let generation = *self;
+        self.0 = self.0.wrapping_add(1);
+        generation
+    }
+}
+
 #[derive(Clone)]
 pub struct SharedWsPool {
     inner: Arc<Mutex<SharedWsPoolInner>>,
@@ -229,9 +244,9 @@ struct SharedWsPoolInner {
     busy: HashSet<PoolKey>,
     invalidated_busy: HashSet<PoolKey>,
     /// Exact generation allowed to cancel or retire each active prewarm key.
-    prewarm_owners: std::collections::HashMap<PoolKey, u64>,
+    prewarm_owners: std::collections::HashMap<PoolKey, PrewarmOwnerGeneration>,
     /// Wrapping source of process-local prewarm ownership generations.
-    next_prewarm_owner: u64,
+    next_prewarm_owner: PrewarmOwnerGeneration,
     abort_wake_generation: u64,
 }
 
@@ -244,7 +259,7 @@ impl SharedWsPool {
                 busy: HashSet::new(),
                 invalidated_busy: HashSet::new(),
                 prewarm_owners: path_std_collections::HashMap::new(),
-                next_prewarm_owner: 0,
+                next_prewarm_owner: PrewarmOwnerGeneration::default(),
                 abort_wake_generation: 0,
             })),
             changed: Arc::new(Condvar::new()),
@@ -284,16 +299,19 @@ impl SharedWsPool {
     }
 
     /// Assigns an exact generation to the current prewarm reservation.
-    fn claim_prewarm(&self, key: &PoolKey) -> Result<u64, WsTurnError> {
+    fn claim_prewarm(&self, key: &PoolKey) -> Result<PrewarmOwnerGeneration, WsTurnError> {
         let mut inner = self.lock_inner()?;
-        let generation = inner.next_prewarm_owner;
-        inner.next_prewarm_owner = inner.next_prewarm_owner.wrapping_add(1);
+        let generation = inner.next_prewarm_owner.allocate();
         inner.prewarm_owners.insert(key.clone(), generation);
         Ok(generation)
     }
 
     /// Invalidates only if the callback still belongs to the same prewarm.
-    fn invalidate_prewarm(&self, key: &PoolKey, generation: u64) -> Result<(), WsTurnError> {
+    fn invalidate_prewarm(
+        &self,
+        key: &PoolKey,
+        generation: PrewarmOwnerGeneration,
+    ) -> Result<(), WsTurnError> {
         let mut inner = self.lock_inner()?;
         if inner.prewarm_owners.get(key) != Some(&generation) {
             return Ok(());
@@ -306,7 +324,11 @@ impl SharedWsPool {
     }
 
     /// Abandons only the exact prewarm generation that still owns the busy key.
-    fn abandon_prewarm(&self, key: &PoolKey, generation: u64) -> Result<(), WsTurnError> {
+    fn abandon_prewarm(
+        &self,
+        key: &PoolKey,
+        generation: PrewarmOwnerGeneration,
+    ) -> Result<(), WsTurnError> {
         let mut inner = self.lock_inner()?;
         if inner.prewarm_owners.get(key) != Some(&generation) {
             return Ok(());
@@ -453,7 +475,11 @@ impl SharedWsPool {
 
     /// Completes a staged prewarm release after cancellation can no longer
     /// target this owner, then wakes a same-key prompt waiter.
-    fn finish_prewarm_release(&self, key: &PoolKey, generation: u64) -> Result<(), WsTurnError> {
+    fn finish_prewarm_release(
+        &self,
+        key: &PoolKey,
+        generation: PrewarmOwnerGeneration,
+    ) -> Result<(), WsTurnError> {
         let mut inner = self.lock_inner()?;
         if inner.prewarm_owners.get(key) != Some(&generation) {
             return Ok(());
@@ -545,7 +571,7 @@ struct PrewarmReservation<'a> {
     /// Exact reserved key.
     key: PoolKey,
     /// Generation proving this guard still owns the key.
-    generation: u64,
+    generation: PrewarmOwnerGeneration,
     /// False only after normal staged release completed.
     armed: bool,
 }
