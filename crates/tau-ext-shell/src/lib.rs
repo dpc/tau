@@ -2166,7 +2166,7 @@ fn dispatch_tool_invoke(
     ) {
         crate::shell_output_spool::note_call();
     }
-    let world = match world_after_shell_authorization(
+    let (world, authorized_cwd) = match world_after_shell_authorization(
         &mut invoke,
         &shell_config,
         tau_vcr::VcrConfig::from_env(),
@@ -2205,6 +2205,7 @@ fn dispatch_tool_invoke(
             shell_command_mode: shell_command_mode.unwrap_or(ShellCommandMode::READ_WRITE_HIDDEN),
             enforce_ro_bind,
             world,
+            authorized_cwd,
         });
         return;
     }
@@ -2245,13 +2246,16 @@ fn world_after_shell_authorization(
     shell_config: &ShellConfig,
     vcr_config: Option<tau_vcr::VcrConfig>,
     tool_cwd: PathBuf,
-) -> Result<path_crate_tools_world::ShellWorld, crate::display::ToolFailure> {
+) -> Result<(path_crate_tools_world::ShellWorld, Option<PathBuf>), crate::display::ToolFailure> {
+    let authorized_cwd = if let Some(surface) =
+        path_crate_tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
+    {
+        path_crate_tools::shell::prepare_tool_invocation(surface, &invoke.arguments, shell_config)?
+    } else {
+        None
+    };
     if let Some(surface) = path_crate_tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
-        && let Some(canonical_cwd) = path_crate_tools::shell::prepare_tool_invocation(
-            surface,
-            &invoke.arguments,
-            shell_config,
-        )?
+        && let Some(canonical_cwd) = authorized_cwd.as_ref()
     {
         set_cbor_text_field(
             &mut invoke.arguments,
@@ -2259,13 +2263,14 @@ fn world_after_shell_authorization(
             canonical_cwd.display().to_string(),
         );
     }
-    path_crate_tools_world::ShellWorld::for_tool_in_dir(
+    let world = path_crate_tools_world::ShellWorld::for_tool_in_dir(
         invoke.tool_name.as_str(),
         invoke.call_id.as_str(),
         &invoke.arguments,
         vcr_config,
         tool_cwd,
-    )
+    )?;
+    Ok((world, authorized_cwd))
 }
 
 fn dispatch_cancellable_non_shell_tool(
@@ -2349,6 +2354,8 @@ struct CancellableShellDispatch<'a> {
     enforce_ro_bind: bool,
     /// Tool execution world carrying the cwd and recorded side effects.
     world: path_crate_tools::world::ShellWorld,
+    /// Canonical operational cwd retained from pre-VCR authorization.
+    authorized_cwd: Option<PathBuf>,
 }
 
 fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
@@ -2362,6 +2369,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         shell_command_mode,
         enforce_ro_bind,
         mut world,
+        authorized_cwd,
     } = params;
     #[cfg(test)]
     lifecycle.test_pause_before_active_registration();
@@ -2395,6 +2403,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
                 .expect("shell dispatch accepts only known shell tools"),
             call_id: invoke.call_id.as_str(),
             arguments: &invoke.arguments,
+            authorized_cwd: authorized_cwd.as_deref(),
         },
         &shell_config,
         shell_command_mode,

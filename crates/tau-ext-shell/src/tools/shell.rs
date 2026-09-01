@@ -6,7 +6,7 @@ use crate::tools as path_crate_tools;
 
 #[cfg(test)]
 mod tests;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use tau_proto::{
@@ -190,6 +190,7 @@ pub(crate) fn run_command_cancellable(
             surface: path_crate_tools::ShellSurface::Generic,
             call_id,
             arguments,
+            authorized_cwd: None,
         },
         shell_config,
         command_mode,
@@ -207,6 +208,8 @@ pub(crate) struct ShellInvocation<'a> {
     pub(crate) call_id: &'a str,
     /// Decoded function arguments for this invocation.
     pub(crate) arguments: &'a CborValue,
+    /// Canonical operational cwd retained from pre-VCR authorization.
+    pub(crate) authorized_cwd: Option<&'a Path>,
 }
 
 /// Execute one shell tool call using that surface's directory argument.
@@ -222,6 +225,7 @@ pub(crate) fn run_command_cancellable_for_tool(
         surface,
         call_id,
         arguments,
+        authorized_cwd,
     } = invocation;
     validate_surface_arguments(surface, arguments)?;
     if let Some(outcome) = world.replay_shell_outcome()? {
@@ -236,7 +240,7 @@ pub(crate) fn run_command_cancellable_for_tool(
         command_mode,
         enforce_ro_bind,
         cancel_rx,
-        None,
+        authorized_cwd,
     )?;
     let elapsed_ms = elapsed_millis(started.elapsed());
     let recorded = match &outcome {
@@ -308,8 +312,8 @@ fn run_command_live_for_surface_with_authorized_cwd(
     let cwd = optional_argument_text(arguments, surface.directory_argument())
         .map_err(ToolFailure::from)?;
     let cwd = authorized_cwd
-        .map(|path| path.display().to_string())
-        .or(cwd);
+        .map(Path::to_path_buf)
+        .or_else(|| cwd.map(PathBuf::from));
     let display_mode = command_mode.display_label().unwrap_or_default();
     let (display_args, display_payload) = command_display(&command);
     let timeout = parse_timeout(arguments).map_err(|message| {
@@ -575,7 +579,6 @@ pub(crate) fn dispatch_user_shell_command(
             return;
         }
     };
-    let cwd = cwd.display().to_string();
     let child = match shell_config.spawn_isolated(&cmd.command, Some(&cwd), false, false) {
         Ok(child) => child,
         Err(err) => {

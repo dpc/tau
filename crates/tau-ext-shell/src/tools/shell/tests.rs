@@ -90,6 +90,7 @@ fn replay_rejects_legacy_gpt_cwd_without_consuming_outcome() {
             surface: path_crate_tools::ShellSurface::ChatGpt,
             call_id: "legacy-gpt-cwd",
             arguments: &arguments,
+            authorized_cwd: None,
         },
         &ShellConfig::default(),
         ShellCommandMode::READ_WRITE_HIDDEN,

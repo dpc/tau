@@ -6,7 +6,6 @@ mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path as path_std_path;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -259,7 +258,7 @@ impl ShellConfig {
     pub(crate) fn spawn_isolated(
         &self,
         command: &str,
-        cwd: Option<&str>,
+        cwd: Option<&Path>,
         read_only_cwd: bool,
         enforce_ro_bind: bool,
     ) -> std::io::Result<ShellProcess> {
@@ -270,7 +269,6 @@ impl ShellConfig {
         apply_command_isolation(&mut child_cmd);
         let read_only_warning = if read_only_cwd && enforce_ro_bind {
             let mount_cwd = cwd.map_or_else(std::env::current_dir, |cwd| {
-                let cwd = path_std_path::Path::new(cwd);
                 if cwd.is_absolute() {
                     Ok(cwd.to_path_buf())
                 } else {

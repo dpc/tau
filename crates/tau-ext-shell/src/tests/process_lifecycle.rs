@@ -108,6 +108,58 @@ fn model_and_user_shells_share_protected_pager_environment() {
     assert_eq!(finished.exit_code, Some(0));
 }
 
+/// Ensures the user-shell spawn boundary retains an admission-time non-UTF-8
+/// cwd as an OS path instead of round-tripping it through lossy display text.
+#[cfg(unix)]
+#[test]
+fn user_shell_preserves_non_utf8_operational_cwd() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let root = TempDir::new().expect("tempdir");
+    let cwd = root
+        .path()
+        .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+    fs::create_dir(&cwd).expect("create non-UTF-8 cwd");
+    fs::write(cwd.join("sentinel"), b"present").expect("write sentinel");
+
+    let (tx, rx) = path_std_sync::mpsc::channel();
+    let command = tau_proto::UiShellCommand {
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-non-utf8-cwd")
+            .expect("test identifier must satisfy its grammar"),
+        command: "test -f ./sentinel".to_owned(),
+        include_in_context: true,
+        target_agent_id: None,
+    };
+    let output = Output::channel(tx);
+    let (_cancel_tx, cancel_rx) = path_std_sync::mpsc::channel();
+
+    path_crate_tools::shell::dispatch_user_shell_command(
+        command,
+        path_crate_config::ShellConfig::default(),
+        &output,
+        cancel_rx,
+        cwd,
+    );
+
+    let finished = rx
+        .try_iter()
+        .find_map(|message| match message {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ShellCommandFinishedReported(event) => Some(event),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("user shell finished event");
+    assert_eq!(finished.output, "");
+    assert_eq!(finished.exit_code, Some(0));
+    assert!(!finished.cancelled);
+}
+
 #[test]
 fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
     // Regression coverage for agent-facing shell output collection: stderr
