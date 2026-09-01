@@ -7,7 +7,7 @@
   styles: {
     // -- User input --
     "user.prompt":          { fg: "white", bold: true },
-    "user.prompt.queued":   { fg: "dark_grey" },
+    "user.prompt.queued":   { fg: "white" },
 
     // -- Agent responses --
     "agent.response":       { fg: "cyan" },

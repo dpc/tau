@@ -332,6 +332,18 @@ fn builtin_dpc_theme_resolves_submitted_user_prompts_as_bright_white() {
     assert!(prompt.bg.is_none());
 }
 
+/// Ensures queued user prompts remain bright white but use normal weight, so
+/// they remain distinct from the already-submitted prompt style.
+#[test]
+fn builtin_dpc_theme_distinguishes_queued_user_prompts() {
+    let theme = Theme::builtin_dpc();
+    let prompt = theme.resolve_style(&StyleName::new("user.prompt.queued"));
+
+    assert!(!prompt.bold);
+    assert_eq!(prompt.fg, Some(Color::White));
+    assert!(prompt.bg.is_none());
+}
+
 /// Ensures user-authored top-level and style-field typos are rejected instead
 /// of being silently ignored and producing confusing styling behavior.
 #[test]
