@@ -84,8 +84,9 @@ explicit directional messages, activations, and typed causal relationships.
 `--mode lite` is the default and reports complete text/output byte/line counts,
 bounded content, and explicit completeness; `--mode full` includes complete
 semantic text and rendered output.
-`agent-performance-jsonl` is always content-free and reports response-local
-token/cache/cost evidence plus qualified journal recorded-at wall intervals and
+`agent-performance-jsonl` is always content-free and reports ordinary and
+standalone provider usage/cost, tool/background and typed-wait lifecycle,
+outer-turn boundaries, qualified journal recorded-at wall intervals, and
 per-agent summaries. `--mode full` is invalid for this format.
 See [`docs/agent-trace.md`](../../docs/agent-trace.md) for the output contracts,
 failure behavior, and sensitive-data warning.

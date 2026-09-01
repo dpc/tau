@@ -15,6 +15,7 @@ fn unknown_and_backward_timestamps_are_omitted() {
     assert_eq!(
         elapsed_without_regression(
             PromptStart {
+                journal_seq: PersistedAgentEventSeq::new(0),
                 recorded_at: UnixMicros::new(10),
                 clock_regressions: 0,
             },

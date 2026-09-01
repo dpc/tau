@@ -129,29 +129,44 @@ impl PersistenceBackend for FilesystemBackend {
         file: &File,
         end_offset: u64,
     ) -> io::Result<crate::agent_checkpoint::CommittedJournalPosition> {
+        let (device, inode) = crate::agent_checkpoint::file_identity(file)?;
+        let boundary_len = end_offset.min(64) as usize;
+        let mut boundary = vec![0; boundary_len];
+        let start = end_offset.saturating_sub(boundary_len as u64);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{FileExt as _, MetadataExt as _};
-            let metadata = file.metadata()?;
-            let boundary_len = end_offset.min(64) as usize;
-            let mut boundary = vec![0; boundary_len];
-            let start = end_offset.saturating_sub(boundary_len as u64);
+            use std::os::unix::fs::FileExt as _;
             file.read_exact_at(&mut boundary, start)?;
-            Ok(crate::agent_checkpoint::CommittedJournalPosition {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-                end_offset,
-                boundary,
-            })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = (file, end_offset);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "managed checkpoints require file identity support",
-            ))
+            use std::os::windows::fs::FileExt as _;
+            let mut filled = 0;
+            while filled < boundary.len() {
+                let read = file.seek_read(
+                    &mut boundary[filled..],
+                    start + u64::try_from(filled).expect("boundary offset is bounded"),
+                )?;
+                if read == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "managed checkpoint boundary ended early",
+                    ));
+                }
+                filled += read;
+            }
         }
+        #[cfg(not(any(unix, windows)))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "managed checkpoints require positional reads",
+        ));
+        Ok(crate::agent_checkpoint::CommittedJournalPosition {
+            device,
+            inode,
+            end_offset,
+            boundary,
+        })
     }
 
     fn sync_all(&self, file: &File) -> io::Result<()> {

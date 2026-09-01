@@ -349,7 +349,8 @@ pub enum AgentTraceFormat {
     /// Compact assistant, message, reasoning, and tool-call timeline as TOON.
     #[default]
     AgentToolsToon,
-    /// Content-free provider accounting and journal-wall timing as JSON Lines.
+    /// Content-free provider, tool, wait, outer-turn, and compaction accounting
+    /// as JSON Lines.
     AgentPerformanceJsonl,
 }
 

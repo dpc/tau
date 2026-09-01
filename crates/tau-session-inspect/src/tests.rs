@@ -281,6 +281,139 @@ fn append_trace_compaction_prompt(
         .expect("compaction prompt start");
 }
 
+fn append_trace_compaction_correction(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    timestamp: u64,
+) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let session_id = tau_proto::SessionId::parse("trace-session").expect("session id");
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("compact-transaction").expect("transaction id");
+    let prompt_id = tau_proto::AgentPromptId::parse("prompt-compaction").expect("prompt id");
+    let model: tau_proto::ModelId = "provider/model".into();
+    let rates = tau_proto::ESTIMATED_API_COST_FALLBACK;
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderStandaloneExecutionAccounted(
+                tau_proto::ProviderStandaloneExecutionAccounted {
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    agent_prompt_id: prompt_id.clone(),
+                    logical_attempt: tau_proto::ProviderAttempt::ONE,
+                    transaction_id: transaction_id.clone(),
+                    model: model.clone(),
+                    backend: None,
+                    usage: tau_proto::StandaloneExecutionUsage::Unknown,
+                    estimated_api_cost_rates: Some(rates),
+                    estimated_api_cost_increment: None,
+                    output: tau_proto::StandaloneExecutionOutput::Rejected,
+                    finality:
+                        tau_proto::StandaloneExecutionAccountingFinality::AwaitingCancelledTerminal,
+                },
+            ),
+            tau_proto::UnixMicros::new(timestamp),
+        )
+        .expect("initial cancellation accounting");
+    let usage = tau_proto::ProviderTokenUsage {
+        model: Some(model.clone()),
+        prompt_sent_tokens: 100,
+        prompt_cached_tokens: 40,
+        response_received_tokens: 5,
+        ..Default::default()
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderStandaloneExecutionAccountingCorrected(
+                tau_proto::ProviderStandaloneExecutionAccountingCorrected {
+                    session_id,
+                    agent_id: agent_id.clone(),
+                    agent_prompt_id: prompt_id,
+                    logical_attempt: tau_proto::ProviderAttempt::ONE,
+                    transaction_id: transaction_id.clone(),
+                    model,
+                    backend: Some(private_backend()),
+                    estimated_api_cost_increment: Some(tau_proto::EstimatedApiCost::for_usage(
+                        &usage, rates,
+                    )),
+                    usage: tau_proto::StandaloneExecutionUsage::Known(usage),
+                    estimated_api_cost_rates: Some(rates),
+                    output: tau_proto::StandaloneExecutionOutput::Rejected,
+                },
+            ),
+            tau_proto::UnixMicros::new(timestamp + 1),
+        )
+        .expect("late cancellation correction");
+    let second_usage = tau_proto::ProviderTokenUsage {
+        model: Some("provider/model".into()),
+        prompt_sent_tokens: 50,
+        prompt_cached_tokens: 10,
+        response_received_tokens: 2,
+        ..Default::default()
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderStandaloneExecutionAccounted(
+                tau_proto::ProviderStandaloneExecutionAccounted {
+                    session_id: tau_proto::SessionId::parse("trace-session").expect("session id"),
+                    agent_id: agent_id.clone(),
+                    agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-compaction")
+                        .expect("prompt id"),
+                    logical_attempt: tau_proto::ProviderAttempt::new(2).expect("attempt two"),
+                    transaction_id: transaction_id.clone(),
+                    model: "provider/model".into(),
+                    backend: Some(private_backend()),
+                    estimated_api_cost_increment: Some(tau_proto::EstimatedApiCost::for_usage(
+                        &second_usage,
+                        rates,
+                    )),
+                    usage: tau_proto::StandaloneExecutionUsage::Known(second_usage),
+                    estimated_api_cost_rates: Some(rates),
+                    output: tau_proto::StandaloneExecutionOutput::Rejected,
+                    finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+                },
+            ),
+            tau_proto::UnixMicros::new(timestamp + 2),
+        )
+        .expect("second final attempt");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+                agent_id: agent_id.clone(),
+                transaction_id,
+                cut: tau_proto::AgentHead::Root,
+                reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
+                resume_through: None,
+                context_retreat: None,
+                incomplete_response: None,
+            }),
+            tau_proto::UnixMicros::new(timestamp + 3),
+        )
+        .expect("compaction terminal");
+}
+
+fn private_backend() -> tau_proto::ProviderBackend {
+    tau_proto::ProviderBackend {
+        kind: tau_proto::ProviderBackendKind::PublicResponses,
+        base_url: "https://private-backend-sentinel.invalid/secret".to_owned(),
+        transport: tau_proto::ProviderBackendTransport::HttpSse,
+        stale_chain_fallback: true,
+    }
+}
+
 /// Appends one timestamp-controlled content-free terminal accounting fact.
 fn append_trace_provider_terminal(
     agents_dir: &std::path::Path,
@@ -335,7 +468,7 @@ fn try_append_trace_provider_terminal(
             estimated_api_cost_rates: None,
             compaction_original_input_tokens: None,
             compaction_output_tokens: None,
-            backend: None,
+            backend: Some(private_backend()),
             provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
@@ -359,7 +492,7 @@ fn append_background_tool_calls(
 ) {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
     let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
-    store
+    let declaration = store
         .append_agent_event(
             agent_id.as_str(),
             None,
@@ -401,8 +534,19 @@ fn append_background_tool_calls(
             }),
         )
         .expect("provider tool call");
-    for (call_id, name, _) in calls {
+    for (index, (call_id, name, _)) in calls.iter().enumerate() {
         let tool_name = tau_proto::ToolName::new(*name);
+        let call = tau_proto::ToolCallRef {
+            declaration: declaration.observation_id,
+            item_index: u32::try_from(index).expect("small fixture"),
+        };
+        store
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                Event::AgentToolDispatchObserved(tau_proto::AgentToolDispatchObserved { call }),
+            )
+            .expect("dispatch observation");
         store
             .append_agent_event(
                 agent_id.as_str(),
@@ -426,6 +570,15 @@ fn append_background_tool_calls(
             .append_agent_event(
                 agent_id.as_str(),
                 None,
+                Event::AgentToolBackgroundedObserved(tau_proto::AgentToolBackgroundedObserved {
+                    call,
+                }),
+            )
+            .expect("background observation");
+        let terminal = store
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
                 Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
                     call_id: (*call_id).into(),
                     tool_name,
@@ -436,6 +589,17 @@ fn append_background_tool_calls(
                 }),
             )
             .expect("real background result");
+        store
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call,
+                    terminal: terminal.observation_id,
+                    cause: tau_proto::ToolTerminalCause::Completed,
+                }),
+            )
+            .expect("terminal classification");
     }
 }
 
@@ -1118,6 +1282,7 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
         Some(0),
     );
     append_trace_compaction_prompt(temp.path(), "agent-root", "prompt-compaction", 50);
+    append_trace_compaction_correction(temp.path(), "agent-root", 52);
     append_trace_prompt_lifecycle(temp.path(), "agent-child", "prompt-incomplete", 20);
     append_background_tool_calls(
         temp.path(),
@@ -1138,11 +1303,17 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
     .expect("performance trace");
     assert!(!output.contains("private response"));
     assert!(!output.contains("private provider error"));
+    assert!(!output.contains("private-backend-sentinel"));
     assert!(!output.contains("private prompt body sentinel"));
     assert!(!output.contains("private_tool_name_sentinel"));
     assert!(!output.contains("private tool argument sentinel"));
     assert!(!output.contains("private tool result sentinel"));
-    assert!(!output.contains("prompt-compaction"));
+    assert!(
+        !rows_or_empty(&output).iter().any(|row| {
+            row["record_type"] == "provider_prompt" && row["agent_prompt_id"] == "prompt-compaction"
+        }),
+        "standalone prompt must not duplicate ordinary provider accounting"
+    );
     assert!(!output.contains("prompt-terminal-only"));
     let rows = output
         .lines()
@@ -1150,6 +1321,7 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
         .collect::<Vec<_>>();
 
     assert_eq!(rows[0]["schema"], "tau.agent_performance");
+    assert_eq!(rows[0]["schema_version"], 0);
     assert_eq!(
         rows[0]["timing_fidelity"],
         "recorded_at_wall_clock_append_invocation_interval"
@@ -1190,6 +1362,8 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
         "agent_id",
         "agent_prompt_id",
         "model",
+        "journal_seq",
+        "terminal_journal_seq",
         "at_us",
         "terminal_at_us",
         "recorded_at_wall_elapsed_us",
@@ -1223,6 +1397,102 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
     assert_eq!(zero["prompt_cached_tokens"], 0);
     assert_eq!(zero["response_received_tokens"], 0);
     assert_eq!(zero["estimated_api_cost_picodollars"], 0);
+    let tool = rows
+        .iter()
+        .find(|row| {
+            row["record_type"] == "tool_call" && row["agent_id"].as_str() == Some("agent-child")
+        })
+        .expect("content-free tool lifecycle");
+    assert_eq!(tool["status"], "completed");
+    assert_eq!(tool["cause"]["kind"], "completed");
+    assert!(tool.get("journal_seq").is_some());
+    assert!(tool.get("terminal_journal_seq").is_some());
+    assert!(tool.get("tool").is_none());
+    assert!(tool.get("arguments").is_none());
+    assert!(tool.get("output").is_none());
+    assert_eq!(
+        tool.as_object()
+            .expect("tool row")
+            .keys()
+            .map(String::as_str)
+            .collect::<path_std_collections::BTreeSet<_>>(),
+        path_std_collections::BTreeSet::from([
+            "record_type",
+            "agent_id",
+            "call",
+            "journal_seq",
+            "dispatch_at_us",
+            "status",
+            "cause",
+            "backgrounded_journal_seq",
+            "backgrounded_at_us",
+            "terminal_journal_seq",
+            "terminal_at_us",
+            "dispatch_to_backgrounded_us",
+            "backgrounded_to_terminal_us",
+            "dispatch_to_terminal_us",
+        ])
+    );
+
+    let compaction = rows
+        .iter()
+        .find(|row| row["record_type"] == "standalone_compaction")
+        .expect("standalone lifecycle");
+    assert_eq!(compaction["compact_prompt_id"], "prompt-compaction");
+    assert_eq!(compaction["trigger"], "manual");
+    assert_eq!(compaction["status"], "failed");
+    assert_eq!(compaction["failure_reason"], "cancelled");
+    assert_eq!(compaction["attempt_count"], 2);
+    assert_eq!(compaction["attempts"][0]["corrected"], true);
+    assert_eq!(compaction["attempts"][0]["usage_known"], true);
+    assert_eq!(compaction["attempts"][0]["prompt_sent_tokens"], 100);
+    assert_eq!(compaction["attempts"][0]["prompt_cached_tokens"], 40);
+    assert_eq!(
+        compaction
+            .as_object()
+            .expect("compaction row")
+            .keys()
+            .map(String::as_str)
+            .collect::<path_std_collections::BTreeSet<_>>(),
+        path_std_collections::BTreeSet::from([
+            "record_type",
+            "agent_id",
+            "journal_seq",
+            "started_at_us",
+            "transaction_id",
+            "compact_prompt_id",
+            "trigger",
+            "status",
+            "failure_reason",
+            "terminal_journal_seq",
+            "terminal_at_us",
+            "recorded_at_wall_elapsed_us",
+            "attempt_count",
+            "attempts",
+        ])
+    );
+    assert_eq!(
+        compaction["attempts"][0]
+            .as_object()
+            .expect("attempt row")
+            .keys()
+            .map(String::as_str)
+            .collect::<path_std_collections::BTreeSet<_>>(),
+        path_std_collections::BTreeSet::from([
+            "agent_prompt_id",
+            "logical_attempt",
+            "model",
+            "accounting_journal_seq",
+            "accounting_at_us",
+            "corrected",
+            "output",
+            "usage_known",
+            "prompt_sent_tokens",
+            "prompt_cached_tokens",
+            "response_received_tokens",
+            "estimated_api_cost_picodollars",
+        ])
+    );
 
     let root_summary = rows
         .iter()
@@ -1273,6 +1543,13 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
         .expect("child summary");
     assert_eq!(child_summary["provider_prompt_incomplete"], 1);
     assert!(child_summary.get("prompt_sent_tokens").is_none());
+}
+
+fn rows_or_empty(output: &str) -> Vec<serde_json::Value> {
+    output
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
 }
 
 fn performance_prompt_row(start: u64, terminal: u64) -> serde_json::Value {
@@ -1380,10 +1657,10 @@ fn agent_trace_rejects_missing_journal_without_mutating_source_tree() {
     );
 }
 
-/// Trace preparation rejects an active writer with its nonblocking lock error
-/// and leaves the durable source tree unchanged.
+/// Trace preparation reads an active writer's committed checkpoint prefix and
+/// leaves its routing lease writable.
 #[test]
-fn agent_trace_rejects_active_writer_without_mutating_source_tree() {
+fn agent_trace_exports_active_writer_without_disrupting_later_writes() {
     let temp = tempfile::tempdir().expect("tempdir");
     let active_id = AgentId::parse("agent-active").expect("agent id");
     let mut active_store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
@@ -1403,25 +1680,26 @@ fn agent_trace_rejects_active_writer_without_mutating_source_tree() {
         )
         .expect("active creation");
 
-    let before = source_tree_snapshot(temp.path()).expect("snapshot fixture");
-    let error = match prepare_agent_trace(
+    let output = export_trace(
         temp.path(),
         &active_id,
         DescendantSelection::RootOnly,
         AgentTraceFormat::TauJsonl,
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("active writer must be rejected"),
-    };
-    let InspectError::AgentStore(tau_core::AgentStoreError::Open { path, source }) = error else {
-        panic!("active writer must report its lock error: {error:?}");
-    };
-    assert_eq!(path, temp.path().join(active_id.as_str()).join("lock"));
-    assert_eq!(source.kind(), path_std_io::ErrorKind::WouldBlock);
-    assert_eq!(
-        source_tree_snapshot(temp.path()).expect("snapshot after rejection"),
-        before
-    );
+    )
+    .expect("active writer trace");
+    let rows = output.lines().collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2, "header plus complete creation frame");
+
+    active_store
+        .append_agent_event(
+            active_id.as_str(),
+            None,
+            Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+                agent_id: active_id.clone(),
+                display_name: "still-routable".to_owned(),
+            }),
+        )
+        .expect("later active write survives tracing");
 }
 
 /// Trace preparation selects a complete inactive journal EOF rather than a

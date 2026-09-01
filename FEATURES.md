@@ -284,8 +284,11 @@ authoritative journal sequence. Lite retains exact content metrics and at most
 Completion-delivering waits reference source-owned output without copying it.
 Agent trace defaults to TOON lite.
 `agent-performance-jsonl` instead emits content-free provider-prompt accounting,
-fixed-point cache ratios, missing-evidence coverage, and explicitly qualified
-journal recorded-at wall-clock intervals with one summary per included agent.
+tool/background and typed-wait lifecycle, outer-turn boundaries, standalone
+compaction attempts, fixed-point cache ratios, missing-evidence coverage, and
+explicitly qualified journal recorded-at wall-clock intervals with one summary
+per included agent. Loaded/running agents use a validated, possibly stale
+checkpoint prefix without pausing their writer.
 
 Compact trace formats provide a semantic assistant/tool/message timeline in JSONL or TOON. Lite bounds each text/output item to 4 KiB while retaining exact complete-content metrics; full retains complete content. Journal sequence is authoritative within an agent, while cross-agent wall time is only a readable overview and not causality.
 

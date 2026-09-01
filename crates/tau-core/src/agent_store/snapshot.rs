@@ -13,8 +13,13 @@ use fs2::FileExt as Fs2FileExt;
 use tau_proto::AgentId;
 
 use super::{AgentStoreError, records_begin_with_creation};
+use crate::agent_checkpoint::read_journal_bound_checkpoint;
 use crate::record_log::{MAX_RECORD_BYTES, read_record_length};
 use crate::{AgentTree, PersistedAgentEvent, PersistedAgentEventSeq};
+
+/// Maximum checkpoint/journal identity observations during an atomic
+/// replacement race.
+const LIVE_CHECKPOINT_ATTEMPTS: usize = 3;
 
 /// An acquired lexical journal lock set that exposes no unvalidated records.
 #[derive(Debug)]
@@ -221,10 +226,10 @@ impl AgentJournalReader<'_> {
 impl AgentJournalSnapshot {
     /// Captures and validates finite committed prefixes for requested journals.
     ///
-    /// Journals select EOF only after acquiring their shared lock. Active
-    /// writers fail closed; managed callers must release, claim
-    /// maintenance, capture, and finalize ownership instead of reading
-    /// through a checkpoint fallback.
+    /// Inactive journals select EOF only after acquiring their shared lock.
+    /// A journal whose writer lock remains held uses its existing atomic,
+    /// journal-bound checkpoint as the committed boundary. The snapshot retains
+    /// each exact opened file identity and never waits for writer completion.
     pub fn capture(
         agents_dir: &Path,
         agent_ids: impl IntoIterator<Item = AgentId>,
@@ -261,6 +266,10 @@ impl AgentJournalSnapshot {
                         Some(lock),
                     )
                 }
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => (
+                    capture_live_journal(&agent_dir, agent_id, &journal_path)?,
+                    None,
+                ),
                 Err(source) => {
                     return Err(AgentStoreError::Open {
                         path: lock_path,
@@ -350,6 +359,106 @@ impl AgentJournalSnapshot {
         }
         Ok(self)
     }
+}
+
+/// Captures one exact checkpoint-bound journal prefix while its writer remains
+/// live.
+fn capture_live_journal(
+    agent_dir: &Path,
+    agent_id: &AgentId,
+    journal_path: &Path,
+) -> Result<SnapshotJournal, AgentStoreError> {
+    capture_live_journal_with_before_attempt(agent_dir, agent_id, journal_path, |_| {})
+}
+
+/// Testable live capture with one hook before each bounded observation attempt.
+fn capture_live_journal_with_before_attempt(
+    agent_dir: &Path,
+    agent_id: &AgentId,
+    journal_path: &Path,
+    mut before_attempt: impl FnMut(usize),
+) -> Result<SnapshotJournal, AgentStoreError> {
+    let checkpoint_path = agent_dir.join("meta.json");
+    let mut last_inconsistent = None;
+    for attempt in 0..LIVE_CHECKPOINT_ATTEMPTS {
+        let mut file = open_existing_journal(journal_path)?;
+        before_attempt(attempt);
+        match read_journal_bound_checkpoint(&checkpoint_path, agent_id, &mut file) {
+            Ok(checkpoint) => {
+                let journal = SnapshotJournal {
+                    path: journal_path.to_path_buf(),
+                    file,
+                    covered_bytes: checkpoint.journal.covered_bytes,
+                };
+                if checkpoint_sequence_matches(&journal, checkpoint.journal.next_seq)? {
+                    return Ok(journal);
+                }
+                last_inconsistent = Some(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "checkpoint next sequence does not match its journal prefix",
+                ));
+            }
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+                ) =>
+            {
+                last_inconsistent = Some(source);
+            }
+            Err(source) => {
+                return Err(AgentStoreError::Read {
+                    path: checkpoint_path,
+                    source,
+                });
+            }
+        }
+    }
+    Err(AgentStoreError::Read {
+        path: checkpoint_path,
+        source: last_inconsistent.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "live journal checkpoint unavailable",
+            )
+        }),
+    })
+}
+
+/// Runs live checkpoint capture with a deterministic per-attempt race hook.
+#[cfg(test)]
+pub(super) fn capture_live_journal_for_test(
+    agent_dir: &Path,
+    agent_id: &AgentId,
+    before_attempt: impl FnMut(usize),
+) -> Result<u64, AgentStoreError> {
+    capture_live_journal_with_before_attempt(
+        agent_dir,
+        agent_id,
+        &agent_dir.join("events.cbor"),
+        before_attempt,
+    )
+    .map(|journal| journal.covered_bytes)
+}
+
+/// Verifies the checkpoint cursor while preserving journal framing/decode
+/// errors.
+fn checkpoint_sequence_matches(
+    journal: &SnapshotJournal,
+    checkpoint_next_seq: PersistedAgentEventSeq,
+) -> Result<bool, AgentStoreError> {
+    let mut reader = AgentJournalReader {
+        path: &journal.path,
+        file: &journal.file,
+        offset: 0,
+        remaining_bytes: journal.covered_bytes,
+        expected: PersistedAgentEventSeq::new(0),
+        finished: false,
+    };
+    for record in reader.by_ref() {
+        record?;
+    }
+    Ok(reader.expected == checkpoint_next_seq)
 }
 
 /// Opens one existing lock file for read-only shared-lock synchronization.

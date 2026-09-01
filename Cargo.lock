@@ -5668,6 +5668,7 @@ dependencies = [
  "rustix-openpty",
  "serde_json",
  "tau-cli",
+ "tau-core",
  "tau-ext-pim",
  "tau-ext-provider-builtin",
  "tau-ext-rhai",
@@ -5824,6 +5825,7 @@ dependencies = [
  "tau-actions",
  "tau-proto",
  "tempfile",
+ "winapi-util",
 ]
 
 [[package]]

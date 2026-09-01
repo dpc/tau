@@ -3,6 +3,7 @@
 use std::collections::btree_map as path_std_collections_btree_map;
 
 mod agent_summary;
+mod orchestration;
 mod provider_prompt;
 mod provider_prompt_record;
 mod summary;
@@ -68,11 +69,29 @@ pub(super) fn write_jsonl(
     for agent_id in snapshot.agent_ids() {
         let provider_prompts = collect_agent(snapshot, agent_id)?;
         let mut summary = Summary::default();
+        let mut rows = Vec::new();
         for (prompt_id, prompt) in &provider_prompts {
-            write_row(
-                output,
-                &prompt.project(agent_id, prompt_id, origin, &mut summary)?,
-            )?;
+            let value =
+                serde_json::to_value(prompt.project(agent_id, prompt_id, origin, &mut summary)?)
+                    .map_err(|error| {
+                        projection_error(format!("failed to serialize performance trace: {error}"))
+                    })?;
+            rows.push(orchestration::OrderedRow {
+                journal_seq: prompt.journal_seq(),
+                family: 0,
+                key: prompt_id.to_string(),
+                value,
+            });
+        }
+        rows.extend(orchestration::collect(snapshot, agent_id, origin)?);
+        rows.sort_by(|left, right| {
+            left.journal_seq
+                .cmp(&right.journal_seq)
+                .then_with(|| left.family.cmp(&right.family))
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        for row in rows {
+            write_row(output, &row.value)?;
         }
         write_row(output, &summary.project(agent_id))?;
     }
@@ -106,6 +125,7 @@ fn collect_agent(
                 let accepted = match prompts.entry(prompt_id.clone()) {
                     path_std_collections_btree_map::Entry::Vacant(entry) => {
                         entry.insert(ProviderPrompt::new(
+                            record.seq,
                             record.recorded_at,
                             clock_regressions,
                             value.model,
@@ -124,7 +144,8 @@ fn collect_agent(
                 let Some(prompt) = prompts.get_mut(&prompt_id) else {
                     continue;
                 };
-                let accepted = prompt.set_terminal(record.recorded_at, clock_regressions, value);
+                let accepted =
+                    prompt.set_terminal(record.seq, record.recorded_at, clock_regressions, value);
                 (prompt_id, accepted, "provider.response_finished")
             }
             _ => continue,

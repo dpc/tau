@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
     DurableSessionSnapshot, ScenarioActionV2, ScenarioLaneV2, ScenarioV2, WatchNotificationV2,
@@ -27,6 +27,9 @@ use terminal_oracles::*;
 use super::gate_fixture::GateFixture;
 use super::headless_process::HeadlessProcess;
 use super::observer::SideObserver;
+use super::peer_navigation::{
+    wait_for_canceled_hold, wait_for_idle_active, wait_for_selected_live_hold,
+};
 use super::pty_process::{
     PtyArtifacts, PtyProcess, PtyReadGeneration, TerminalSize, VtStyledFrame,
 };
@@ -58,6 +61,204 @@ const RESTORE_NOTICE: &str = concat!(
     "Session-scoped tool and extension state may also have changed; inspect current tool state ",
     "and recreate timers or other session-scoped setup if still needed."
 );
+
+/// The real CLI traces production-held main and completed-worker journals, then
+/// the same live harness routes fresh work to that worker.
+#[test]
+fn live_cli_trace_preserves_completed_worker_routing() -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = live_trace_scenario();
+    let fixture = GateFixture::new_multi_agent(&scenario, Path::new(FAKE_PROVIDER))?;
+    let session_id = SessionId::parse(SESSION).expect("session id");
+    let socket = fixture.headless_socket();
+    let daemon = HeadlessProcess::spawn(
+        fixture.headless_command(Path::new(HARNESS_DAEMON), &socket),
+        socket.clone(),
+        fixture.artifact_path("trace-daemon.stderr"),
+    )?;
+    let deadline = Instant::now() + DEADLINE;
+    let mut observer = SideObserver::connect(
+        &socket,
+        &session_id,
+        fixture.artifact_path("trace-observer.json"),
+        deadline,
+    )?;
+    observer.wait_for_extension("e2e-fake-provider", deadline)?;
+    observer.create_main(&session_id, "s8-main", MAIN_PROMPT)?;
+    wait_marker(&mut observer, MAIN_FINAL_RESPONSE, deadline)?;
+    wait_two_idle(&mut observer, deadline)?;
+    let identities = Identities::from_events(&observer.events)?;
+    for agent_id in identities.all() {
+        let checkpoint = fixture
+            .tau_state()
+            .join("agents")
+            .join(agent_id.as_str())
+            .join("meta.json");
+        while !checkpoint.exists() {
+            if Instant::now() >= deadline {
+                return Err(
+                    format!("production checkpoint was not published for `{agent_id}`").into(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    let trace = run_live_trace(&fixture, &identities)?;
+    if !trace.contains(identities.main.as_str()) || !trace.contains(identities.worker.as_str()) {
+        return Err("live descendant trace omitted main or completed worker".into());
+    }
+
+    drop(observer);
+    daemon.finish()?;
+    fixture.require_boot_gone(session_id.as_str())?;
+
+    let mut terminal = PtyProcess::spawn(
+        fixture.command(Some(session_id.as_str())),
+        false,
+        Some(PtyArtifacts::new(
+            fixture.artifact_path("trace-resume.raw.bounded"),
+            fixture.artifact_path("trace-resume.normalized.txt"),
+        )),
+    )?;
+    let deadline = Instant::now() + DEADLINE;
+    let (socket, discovered) =
+        discover_daemon(fixture.runtime_home(), Some(&session_id), deadline)?;
+    if discovered != session_id {
+        return Err("trace resume discovered the wrong session".into());
+    }
+    let mut observer = SideObserver::connect(
+        &socket,
+        &session_id,
+        fixture.artifact_path("trace-resume-observer.json"),
+        deadline,
+    )?;
+    wait_resume_boundaries(&mut observer, &session_id, &identities, deadline)?;
+    observer.wait_for_extension("e2e-fake-provider", deadline)?;
+    terminal.wait_for(MAIN_FINAL_RESPONSE, deadline)?;
+    let worker_switch = terminal.read_generation()?;
+    terminal.send_line(&format!(":agent switch {}", identities.worker))?;
+    wait_for_worker_frame(
+        &terminal,
+        worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
+    terminal.send_line(&format!(":agent resume {}", identities.worker))?;
+    terminal.wait_ready_for(identities.worker.as_str(), deadline)?;
+
+    terminal.send_line("held worker work")?;
+    let held_prompt = wait_for_selected_live_hold(&mut observer, &identities.worker, deadline)?;
+    if !held_prompt.tools.is_empty() {
+        return Err("held resumed-worker prompt unexpectedly exposed tools".into());
+    }
+    let running_trace = run_live_trace(&fixture, &identities)?;
+    if !running_trace.contains(identities.worker.as_str()) {
+        return Err("running descendant trace omitted the active worker".into());
+    }
+    observer.cancel_prompt(&session_id, &held_prompt)?;
+    wait_for_canceled_hold(&mut observer, &held_prompt, deadline)?;
+    wait_for_idle_active(&mut observer, &identities.worker, &held_prompt, deadline)?;
+
+    let fresh_start = observer.events.len();
+    terminal.send_line("fresh worker work")?;
+    wait_agent_marker(
+        &mut observer,
+        &identities.worker,
+        "fresh worker complete",
+        deadline,
+    )?;
+    wait_agent_idle(&mut observer, &identities.worker, deadline)?;
+    terminal.wait_for("fresh worker complete", deadline)?;
+    terminal.wait_ready_for(identities.worker.as_str(), deadline)?;
+    let fresh_prompts = observer.events[fresh_start..]
+        .iter()
+        .filter_map(|observed| match &observed.event {
+            tau_proto::Event::AgentPromptCreated(prompt)
+                if !observed.replay && prompt.agent_id == identities.worker =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !matches!(fresh_prompts.as_slice(), [prompt] if prompt.tools.is_empty()) {
+        return Err("fresh resumed-worker prompt did not have the sole empty tool snapshot".into());
+    }
+    assert_provider_turns(
+        &observer.events,
+        &identities,
+        ProviderTurns { main: 0, worker: 2 },
+    )?;
+    if observer.events.iter().any(|observed| {
+        !observed.replay
+            && matches!(
+                &observed.event,
+                tau_proto::Event::ToolRequest(_)
+                    | tau_proto::Event::ToolStarted(_)
+                    | tau_proto::Event::ToolResultDisplay(_)
+                    | tau_proto::Event::ToolError(_)
+                    | tau_proto::Event::ProviderToolResult(_)
+                    | tau_proto::Event::ProviderToolError(_)
+            )
+    }) {
+        return Err("live-trace companion executed an unexpected tool".into());
+    }
+    if matched_actions(&fixture)? != 6 {
+        return Err("live-trace companion did not consume exactly six actions".into());
+    }
+    if fixture.trace()?.contains("mismatch") {
+        return Err("live-trace companion recorded a provider mismatch".into());
+    }
+
+    drop(observer);
+    terminal.finish()?;
+    fixture.require_boot_gone(session_id.as_str())?;
+    fixture.complete();
+    Ok(())
+}
+
+fn live_trace_scenario() -> ScenarioV2 {
+    let mut scenario = scenario();
+    scenario.name = "s8-agent-trace-live-descendant-companion".to_owned();
+    scenario.lanes[1].actions[1] = ScenarioActionV2::HoldUntilCancel {
+        user_text: "held worker work".to_owned(),
+        timeout_ms: 10_000,
+    };
+    scenario.lanes[1].actions.push(ScenarioActionV2::Text {
+        user_text: "fresh worker work".to_owned(),
+        response: "fresh worker complete".to_owned(),
+    });
+    scenario
+}
+
+fn run_live_trace(
+    fixture: &GateFixture,
+    identities: &Identities,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let agents_dir = fixture.tau_state().join("agents");
+    let output = fixture
+        .command(None)
+        .args([
+            "agent",
+            "trace",
+            identities.main.as_str(),
+            "--include-descendants",
+            "--format",
+            "agent-performance-jsonl",
+            "--agents-dir",
+            agents_dir.to_str().ok_or("non-UTF-8 agents path")?,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "live trace failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
 
 /// Proves two attached public UIs share ID-keyed semantic transcripts while
 /// keeping drafts, selection, themes, redraws, and terminal dimensions local.

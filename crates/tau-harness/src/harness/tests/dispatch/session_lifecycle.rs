@@ -503,12 +503,16 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
             tau_core::PersistenceFailureKind::Sync,
         );
     let active_snapshot =
-        tau_core::AgentJournalSnapshot::capture(&state_dir.join("agents"), [main_id.clone()]);
-    assert!(matches!(
-        active_snapshot,
-        Err(tau_core::AgentStoreError::Open { source, .. })
-            if source.kind() == std::io::ErrorKind::WouldBlock
-    ));
+        tau_core::AgentJournalSnapshot::capture(&state_dir.join("agents"), [main_id.clone()])
+            .expect("running harness exposes its last journal-bound checkpoint");
+    assert!(
+        !active_snapshot
+            .records(&main_id)
+            .expect("selected active journal")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid active checkpoint prefix")
+            .is_empty()
+    );
     let active_entry = tau_core::list_agent_entries(&state_dir.join("agents"))
         .expect("list active agents")
         .into_iter()
@@ -517,8 +521,8 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
     assert_eq!(active_entry.status, tau_core::AgentListStatus::Busy);
     std::fs::remove_dir(&checkpoint_obstacle).expect("release checkpoint publication");
     // Resume queues fresh initialization and restore suffixes on the managed
-    // persistence worker. Release those writer leases before opening offline
-    // strict readers, which intentionally have no live-writer snapshot authority.
+    // persistence worker. The live snapshot above remains at its older checkpoint;
+    // release the writer leases before checking the repaired complete EOF.
     harness.shutdown().expect("shutdown resumed harness");
     drop(harness);
     for path in &paths {

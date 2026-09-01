@@ -217,7 +217,7 @@ pub(crate) fn read_journal_bound_checkpoint(
         ));
     }
     let metadata = journal.metadata()?;
-    let (device, inode) = metadata_identity(&metadata);
+    let (device, inode) = file_identity(journal)?;
     if device != checkpoint.journal.device
         || inode != checkpoint.journal.inode
         || metadata.len() < checkpoint.journal.covered_bytes
@@ -262,12 +262,7 @@ pub(crate) fn write_checkpoint_atomic(path: &Path, checkpoint: &AgentCheckpoint)
 /// Return file identity, EOF, and the witness window from one open journal.
 pub(crate) fn journal_position(file: &mut File) -> io::Result<CommittedJournalPosition> {
     let metadata = file.metadata()?;
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
-    #[cfg(unix)]
-    let (device, inode) = (metadata.dev(), metadata.ino());
-    #[cfg(not(unix))]
-    let (device, inode) = (0, 0);
+    let (device, inode) = file_identity(file)?;
     let end_offset = metadata.len();
     let window_len = end_offset.min(BOUNDARY_BYTES);
     let mut boundary = vec![0; window_len as usize];
@@ -353,8 +348,8 @@ fn inspect_agent_dir(
     let meta_path = dir.join("meta.json");
     let journal_path = dir.join("events.cbor");
     let checkpoint_result = read_checkpoint(&meta_path);
-    let journal_metadata = fs::metadata(&journal_path);
-    if journal_metadata.is_err() {
+    let journal = File::open(&journal_path);
+    if journal.is_err() {
         let legacy = read_legacy_hint(&meta_path);
         return AgentListEntry {
             id,
@@ -399,8 +394,39 @@ fn inspect_agent_dir(
             None,
         );
     }
-    let metadata = journal_metadata.expect("checked above");
-    let (device, inode) = metadata_identity(&metadata);
+    let journal = journal.expect("checked above");
+    let metadata = match journal.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) if retry_inconsistent_observation => {
+            return inspect_agent_dir(id, dir, remaining_repair_bytes, repair_deadline, false);
+        }
+        Err(_) => {
+            return try_bounded_full_rebuild(
+                id,
+                dir,
+                AgentListStatus::ReplacedOrTruncated,
+                remaining_repair_bytes,
+                repair_deadline,
+                None,
+            );
+        }
+    };
+    let (device, inode) = match file_identity(&journal) {
+        Ok(identity) => identity,
+        Err(_) if retry_inconsistent_observation => {
+            return inspect_agent_dir(id, dir, remaining_repair_bytes, repair_deadline, false);
+        }
+        Err(_) => {
+            return try_bounded_full_rebuild(
+                id,
+                dir,
+                AgentListStatus::ReplacedOrTruncated,
+                remaining_repair_bytes,
+                repair_deadline,
+                None,
+            );
+        }
+    };
     if device != checkpoint.journal.device
         || inode != checkpoint.journal.inode
         || metadata.len() < checkpoint.journal.covered_bytes
@@ -470,7 +496,7 @@ fn try_bounded_suffix_repair(
         }
         let mut journal = File::open(dir.join("events.cbor"))?;
         let metadata = journal.metadata()?;
-        let (device, inode) = metadata_identity(&metadata);
+        let (device, inode) = file_identity(&journal)?;
         if device != checkpoint.journal.device
             || inode != checkpoint.journal.inode
             || metadata.len() < checkpoint.journal.covered_bytes
@@ -833,14 +859,24 @@ fn seconds_to_micros(value: u64) -> Option<UnixMicros> {
     (value != 0).then(|| UnixMicros::new(value.saturating_mul(1_000_000)))
 }
 
-fn metadata_identity(metadata: &fs::Metadata) -> (u64, u64) {
+pub(crate) fn file_identity(file: &File) -> io::Result<(u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        (metadata.dev(), metadata.ino())
+        let metadata = file.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        (0, 0)
+        let information = winapi_util::file::information(winapi_util::HandleRef::from_file(file))?;
+        Ok((information.volume_serial_number(), information.file_index()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "agent checkpoints require file identity support",
+        ))
     }
 }

@@ -74,6 +74,7 @@ proptest = "1.7"
 rostra-client = "0.1.3"
 rostra-client-db = "0.1.3"
 rostra-core = "0.1.3"
+winapi-util = "0.1.11"
 # Internal crates
 tau-actions = { path = "crates/tau-actions" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }

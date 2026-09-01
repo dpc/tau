@@ -429,6 +429,13 @@ replayed `agent_start` lifecycle, post-boundary directed current/history rosters
 typed two-agent store record counts/prefixes/suffixes, the fake checkpoint, and
 bounded process-group/socket cleanup reject replay work, lane rebinding,
 cross-agent routing, and partial cleanup.
+The distinct `s8-agent-trace-live-descendant-companion` fixture reuses S8's two
+roles and exact tool surface but owns a separate six-action budget. Boot A
+consumes the same first four actions. Resumed Boot B routes exactly two tool-free
+worker prompts: one held/cancelled turn for live descendant tracing, then one
+successful follow-up. It requires empty tool snapshots, zero main turns, exactly
+two worker turns, no tool execution, no provider mismatch, and exact six-action
+consumption. This companion does not alter S8's five-action restore contract.
 The peer-navigation case requires the authenticated bare delivery to report one
 auto-started recipient, observes its complete stats snapshot as
 `active/running`, and waits for the correlated hold-ready notice broadcast

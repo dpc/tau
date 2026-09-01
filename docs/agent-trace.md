@@ -396,31 +396,65 @@ either artifact as sensitive.
 
 ## Content-free performance JSON Lines
 
-`agent-performance-jsonl` projects only prompt correlations, response-local
-token/cache accounting, stored estimated cost, and qualified lifecycle timing.
+`agent-performance-jsonl` projects ordinary prompt accounting plus content-free
+tool/background, typed wait, outer-turn, and standalone-compaction lifecycle.
 It never emits prompt or response content, errors, tool names, arguments,
 results, model parameters, or provider bodies. Agent, prompt, and
 provider-qualified model IDs, descendant membership, activity timing, token
-counts, cache reuse, and cost remain sensitive metadata.
+counts, cache reuse, cost, and work patterns remain sensitive metadata.
 
 The first row uses schema `tau.agent_performance`, version `0`, and contains the
 root/included agent IDs, `time_unit: "microseconds"`,
 `timing_fidelity: "recorded_at_wall_clock_append_invocation_interval"`, and
-`content_included: false`. Each included agent then emits provider-prompt rows
-ordered lexically by prompt ID followed by one `agent_summary`; agents remain in
-lexical order. `--include-descendants` uses the same authenticated creator scope
+`content_included: false`. Each included agent then emits occurrence rows ordered
+by authoritative start journal sequence, then stable family/key, followed by one
+`agent_summary`; agents remain in lexical order. `--include-descendants` uses the same authenticated creator scope
 and snapshot as every other format.
 
 ```text
 header: schema, schema_version, record_type, root_agent_id,
         included_agent_ids, time_unit, timing_fidelity, content_included
-provider_prompt: record_type, agent_id, agent_prompt_id, model,
+provider_prompt: record_type, agent_id, agent_prompt_id, model, journal_seq,
+                 optional terminal_journal_seq,
                  optional at_us, optional terminal_at_us,
                  optional recorded_at_wall_elapsed_us, terminal_present,
                  optional prompt_sent_tokens,
                  optional prompt_cached_tokens,
                  optional response_received_tokens,
                  optional estimated_api_cost_picodollars
+tool_call: record_type, agent_id, call, journal_seq, status,
+           optional dispatch_at_us/cause/backgrounded_at_us/backgrounded_journal_seq,
+           optional terminal_at_us/terminal_journal_seq,
+           optional dispatch_to_backgrounded_us,
+           optional backgrounded_to_terminal_us,
+           optional dispatch_to_terminal_us
+wait: record_type, agent_id, wait_call, journal_seq, optional observed_at_us, mode,
+      registration, outcome, optional terminal_journal_seq/terminal_at_us,
+      exact mode: target_call
+      activating_input mode: effective_timeout_minutes
+      completion_delivered: source_call, source_terminal, source_phase, envelope,
+                            optional completion_to_delivery_us
+      interrupted_by_activation/input_available: activation,
+                                                 optional activation_kind/
+                                                          activation_to_wait_terminal_us
+      rejected: rejection_reason
+      active registration: optional active_wait_us
+outer_turn: record_type, agent_id, outer_turn_id, agent_prompt_id,
+            journal_seq, optional started_at_us, status, optional terminal boundary,
+            optional recorded_at_wall_elapsed_us,
+            optional automatic_compaction_decision_present
+standalone_compaction: record_type, agent_id, transaction_id,
+                       compact_prompt_id, trigger, journal_seq,
+                       optional started_at_us, status,
+                       optional failure_reason/terminal boundary/
+                                recorded_at_wall_elapsed_us,
+                       attempt_count, attempts
+standalone attempt: agent_prompt_id, logical_attempt, model,
+                    accounting_journal_seq, optional accounting_at_us,
+                    corrected, output, usage_known,
+                    optional prompt_sent_tokens/prompt_cached_tokens/
+                             response_received_tokens/
+                             estimated_api_cost_picodollars
 agent_summary: record_type, agent_id, provider_prompt_occurrences,
                provider_prompt_complete, provider_prompt_incomplete,
                provider_prompt_elapsed_reported,
@@ -447,8 +481,29 @@ before stdout instead of emitting a saturated total. A stored per-response cost
 may itself be the saturated estimate produced by Tau's cost type.
 
 Ordinary-inference prompt materialization (`agent.prompt_started`) is the sole
-start and inclusion evidence. Standalone compaction is excluded because its
-canonical terminal is not `provider.response_finished`. The optional
+ordinary-provider start and inclusion evidence. Its usage authority remains only
+canonical `provider.response_finished`. Standalone attempts use only
+`provider.standalone_execution_accounted`; a matching
+`provider.standalone_execution_accounting_corrected` replaces the awaiting
+cancellation sample in the same `(agent_prompt_id, logical_attempt)` entry.
+`agent.compacted` token fields are lifecycle evidence and are never added as a
+second usage total.
+
+Tool and wait rows use only typed durable call/observation references. Missing
+referenced terminals remain `source_not_selected`, `unresolved`, or incomplete;
+the projector does not infer them from adjacency or parse provider arguments.
+Activating-input waits expose only the durable effective timeout, not the
+requested timeout. Standalone trigger and failure fields are categorical, and
+attempts contain normalized usage/cost without provider rates or bodies.
+Tool `cause` is the serialized `ToolTerminalCause`: `{"kind":"completed"}`,
+`tool_error`, `provider_disconnected`, `lifecycle_teardown`,
+`restart_repair`, or `unknown`; cancellation additionally carries its durable
+request observation. Wait `mode`, `registration`, `outcome`, `source_phase`,
+`envelope`, `activation_kind`, and `rejection_reason` use their snake-case
+protocol enum values. `source_terminal` and `activation` are observation IDs;
+`source_call` and `target_call` are `ToolCallRef` objects.
+
+The optional
 `recorded_at_wall_elapsed_us` and its summary sum compare the journal records'
 wall-clock append-invocation timestamps. They are not durable commit time,
 provider wire/model latency, or exact execution time, and intervals can overlap.
@@ -457,7 +512,8 @@ offsets are absent when no nonzero trace origin exists. Missing terminals stay
 explicitly incomplete. Duplicate lifecycle/terminal facts for one agent/prompt
 correlation fail projection rather than selecting one.
 
-Projection retains one small content-free correlation entry per distinct prompt
-until that agent's rows are emitted. It does not retain provider output,
-error text, model parameters, or cumulative token snapshots. As with other trace
-formats, pathological prompt-ID cardinality or length can exhaust memory.
+Projection retains compact content-free identities, categorical lifecycle facts,
+and accounting counters until that agent's rows are emitted. It drops prompt,
+tool, response, error, model-parameter, endpoint, rate, and cumulative-token
+payloads while streaming the journal. Pathological identifier cardinality or
+length can still exhaust memory.

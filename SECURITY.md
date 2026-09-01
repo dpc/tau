@@ -1208,7 +1208,8 @@ usage accounting, and the no-write behavior of offline inspection.
 
 ## Offline agent trace export
 
-`tau agent trace` exports unredacted durable journals. Output can contain full
+`tau agent trace` can export unredacted durable journals. Native, OTLP, and
+compact output can contain full
 prompts, reasoning, images, tool arguments and results, messages, model
 parameters, usage, and cost data. Treat native, OTLP, compact JSONL, and compact
 TOON output as sensitive as the original state directory; redirect or transmit
@@ -1219,15 +1220,21 @@ complete normalized output and rendered error details.
 
 The exporter opens only existing state and never repairs or writes it. Only
 writer-lock contention selects checkpoint mode. Inactive journals acquire their
-exclusive locks before opening the journal and selecting EOF; lock-held journals
+shared locks before opening the journal and selecting EOF; lock-held journals
 retain one exact opened journal identity and select a finite prefix through the
-existing bound checkpoint. Bounded positional reads and strict replay validate
+existing bound checkpoint. A small bounded retry tolerates only an atomic
+journal/checkpoint replacement observation race. Bounded positional reads and strict replay validate
 every selected prefix, descendant discovery is rechecked after capture, and all
 failures occur before stdout. Capture never waits for lock release or includes
 records committed after its selected cuts. A snapshot retains one journal file
 descriptor per included agent plus lock descriptors for inactive agents until
 private staging finishes. A very large selected workflow can exhaust process
 file descriptors and fail before output.
+
+`agent-performance-jsonl` is the preferred content-free audit projection, but it
+still exposes identifiers, models, timing, usage/cost, membership, and work
+patterns. Keep it private even though it omits prompt, tool, response, error, and
+provider-body content.
 
 Descendant discovery accepts only a valid matching sequence-zero
 `AgentStarted.creator` record as an authenticated edge. Missing, unreadable,
@@ -1260,13 +1267,17 @@ raw.
 
 The performance projection emits no prompt, tool, response, or error bodies, but
 its agent/prompt/model IDs, descendant membership, timing, token/cache counts,
-and estimated cost remain sensitive metadata. It retains only compact
-response-local accounting, provider-qualified model identity, and timestamps
-per prompt, not provider payloads, model parameters, or cumulative usage
-snapshots. Heap remains proportional to prompt correlation count and
-agent/prompt/model identifier bytes. Changes must recheck zero and decreasing wall timestamps, duplicate
-terminals, checked aggregate overflow, zero/fractional cache-ratio boundaries,
-and structural output-field privacy.
+estimated cost, call/observation/turn/transaction identities, and work patterns
+remain sensitive metadata. It streams each event into a compact content-free
+classification: per-occurrence identity/timestamp, declaration and canonical
+terminal call identities, typed tool/wait/activation/outer-turn boundaries, and
+standalone accounting counters. It drops provider payloads, tool names and
+arguments/results, errors, model parameters, endpoint/backend/rate metadata, and
+cumulative usage snapshots. Heap remains proportional to selected occurrence and
+correlation cardinality plus retained identifier bytes, not selected journal
+payload bytes. Changes must recheck zero and decreasing wall timestamps,
+duplicate terminals, checked aggregate overflow, zero/fractional cache-ratio
+boundaries, typed reference integrity, and structural output-field privacy.
 
 One pathological frame-valid selected journal can exhaust memory or temporary
 storage. Projection failure remains before stdout, and the final anonymous file

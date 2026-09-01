@@ -86,6 +86,14 @@ dispatch-uncertain, and interrupted-tool state in one four-agent session and
 proves a second no-input resume adds no cross-agent work or durable suffix. S8
 is implemented by
 `core_resume::multi_agent::public_terminal_cold_resume_selects_main_and_worker`.
+The separate
+`core_resume::multi_agent::live_cli_trace_preserves_completed_worker_routing`
+companion uses scenario `s8-agent-trace-live-descendant-companion`. It preserves
+S8's role/tool surface while owning six actions: the original four-action Boot A,
+one held/cancelled tool-free worker turn used to trace an active descendant, and
+one later successful tool-free worker turn. Exact provider-turn, action
+consumption, empty-tool, no-tool-execution, and no-mismatch oracles keep this
+audit coverage from changing S8's five-action contract.
 
 ## Test boundaries and oracles
 

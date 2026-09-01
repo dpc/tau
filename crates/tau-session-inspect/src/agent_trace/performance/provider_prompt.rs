@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests;
 
+use tau_core::PersistedAgentEventSeq;
 use tau_proto::{
     AgentId, AgentPromptId, EstimatedApiCost, ModelId, ProviderResponseFinished, UnixMicros,
 };
@@ -14,6 +15,8 @@ use crate::InspectError;
 
 /// Content-free fields retained from one terminal provider response.
 struct TerminalEvidence {
+    /// Owning journal sequence.
+    journal_seq: PersistedAgentEventSeq,
     /// Terminal record timestamp.
     recorded_at: UnixMicros,
     /// Number of preceding journal wall-clock regressions.
@@ -37,6 +40,8 @@ pub(super) struct ProviderPrompt {
 /// Required materialization boundary and its clock-regression epoch.
 #[derive(Clone, Copy)]
 struct PromptStart {
+    /// Owning journal sequence.
+    journal_seq: PersistedAgentEventSeq,
     /// Wall-clock sample recorded at append invocation.
     recorded_at: UnixMicros,
     /// Number of preceding comparable wall-clock regressions.
@@ -45,9 +50,15 @@ struct PromptStart {
 
 impl ProviderPrompt {
     /// Creates a correlation from its required materialization fact.
-    pub(super) fn new(at: UnixMicros, clock_regressions: u64, model: ModelId) -> Self {
+    pub(super) fn new(
+        journal_seq: PersistedAgentEventSeq,
+        at: UnixMicros,
+        clock_regressions: u64,
+        model: ModelId,
+    ) -> Self {
         Self {
             prompt_started: PromptStart {
+                journal_seq,
                 recorded_at: at,
                 clock_regressions,
             },
@@ -59,6 +70,7 @@ impl ProviderPrompt {
     /// Records one unique content-free terminal projection.
     pub(super) fn set_terminal(
         &mut self,
+        journal_seq: PersistedAgentEventSeq,
         at: UnixMicros,
         clock_regressions: u64,
         response: ProviderResponseFinished,
@@ -72,6 +84,7 @@ impl ProviderPrompt {
         });
         self.terminal
             .replace(TerminalEvidence {
+                journal_seq,
                 recorded_at: at,
                 clock_regressions,
                 usage,
@@ -114,6 +127,11 @@ impl ProviderPrompt {
             agent_id,
             agent_prompt_id: prompt_id,
             model: &self.model,
+            journal_seq: start.journal_seq.get(),
+            terminal_journal_seq: self
+                .terminal
+                .as_ref()
+                .map(|terminal| terminal.journal_seq.get()),
             at_us: relative_time(Some(start.recorded_at), origin),
             terminal_at_us: relative_time(terminal_at, origin),
             recorded_at_wall_elapsed_us: elapsed,
@@ -127,6 +145,11 @@ impl ProviderPrompt {
 
     fn start(&self) -> PromptStart {
         self.prompt_started
+    }
+
+    /// Returns the authoritative start sequence for row ordering.
+    pub(super) fn journal_seq(&self) -> u64 {
+        self.prompt_started.journal_seq.get()
     }
 }
 

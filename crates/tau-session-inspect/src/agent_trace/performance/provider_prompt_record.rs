@@ -14,6 +14,11 @@ pub(super) struct ProviderPromptRecord<'a> {
     pub(super) agent_prompt_id: &'a AgentPromptId,
     /// Provider-qualified materialized model ID.
     pub(super) model: &'a ModelId,
+    /// Authoritative prompt-start journal sequence.
+    pub(super) journal_seq: u64,
+    /// Authoritative terminal journal sequence when selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) terminal_journal_seq: Option<u64>,
     /// Relative prompt-materialization time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) at_us: Option<u64>,

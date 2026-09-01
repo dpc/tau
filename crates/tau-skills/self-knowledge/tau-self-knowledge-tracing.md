@@ -1,18 +1,25 @@
 ---
 name: tau-self-knowledge-tracing
-description: Inspect durable Tau agent traces and compact semantic/correlation projections.
+description: Audit Tau agent execution, performance, orchestration, and durable semantic traces.
 ---
 
 # Durable agent tracing
 
-Export the compact projection with:
+Choose the least sensitive projection that answers the question:
 
 ```console
+tau agent trace <agent-id> --include-descendants --format agent-performance-jsonl
 tau agent trace <agent-id> --include-descendants --format agent-tools-toon
-tau agent trace <agent-id> --include-descendants --format agent-tools-jsonl | jq -c .
+tau agent trace <agent-id> --include-descendants --format tau-jsonl
 ```
 
-Both formats use `tau.agent_trace_compact`, schema version `0`, and contain
+Use `agent-performance-jsonl` by default. It is content-free and covers ordinary
+provider usage/cost, tool/background lifecycle, typed waits and effective input
+timeouts, outer turns, and standalone compaction attempts. It still exposes
+identities, models, activity timing, usage, cost, membership, and work patterns.
+
+Use `agent-tools-toon` or `agent-tools-jsonl` only for bounded semantic
+explanation. Both formats use `tau.agent_trace_compact`, schema version `0`, and contain
 provider-declared `call`, assistant prose/reasoning, explicit directional
 messages, content-free `activation`, and typed `relationship` items. Every item
 includes relative append time, optional absolute Unix append time, and owning
@@ -33,8 +40,18 @@ prose, displayable reasoning, explicit messages, tool arguments/output, exact
 timestamps, and identity/activity metadata. Captured identity/timestamps remain
 historical journal facts when journals move between sessions.
 
-For content-free prompt and usage accounting, use:
+Use `tau-jsonl` only for complete replay or journal-integrity investigation. It
+contains every selected canonical journal occurrence.
 
-```console
-tau agent trace <agent-id> --format agent-performance-jsonl
-```
+Tracing is a finite read-only snapshot. An inactive journal uses its locked EOF;
+a currently loaded/running journal uses an exact validated checkpoint prefix, so
+the trace may be stale and omit the newest writes. It never contacts the harness,
+pauses the writer, or follows later writes.
+
+Keep all trace artifacts private and use owner-only files. Compact and native
+formats can contain unredacted reasoning, messages, arguments, outputs, images,
+and secrets. Use session `events.jsonl` only for transient observations, private
+provider captures only for exact wire shape, and component logs for operational
+failures; load `tau-self-knowledge-debugging` before that escalation.
+
+`docs/agent-trace.md` owns exact schemas and field definitions.

@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::collections::VecDeque;
 use std::time::Instant;
 use std::{sync as path_std_sync, time as path_std_time};
 
@@ -1275,9 +1277,9 @@ fn journal_snapshot_does_not_create_missing_paths() {
     assert!(!temp.path().join(agent_id.as_str()).exists());
 }
 
-/// A strict snapshot never falls back to a live writer's checkpoint.
+/// A live writer exposes only its exact checkpoint prefix and remains writable.
 #[test]
-fn journal_snapshot_rejects_lock_held_writer() {
+fn journal_snapshot_uses_lock_held_checkpoint_without_disrupting_writer() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-active").expect("agent id");
     let mut store = AgentStore::open_lazy(temp.path()).expect("store");
@@ -1285,10 +1287,22 @@ fn journal_snapshot_rejects_lock_held_writer() {
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
 
-    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
-        .expect_err("active writer excludes strict snapshot");
-    assert!(matches!(error, AgentStoreError::Open { source, .. }
-        if source.kind() == io::ErrorKind::WouldBlock));
+    let snapshot = AgentJournalSnapshot::capture(temp.path(), [agent_id.clone()])
+        .expect("active writer exposes committed checkpoint");
+    let records = snapshot
+        .records(&agent_id)
+        .expect("selected journal")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("valid checkpoint prefix");
+    assert_eq!(records.len(), 1);
+
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "still-live"),
+        )
+        .expect("later write survives trace");
 }
 
 /// Inactive strict capture derives EOF without trusting a stale checkpoint
@@ -1315,8 +1329,9 @@ fn journal_snapshot_uses_inactive_eof_despite_mismatched_checkpoint_boundary() {
         .expect("inactive snapshot ignores stale checkpoint");
 }
 
-/// Inactive strict capture derives its sequence from journal records, not
-/// sidecar claims.
+/// A live checkpoint with a mismatched replay cursor exhausts bounded
+/// observation retries as checkpoint corruption while leaving its writer
+/// usable.
 #[test]
 fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1334,9 +1349,294 @@ fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
     )
     .expect("rewrite checkpoint");
 
+    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id.clone()])
+        .expect_err("live mismatched checkpoint cursor");
+    assert!(matches!(
+        error,
+        AgentStoreError::Read { path, source }
+            if path == checkpoint_path && source.kind() == io::ErrorKind::InvalidData
+    ));
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "still-live"),
+        )
+        .expect("writer survives failed trace");
+}
+
+/// Checkpoint production and validation share one fallible platform file
+/// identity, so a writer can immediately read its own bound checkpoint.
+#[test]
+fn checkpoint_writer_reader_file_identity_round_trip() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-identity-round-trip").expect("agent id");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    let agent_dir = temp.path().join(agent_id.as_str());
+    let mut journal = File::open(agent_dir.join("events.cbor")).expect("journal");
+
+    let checkpoint =
+        read_journal_bound_checkpoint(&agent_dir.join("meta.json"), &agent_id, &mut journal)
+            .expect("writer checkpoint binds to its journal");
+
+    assert_eq!(checkpoint.agent_id, agent_id);
+    assert_eq!(
+        checkpoint.journal.covered_bytes,
+        journal.metadata().expect("journal metadata").len()
+    );
+}
+
+/// Live capture retries an inconsistent atomic checkpoint observation and
+/// accepts the next exact journal-bound replacement within its fixed attempt
+/// budget.
+#[test]
+fn journal_snapshot_retries_live_checkpoint_atomic_replacement_race() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-checkpoint-race").expect("agent id");
+    let target_root = temp.path().join("target");
+    let agent_dir = target_root.join(agent_id.as_str());
+    fs::create_dir_all(&agent_dir).expect("target agent dir");
+    fs::File::create(agent_dir.join("lock")).expect("target lock");
+    let generation_zero = prepared_snapshot_generation(temp.path(), &agent_id, 0);
+    let generation_one = prepared_snapshot_generation(temp.path(), &agent_id, 1);
+    install_snapshot_generation(&generation_zero, &agent_dir);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(agent_dir.join("lock"))
+        .expect("target lock");
+    fs2::FileExt::lock_exclusive(&lock).expect("hold live writer lock");
+    let checkpoint_path = agent_dir.join("meta.json");
+    let expected = read_checkpoint(&generation_one.join("meta.json"))
+        .expect("replacement checkpoint")
+        .journal
+        .covered_bytes;
+    let attempts = Cell::new(0);
+    let mut replacement = Some(generation_one);
+
+    let covered =
+        super::snapshot::capture_live_journal_for_test(&agent_dir, &agent_id, |attempt| {
+            attempts.set(attempts.get() + 1);
+            if attempt == 0 {
+                install_snapshot_generation(
+                    &replacement.take().expect("one replacement generation"),
+                    &agent_dir,
+                );
+            }
+        })
+        .expect("second bounded observation succeeds");
+
+    assert_eq!(attempts.get(), 2);
+    assert_eq!(covered, expected);
+    assert_eq!(
+        read_checkpoint(&checkpoint_path)
+            .expect("selected replacement checkpoint")
+            .journal
+            .covered_bytes,
+        expected
+    );
+    fs2::FileExt::unlock(&lock).expect("release simulated writer");
+    drop(lock);
+    let mut store = AgentStore::open_lazy(&target_root).expect("reopen replacement generation");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "post-capture"),
+        )
+        .expect("replacement generation remains appendable");
+}
+
+fn prepared_snapshot_generation(root: &Path, agent_id: &AgentId, suffix_events: usize) -> PathBuf {
+    let generation_root = root.join(format!("generation-{suffix_events}"));
+    let mut store = AgentStore::open_lazy(&generation_root).expect("generation store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(agent_id))
+        .expect("generation creation");
+    for index in 0..suffix_events {
+        store
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                display_name_event(agent_id, &format!("generation-{suffix_events}-{index}")),
+            )
+            .expect("generation suffix");
+    }
     drop(store);
-    AgentJournalSnapshot::capture(temp.path(), [agent_id])
-        .expect("inactive snapshot ignores sidecar sequence");
+    generation_root.join(agent_id.as_str())
+}
+
+fn prepared_collision_generation(root: &Path, agent_id: &AgentId, marker: &str) -> (PathBuf, u64) {
+    let generation_root = root.join(format!("collision-{marker}"));
+    let mut store = AgentStore::open_lazy(&generation_root).expect("generation store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(agent_id))
+        .expect("generation creation");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(agent_id, marker),
+        )
+        .expect("different equal-length prefix");
+    let agent_dir = generation_root.join(agent_id.as_str());
+    let final_record_offset = read_checkpoint(&agent_dir.join("meta.json"))
+        .expect("middle checkpoint")
+        .journal
+        .covered_bytes;
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(agent_id, &"same-terminal-boundary-".repeat(8)),
+        )
+        .expect("identical long boundary suffix");
+    drop(store);
+    (agent_dir, final_record_offset)
+}
+
+fn install_snapshot_generation(source: &Path, target: &Path) {
+    let checkpoint = read_checkpoint(&source.join("meta.json")).expect("source checkpoint");
+    fs::rename(source.join("events.cbor"), target.join("events.cbor"))
+        .expect("atomically replace journal generation");
+    crate::agent_checkpoint::write_checkpoint_atomic(&target.join("meta.json"), &checkpoint)
+        .expect("atomically publish bound checkpoint");
+}
+
+/// Equal-length generations with equal replay cursors and boundary witnesses
+/// still cannot cross the open/checkpoint observation boundary.
+#[test]
+fn journal_snapshot_rejects_collision_shaped_generation_crossing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-checkpoint-collision").expect("agent id");
+    let target_root = temp.path().join("target");
+    let agent_dir = target_root.join(agent_id.as_str());
+    fs::create_dir_all(&agent_dir).expect("target agent dir");
+    fs::File::create(agent_dir.join("lock")).expect("target lock");
+    let (generation_zero, zero_final_offset) =
+        prepared_collision_generation(temp.path(), &agent_id, "generation-a");
+    let (generation_one, one_final_offset) =
+        prepared_collision_generation(temp.path(), &agent_id, "generation-b");
+    assert_eq!(zero_final_offset, one_final_offset);
+    let checkpoint_zero =
+        read_checkpoint(&generation_zero.join("meta.json")).expect("old checkpoint");
+    let mut checkpoint_one =
+        read_checkpoint(&generation_one.join("meta.json")).expect("new checkpoint");
+    let old_bytes = fs::read(generation_zero.join("events.cbor")).expect("old journal");
+    let mut new_bytes = fs::read(generation_one.join("events.cbor")).expect("new journal");
+    new_bytes[usize::try_from(one_final_offset).expect("bounded offset")..]
+        .copy_from_slice(&old_bytes[usize::try_from(zero_final_offset).expect("bounded offset")..]);
+    fs::write(generation_one.join("events.cbor"), &new_bytes).expect("copy identical final record");
+    checkpoint_one.journal.boundary_blake3_128 =
+        checkpoint_zero.journal.boundary_blake3_128.clone();
+    crate::agent_checkpoint::write_checkpoint_atomic(
+        &generation_one.join("meta.json"),
+        &checkpoint_one,
+    )
+    .expect("publish collision-shaped checkpoint");
+    assert_eq!(
+        checkpoint_zero.journal.covered_bytes,
+        checkpoint_one.journal.covered_bytes
+    );
+    assert_eq!(
+        checkpoint_zero.journal.next_seq,
+        checkpoint_one.journal.next_seq
+    );
+    assert_eq!(
+        checkpoint_zero.journal.boundary_blake3_128,
+        checkpoint_one.journal.boundary_blake3_128
+    );
+    assert_ne!(old_bytes, new_bytes);
+    install_snapshot_generation(&generation_zero, &agent_dir);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(agent_dir.join("lock"))
+        .expect("target lock");
+    fs2::FileExt::lock_exclusive(&lock).expect("hold live writer lock");
+    let attempts = Cell::new(0);
+    let mut replacement = Some(generation_one);
+
+    let covered =
+        super::snapshot::capture_live_journal_for_test(&agent_dir, &agent_id, |attempt| {
+            attempts.set(attempts.get() + 1);
+            if attempt == 0 {
+                install_snapshot_generation(
+                    &replacement.take().expect("one replacement generation"),
+                    &agent_dir,
+                );
+            }
+        })
+        .expect("identity mismatch retries to the exact replacement");
+
+    assert_eq!(attempts.get(), 2);
+    assert_eq!(covered, checkpoint_one.journal.covered_bytes);
+    fs2::FileExt::unlock(&lock).expect("release simulated writer");
+    drop(lock);
+    let mut store = AgentStore::open_lazy(&target_root).expect("reopen replacement generation");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "post-collision-capture"),
+        )
+        .expect("replacement generation remains appendable");
+}
+
+/// Live capture attempts three real journal/checkpoint generation crossings
+/// before returning a checkpoint-path error.
+#[test]
+fn journal_snapshot_live_checkpoint_retry_budget_is_bounded() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-checkpoint-budget").expect("agent id");
+    let target_root = temp.path().join("target");
+    let agent_dir = target_root.join(agent_id.as_str());
+    fs::create_dir_all(&agent_dir).expect("target agent dir");
+    fs::File::create(agent_dir.join("lock")).expect("target lock");
+    install_snapshot_generation(
+        &prepared_snapshot_generation(temp.path(), &agent_id, 0),
+        &agent_dir,
+    );
+    let mut replacements = (1..=3)
+        .map(|suffix| prepared_snapshot_generation(temp.path(), &agent_id, suffix))
+        .collect::<VecDeque<_>>();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(agent_dir.join("lock"))
+        .expect("target lock");
+    fs2::FileExt::lock_exclusive(&lock).expect("hold live writer lock");
+    let checkpoint_path = agent_dir.join("meta.json");
+    let attempts = Cell::new(0);
+
+    let error = super::snapshot::capture_live_journal_for_test(&agent_dir, &agent_id, |_| {
+        attempts.set(attempts.get() + 1);
+        install_snapshot_generation(
+            &replacements.pop_front().expect("replacement per attempt"),
+            &agent_dir,
+        );
+    })
+    .expect_err("retry budget exhausts");
+
+    assert_eq!(attempts.get(), 3);
+    assert!(matches!(
+        error,
+        AgentStoreError::Read { path, source }
+            if path == checkpoint_path && source.kind() == io::ErrorKind::InvalidData
+    ));
+    fs2::FileExt::unlock(&lock).expect("release simulated writer");
+    drop(lock);
+    let mut store = AgentStore::open_lazy(&target_root).expect("reopen final generation");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "post-exhaustion"),
+        )
+        .expect("final replacement remains appendable");
 }
 
 /// Inactive capture must acquire the shared lock before selecting EOF, so

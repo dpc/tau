@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::backend::{FilesystemBackend, PersistenceBackend};
 use super::worker::StreamLifecycle;
@@ -635,6 +635,13 @@ fn started_event(agent_id: &tau_proto::AgentId) -> tau_proto::Event {
         display_name: None,
         metadata: Vec::new(),
         ephemeral: false,
+    })
+}
+
+fn display_name_event(agent_id: &tau_proto::AgentId, display_name: &str) -> tau_proto::Event {
+    tau_proto::Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+        agent_id: agent_id.clone(),
+        display_name: display_name.to_owned(),
     })
 }
 
@@ -1427,19 +1434,44 @@ fn agent_checkpoint_is_published_before_clean_release() {
             tau_proto::UnixMicros::new(7),
         )
         .expect("append creation");
+    let checkpoint_path = agents.join(agent_id.as_str()).join("meta.json");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !checkpoint_path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "managed checkpoint was not published while its writer remained live"
+        );
+        std::thread::yield_now();
+    }
+    let snapshot = crate::AgentJournalSnapshot::capture(&agents, [agent_id.clone()])
+        .expect("live reader accepts managed producer checkpoint");
+    assert_eq!(
+        snapshot
+            .records(&agent_id)
+            .expect("managed agent reader")
+            .count(),
+        1
+    );
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "after-live-read"),
+            tau_proto::UnixMicros::new(8),
+        )
+        .expect("managed writer survives live checkpoint read");
     let leases = store.managed_persistence_leases();
     owner
         .release(&leases, Duration::from_secs(2))
         .expect("release drains checkpoint debt");
-    let checkpoint: crate::AgentCheckpoint = serde_json::from_slice(
-        &std::fs::read(agents.join(agent_id.as_str()).join("meta.json"))
-            .expect("checkpoint sidecar"),
-    )
-    .expect("decode checkpoint");
+    let checkpoint: crate::AgentCheckpoint =
+        serde_json::from_slice(&std::fs::read(checkpoint_path).expect("checkpoint sidecar"))
+            .expect("decode checkpoint");
     assert_eq!(checkpoint.agent_id, agent_id);
     assert_eq!(
         checkpoint.journal.next_seq,
-        crate::PersistedAgentEventSeq::new(1)
+        crate::PersistedAgentEventSeq::new(2)
     );
     assert!(checkpoint.journal.covered_bytes > 8);
 }

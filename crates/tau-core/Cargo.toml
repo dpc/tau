@@ -28,5 +28,8 @@ serde_json.workspace = true
 tau-actions.workspace = true
 tau-proto.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
