@@ -2527,7 +2527,7 @@ fn repeated_input_wait_timeouts_add_one_advisory() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let has_advice = |h: &Harness, call_id: &str| {
+    let advice = |h: &Harness, call_id: &str| {
         event_log_contains_any_source(h, |event| {
             matches!(
                 event,
@@ -2536,8 +2536,12 @@ fn repeated_input_wait_timeouts_add_one_advisory() {
                         && matches!(
                             &result.result,
                             CborValue::Map(entries)
-                                if entries.iter().any(|(key, _)|
-                                    key == &CborValue::Text("advice".to_owned()))
+                                if entries.contains(&(
+                                    CborValue::Text("advice".to_owned()),
+                                    CborValue::Text(
+                                        "Seems like you're waiting in a loop. Call `status` with `waiting`, then finish the current turn—status alone does not finish it. Rely on a message or trigger to wake you.".to_owned()
+                                    )
+                                ))
                         )
             )
         })
@@ -2558,7 +2562,7 @@ fn repeated_input_wait_timeouts_add_one_advisory() {
             h.next_input_wait_deadline()
                 .expect("registered input deadline"),
         );
-        assert_eq!(has_advice(&h, &call_id), index == 3);
+        assert_eq!(advice(&h, &call_id), index == 3);
     }
     h.report_agent_work_status(
         &cid,
@@ -2588,7 +2592,7 @@ fn repeated_input_wait_timeouts_add_one_advisory() {
             h.next_input_wait_deadline()
                 .expect("registered input deadline"),
         );
-        assert_eq!(has_advice(&h, &call_id), index == 7);
+        assert_eq!(advice(&h, &call_id), index == 7);
     }
     h.report_agent_work_status(
         &cid,
@@ -2618,7 +2622,7 @@ fn repeated_input_wait_timeouts_add_one_advisory() {
             h.next_input_wait_deadline()
                 .expect("registered input deadline"),
         );
-        assert!(!has_advice(&h, &call_id));
+        assert!(!advice(&h, &call_id));
     }
     h.shutdown().expect("shutdown");
 }

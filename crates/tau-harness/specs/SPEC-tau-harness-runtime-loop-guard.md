@@ -26,7 +26,8 @@ branch-local guard state, including in-flight signatures and queued pivots.
 
 The separate repeated-wait guard counts consecutive activating-input waits that
 time out without a substantive tool admission or a new status report. The third
-timeout adds one model-visible advisory to use `status(waiting)` and rely on an
-event-driven wake. It does not reject, shorten, or otherwise change the wait.
-The advisory is one-shot for that no-progress run, and an already reported
-`waiting` phase suppresses it.
+timeout adds one model-visible advisory to call `status` with `waiting`, finish
+the current turn (status alone does not finish it), and rely on a message or
+trigger for an event-driven wake. It does not reject, shorten, or otherwise
+change the wait. The advisory is one-shot for that no-progress run, and an
+already reported `waiting` phase suppresses it.

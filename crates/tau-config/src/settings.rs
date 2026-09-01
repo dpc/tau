@@ -37,7 +37,7 @@ const BUILT_IN_CLI_YAML: &str = include_str!("../config/built-in.cli.yaml");
 const BUILT_IN_CLI_BINDINGS_YAML: &str = include_str!("../config/built-in.cli-bindings.yaml");
 
 /// Built-in lower effective bound for activating-input `wait` tool calls.
-pub const DEFAULT_WAIT_TIMEOUT_MINIMUM_MINUTES: u64 = 5;
+pub const DEFAULT_WAIT_TIMEOUT_MINIMUM_MINUTES: u64 = 1;
 /// Built-in upper effective bound for activating-input `wait` tool calls.
 pub const DEFAULT_WAIT_TIMEOUT_MAXIMUM_MINUTES: u64 = 1_440;
 const BUILT_IN_HARNESS_YAML: &str = include_str!("../config/built-in.harness.yaml");

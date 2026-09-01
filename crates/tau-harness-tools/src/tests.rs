@@ -302,7 +302,7 @@ fn wait_spec_documents_completion_retention_and_optional_non_consuming_input_mod
     assert!(parameters.get("required").is_none());
     let description = spec.description.expect("wait description");
     assert!(description.contains("`wait({\"timeout_minutes\":N})`"));
-    assert!(description.contains("five through 1,440 minutes by default"));
+    assert!(description.contains("one through 1,440 minutes by default"));
     assert!(description.contains("do not consume"));
     assert!(description.contains("oldest unconsumed completed background result"));
     assert!(
@@ -992,9 +992,9 @@ fn wait_initial_display_shows_normalized_input_timeout() {
     assert_eq!(
         state
             .initial_display(&timeout_call(1))
-            .expect("floor-clamped wait display")
+            .expect("one-minute wait display")
             .args,
-        "5m"
+        "1m"
     );
     assert_eq!(
         state

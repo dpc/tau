@@ -11,7 +11,7 @@ an existing tool round. `N` must be a positive CBOR integer; zero, negatives,
 fractions, and other types are errors. `harness.yaml` silently clamps `N` to
 the inclusive `wait_timeout_minimum_minutes` and
 `wait_timeout_maximum_minutes` bounds before duration conversion; they default
-to five and 1,440 minutes. Both are positive whole-minute values, with a
+to one and 1,440 minutes. Both are positive whole-minute values, with a
 65,535-minute maximum because persisted wait registrations store the effective
 timeout as `u16`. The legacy `any_input` field is explicitly rejected. The
 deadline starts when the event loop registers the waiter.
@@ -28,8 +28,10 @@ and input for another agent do not wake it. If its deadline is processed first,
 it instead completes normally with `timed_out: true` and warning/`timeout` UI
 metadata. After the third consecutive activating-input timeout without a status
 report or substantive tool admission, that result also carries one bounded
-`advice` string suggesting `status(waiting)` and an event-driven wake. The
-advisory is one-shot for that no-progress run, and current Waiting status
+`advice` string telling the agent to call `status` with `waiting`, finish the
+current turn (status alone does not finish it), and rely on a message or
+trigger for an event-driven wake. The advisory is one-shot for that no-progress
+run, and current Waiting status
 suppresses it. It never rejects or shortens a wait. Event-loop processing order
 decides races exactly once.
 

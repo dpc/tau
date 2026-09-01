@@ -1024,17 +1024,17 @@ fn diagnostic_retention_has_independent_default_and_disable() {
     assert_eq!(disabled.diagnostic_retention(), None);
 }
 
-/// Ensures activating-input waits ship with a five-minute floor and retain the
-/// established 1,440-minute ceiling unless users override both bounds.
+/// Ensures activating-input waits honor a one-minute default floor and retain
+/// the established 1,440-minute ceiling unless users override both bounds.
 #[test]
 fn wait_timeout_bounds_default_and_override() {
     let built_in = HarnessSettings::built_in();
     let built_in_bounds = built_in.wait_timeout_bounds();
-    assert_eq!(built_in_bounds.minimum().get(), 5);
+    assert_eq!(built_in_bounds.minimum().get(), 1);
     assert_eq!(built_in_bounds.maximum().get(), 1_440);
     assert_eq!(
         built_in_bounds.minimum_duration(),
-        std::time::Duration::from_secs(5 * 60)
+        std::time::Duration::from_secs(60)
     );
 
     let td = TempDir::new().expect("tempdir");

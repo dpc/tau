@@ -83,7 +83,7 @@ the global `harness.yaml` bounds. The defaults trade small waits for fewer model
 rounds while preserving immediate input delivery:
 
 ```yaml
-wait_timeout_minimum_minutes: 5
+wait_timeout_minimum_minutes: 1
 wait_timeout_maximum_minutes: 1440
 ```
 

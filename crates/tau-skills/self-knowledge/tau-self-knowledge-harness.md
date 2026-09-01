@@ -133,7 +133,7 @@ the target result; retry the exact wait after handling the input.
 `wait({"timeout_minutes":N})` instead waits for activating input without
 consuming either input or background results. `N` must be a positive integer;
 `harness.yaml` silently clamps it to the inclusive
-`wait_timeout_minimum_minutes` and `wait_timeout_maximum_minutes` bounds (five
+`wait_timeout_minimum_minutes` and `wait_timeout_maximum_minutes` bounds (one
 and 1,440 minutes by default). `timeout_minutes` and `tool_call_id` are
 mutually exclusive.
 

@@ -3228,7 +3228,7 @@ impl Harness {
                     .is_some_and(|agent| agent.turn.work_status.record_input_wait_timeout())
                 {
                     reply.add_timeout_advice(
-                        "Seems like you're waiting in a loop. Consider setting `status` to `waiting` and relying on a message or trigger to wake you.",
+                        "Seems like you're waiting in a loop. Call `status` with `waiting`, then finish the current turn—status alone does not finish it. Rely on a message or trigger to wake you.",
                     );
                 }
             }

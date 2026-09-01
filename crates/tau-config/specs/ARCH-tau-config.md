@@ -111,7 +111,7 @@ diagnostic cleanup.
 
 `wait_timeout_minimum_minutes` and `wait_timeout_maximum_minutes` bound the
 effective activating-input `wait({"timeout_minutes": N})` deadline. They are
-inclusive positive whole-minute values, default to five and 1,440 respectively,
+inclusive positive whole-minute values, default to one and 1,440 respectively,
 and reject an inverted range during configuration loading. The maximum cannot
 exceed 65,535 minutes because the persisted wait registration represents its
 effective timeout as `u16`. They do not affect argument-free or exact
