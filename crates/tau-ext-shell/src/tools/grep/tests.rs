@@ -1,3 +1,5 @@
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::{io as path_std_io, process as path_std_process, time as path_std_time};
 
 use base64::engine as path_base64_engine;
@@ -14,55 +16,59 @@ fn args(extra: (&str, CborValue)) -> CborValue {
     ])
 }
 
-/// Ensures omitted and explicit `false` preserve literal matching while `true`
-/// selects regex matching, without changing display text or argument placement.
+/// Ensures C11's literal/regex modes retain their exact OsString argv while C5
+/// keeps omitted and leading-hyphen roots positional after the separator.
 #[test]
 fn grep_pattern_mode_preserves_schema_defaults_display_and_ripgrep_argv() {
     let cases = [
         (
-            "omitted regex defaults to literal",
+            "omitted path and regex default to current-directory literal search",
             None,
             true,
-            "needle.*",
-            "./search-root",
+            "-needle.*",
+            None,
         ),
         (
-            "false regex selects literal",
+            "false regex selects literal with separator and suffix path",
             Some(CborValue::Bool(false)),
             true,
             "needle.*",
-            "./search-root",
+            Some("./search-root/suffix"),
         ),
         (
-            "true regex selects regex",
+            "true regex preserves leading-hyphen positional path",
             Some(CborValue::Bool(true)),
             false,
             "needle.*",
-            "./search-root",
+            Some("-search-root"),
         ),
     ];
 
     for (label, regex, expects_fixed_strings, pattern, path) in cases {
-        let mut entries = vec![
-            (
-                CborValue::Text("pattern".to_owned()),
-                CborValue::Text(pattern.to_owned()),
-            ),
-            (
+        let mut entries = vec![(
+            CborValue::Text("pattern".to_owned()),
+            CborValue::Text(pattern.to_owned()),
+        )];
+        if let Some(path) = path {
+            entries.push((
                 CborValue::Text("path".to_owned()),
                 CborValue::Text(path.to_owned()),
-            ),
-        ];
+            ));
+        }
         if let Some(regex) = regex {
             entries.push((CborValue::Text("regex".to_owned()), regex));
         }
         let options = GrepOptions::parse(&CborValue::Map(entries))
             .unwrap_or_else(|error| panic!("{label}: parse failed: {error:?}"));
         let args = options.ripgrep_args();
-        let separator = args
+        let separators = args
             .iter()
-            .position(|argument| argument == "--")
-            .unwrap_or_else(|| panic!("{label}: missing -- separator"));
+            .enumerate()
+            .filter_map(|(index, argument)| (argument == OsStr::new("--")).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(separators.len(), 1, "{label}: exactly one -- separator");
+        let separator = separators[0];
+        let path = path.unwrap_or(".");
         let mut expected = vec![
             "--json",
             "--hidden",
@@ -87,13 +93,18 @@ fn grep_pattern_mode_preserves_schema_defaults_display_and_ripgrep_argv() {
             "{label}"
         );
         assert_eq!(
+            options.search_path(),
+            Path::new(path),
+            "{label}: search root"
+        );
+        assert_eq!(
             args[separator + 1..],
-            [pattern.to_owned(), path.to_owned()],
+            [OsString::from(pattern), OsString::from(path)],
             "{label}: pattern and path must follow -- in order"
         );
         assert_eq!(
             args,
-            expected.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            expected.into_iter().map(OsString::from).collect::<Vec<_>>(),
             "{label}: ripgrep argv"
         );
     }

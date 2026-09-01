@@ -8,8 +8,10 @@ use base64::engine as path_base64_engine;
 
 #[cfg(test)]
 mod tests;
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 
@@ -80,7 +82,7 @@ struct GrepOptions {
     /// Search-pattern mode and text passed to ripgrep after the `--` separator.
     pattern: GrepPattern,
     /// Optional user-supplied search root; defaults to the current directory.
-    path: Option<String>,
+    path: Option<PathBuf>,
     /// Optional ripgrep glob filter passed as `--glob`.
     glob: Option<String>,
     /// Whether matching should ignore case.
@@ -106,9 +108,9 @@ impl GrepPattern {
         }
     }
 
-    fn push_ripgrep_args(&self, args: &mut Vec<String>) {
+    fn push_ripgrep_args(&self, args: &mut Vec<OsString>) {
         if matches!(self, Self::Literal(_)) {
-            args.push("--fixed-strings".to_owned());
+            args.push("--fixed-strings".into());
         }
     }
 }
@@ -116,7 +118,7 @@ impl GrepPattern {
 impl GrepOptions {
     fn parse(arguments: &CborValue) -> Result<Self, ToolFailure> {
         let pattern = argument_text(arguments, "pattern")?;
-        let path = optional_argument_text(arguments, "path")?;
+        let path = optional_argument_text(arguments, "path")?.map(PathBuf::from);
         let glob = optional_argument_text(arguments, "glob")?;
         let ignore_case = optional_bool_argument(arguments, "ignoreCase")?;
         // Literal matching is the default. Most callers are searching for
@@ -149,18 +151,26 @@ impl GrepOptions {
         })
     }
 
-    fn search_path(&self) -> &str {
-        self.path.as_deref().unwrap_or(".")
+    fn search_path(&self) -> &Path {
+        self.path.as_deref().unwrap_or_else(|| Path::new("."))
     }
 
     fn display_args(&self) -> String {
         match self.glob.as_deref() {
-            Some(g) => format!("{:?} in {} [{g}]", self.pattern.text(), self.search_path()),
-            None => format!("{:?} in {}", self.pattern.text(), self.search_path()),
+            Some(g) => format!(
+                "{:?} in {} [{g}]",
+                self.pattern.text(),
+                self.search_path().display()
+            ),
+            None => format!(
+                "{:?} in {}",
+                self.pattern.text(),
+                self.search_path().display()
+            ),
         }
     }
 
-    fn ripgrep_args(&self) -> Vec<String> {
+    fn ripgrep_args(&self) -> Vec<OsString> {
         // Use `--json` for structured output. This replaces the previous
         // hand-rolled `PATH:LINE:CONTENT` vs `PATH-LINE-CONTENT` line
         // classifier, which had a known misclassification mode on paths
@@ -174,32 +184,32 @@ impl GrepOptions {
         // deliberately not passed: it only affects rg's human-readable
         // output and is a no-op under `--json`, so the heading grouping is
         // done by the renderer below.
-        let mut args: Vec<String> = vec![
-            "--json".to_owned(),
-            "--hidden".to_owned(),
-            "--with-filename".to_owned(),
-            "--max-columns".to_owned(),
-            GREP_MAX_LINE_LENGTH.to_string(),
-            "--max-columns-preview".to_owned(),
+        let mut args: Vec<OsString> = vec![
+            "--json".into(),
+            "--hidden".into(),
+            "--with-filename".into(),
+            "--max-columns".into(),
+            GREP_MAX_LINE_LENGTH.to_string().into(),
+            "--max-columns-preview".into(),
         ];
         self.push_optional_ripgrep_args(&mut args);
-        args.push("--".to_owned());
-        args.push(self.pattern.text().to_owned());
-        args.push(self.search_path().to_owned());
+        args.push("--".into());
+        args.push(self.pattern.text().into());
+        args.push(self.search_path().as_os_str().to_owned());
         args
     }
 
-    fn push_optional_ripgrep_args(&self, args: &mut Vec<String>) {
+    fn push_optional_ripgrep_args(&self, args: &mut Vec<OsString>) {
         if self.ignore_case {
-            args.push("--ignore-case".to_owned());
+            args.push("--ignore-case".into());
         }
         self.pattern.push_ripgrep_args(args);
         if let Some(glob) = &self.glob {
-            args.push("--glob".to_owned());
-            args.push(glob.clone());
+            args.push("--glob".into());
+            args.push(glob.into());
         }
         if let Some(context) = self.context {
-            args.push(format!("--context={context}"));
+            args.push(format!("--context={context}").into());
         }
     }
 }

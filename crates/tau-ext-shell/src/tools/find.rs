@@ -46,7 +46,7 @@ struct FindRequest {
     /// Glob pattern used to match paths relative to the search root.
     pattern: String,
     /// Directory path supplied by the caller, defaulting to the current path.
-    path: String,
+    path: PathBuf,
     /// Maximum number of matches returned to the caller.
     limit: usize,
     /// Short argument summary rendered in UI state for successes and failures.
@@ -70,9 +70,10 @@ fn parse_find_request(arguments: &CborValue) -> Result<FindRequest, ToolFailure>
     let pattern = argument_text(arguments, "pattern").map_err(ToolFailure::from)?;
     let path = optional_argument_text(arguments, "path")
         .map_err(ToolFailure::from)?
-        .unwrap_or_else(|| ".".to_owned());
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     let limit = parse_find_limit(arguments)?;
-    let display_args = format!("{pattern} in {}", PathBuf::from(&path).display());
+    let display_args = format!("{pattern} in {}", path.display());
 
     Ok(FindRequest {
         pattern,
@@ -102,8 +103,8 @@ fn parse_find_limit(arguments: &CborValue) -> Result<usize, ToolFailure> {
 }
 
 fn prepare_find_search(request: &FindRequest) -> Result<FindSearch, ToolFailure> {
-    let path = PathBuf::from(&request.path);
-    let metadata = fs::metadata(&path).map_err(|e| {
+    let path = request.path.as_path();
+    let metadata = fs::metadata(path).map_err(|e| {
         find_failure_with_args(
             &request.display_args,
             format!("failed to access {}: {e}", path.display()),
@@ -120,7 +121,7 @@ fn prepare_find_search(request: &FindRequest) -> Result<FindSearch, ToolFailure>
         .map_err(|e| ToolFailure::from(e).with_args(request.display_args.clone()))?;
 
     Ok(FindSearch {
-        path,
+        path: path.to_owned(),
         glob,
         collection_cap: request.limit.saturating_add(1),
         display_args: request.display_args.clone(),
@@ -136,7 +137,7 @@ fn collect_find_matches(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<Vec<String>>, ToolFailure> {
     let mut matches = Vec::new();
-    for entry in WalkBuilder::new(&search.path)
+    for entry in WalkBuilder::new(search.path.as_path())
         .hidden(false)
         .parents(true)
         .ignore(true)
@@ -162,7 +163,7 @@ fn collect_find_matches(
             continue;
         }
 
-        let Ok(relative_path) = entry.path().strip_prefix(&search.path) else {
+        let Ok(relative_path) = entry.path().strip_prefix(search.path.as_path()) else {
             continue;
         };
         if search.glob.is_match(relative_path) {

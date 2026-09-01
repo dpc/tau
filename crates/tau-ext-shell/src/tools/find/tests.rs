@@ -42,6 +42,34 @@ fn find_rejects_wrong_type_path() {
     assert_eq!(err.message, "argument `path` must be a string");
 }
 
+/// Ensures find converts the decoded UTF-8 root once, preserving both the
+/// current-directory default and the existing display text.
+#[test]
+fn find_parse_retains_typed_root_and_display() {
+    let omitted = parse_find_request(&CborValue::Map(vec![(
+        CborValue::Text("pattern".to_owned()),
+        CborValue::Text("*.rs".to_owned()),
+    )]))
+    .expect("omitted path parses");
+    assert_eq!(omitted.path, PathBuf::from("."));
+    assert_eq!(omitted.display_args, "*.rs in .");
+
+    let explicit_path = "./search-root/suffix";
+    let explicit = parse_find_request(&CborValue::Map(vec![
+        (
+            CborValue::Text("pattern".to_owned()),
+            CborValue::Text("*.rs".to_owned()),
+        ),
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(explicit_path.to_owned()),
+        ),
+    ]))
+    .expect("explicit path parses");
+    assert_eq!(explicit.path, PathBuf::from(explicit_path));
+    assert_eq!(explicit.display_args, "*.rs in ./search-root/suffix");
+}
+
 /// Ensures find rejects non-positive limits instead of coercing them to a
 /// surprising positive default.
 #[test]
@@ -168,7 +196,7 @@ fn find_collect_stops_when_cancelled_during_traversal() {
     std::fs::write(tempdir.path().join("beta.txt"), "x").expect("write beta");
     let request = FindRequest {
         pattern: "*.txt".to_owned(),
-        path: tempdir.path().display().to_string(),
+        path: tempdir.path().to_owned(),
         limit: DEFAULT_FIND_LIMIT,
         display_args: "test".to_owned(),
     };
