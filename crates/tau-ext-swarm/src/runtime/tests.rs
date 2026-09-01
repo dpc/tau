@@ -260,11 +260,7 @@ fn session_switch_clears_incarnation_state_before_replay() {
             description: "description".into(),
             recommended_answer: None,
             task_id: None,
-            state: path_crate_tools::BlockerState::Active,
-            answer: None,
-            answer_kind: None,
-            reason: None,
-            reserved_answer_bytes: 0,
+            lifecycle: path_crate_tools::BlockerLifecycle::active(),
         });
     let (completion, _result) = path_tokio_sync::oneshot::channel();
     state.pending.lock().expect("pending").insert(

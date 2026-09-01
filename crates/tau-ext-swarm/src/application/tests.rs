@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use iroh::endpoint as path_iroh_endpoint;
 use tau_swarm_api::{
     Agent, AgentActivity, AgentNavigationMode, AgentWorkStatus, ApplicationIncarnationId,
-    CorrelationId, DeliveryOutcome, Hostname, PromptRequest, SessionChange, SessionId, TaskId,
-    TaskInfo, TaskTitle,
+    BlockerId, BlockerPublication, BlockerRevisionNumber, CorrelationId, DeliveryOutcome, Hostname,
+    PromptRequest, SessionChange, SessionId, TaskId, TaskInfo, TaskTitle, Timestamp,
 };
 use tau_swarm_client::{
     Backoff, Connector, ErrorKind, ExpectedPeer, IncomingCommand, SessionTransport,
@@ -24,6 +24,7 @@ use tau_swarm_iroh::{Credentials, IrohConnector, Server};
 
 use super::*;
 use crate::projection::ProjectionLimits;
+use crate::tools::{BlockerHistoryLimits, BlockerLifecycle, BlockerRecord};
 
 fn prompt(id: &str, message: &str) -> DeliverPromptRequest {
     DeliverPromptRequest {
@@ -79,6 +80,96 @@ fn application(
         },
     );
     (Arc::new(application), prompt_rx, blocker_rx)
+}
+
+/// Builds an application whose projection and process-memory history contain
+/// the same active blocker, returning the loopback receiver for cut testing.
+async fn application_with_blocker(
+    command_timeout: Duration,
+    command_limits: CommandLimits,
+    blocker_history_bytes: usize,
+) -> (
+    Arc<SwarmApplication>,
+    mpsc::Receiver<BlockerSubmission>,
+    Arc<StdMutex<Vec<BlockerRecord>>>,
+) {
+    let (application, _prompts, blockers) = application(true);
+    let publication = BlockerPublication {
+        blocker_id: BlockerId::new("blocker"),
+        revision: BlockerRevisionNumber(1),
+        owner: AgentId::new("agent"),
+        title: "title".into(),
+        description: "description".into(),
+        recommended_answer: None,
+        task_id: None,
+        source_timestamp: Timestamp(1),
+    };
+    application
+        .projection
+        .lock()
+        .await
+        .add_blocker(publication)
+        .expect("active blocker");
+    let history = Arc::new(StdMutex::new(vec![BlockerRecord {
+        blocker_id: BlockerId::new("blocker"),
+        revision: BlockerRevisionNumber(1),
+        owner: AgentId::new("agent"),
+        title: "title".into(),
+        description: "description".into(),
+        recommended_answer: None,
+        task_id: None,
+        lifecycle: BlockerLifecycle::active(),
+    }]));
+    let application = Arc::new(
+        Arc::try_unwrap(application)
+            .ok()
+            .expect("sole application")
+            .with_command_policy(command_timeout, command_limits)
+            .with_blocker_history(
+                Arc::clone(&history),
+                BlockerHistoryLimits {
+                    entries: 8,
+                    encoded_bytes: blocker_history_bytes,
+                },
+            ),
+    );
+    (application, blockers, history)
+}
+
+/// Returns one valid custom answer request with a caller-selected command ID.
+fn blocker_answer(command_id: &str) -> AnswerBlockerRequest {
+    AnswerBlockerRequest {
+        command_id: command_id.into(),
+        blocker_id: "blocker".into(),
+        revision: 1,
+        kind: BlockerAnswerKind::Custom,
+        response: "answer".into(),
+    }
+}
+
+/// Builds one active process-memory record for reservation accounting fixtures.
+fn active_history_record(id: &str) -> BlockerRecord {
+    BlockerRecord {
+        blocker_id: BlockerId::new(id),
+        revision: BlockerRevisionNumber(1),
+        owner: AgentId::new("agent"),
+        title: "title".into(),
+        description: "description".into(),
+        recommended_answer: None,
+        task_id: None,
+        lifecycle: BlockerLifecycle::active(),
+    }
+}
+
+/// Asserts that a failed remote transaction restored the exact unreserved
+/// active lifecycle rather than leaving a hidden byte reservation behind.
+fn assert_unreserved_active(history: &StdMutex<Vec<BlockerRecord>>) {
+    assert!(matches!(
+        history.lock().expect("history")[0].lifecycle,
+        BlockerLifecycle::Active {
+            pending_answer_bytes: None
+        }
+    ));
 }
 
 /// Dropping a level-triggered changes wait consumes no revision; a later task
@@ -267,6 +358,277 @@ async fn scopes_shared_command_state_by_session_identity() {
         ),
         "return to first session must not submit the command again"
     );
+}
+
+/// Command-table rejection happens after reservation but rolls the blocker
+/// back atomically before returning the admission rejection.
+#[tokio::test]
+async fn blocker_admission_failure_releases_answer_reservation() {
+    let (application, mut blockers, history) = application_with_blocker(
+        Duration::from_millis(10),
+        CommandLimits {
+            entries: 0,
+            logical_bytes: 16 * 1024,
+        },
+        16 * 1024,
+    )
+    .await;
+    assert!(matches!(
+        application
+            .answer_blocker(blocker_answer("admission"))
+            .await,
+        Ok(AnswerBlockerResponse::Rejected(_))
+    ));
+    assert!(blockers.try_recv().is_err());
+    assert_unreserved_active(&history);
+}
+
+/// Loopback send failure, canonical rejection, indeterminate completion, and
+/// timeout all release the pending answer reservation at their transaction cut.
+#[tokio::test]
+async fn blocker_remote_failure_cuts_release_answer_reservation() {
+    let limits = CommandLimits {
+        entries: 8,
+        logical_bytes: 16 * 1024,
+    };
+
+    let (application, blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, 16 * 1024).await;
+    drop(blockers);
+    assert!(
+        application
+            .answer_blocker(blocker_answer("send-failure"))
+            .await
+            .is_err()
+    );
+    assert_unreserved_active(&history);
+
+    let (application, mut blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, 16 * 1024).await;
+    let answer = tokio::spawn({
+        let application = Arc::clone(&application);
+        async move { application.answer_blocker(blocker_answer("rejected")).await }
+    });
+    blockers
+        .recv()
+        .await
+        .expect("rejected submission")
+        .completion
+        .send(Err("rejected".into()))
+        .expect("rejection receiver");
+    assert!(matches!(
+        answer.await.expect("answer task"),
+        Ok(AnswerBlockerResponse::Rejected(_))
+    ));
+    assert_unreserved_active(&history);
+
+    let (application, mut blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, 16 * 1024).await;
+    let answer = tokio::spawn({
+        let application = Arc::clone(&application);
+        async move {
+            application
+                .answer_blocker(blocker_answer("indeterminate"))
+                .await
+        }
+    });
+    drop(blockers.recv().await.expect("indeterminate submission"));
+    assert!(answer.await.expect("answer task").is_err());
+    assert_unreserved_active(&history);
+
+    let (application, mut blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, 16 * 1024).await;
+    let answer = tokio::spawn({
+        let application = Arc::clone(&application);
+        async move { application.answer_blocker(blocker_answer("timeout")).await }
+    });
+    let submission = blockers.recv().await.expect("timed-out submission");
+    assert!(answer.await.expect("answer task").is_err());
+    drop(submission);
+    assert_unreserved_active(&history);
+}
+
+/// Remote reservation sizes the exact current and prospective serialized owner
+/// histories, accepts equality, rejects one byte less, and includes another
+/// same-owner reservation without exposing it in either encoding.
+#[tokio::test]
+async fn blocker_remote_reservation_uses_exact_encoded_history_delta() {
+    let request = blocker_answer("accounting");
+    let current = vec![active_history_record("blocker")];
+    let before = serde_json::to_vec(&current)
+        .expect("current owner history encoding")
+        .len();
+    let mut prospective = current.clone();
+    prospective[0].lifecycle.answer(
+        request.response.clone(),
+        tau_swarm_api::BlockerAnswerKind::Custom,
+    );
+    let after = serde_json::to_vec(&prospective)
+        .expect("prospective owner history encoding")
+        .len();
+    let additional = after.checked_sub(before).expect("answer grows history");
+
+    let limits = CommandLimits {
+        entries: 8,
+        logical_bytes: 16 * 1024,
+    };
+    let (application, _blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, after).await;
+    assert_eq!(application.reserve_blocker_answer(&request), Ok(()));
+    assert_eq!(
+        history.lock().expect("history")[0]
+            .lifecycle
+            .pending_answer_bytes(),
+        additional.max(1)
+    );
+
+    let (application, _blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, after - 1).await;
+    assert_eq!(
+        application.reserve_blocker_answer(&request),
+        Err("blocker byte limit is full".into())
+    );
+    assert_unreserved_active(&history);
+
+    let existing_reservation = 7;
+    let mut current = vec![
+        active_history_record("blocker"),
+        BlockerRecord {
+            lifecycle: BlockerLifecycle::Active {
+                pending_answer_bytes: NonZeroUsize::new(existing_reservation),
+            },
+            ..active_history_record("other")
+        },
+    ];
+    let before = serde_json::to_vec(&current)
+        .expect("current owner history encoding")
+        .len();
+    current[0].lifecycle.answer(
+        request.response.clone(),
+        tau_swarm_api::BlockerAnswerKind::Custom,
+    );
+    let after = serde_json::to_vec(&current)
+        .expect("prospective owner history encoding")
+        .len();
+    let required = after + existing_reservation;
+    let (application, _blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, required).await;
+    history.lock().expect("history").push(BlockerRecord {
+        lifecycle: BlockerLifecycle::Active {
+            pending_answer_bytes: NonZeroUsize::new(existing_reservation),
+        },
+        ..active_history_record("other")
+    });
+    let required = before + (after - before) + existing_reservation;
+    assert_eq!(required, application.blocker_history_limits.encoded_bytes);
+    assert_eq!(application.reserve_blocker_answer(&request), Ok(()));
+
+    let (application, _blockers, history) =
+        application_with_blocker(Duration::from_millis(10), limits, required - 1).await;
+    history.lock().expect("history").push(BlockerRecord {
+        lifecycle: BlockerLifecycle::Active {
+            pending_answer_bytes: NonZeroUsize::new(existing_reservation),
+        },
+        ..active_history_record("other")
+    });
+    assert_eq!(
+        application.reserve_blocker_answer(&request),
+        Err("blocker byte limit is full".into())
+    );
+    assert_unreserved_active(&history);
+    assert_eq!(
+        history.lock().expect("history")[1]
+            .lifecycle
+            .pending_answer_bytes(),
+        existing_reservation
+    );
+}
+
+/// The extracted reservation arithmetic locks the otherwise unreachable
+/// zero-delta, underflow, and checked-overflow cuts with exact diagnostics.
+#[test]
+fn blocker_remote_reservation_preserves_checked_arithmetic_cuts() {
+    assert_eq!(
+        answer_reservation_bytes(10, 10, 0, 10),
+        Ok(NonZeroUsize::new(1).expect("nonzero"))
+    );
+    assert_eq!(
+        answer_reservation_bytes(10, 9, 0, usize::MAX),
+        Err("blocker byte accounting underflow".into())
+    );
+    assert_eq!(
+        answer_reservation_bytes(usize::MAX, usize::MAX, 1, usize::MAX),
+        Err("blocker byte accounting overflow".into())
+    );
+    assert_eq!(
+        answer_reservation_bytes(usize::MAX - 1, usize::MAX, 0, usize::MAX),
+        Ok(NonZeroUsize::new(1).expect("nonzero"))
+    );
+}
+
+/// Canonical acceptance closes the projection and notifies observers while
+/// history is still reserved-active, then commits the exhaustive Answered
+/// state.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocker_acceptance_orders_projection_notification_before_history_commit() {
+    let limits = CommandLimits {
+        entries: 8,
+        logical_bytes: 16 * 1024,
+    };
+    let (application, mut blockers, history) =
+        application_with_blocker(Duration::from_secs(30), limits, 16 * 1024).await;
+    let notified = application.changed.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    let answer = tokio::spawn({
+        let application = Arc::clone(&application);
+        async move {
+            application
+                .answer_blocker(blocker_answer("accepted-order"))
+                .await
+        }
+    });
+    let submission = blockers.recv().await.expect("answer submission");
+    let history_guard = history.lock().expect("hold history commit cut");
+    assert!(matches!(
+        history_guard[0].lifecycle,
+        BlockerLifecycle::Active {
+            pending_answer_bytes: Some(_)
+        }
+    ));
+    submission
+        .completion
+        .send(Ok(()))
+        .expect("canonical acceptance");
+    notified.await;
+    assert!(
+        application
+            .projection
+            .lock()
+            .await
+            .blocker("blocker", 1)
+            .is_none(),
+        "projection must close before notification"
+    );
+    assert!(matches!(
+        history_guard[0].lifecycle,
+        BlockerLifecycle::Active {
+            pending_answer_bytes: Some(_)
+        }
+    ));
+    drop(history_guard);
+    assert_eq!(
+        answer.await.expect("answer task"),
+        Ok(AnswerBlockerResponse::Accepted)
+    );
+    assert!(matches!(
+        history.lock().expect("history")[0].lifecycle,
+        BlockerLifecycle::Answered {
+            ref answer,
+            kind: tau_swarm_api::BlockerAnswerKind::Custom
+        } if answer == "answer"
+    ));
 }
 
 /// An indeterminate timeout is terminal in process memory and exact retry does

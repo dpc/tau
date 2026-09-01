@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use tau_swarm_client_api::{
 use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 
 use crate::projection::SessionProjection;
-use crate::tools::{BlockerHistoryLimits, BlockerRecord, BlockerState};
+use crate::tools::{BlockerHistoryLimits, BlockerLifecycle, BlockerRecord};
 
 /// One request for Tau's existing internal prompt submission path.
 #[derive(Debug)]
@@ -454,17 +455,9 @@ impl Application for SwarmApplication {
                                     && record.revision.0 == request.revision
                             })
                     {
-                        record.state = BlockerState::Answered;
-                        record.answer = Some(request.response.clone());
-                        record.answer_kind = Some(match request.kind {
-                            path_tau_swarm_client_api_v0::BlockerAnswerKind::ApprovedRecommendation => {
-                                tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation
-                            }
-                            path_tau_swarm_client_api_v0::BlockerAnswerKind::Custom => {
-                                tau_swarm_api::BlockerAnswerKind::Custom
-                            }
-                        });
-                        record.reserved_answer_bytes = 0;
+                        record
+                            .lifecycle
+                            .answer(request.response.clone(), blocker_answer_kind(request.kind));
                     }
                     Ok(AnswerBlockerResponse::Accepted)
                 }
@@ -497,11 +490,16 @@ impl SwarmApplication {
                     && record.revision.0 == request.revision
             })
             .ok_or_else(|| "blocker revision is not active".to_owned())?;
-        if !matches!(history[index].state, BlockerState::Active) {
-            return Err("blocker revision is not active".into());
-        }
-        if history[index].reserved_answer_bytes != 0 {
-            return Err("blocker answer is already pending".into());
+        match history[index].lifecycle {
+            BlockerLifecycle::Active {
+                pending_answer_bytes: None,
+            } => {}
+            BlockerLifecycle::Active {
+                pending_answer_bytes: Some(_),
+            } => return Err("blocker answer is already pending".into()),
+            BlockerLifecycle::Answered { .. } | BlockerLifecycle::Cancelled { .. } => {
+                return Err("blocker revision is not active".into());
+            }
         }
         let owner = history[index].owner.clone();
         let owner_history: Vec<_> = history
@@ -517,16 +515,9 @@ impl SwarmApplication {
             .iter_mut()
             .find(|record| record.blocker_id.as_str() == request.blocker_id)
             .ok_or_else(|| "blocker revision is not active".to_owned())?;
-        record.state = BlockerState::Answered;
-        record.answer = Some(request.response.clone());
-        record.answer_kind = Some(match request.kind {
-            path_tau_swarm_client_api_v0::BlockerAnswerKind::ApprovedRecommendation => {
-                tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation
-            }
-            path_tau_swarm_client_api_v0::BlockerAnswerKind::Custom => {
-                tau_swarm_api::BlockerAnswerKind::Custom
-            }
-        });
+        record
+            .lifecycle
+            .answer(request.response.clone(), blocker_answer_kind(request.kind));
         let after = serde_json::to_vec(&prospective)
             .map_err(|_| "blocker history encoding failed".to_owned())?
             .len();
@@ -534,20 +525,16 @@ impl SwarmApplication {
             .iter()
             .filter(|record| record.owner == owner)
             .try_fold(0_usize, |total, record| {
-                total.checked_add(record.reserved_answer_bytes)
+                total.checked_add(record.lifecycle.pending_answer_bytes())
             })
             .ok_or_else(|| "blocker byte accounting overflow".to_owned())?;
-        let additional = after
-            .checked_sub(before)
-            .ok_or_else(|| "blocker byte accounting underflow".to_owned())?;
-        let required = before
-            .checked_add(reserved_elsewhere)
-            .and_then(|bytes| bytes.checked_add(additional))
-            .ok_or_else(|| "blocker byte accounting overflow".to_owned())?;
-        if self.blocker_history_limits.encoded_bytes < required {
-            return Err("blocker byte limit is full".into());
-        }
-        history[index].reserved_answer_bytes = additional.max(1);
+        let reservation = answer_reservation_bytes(
+            before,
+            after,
+            reserved_elsewhere,
+            self.blocker_history_limits.encoded_bytes,
+        )?;
+        history[index].lifecycle.reserve(reservation);
         Ok(())
     }
 
@@ -562,7 +549,43 @@ impl SwarmApplication {
                         && record.revision.0 == request.revision
                 })
         {
-            record.reserved_answer_bytes = 0;
+            record.lifecycle.release_reservation();
+        }
+    }
+}
+
+/// Computes the exact nonzero pending reservation after prospective answer
+/// encoding while preserving the existing admission arithmetic.
+fn answer_reservation_bytes(
+    before: usize,
+    after: usize,
+    reserved_elsewhere: usize,
+    limit: usize,
+) -> Result<NonZeroUsize, String> {
+    let additional = after
+        .checked_sub(before)
+        .ok_or_else(|| "blocker byte accounting underflow".to_owned())?;
+    let required = before
+        .checked_add(reserved_elsewhere)
+        .and_then(|bytes| bytes.checked_add(additional))
+        .ok_or_else(|| "blocker byte accounting overflow".to_owned())?;
+    if limit < required {
+        return Err("blocker byte limit is full".into());
+    }
+    Ok(NonZeroUsize::new(additional.max(1))
+        .expect("the answer reservation is always at least one byte"))
+}
+
+/// Maps the validated wire answer kind into the model-visible history kind.
+fn blocker_answer_kind(
+    kind: path_tau_swarm_client_api_v0::BlockerAnswerKind,
+) -> tau_swarm_api::BlockerAnswerKind {
+    match kind {
+        path_tau_swarm_client_api_v0::BlockerAnswerKind::ApprovedRecommendation => {
+            tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation
+        }
+        path_tau_swarm_client_api_v0::BlockerAnswerKind::Custom => {
+            tau_swarm_api::BlockerAnswerKind::Custom
         }
     }
 }

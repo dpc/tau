@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngCore;
@@ -78,16 +79,9 @@ pub(crate) struct BlockerRecord {
     pub recommended_answer: Option<String>,
     /// Optional associated task.
     pub task_id: Option<TaskId>,
-    /// Current lifecycle state.
-    pub state: BlockerState,
-    /// Accepted answer, when answered.
-    pub answer: Option<String>,
-    /// Accepted answer kind, when answered.
-    pub answer_kind: Option<tau_swarm_api::BlockerAnswerKind>,
-    /// Cancellation reason, when cancelled.
-    pub reason: Option<String>,
-    /// Bytes reserved for one pending answer, excluded from list output.
-    pub reserved_answer_bytes: usize,
+    /// Exhaustive process-memory lifecycle, including an invisible pending
+    /// reservation.
+    pub(crate) lifecycle: BlockerLifecycle,
 }
 
 impl Serialize for BlockerRecord {
@@ -103,36 +97,100 @@ impl Serialize for BlockerRecord {
         record.serialize_field("description", &self.description)?;
         record.serialize_field("recommended_answer", &self.recommended_answer)?;
         record.serialize_field("task_id", &self.task_id.as_ref().map(TaskId::as_str))?;
-        record.serialize_field("state", &self.state)?;
-        if let Some(answer) = &self.answer {
-            record.serialize_field("answer", answer)?;
-        }
-        if let Some(kind) = self.answer_kind {
-            let kind = match kind {
-                tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation => {
-                    "approved_recommendation"
+        match &self.lifecycle {
+            BlockerLifecycle::Active { .. } => record.serialize_field("state", "active")?,
+            BlockerLifecycle::Answered { answer, kind } => {
+                record.serialize_field("state", "answered")?;
+                record.serialize_field("answer", answer)?;
+                let kind = match kind {
+                    tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation => {
+                        "approved_recommendation"
+                    }
+                    tau_swarm_api::BlockerAnswerKind::Custom => "custom",
+                };
+                record.serialize_field("answer_kind", kind)?;
+            }
+            BlockerLifecycle::Cancelled { reason } => {
+                record.serialize_field("state", "cancelled")?;
+                if let Some(reason) = reason {
+                    record.serialize_field("reason", reason)?;
                 }
-                tau_swarm_api::BlockerAnswerKind::Custom => "custom",
-            };
-            record.serialize_field("answer_kind", kind)?;
-        }
-        if let Some(reason) = &self.reason {
-            record.serialize_field("reason", reason)?;
+            }
         }
         record.end()
     }
 }
 
-/// Blocker lifecycle retained for compaction recovery.
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum BlockerState {
-    /// Awaiting an answer.
-    Active,
-    /// Answer reached the owning Tau agent.
-    Answered,
-    /// Owner cancelled the blocker.
-    Cancelled,
+/// Exhaustive process-memory lifecycle of one blocker.
+#[derive(Clone)]
+pub(crate) enum BlockerLifecycle {
+    /// Awaiting an answer, optionally with bytes reserved by one remote
+    /// command.
+    Active {
+        /// Additional encoded bytes held until the pending answer completes.
+        pending_answer_bytes: Option<NonZeroUsize>,
+    },
+    /// Answer accepted through the canonical Tau prompt loopback.
+    Answered {
+        /// Accepted answer text.
+        answer: String,
+        /// Accepted answer classification.
+        kind: tau_swarm_api::BlockerAnswerKind,
+    },
+    /// Cancelled by the owning Tau agent.
+    Cancelled {
+        /// Optional cancellation explanation.
+        reason: Option<String>,
+    },
+}
+
+impl BlockerLifecycle {
+    /// Creates an active lifecycle without a pending answer reservation.
+    pub(crate) fn active() -> Self {
+        Self::Active {
+            pending_answer_bytes: None,
+        }
+    }
+
+    /// Returns the pending answer reservation, or zero when no answer is
+    /// pending.
+    pub(crate) fn pending_answer_bytes(&self) -> usize {
+        match self {
+            Self::Active {
+                pending_answer_bytes,
+            } => pending_answer_bytes.map_or(0, NonZeroUsize::get),
+            Self::Answered { .. } | Self::Cancelled { .. } => 0,
+        }
+    }
+
+    /// Acquires a nonzero answer reservation on an unreserved active blocker.
+    pub(crate) fn reserve(&mut self, bytes: NonZeroUsize) {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(matches!(
+            self,
+            Self::Active {
+                pending_answer_bytes: None
+            }
+        ));
+        *self = Self::Active {
+            pending_answer_bytes: Some(bytes),
+        };
+    }
+
+    /// Releases a pending answer reservation while retaining the active
+    /// blocker.
+    pub(crate) fn release_reservation(&mut self) {
+        if matches!(self, Self::Active { .. }) {
+            *self = Self::active();
+        }
+    }
+
+    /// Commits an accepted answer and consumes any pending reservation.
+    pub(crate) fn answer(&mut self, answer: String, kind: tau_swarm_api::BlockerAnswerKind) {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(matches!(self, Self::Active { .. }));
+        *self = Self::Answered { answer, kind };
+    }
 }
 
 /// Strict tagged operation accepted by the agent-scoped `task_blocker` tool.
@@ -378,11 +436,7 @@ fn add_blocker(
         description,
         recommended_answer,
         task_id: task_id.map(TaskId::new),
-        state: BlockerState::Active,
-        answer: None,
-        answer_kind: None,
-        reason: None,
-        reserved_answer_bytes: 0,
+        lifecycle: BlockerLifecycle::active(),
     };
     let mut prospective: Vec<_> = history
         .iter()
@@ -426,11 +480,16 @@ fn cancel_blocker(
         .iter()
         .position(|record| record.blocker_id.as_str() == id && record.owner.as_str() == owner)
         .ok_or("blocker is not owned by this agent")?;
-    if !matches!(history[index].state, BlockerState::Active) {
-        return Err("blocker is not active".into());
-    }
-    if history[index].reserved_answer_bytes != 0 {
-        return Err("blocker answer is already pending".into());
+    match history[index].lifecycle {
+        BlockerLifecycle::Active {
+            pending_answer_bytes: None,
+        } => {}
+        BlockerLifecycle::Active {
+            pending_answer_bytes: Some(_),
+        } => return Err("blocker answer is already pending".into()),
+        BlockerLifecycle::Answered { .. } | BlockerLifecycle::Cancelled { .. } => {
+            return Err("blocker is not active".into());
+        }
     }
     let mut prospective: Vec<_> = history
         .iter()
@@ -441,9 +500,10 @@ fn cancel_blocker(
         .iter_mut()
         .find(|record| record.blocker_id.as_str() == id)
         .ok_or("blocker is not owned by this agent")?;
-    prospective_record.state = BlockerState::Cancelled;
-    prospective_record.reason.clone_from(&reason);
-    let prospective_reason = prospective_record.reason.clone();
+    prospective_record.lifecycle = BlockerLifecycle::Cancelled {
+        reason: reason.clone(),
+    };
+    let prospective_lifecycle = prospective_record.lifecycle.clone();
     let limit = state
         .config
         .as_ref()
@@ -459,8 +519,7 @@ fn cancel_blocker(
         .remove_blocker(&BlockerId::new(id), reason)
         .map_err(str::to_owned)?;
     state.changed.notify_waiters();
-    history[index].state = BlockerState::Cancelled;
-    history[index].reason = prospective_reason;
+    history[index].lifecycle = prospective_lifecycle;
     serde_json::to_value(&history[index]).map_err(|_| "blocker encoding failed".into())
 }
 
@@ -477,7 +536,7 @@ fn owner_history_fits(
         .iter()
         .filter(|record| record.owner.as_str() == owner)
         .try_fold(0_usize, |total, record| {
-            total.checked_add(record.reserved_answer_bytes)
+            total.checked_add(record.lifecycle.pending_answer_bytes())
         })
         .ok_or_else(|| "blocker byte accounting overflow".to_owned())?;
     let required = encoded

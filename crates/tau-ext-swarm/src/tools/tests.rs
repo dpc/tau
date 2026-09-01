@@ -18,6 +18,21 @@ use crate::application::SwarmApplication;
 use crate::projection::{ProjectionLimits, SessionProjection};
 use crate::worker_health::WorkerHealth;
 
+/// Builds one blocker record so lifecycle-focused tests keep immutable fields
+/// identical and expose only the state under test.
+fn blocker_record(lifecycle: BlockerLifecycle) -> BlockerRecord {
+    BlockerRecord {
+        blocker_id: BlockerId::new("blocker"),
+        revision: BlockerRevisionNumber(1),
+        owner: tau_swarm_api::AgentId::new("agent"),
+        title: "title".into(),
+        description: "description".into(),
+        recommended_answer: None,
+        task_id: None,
+        lifecycle,
+    }
+}
+
 /// Minimal runner used to exercise the production Swarm tool handlers.
 struct ToolTestExtension;
 
@@ -589,6 +604,75 @@ fn blocker_actions_reject_cross_action_fields() {
     );
 }
 
+/// Every exhaustive lifecycle variant lowers to the exact historical JSON
+/// field order, names, nulls, strings, and lifecycle-specific omissions.
+#[test]
+fn blocker_lifecycle_serializes_exact_model_visible_json() {
+    let cases = [
+        (
+            BlockerLifecycle::active(),
+            r#"{"blocker_id":"blocker","revision":1,"owner":"agent","title":"title","description":"description","recommended_answer":null,"task_id":null,"state":"active"}"#,
+        ),
+        (
+            BlockerLifecycle::Answered {
+                answer: "answer".into(),
+                kind: tau_swarm_api::BlockerAnswerKind::Custom,
+            },
+            r#"{"blocker_id":"blocker","revision":1,"owner":"agent","title":"title","description":"description","recommended_answer":null,"task_id":null,"state":"answered","answer":"answer","answer_kind":"custom"}"#,
+        ),
+        (
+            BlockerLifecycle::Answered {
+                answer: "recommended".into(),
+                kind: tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation,
+            },
+            r#"{"blocker_id":"blocker","revision":1,"owner":"agent","title":"title","description":"description","recommended_answer":null,"task_id":null,"state":"answered","answer":"recommended","answer_kind":"approved_recommendation"}"#,
+        ),
+        (
+            BlockerLifecycle::Cancelled {
+                reason: Some("reason".into()),
+            },
+            r#"{"blocker_id":"blocker","revision":1,"owner":"agent","title":"title","description":"description","recommended_answer":null,"task_id":null,"state":"cancelled","reason":"reason"}"#,
+        ),
+        (
+            BlockerLifecycle::Cancelled { reason: None },
+            r#"{"blocker_id":"blocker","revision":1,"owner":"agent","title":"title","description":"description","recommended_answer":null,"task_id":null,"state":"cancelled"}"#,
+        ),
+    ];
+
+    for (lifecycle, expected) in cases {
+        assert_eq!(
+            serde_json::to_string(&blocker_record(lifecycle)).expect("blocker encoding"),
+            expected
+        );
+    }
+}
+
+/// A pending byte reservation is admission-only state and must remain
+/// indistinguishable from an ordinary active blocker in model-visible JSON.
+#[test]
+fn blocker_answer_reservation_is_invisible_in_json() {
+    let unreserved =
+        serde_json::to_vec(&blocker_record(BlockerLifecycle::active())).expect("active encoding");
+    let reserved = serde_json::to_vec(&blocker_record(BlockerLifecycle::Active {
+        pending_answer_bytes: NonZeroUsize::new(9),
+    }))
+    .expect("reserved active encoding");
+    assert_eq!(reserved, unreserved);
+}
+
+/// Exhaustive lifecycle variants structurally prevent answered or cancelled
+/// records from retaining a reservation or incompatible optional fields.
+#[test]
+fn blocker_lifecycle_variants_contain_only_valid_state() {
+    let answered = BlockerLifecycle::Answered {
+        answer: "answer".into(),
+        kind: tau_swarm_api::BlockerAnswerKind::Custom,
+    };
+    let cancelled = BlockerLifecycle::Cancelled { reason: None };
+    assert_eq!(answered.pending_answer_bytes(), 0);
+    assert_eq!(cancelled.pending_answer_bytes(), 0);
+}
+
 /// Once remote answer delivery reserves an active blocker, local cancellation
 /// cannot win a second lifecycle transition.
 #[test]
@@ -621,11 +705,9 @@ fn cancellation_rejects_reserved_answer() {
             description: "description".into(),
             recommended_answer: None,
             task_id: None,
-            state: BlockerState::Active,
-            answer: None,
-            answer_kind: None,
-            reason: None,
-            reserved_answer_bytes: 1,
+            lifecycle: BlockerLifecycle::Active {
+                pending_answer_bytes: NonZeroUsize::new(1),
+            },
         });
     assert_eq!(
         cancel_blocker(&mut state, "agent", "task_blocker".into(), None),
@@ -645,16 +727,15 @@ fn owner_history_budget_includes_pending_answer_reservations() {
         description: "description".into(),
         recommended_answer: None,
         task_id: None,
-        state: BlockerState::Active,
-        answer: None,
-        answer_kind: None,
-        reason: None,
-        reserved_answer_bytes: 7,
+        lifecycle: BlockerLifecycle::Active {
+            pending_answer_bytes: NonZeroUsize::new(7),
+        },
     };
     let history = vec![record.clone()];
     let mut prospective = history.clone();
-    prospective[0].state = BlockerState::Cancelled;
-    prospective[0].reason = Some("reason".into());
+    prospective[0].lifecycle = BlockerLifecycle::Cancelled {
+        reason: Some("reason".into()),
+    };
     let encoded = serde_json::to_vec(&prospective)
         .expect("history encoding")
         .len();
@@ -665,6 +746,164 @@ fn owner_history_budget_includes_pending_answer_reservations() {
     assert_eq!(
         owner_history_fits(&history, "agent", &prospective, encoded + 6),
         Ok(false)
+    );
+}
+
+/// Answered and cancelled blockers retain the historical non-active
+/// cancellation diagnostic and remain unchanged.
+#[test]
+fn cancellation_rejects_every_non_active_lifecycle() {
+    for lifecycle in [
+        BlockerLifecycle::Answered {
+            answer: "answer".into(),
+            kind: tau_swarm_api::BlockerAnswerKind::Custom,
+        },
+        BlockerLifecycle::Cancelled {
+            reason: Some("reason".into()),
+        },
+    ] {
+        let mut state = configured_runtime();
+        state
+            .blocker_history
+            .lock()
+            .expect("history")
+            .push(blocker_record(lifecycle));
+        let before = list_blockers(&state, "agent").expect("history before cancellation");
+        assert_eq!(
+            cancel_blocker(&mut state, "agent", "blocker".into(), None),
+            Err("blocker is not active".into())
+        );
+        assert_eq!(
+            list_blockers(&state, "agent").expect("history after cancellation"),
+            before
+        );
+    }
+}
+
+/// Cancellation commits history only after both prospective byte admission and
+/// projection removal succeed, so either failure leaves the active lifecycle.
+#[test]
+fn cancellation_failures_leave_active_history_unchanged() {
+    let mut state = configured_runtime();
+    let added = add_blocker(
+        &mut state,
+        "agent",
+        "title".into(),
+        "description".into(),
+        None,
+        None,
+    )
+    .expect("active blocker");
+    let blocker_id = added
+        .get("blocker_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("blocker ID")
+        .to_owned();
+    let before = list_blockers(&state, "agent").expect("active history");
+    state
+        .config
+        .as_mut()
+        .expect("config")
+        .blocker_history_limits
+        .encoded_bytes = serde_json::to_vec(before.as_array().expect("history array"))
+        .expect("active history encoding")
+        .len();
+    assert_eq!(
+        cancel_blocker(
+            &mut state,
+            "agent",
+            blocker_id.clone(),
+            Some("reason".into())
+        ),
+        Err("blocker byte limit is full".into())
+    );
+    assert_eq!(
+        list_blockers(&state, "agent").expect("history after bound failure"),
+        before
+    );
+
+    let mut state = configured_runtime();
+    state.projection = path_std_sync::Arc::new(path_tokio_sync::Mutex::new(
+        SessionProjection::new(ProjectionLimits {
+            publication_bytes: 1_024,
+            ..ProjectionLimits::unconfigured()
+        }),
+    ));
+    state
+        .projection
+        .blocking_lock()
+        .upsert_agent(Agent {
+            id: tau_swarm_api::AgentId::new("agent"),
+            name: "Agent".into(),
+            activity: AgentActivity::Waiting,
+            navigation_mode: AgentNavigationMode::Active,
+            watches: BTreeSet::new(),
+            work_status: AgentWorkStatus::Unreported,
+        })
+        .expect("owner projection");
+    let added = add_blocker(
+        &mut state,
+        "agent",
+        "title".into(),
+        "description".into(),
+        None,
+        None,
+    )
+    .expect("active blocker at history ceiling");
+    let blocker_id = added
+        .get("blocker_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("blocker ID")
+        .to_owned();
+    let before = list_blockers(&state, "agent").expect("active history");
+    assert_eq!(
+        cancel_blocker(&mut state, "agent", blocker_id, Some("r".repeat(4_096))),
+        Err("change exceeds publication byte limit".into())
+    );
+    assert_eq!(
+        list_blockers(&state, "agent").expect("history after projection failure"),
+        before
+    );
+}
+
+/// Checked reservation sums preserve exact-limit acceptance, one-byte excess
+/// rejection, and the existing overflow diagnostic.
+#[test]
+fn owner_history_budget_preserves_exact_boundaries_and_overflow() {
+    let prospective = vec![blocker_record(BlockerLifecycle::Cancelled {
+        reason: Some("reason".into()),
+    })];
+    let encoded = serde_json::to_vec(&prospective)
+        .expect("history encoding")
+        .len();
+    let reserved = blocker_record(BlockerLifecycle::Active {
+        pending_answer_bytes: NonZeroUsize::new(1),
+    });
+    assert_eq!(
+        owner_history_fits(
+            std::slice::from_ref(&reserved),
+            "agent",
+            &prospective,
+            encoded + 1
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        owner_history_fits(
+            std::slice::from_ref(&reserved),
+            "agent",
+            &prospective,
+            encoded
+        ),
+        Ok(false)
+    );
+
+    let maximum = blocker_record(BlockerLifecycle::Active {
+        pending_answer_bytes: NonZeroUsize::new(usize::MAX),
+    });
+    assert_eq!(
+        owner_history_fits(&[maximum, reserved], "agent", &prospective, usize::MAX),
+        Err("blocker byte accounting overflow".into())
     );
 }
 
