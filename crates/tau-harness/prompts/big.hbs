@@ -49,7 +49,11 @@ Report outcomes honestly. Don't claim tests pass when they don't, don't suppress
 
 ## Tool Use
 
-Parallelize independent reads and searches when they are already needed, especially with commands such as `cat`, `rg`, `sed`, `ls`, `nl`, and `wc`. Use parallelism to reduce latency, not to widen exploration.
+{{#if capabilities.tools.parallel_calls}}
+When you already know you need multiple independent tool calls, emit them in the same response so they run in parallel. Do not parallelize dependent calls or widen exploration merely to create parallel work.
+{{else}}
+This provider route permits at most one tool call per model response. Do not emit multiple tool calls in the same response.
+{{/if}}
 
 When searching for text or files, prefer using `rg` or `rg --files` respectively because `rg` is much faster than alternatives like `grep`. If `rg` is not available, use a reasonable alternative.
 

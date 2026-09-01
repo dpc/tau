@@ -1152,13 +1152,13 @@ fn built_in_prompts_place_payload_envelope_provenance_notice_between_tools_and_s
             BUILT_IN_SYSTEM_TEMPLATE_NAME,
             "## Tool calling",
             "## Skills and skill system",
-            "032819036ab1a716e38506c3c660a2eb88964025e93157c7aa92ce29deec4c8f",
+            "c6ab05f4c7b7fddcac37b7bae0622c09ab6d254485140abe00b03807ab464763",
         ),
         (
             BIG_SYSTEM_TEMPLATE_NAME,
             "## Tool Use",
             "## Skills",
-            "1657d148cd05b6df2e14cbc6c0ae60165f496cee54ea90bbf11705ed3aedb0e2",
+            "0bdda577bb0c43c0bfaead821209b3560d01adf9d43a88d12a565c770db50ca8",
         ),
     ] {
         let prompt = build_system_prompt_with_tool_template_context(
@@ -1373,33 +1373,42 @@ fn prompt_capabilities_are_deterministic() {
     assert_eq!(capabilities.extensions.active, ["z-ext"]);
 }
 
-/// System prompt guidance must never promise parallel tool execution when the
-/// effective provider route publishes a one-call limit.
+/// Both built-in templates must encourage one provider response containing
+/// already-needed independent calls exactly once, while one-call routes retain
+/// an explicit limit and neither template permits dependent calls to race.
 #[test]
-fn system_prompt_renders_effective_parallel_tool_capability() {
-    let parallel = build_system_prompt_with_tool_template_context(
-        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &path_std_collections::HashMap::new(),
-        &[],
-        &[],
-        serde_json::json!({}),
-        RolePromptTemplateContext::for_role("engineer"),
-        PromptCapabilities::default(),
-    );
-    let serial = build_system_prompt_with_tool_template_context(
-        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &path_std_collections::HashMap::new(),
-        &[],
-        &[],
-        serde_json::json!({}),
-        RolePromptTemplateContext::for_role("engineer"),
-        PromptCapabilities::default().with_parallel_tool_calls(false),
-    );
+fn built_in_prompts_render_effective_parallel_tool_capability() {
+    const INDEPENDENT_CALLS: &str = "When you already know you need multiple independent tool calls, emit them in the same response so they run in parallel.";
+    const DEPENDENT_CALLS: &str = "Do not parallelize dependent calls";
+    const ONE_CALL_LIMIT: &str = "at most one tool call per model response";
 
-    assert!(parallel.contains("execute in parallel"));
-    assert!(!parallel.contains("at most one tool call"));
-    assert!(serial.contains("at most one tool call"));
-    assert!(!serial.contains("Maximize use of parallel tool calls"));
+    for template in [BUILT_IN_SYSTEM_PROMPT_TEMPLATE, BIG_SYSTEM_PROMPT_TEMPLATE] {
+        let parallel = build_system_prompt_with_tool_template_context(
+            template,
+            &path_std_collections::HashMap::new(),
+            &[],
+            &[],
+            serde_json::json!({}),
+            RolePromptTemplateContext::for_role("engineer"),
+            PromptCapabilities::default(),
+        );
+        let serial = build_system_prompt_with_tool_template_context(
+            template,
+            &path_std_collections::HashMap::new(),
+            &[],
+            &[],
+            serde_json::json!({}),
+            RolePromptTemplateContext::for_role("engineer"),
+            PromptCapabilities::default().with_parallel_tool_calls(false),
+        );
+
+        assert_eq!(parallel.matches(INDEPENDENT_CALLS).count(), 1);
+        assert!(parallel.contains(DEPENDENT_CALLS));
+        assert!(!parallel.contains(ONE_CALL_LIMIT));
+        assert_eq!(serial.matches(INDEPENDENT_CALLS).count(), 0);
+        assert!(serial.contains(ONE_CALL_LIMIT));
+        assert!(!serial.contains(DEPENDENT_CALLS));
+    }
 }
 
 /// Bad fragment templates fail the complete render rather than silently

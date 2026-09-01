@@ -1161,8 +1161,8 @@ fn provider_model_parallel_capability_flows_into_prompt_rendering() {
 
     assert!(normal.contains("at most one tool call"));
     assert!(preview.contains("at most one tool call"));
-    assert!(!normal.contains("Maximize use of parallel tool calls"));
-    assert!(!preview.contains("Maximize use of parallel tool calls"));
+    assert!(!normal.contains("multiple independent tool calls"));
+    assert!(!preview.contains("multiple independent tool calls"));
     h.shutdown().expect("shutdown");
 }
 

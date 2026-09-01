@@ -27,7 +27,7 @@ Tau comes with a set of `self-knowledge` skills describing it. Search for them a
 ## Tool calling
 
 {{#if capabilities.tools.parallel_calls}}
-You can call multiple tools in a single response and they will execute in parallel. Maximize use of parallel tool calls inside the same response whenever possible to increase efficiency. However, if some tool calls depend on previous calls completing, do NOT call these tools in parallel.
+You can call multiple tools in a single response and they will execute in parallel. When you already know you need multiple independent tool calls, emit them in the same response so they run in parallel. Do not parallelize dependent calls.
 {{else}}
 This provider route permits at most one tool call per model response. Do not emit multiple tool calls in the same response.
 {{/if}}

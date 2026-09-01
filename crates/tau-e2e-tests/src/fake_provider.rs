@@ -3212,7 +3212,7 @@ impl FakeState {
                 if !prompt.system_prompt.contains("at most one tool call")
                     || prompt
                         .system_prompt
-                        .contains("Maximize use of parallel tool calls")
+                        .contains("When you already know you need multiple independent tool calls, emit them in the same response so they run in parallel.")
                 {
                     return Err(self.mismatch(
                         cursor,
@@ -3260,7 +3260,7 @@ impl FakeState {
                 }
                 let parallel_guidance = prompt
                     .system_prompt
-                    .contains("Maximize use of parallel tool calls");
+                    .contains("When you already know you need multiple independent tool calls, emit them in the same response so they run in parallel.");
                 let serial_guidance = prompt.system_prompt.contains("at most one tool call");
                 if parallel_guidance != *advertise_parallel
                     || serial_guidance == *advertise_parallel

@@ -327,13 +327,14 @@ fn completed_tool_call_lookup_is_owner_scoped() {
     h.shutdown().expect("shutdown");
 }
 
-/// Ensures read and edit dispatch immediately without harness-global
-/// serialization because ext-shell coordinates their concurrent work.
+/// Ensures one provider terminal containing sibling calls dispatches them all
+/// immediately without harness-global serialization; provider emission remains
+/// a separate concern.
 ///
 /// This fixture explicitly selects the line-coordinate editor because untagged
 /// models now default to exact-text editing.
 #[test]
-fn tool_turn_dispatches_provider_calls_without_global_locking() {
+fn tool_turn_dispatches_provider_emitted_siblings_without_global_locking() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");

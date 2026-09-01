@@ -2763,10 +2763,10 @@ fn compact_ws_measurement_matches_exact_dispatch_envelope() {
     );
 }
 
-/// Ensures the default GPT-5.6 route uses standard Responses lowering and
-/// truthfully enables parallel direct tool calls.
+/// Ensures standard Responses lowering advertises that the provider may emit
+/// sibling direct tool calls; harness execution remains a separate concern.
 #[test]
-fn build_request_uses_standard_responses_contract_for_gpt_5_6() {
+fn standard_responses_advertise_parallel_tool_call_emission() {
     let config = ResponsesConfig {
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
