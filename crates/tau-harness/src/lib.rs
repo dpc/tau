@@ -36,6 +36,7 @@ mod event;
 mod event_log;
 mod extension;
 mod extension_launcher;
+mod extension_stderr_mirror;
 mod format;
 mod frozen_agent_discovery;
 mod harness;

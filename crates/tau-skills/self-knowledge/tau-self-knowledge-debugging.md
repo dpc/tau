@@ -109,6 +109,15 @@ each built-in component enables its own first-party target at `info` and all
 other targets at `warn`. Custom extension processes own their logging fallback.
 A valid `TAU_LOG` replaces the built-in filter completely.
 
+For `tau serve --mirror-extension-stderr`, the per-session
+`logs/<extension>.log` remains the authoritative, byte-compatible raw file.
+Process stderr receives only a lossy, bounded, escaped copy with validated
+extension name, immutable child generation, PID, and `line`, `chunk`, `eof`, or
+`dropped` boundary. Queue pressure or sink/setup failure can omit mirror
+records, and same-name generations can overlap; use the private raw file when
+completeness or exact bytes matter. The mirror widens the audience to journal
+readers and does not redact arbitrary custom extension stderr.
+
 Treat debug and trace extension output as private: it can contain identifiers,
 queries, paths, and script-authored text. Extension stderr is unredacted,
 unrotated within the session, and follows whole-session retention rather than

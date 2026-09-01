@@ -78,6 +78,8 @@ impl Harness {
                     .provider_settings_snapshots
                     .get(ext_config.name.as_str())
                     .unwrap_or(&BTreeMap::new()),
+                self.extensions.stderr_mirror.as_ref(),
+                0,
             ) {
                 Ok(spawned) => spawned,
                 Err(error) if !ext_config.require => {

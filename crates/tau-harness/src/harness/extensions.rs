@@ -114,6 +114,9 @@ pub(super) struct ExtensionActivationStage {
 /// Runtime state for extension process lifecycle and pre-`Ready` activation.
 #[derive(Default)]
 pub(crate) struct ExtensionRuntimeState {
+    /// Immutable process-local sink for opt-in supervised-child stderr
+    /// mirroring.
+    pub(crate) stderr_mirror: Option<crate::extension_stderr_mirror::ExtensionStderrMirror>,
     /// Every spawned or in-process extension, keyed by current `ConnectionId`.
     /// Supervises restart and shutdown. Lookups by connection id (the hot
     /// per-event path — every `Hello`, `Ready`, `Disconnected`) are O(1).

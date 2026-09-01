@@ -23,6 +23,9 @@ use crate::event::{
     spawn_reader_thread_after_initialized, spawn_supervised_writer_thread_with_isolation_tempdir,
     spawn_writer_thread,
 };
+use crate::extension_stderr_mirror::{
+    ExtensionStderrIdentity, ExtensionStderrLogger, ExtensionStderrMirror,
+};
 use crate::prompt::chrono_free_date;
 use crate::settings::ExtensionConfig;
 
@@ -514,6 +517,8 @@ pub(crate) fn spawn_supervised(
     state_dir: &Path,
     memory_only: bool,
     provider_settings: &std::collections::BTreeMap<String, Vec<u8>>,
+    stderr_mirror: Option<&ExtensionStderrMirror>,
+    generation: u32,
 ) -> Result<SupervisedSpawn, HarnessError> {
     let (mut command, empty_mask) = supervised_command(
         config,
@@ -544,7 +549,18 @@ pub(crate) fn spawn_supervised(
         .ok_or_else(|| HarnessError::Participant("missing stdout".to_owned()))?;
 
     if let (Some(log_path), Some(stderr)) = (stderr_log_path, child.stderr.take()) {
-        spawn_extension_stderr_logger(config.name.clone(), stderr, log_path);
+        let identity = ExtensionStderrIdentity::new(
+            tau_proto::ExtensionName::parse(config.name.clone())
+                .expect("validated extension config name must remain canonical"),
+            generation,
+            child_pid,
+        );
+        spawn_extension_stderr_logger(
+            config.name.clone(),
+            stderr,
+            log_path,
+            stderr_mirror.map(|mirror| mirror.logger(identity)),
+        );
     }
 
     let connection_id = next_extension_connection_id();
@@ -598,6 +614,7 @@ fn spawn_extension_stderr_logger(
     name: String,
     stderr: std::process::ChildStderr,
     log_path: PathBuf,
+    mirror: Option<ExtensionStderrLogger>,
 ) {
     use std::io::{BufReader, Write};
     thread::spawn(move || {
@@ -635,17 +652,7 @@ fn spawn_extension_stderr_logger(
         let _ = file.flush();
 
         let mut reader = BufReader::new(stderr);
-        let mut buf = [0u8; 4096];
-        loop {
-            match path_std_io::Read::read(&mut reader, &mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = file.write_all(&buf[..n]);
-                    let _ = file.flush();
-                }
-                Err(_) => break,
-            }
-        }
+        drain_extension_stderr(&mut reader, &mut file, mirror);
         let _ = writeln!(
             file,
             "--- {} stderr closed at {} ---",
@@ -654,6 +661,44 @@ fn spawn_extension_stderr_logger(
         );
         let _ = file.flush();
     });
+}
+
+/// Drains arbitrary child stderr to the authoritative raw sink before
+/// nonblocking mirror admission.
+fn drain_extension_stderr(
+    reader: &mut impl path_std_io::Read,
+    raw: &mut impl path_std_io::Write,
+    mut mirror: Option<ExtensionStderrLogger>,
+) {
+    let mut buf = [0u8; 4096];
+    let mut reached_eof = false;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => {
+                reached_eof = true;
+                break;
+            }
+            Ok(n) => {
+                let write_succeeded = raw.write_all(&buf[..n]).is_ok();
+                let flush_succeeded = raw.flush().is_ok();
+                if write_succeeded && flush_succeeded {
+                    if let Some(mirror) = &mut mirror {
+                        mirror.feed(&buf[..n]);
+                    }
+                } else if let Some(mirror) = &mut mirror {
+                    mirror.disable();
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if reached_eof {
+        if let Some(mirror) = &mut mirror {
+            mirror.finish();
+        }
+    } else if let Some(mirror) = &mut mirror {
+        mirror.disable();
+    }
 }
 
 #[cfg(test)]

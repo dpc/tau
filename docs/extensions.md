@@ -389,6 +389,52 @@ so its environment cannot change
 the filter of an already-running harness or extension. Restart or resume the
 harness with the desired filter instead.
 
+`tau serve --mirror-extension-stderr` additionally copies child stderr to the
+serve process's inherited stderr as escaped, bounded, generation- and
+PID-attributed records. It is default-off, best-effort, and never replaces or
+changes the private file. A full internal queue drops mirror records and later
+reports bounded record/raw-byte counts; a stderr sink failure disables the
+process-wide mirror while raw files continue. Attach/close file markers,
+extension stdout and protocol, events, journals, debug JSONL, provider captures,
+and Configure payloads are never mirrored.
+
+The worker uses an independent duplicate of inherited stderr when available.
+Any mirror setup failure, including descriptor duplication or worker-thread
+creation, disables only the mirror. Mirror traffic still shares the underlying
+fd-2 sink capacity, and ordinary harness tracing keeps its existing synchronous
+behavior.
+
+Each mirror record has exactly this single-line shape and one trailing LF:
+
+```text
+tau: extension stderr: extension=<validated-name> generation=<u32> pid=<u32> boundary=<line|chunk|eof|dropped> message="<escaped-message>"
+```
+
+Framing splits only on byte LF and omits that LF from `message`. An exact
+4096-byte payload followed by LF is one `line`. Longer logical lines emit one or
+more `chunk` records and then a final `line`; an unterminated suffix ends with
+`eof`, including an empty `eof` after a final full chunk. Ordinary fragments
+contain at most 4096 raw payload bytes plus at most three lookahead bytes needed
+to avoid splitting valid UTF-8. The canonical escaping is `\\`, `\"`, `\t`,
+and `\r`; invalid bytes, C0/C1 controls, DEL, and ESC use uppercase `\xHH`;
+U+2028, U+2029, U+061C, U+200E/U+200F, U+202A–U+202E, and U+2066–U+2069 use
+uppercase-codepoint `\u{...}`. Other printable valid Unicode is preserved.
+
+Queue saturation drops mirror records only. Each affected child logger retains
+saturating dropped-record and original raw-byte counts. When admission resumes,
+one `boundary=dropped` record with
+`message="records=<count> raw_bytes=<count>"` precedes its later content.
+Ordering is preserved only within one `(extension,generation)` logger;
+cross-extension and cross-generation order is scheduler-dependent. Generation
+and PID distinguish an old same-name child whose stderr remains open while its
+replacement runs. File attach/close markers never enter the mirror.
+
+This option does not apply `TAU_LOG` again: the child remains the sole producer
+filter. Arbitrary custom extension stderr is mirrored once and is **unredacted**.
+Journal readers are commonly a wider audience than readers of Tau's private
+state, so enable it only when that audience may see the complete custom stderr
+stream. Journald may independently suppress records.
+
 ## Failure and naming behavior
 
 `enable` answers whether an extension should run. For an enabled extension,

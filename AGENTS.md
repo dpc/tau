@@ -23,6 +23,9 @@
   gate unless the user explicitly requests one.
 - Before designing a multi-stage event-log operation, read
   `specs/GATE-atomic-event-log-publication.md`.
+- Treat logging and `tracing` sink I/O under
+  `specs/ARCH-logging-io-analysis.md`; do not expand that exception
+  to protocol, persistence, extension stderr draining, or other functional I/O.
 
 ## Verification
 

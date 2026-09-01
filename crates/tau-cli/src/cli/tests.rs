@@ -108,6 +108,7 @@ fn serve_requires_exactly_one_explicit_session_mode() {
             existing: true,
             bootstrap_prompt_file: None,
             bootstrap_id: None,
+            mirror_extension_stderr: false,
         }) if session.as_str() == "s1"
     ));
     let parsed = Cli::parse_from(["tau", "serve", "--session", "s2", "--create"]);
@@ -119,8 +120,43 @@ fn serve_requires_exactly_one_explicit_session_mode() {
             existing: false,
             bootstrap_prompt_file: None,
             bootstrap_id: None,
+            mirror_extension_stderr: false,
         }) if session.as_str() == "s2"
     ));
+}
+
+/// Extension stderr mirroring is default-off and accepted only by fixed-session
+/// serve rather than root, interactive, attach, resume, or component modes.
+#[test]
+fn extension_stderr_mirror_flag_is_serve_only_and_opt_in() {
+    let parsed = Cli::parse_from([
+        "tau",
+        "serve",
+        "--session",
+        "s1",
+        "--existing",
+        "--mirror-extension-stderr",
+    ]);
+    assert!(matches!(
+        parsed.command,
+        Some(super::Command::Serve {
+            mirror_extension_stderr: true,
+            ..
+        })
+    ));
+    for command in [
+        vec!["tau", "--mirror-extension-stderr"],
+        vec!["tau", "resume", "--mirror-extension-stderr"],
+        vec!["tau", "attach", "s1", "--mirror-extension-stderr"],
+        vec!["tau", "component", "harness", "--mirror-extension-stderr"],
+        vec!["tau", "--prompt-stdin", "--mirror-extension-stderr"],
+        vec!["tau", "--ephemeral", "--mirror-extension-stderr"],
+    ] {
+        assert!(
+            Cli::try_parse_from(command).is_err(),
+            "flag unexpectedly accepted outside serve"
+        );
+    }
 }
 
 /// Serve bootstrap options are paired and accept only the durable id grammar.

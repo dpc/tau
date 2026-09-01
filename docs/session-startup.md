@@ -31,6 +31,30 @@ signal's default termination and can interrupt that cleanup.
 After a graceful `--create` stop, use the same command with `--existing` for
 normal service restarts.
 
+Supervisors that need extension output in process logs can opt in with
+`--mirror-extension-stderr`. The option exists only on `tau serve` and is off by
+default:
+
+```text
+tau serve --session SESSION --existing --mirror-extension-stderr
+```
+
+Tau keeps each private extension log authoritative and unchanged, then sends
+escaped, framed records with extension name, child generation, PID, and
+line/chunk/EOF boundary to inherited stderr through a bounded best-effort
+worker. Queue saturation can suppress mirror records, and a process-stderr
+failure disables mirroring without stopping private-file draining or the
+harness. Tau uses an independent duplicate of inherited stderr when setup
+succeeds; any setup failure, including descriptor duplication or worker-thread
+creation, disables only mirroring. Mirror traffic may still consume capacity in
+the shared stderr sink, and ordinary harness tracing remains synchronous. Do not
+join or pipe-follow extension log files to reproduce this
+behavior. For a user systemd service, route `StandardError=journal`; journald
+owns journal retention and may apply its own suppression.
+The exact record grammar, UTF-8-aware 4096-byte framing, canonical escaping,
+drop notices, and within-generation ordering contract are documented under
+[Extension logs](extensions.md#extension-logs).
+
 `serve` can admit one literal prompt after complete readiness:
 
 ```text

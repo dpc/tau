@@ -4432,6 +4432,8 @@ fn expired_optional_pending_extension_is_disabled_without_blocking_later_ready()
         &h.session_runtime.state_dir,
         h.session_runtime.storage_mode.is_memory_only(),
         &Default::default(),
+        None,
+        0,
     )
     .expect("spawn optional extension");
     let optional = spawned.connection_id.clone();

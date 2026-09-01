@@ -10,6 +10,25 @@ discovery socket and metadata available for `tau session list` and
 `tau attach ID`, remain alive across UI disconnects, pin the selected session,
 and reject every in-process session switch.
 
+`tau serve` alone accepts the default-off `--mirror-extension-stderr` operator
+sink choice. When enabled, each supervised child's stderr still reaches its
+authoritative private extension file first, byte-for-byte with the existing
+markers, then enters one bounded process-local best-effort queue for escaped,
+generation- and PID-attributed records on inherited process stderr. Queue
+saturation drops mirror records only; sink failure disables the process-wide
+mirror; neither path may block extension draining or protocol progress. The
+worker uses an independent duplicate of inherited stderr when setup succeeds;
+setup failure disables only the mirror. Mirror traffic may contribute to shared
+fd-2 capacity, while existing synchronous harness tracing retains the logging-I/O
+policy in
+[ARCH-logging-io-analysis](../../../specs/ARCH-logging-io-analysis.md).
+The mirror never includes file markers,
+extension stdout/protocol, events, journals, debug JSONL, provider captures, or
+configuration payloads. `TAU_LOG` remains producer-side, and custom extension
+stderr remains unredacted. This externally meaningful extension-interface
+choice was approved under
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
+
 The paired `--bootstrap-prompt-file PATH --bootstrap-id ID` serve options add one
 post-readiness, at-most-once initial prompt without changing serve ownership.
 The source is read exactly once (`-` means stdin through EOF), submitted

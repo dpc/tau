@@ -283,6 +283,7 @@ fn raw_secret_source_error_prevents_provider_start() {
                 ignore_startup_environment: false,
                 memory_only_agent_store: false,
                 project_root: tempdir.path().canonicalize().expect("project root"),
+                extension_stderr_mirror: None,
             },
             &mut initial_client_error_stream,
         ) {

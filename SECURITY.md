@@ -217,6 +217,21 @@ sidecar, and configured-endpoint boundary are documented in
 Tool, provider, extension, and user-derived presentation text is not trusted
 terminal control. Themes resolve to structured styles rather than inline escape
 bytes, and terminal cell conversion sanitizes control characters before output.
+The serve-only `--mirror-extension-stderr` option similarly treats arbitrary
+supervised-child stderr as untrusted display bytes: it emits bounded escaped
+records with validated extension, immutable generation, and PID attribution,
+never raw child bytes. The authoritative private file is written and flushed
+first. A bounded nonblocking queue may drop mirror records, and process-stderr
+failure disables the mirror, so its worker cannot backpressure extension
+draining or protocol progress. It writes through an independent duplicate of
+inherited stderr where descriptor duplication succeeds; setup failure disables
+only mirroring. Mirror traffic can still consume shared fd-2 sink capacity, and
+the existing synchronous harness tracing may block on a full sink under
+[ARCH-logging-io-analysis](specs/ARCH-logging-io-analysis.md).
+The mirror is default-off because custom extension stderr is
+unredacted and journal readers are a wider audience. It never inspects
+extension stdout/protocol, events, journals, debug JSONL, provider captures,
+Configure payloads, or secrets by category.
 The one-shot `--prompt-stdin` path checks inherited stdout and stderr
 independently. It sanitizes dynamic answer text only when stdout is a terminal,
 and sanitizes dynamic reasoning, role, and `PromptStdinError` bodies only when

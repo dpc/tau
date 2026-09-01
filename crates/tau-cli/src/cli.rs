@@ -197,6 +197,14 @@ pub enum Command {
             requires = "bootstrap_prompt_file"
         )]
         bootstrap_id: Option<tau_harness::BootstrapId>,
+
+        /// Mirror framed, escaped extension stderr to this process's stderr.
+        ///
+        /// Private per-session extension log files remain authoritative. Custom
+        /// extension stderr is unredacted and may reach a wider journal
+        /// audience.
+        #[arg(long)]
+        mirror_extension_stderr: bool,
     },
 
     /// Inspect sessions.

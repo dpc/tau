@@ -1524,6 +1524,9 @@ pub(crate) struct HarnessStartupInputs {
     pub(crate) memory_only_agent_store: bool,
     /// Absolute canonical project root captured for this harness startup.
     pub(crate) project_root: PathBuf,
+    /// Optional process-local mirror selected only by fixed-session serve.
+    pub(crate) extension_stderr_mirror:
+        Option<crate::extension_stderr_mirror::ExtensionStderrMirror>,
 }
 
 #[cfg(any(test, feature = "echo-agent"))]

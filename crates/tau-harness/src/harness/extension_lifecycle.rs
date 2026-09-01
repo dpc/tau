@@ -1123,6 +1123,8 @@ impl Harness {
                 .provider_settings_snapshots
                 .get(config.name.as_str())
                 .unwrap_or(&BTreeMap::new()),
+            self.extensions.stderr_mirror.as_ref(),
+            attempt,
         )?;
         let new_connection_id = spawned.connection_id.clone();
         tracing::info!(

@@ -1,5 +1,10 @@
 # ARCH-tau-harness: tau-harness architecture
 
+Tau evaluates diagnostic logging and `tracing` sink I/O under
+[ARCH-logging-io-analysis](../../../specs/ARCH-logging-io-analysis.md),
+not as functional protocol, lifecycle, or publication I/O. This exception does
+not include extension stderr draining or any other application-level I/O.
+
 ## Semantic persistence lifecycle
 
 A fixed-session serve bootstrap begins only after extension/session readiness,

@@ -1,5 +1,5 @@
 use std::fs::{File, Permissions};
-use std::io::{Read as _, Write};
+use std::io::{BufRead as _, BufReader, Read as _, Write};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -175,6 +175,97 @@ impl TestEnvironment {
         ShutdownCanary { stopped, release }
     }
 
+    /// Configures one real extension wrapper that emits arbitrary stderr before
+    /// delegating to a stock protocol-speaking component.
+    fn configure_stderr_canary(&self, canary: &str) -> ShutdownCanary {
+        let script = self.temp.path().join("stderr-canary");
+        let stopped = self.temp.path().join("stderr-extension-stopped");
+        let release = self.temp.path().join("release-stderr-extension");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' \"$4\" >&2\n\"$1\" component ext-std-notifications\nstatus=$?\nprintf stopped > \"$2\"\nwhile [ ! -e \"$3\" ]; do sleep 0.01; done\nexit \"$status\"\n",
+        )
+        .expect("write stderr canary");
+        std::fs::set_permissions(&script, Permissions::from_mode(0o700))
+            .expect("make stderr canary executable");
+        let command = serde_json::to_string(&[
+            script.to_str().expect("UTF-8 canary path").to_owned(),
+            std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau"),
+            stopped.to_str().expect("UTF-8 stopped path").to_owned(),
+            release.to_str().expect("UTF-8 release path").to_owned(),
+            canary.to_owned(),
+        ])
+        .expect("serialize stderr canary command");
+        std::fs::write(
+            self.config_home.join("tau/harness.yaml"),
+            format!(
+                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: legacy\n"
+            ),
+        )
+        .expect("configure stderr canary");
+        ShutdownCanary { stopped, release }
+    }
+
+    /// Configures a first child whose inherited stderr stays open while the
+    /// harness starts a second generation of the same extension.
+    fn configure_respawn_stderr_overlap(&self) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+        let script = self.temp.path().join("respawn-stderr-overlap");
+        let first_started = self.temp.path().join("respawn-first-started");
+        let release_protocol = self.temp.path().join("respawn-release-protocol");
+        let release_old = self.temp.path().join("respawn-release-old-stderr");
+        let second_started = self.temp.path().join("respawn-second-started");
+        let old_written = self.temp.path().join("respawn-old-written");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             if [ ! -e \"$2\" ]; then\n\
+               printf '%s' \"$$\" > \"$2\"\n\
+               (while [ ! -e \"$3\" ]; do sleep 0.01; done; printf 'stdout-protocol-private') 2>/dev/null &\n\
+               (while [ ! -e \"$4\" ]; do sleep 0.01; done; printf 'old-late\\n' >&2; : > \"$6\") >/dev/null &\n\
+               exec \"$1\" component ext-std-notifications\n\
+             fi\n\
+             printf 'new-start\\n' >&2\n\
+             printf '%s' \"$$\" > \"$5\"\n\
+             exec \"$1\" component ext-std-notifications\n",
+        )
+        .expect("write respawn overlap wrapper");
+        std::fs::set_permissions(&script, Permissions::from_mode(0o700))
+            .expect("make respawn overlap wrapper executable");
+        let command = serde_json::to_string(&[
+            script.to_str().expect("UTF-8 wrapper path").to_owned(),
+            std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau"),
+            first_started
+                .to_str()
+                .expect("UTF-8 marker path")
+                .to_owned(),
+            release_protocol
+                .to_str()
+                .expect("UTF-8 marker path")
+                .to_owned(),
+            release_old.to_str().expect("UTF-8 marker path").to_owned(),
+            second_started
+                .to_str()
+                .expect("UTF-8 marker path")
+                .to_owned(),
+            old_written.to_str().expect("UTF-8 marker path").to_owned(),
+        ])
+        .expect("serialize respawn overlap command");
+        std::fs::write(
+            self.config_home.join("tau/harness.yaml"),
+            format!(
+                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: legacy\n"
+            ),
+        )
+        .expect("configure respawn overlap");
+        (
+            first_started,
+            release_protocol,
+            release_old,
+            second_started,
+            old_written,
+        )
+    }
+
     /// Requires the runtime harness directory to contain no socket or metadata.
     fn assert_runtime_discovery_empty(&self) {
         let harnesses = self.runtime_dir.join("tau/harnesses");
@@ -186,6 +277,243 @@ impl TestEnvironment {
             .count();
         assert_eq!(count, 0, "runtime discovery files leaked");
     }
+}
+
+/// Nonterminal fixed-session serve mirrors arbitrary extension stderr only
+/// when explicitly requested, retains the raw private file, and cleans up on
+/// SIGTERM without duplicate mirror records.
+#[test]
+fn fixed_session_serve_mirrors_extension_stderr_only_when_enabled() {
+    for enabled in [false, true] {
+        let environment = TestEnvironment::new();
+        let canary = format!("custom-stderr-canary-enabled-{enabled}");
+        let shutdown = environment.configure_stderr_canary(&canary);
+        let session_id = format!("stderr-mirror-{enabled}");
+        let mut command = environment.command();
+        command.args(["serve", "--session", &session_id, "--create"]);
+        if enabled {
+            command.arg("--mirror-extension-stderr");
+        }
+        let server = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stderr mirror server");
+        let _metadata = environment.wait_for_metadata();
+        Command::new("kill")
+            .args(["-TERM", &server.id().to_string()])
+            .status()
+            .expect("signal stderr mirror server");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !shutdown.stopped.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "extension did not stop after SIGTERM"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&shutdown.release, b"release").expect("release extension wrapper");
+        let output = server
+            .wait_with_output()
+            .expect("wait for stderr mirror server");
+        assert!(output.status.success(), "serve exited unsuccessfully");
+        let stderr = String::from_utf8(output.stderr).expect("serve stderr is UTF-8");
+        assert_eq!(
+            stderr.matches(&canary).count(),
+            usize::from(enabled),
+            "extension stderr mirror opt-in or exactly-once behavior changed"
+        );
+        assert!(
+            stderr.contains("extension spawned"),
+            "ordinary harness tracing must remain on process stderr"
+        );
+        let raw_path = environment.state_home.join(format!(
+            "tau/sessions/{session_id}/logs/std-notifications.log"
+        ));
+        let raw = std::fs::read(&raw_path).expect("read authoritative extension log");
+        assert!(
+            raw.windows(canary.len())
+                .any(|window| window == canary.as_bytes()),
+            "authoritative raw extension log lost child bytes"
+        );
+        assert!(
+            String::from_utf8_lossy(&raw).contains("attached at"),
+            "existing raw attach marker changed"
+        );
+        assert!(
+            !stderr.contains("attached at"),
+            "private-file markers must never be mirrored"
+        );
+        environment.assert_runtime_discovery_empty();
+    }
+}
+
+/// An explicitly empty producer filter suppresses harness and built-in tracing
+/// without suppressing one arbitrary custom stderr record from the mirror.
+#[test]
+fn fixed_session_stderr_mirror_does_not_reinterpret_empty_tau_log() {
+    let environment = TestEnvironment::new();
+    let canary = "custom-debug-canary-exactly-once";
+    let shutdown = environment.configure_stderr_canary(canary);
+    let session_id = "stderr-mirror-empty-tau-log";
+    let server = environment
+        .command()
+        .env("TAU_LOG", "")
+        .args([
+            "serve",
+            "--session",
+            session_id,
+            "--create",
+            "--mirror-extension-stderr",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn empty-filter stderr mirror server");
+    let _metadata = environment.wait_for_metadata();
+    Command::new("kill")
+        .args(["-TERM", &server.id().to_string()])
+        .status()
+        .expect("signal empty-filter server");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !shutdown.stopped.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "empty-filter extension did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&shutdown.release, b"release").expect("release empty-filter wrapper");
+    let output = server
+        .wait_with_output()
+        .expect("wait for empty-filter server");
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("serve stderr is UTF-8");
+    assert_eq!(stderr.matches(canary).count(), 1);
+    assert!(
+        !stderr.contains("extension spawned"),
+        "empty TAU_LOG must continue suppressing harness tracing"
+    );
+    assert!(
+        stderr.contains("extension=std-notifications generation=0 pid="),
+        "custom stderr record lost immutable attribution"
+    );
+}
+
+/// A real supervised respawn keeps old and new same-name stderr loggers
+/// separately attributed even when the old pipe writes after generation one
+/// starts.
+#[test]
+fn fixed_session_stderr_mirror_attributes_real_respawn_overlap() {
+    let environment = TestEnvironment::new();
+    let (first_pid_path, release_protocol, release_old, second_started, old_written) =
+        environment.configure_respawn_stderr_overlap();
+    let session_id = "stderr-respawn-overlap";
+    let mut server = environment
+        .command()
+        .args([
+            "serve",
+            "--session",
+            session_id,
+            "--create",
+            "--mirror-extension-stderr",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn respawn-overlap server");
+    let stderr = server.stderr.take().expect("capture serve stderr");
+    let (stderr_line_tx, stderr_line_rx) = mpsc::channel();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut output = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            let read = reader
+                .read_until(b'\n', &mut line)
+                .expect("read serve stderr");
+            if read == 0 {
+                break;
+            }
+            output.extend_from_slice(&line);
+            stderr_line_tx
+                .send(line)
+                .expect("send captured stderr line");
+        }
+        output
+    });
+    let _metadata = environment.wait_for_metadata();
+    let first_pid = std::fs::read_to_string(&first_pid_path).expect("read first child PID");
+    Command::new("kill")
+        .args(["-TERM", first_pid.trim()])
+        .status()
+        .expect("terminate first extension generation");
+    std::fs::write(&release_protocol, b"release").expect("release old protocol pipe");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !second_started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "replacement generation did not start"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let second_pid = std::fs::read_to_string(&second_started).expect("read second child PID");
+    std::fs::write(&release_old, b"release").expect("release old inherited stderr");
+    while !old_written.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "old stderr writer did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut saw_new = false;
+    loop {
+        let line = stderr_line_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("wait for mirrored overlap record");
+        let line = String::from_utf8(line).expect("mirror line is UTF-8");
+        saw_new |= line.contains("generation=1") && line.contains("message=\"new-start\"");
+        if line.contains("generation=0") && line.contains("message=\"old-late\"") {
+            break;
+        }
+    }
+    assert!(saw_new, "replacement record must precede late old stderr");
+    Command::new("kill")
+        .args(["-TERM", &server.id().to_string()])
+        .status()
+        .expect("signal respawn-overlap server");
+    let status = server.wait().expect("wait for overlap server");
+    assert!(status.success());
+    let stderr =
+        String::from_utf8(stderr_reader.join().expect("stderr reader joins")).expect("UTF-8");
+    let new = stderr
+        .find("generation=1")
+        .expect("replacement generation record");
+    let old = stderr
+        .find("generation=0")
+        .and_then(|start| {
+            stderr[start..]
+                .find("message=\"old-late\"")
+                .map(|offset| start + offset)
+        })
+        .expect("late old-generation record");
+    assert!(new < old, "old stderr did not overlap the replacement");
+    assert!(stderr.contains(&format!(
+        "extension=std-notifications generation=0 pid={} boundary=line message=\"old-late\"",
+        first_pid.trim()
+    )));
+    assert!(stderr.contains(&format!(
+        "extension=std-notifications generation=1 pid={} boundary=line message=\"new-start\"",
+        second_pid.trim()
+    )));
+    assert_ne!(first_pid.trim(), second_pid.trim());
+    assert!(
+        !stderr.contains("stdout-protocol-private"),
+        "Configure/protocol canary leaked into process stderr"
+    );
 }
 
 /// One interactive Tau child and the PTY controller used to submit commands.

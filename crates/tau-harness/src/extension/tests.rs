@@ -1,14 +1,16 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::error::Error as _;
+use std::io;
 use std::os::unix::fs::PermissionsExt as _;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_config::settings::{TauRuntimeSocketAccess, TauStateAccess};
 
 use super::*;
 use crate::event::{ComponentIngress as PathComponentIngress, ComponentIngressCapacity};
+use crate::extension_stderr_mirror::{ExtensionStderrIdentity, ExtensionStderrMirror};
 
 /// A blocked destructor models work that begins after a runner returns but
 /// before its Rust thread has actually terminated.
@@ -116,6 +118,288 @@ impl Drop for BlockingTeardownRelease {
             let _ = exited.recv_timeout(Duration::from_secs(1));
         }
     }
+}
+
+/// A private-file failure permanently suppresses only that child's mirror while
+/// the drain loop continues attempting every later raw chunk.
+#[test]
+fn raw_sink_failure_disables_only_logger_mirror_and_keeps_draining() {
+    struct ChunkReader {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+    }
+    impl io::Read for ChunkReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some(chunk) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            buf[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        }
+    }
+    #[derive(Default)]
+    struct FailingRaw {
+        writes: Vec<Vec<u8>>,
+        flushes: usize,
+    }
+    impl io::Write for FailingRaw {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes.push(bytes.to_vec());
+            if self.writes.len() == 1 {
+                Err(io::Error::other("injected raw failure"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+    #[derive(Clone)]
+    struct MirrorOutput(Arc<Mutex<Vec<u8>>>);
+    impl io::Write for MirrorOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("mirror output")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let mirror = ExtensionStderrMirror::with_writer_and_capacity(MirrorOutput(output.clone()), 8);
+    let logger = mirror.logger(ExtensionStderrIdentity::new(
+        crate::test_extension_name("raw-failure"),
+        0,
+        12,
+    ));
+    let mut reader = ChunkReader {
+        chunks: [b"first\n".to_vec(), b"second\n".to_vec()].into(),
+    };
+    let mut raw = FailingRaw::default();
+    drain_extension_stderr(&mut reader, &mut raw, Some(logger));
+    drop(mirror);
+    assert_eq!(raw.writes, vec![b"first\n".to_vec(), b"second\n".to_vec()]);
+    assert_eq!(raw.flushes, 2, "every raw write attempt retains its flush");
+    assert!(output.lock().expect("mirror output").is_empty());
+}
+
+/// A private-file flush failure disables only that logger's mirror while later
+/// raw chunks and their flush attempts continue.
+#[test]
+fn raw_flush_failure_disables_only_logger_mirror_and_keeps_draining() {
+    struct TwoChunks {
+        next: usize,
+    }
+    impl io::Read for TwoChunks {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let chunks: [&[u8]; 2] = [b"first\n", b"second\n"];
+            let Some(chunk) = chunks.get(self.next) else {
+                return Ok(0);
+            };
+            self.next += 1;
+            buf[..chunk.len()].copy_from_slice(chunk);
+            Ok(chunk.len())
+        }
+    }
+    #[derive(Default)]
+    struct FlushFailsOnce {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+    impl io::Write for FlushFailsOnce {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 1 {
+                Err(io::Error::other("injected raw flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let mirror_output = Arc::new(Mutex::new(Vec::new()));
+    #[derive(Clone)]
+    struct Output(Arc<Mutex<Vec<u8>>>);
+    impl io::Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("output lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mirror = ExtensionStderrMirror::with_writer_and_capacity(Output(mirror_output.clone()), 8);
+    let logger = mirror.logger(ExtensionStderrIdentity::new(
+        crate::test_extension_name("raw-flush-failure"),
+        0,
+        15,
+    ));
+    let mut reader = TwoChunks { next: 0 };
+    let mut raw = FlushFailsOnce::default();
+    drain_extension_stderr(&mut reader, &mut raw, Some(logger));
+    drop(mirror);
+    assert_eq!(raw.bytes, b"first\nsecond\n");
+    assert_eq!(raw.flushes, 2);
+    assert!(mirror_output.lock().expect("output lock").is_empty());
+}
+
+/// A read error is not child EOF and must discard the pending mirror suffix so
+/// it cannot masquerade as a complete `boundary=eof` record.
+#[test]
+fn stderr_read_error_does_not_emit_eof_boundary() {
+    struct ErrorAfterBytes {
+        emitted: bool,
+    }
+    impl io::Read for ErrorAfterBytes {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.emitted {
+                return Err(io::Error::other("injected read failure"));
+            }
+            self.emitted = true;
+            buf[..7].copy_from_slice(b"partial");
+            Ok(7)
+        }
+    }
+    #[derive(Clone)]
+    struct MirrorOutput(Arc<Mutex<Vec<u8>>>);
+    impl io::Write for MirrorOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("mirror output")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let mirror = ExtensionStderrMirror::with_writer_and_capacity(MirrorOutput(output.clone()), 8);
+    let logger = mirror.logger(ExtensionStderrIdentity::new(
+        crate::test_extension_name("read-error"),
+        0,
+        13,
+    ));
+    let mut reader = ErrorAfterBytes { emitted: false };
+    let mut raw = Vec::new();
+    drain_extension_stderr(&mut reader, &mut raw, Some(logger));
+    drop(mirror);
+    assert_eq!(raw, b"partial");
+    assert!(output.lock().expect("mirror output").is_empty());
+}
+
+/// A worker blocked in its inherited-stderr sink cannot backpressure the raw
+/// drain even after the bounded mirror queue saturates.
+#[test]
+fn blocked_mirror_sink_does_not_block_raw_stderr_drain() {
+    struct BlockingWriter {
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+        blocked: bool,
+    }
+    impl io::Write for BlockingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if !self.blocked {
+                self.blocked = true;
+                self.entered.send(()).expect("announce blocked mirror sink");
+                self.release.recv().expect("release mirror sink");
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    let mirror = ExtensionStderrMirror::with_writer_and_capacity(
+        BlockingWriter {
+            entered: entered_tx,
+            release: release_rx,
+            blocked: false,
+        },
+        1,
+    );
+    let identity = ExtensionStderrIdentity::new(crate::test_extension_name("blocked-drain"), 0, 14);
+    let mut blocker = mirror.logger(identity.clone());
+    blocker.feed(b"occupy-worker\n");
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("mirror worker reached blocked sink");
+    let input = b"raw-a\nraw-b\nraw-c\n";
+    let mut reader = io::Cursor::new(input);
+    let mut raw = Vec::new();
+    drain_extension_stderr(&mut reader, &mut raw, Some(mirror.logger(identity)));
+    assert_eq!(raw, input, "raw drain stalled or lost bytes at saturation");
+    release_tx.send(()).expect("release mirror worker");
+}
+
+/// A process-stderr flush failure disables the one shared mirror while two
+/// independent authoritative raw sinks continue receiving complete bytes.
+#[test]
+fn mirror_flush_failure_is_global_but_raw_loggers_continue() {
+    struct FlushFailure {
+        attempted: mpsc::SyncSender<()>,
+        failed: mpsc::Sender<()>,
+    }
+    impl io::Write for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.attempted.send(()).expect("announce flush failure");
+            Err(io::Error::other("injected mirror flush failure"))
+        }
+    }
+    impl Drop for FlushFailure {
+        fn drop(&mut self) {
+            let _ = self.failed.send(());
+        }
+    }
+    let (attempted_tx, attempted_rx) = mpsc::sync_channel(0);
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let mirror = ExtensionStderrMirror::with_writer_and_capacity(
+        FlushFailure {
+            attempted: attempted_tx,
+            failed: failed_tx,
+        },
+        4,
+    );
+    let identity =
+        |name, pid| ExtensionStderrIdentity::new(crate::test_extension_name(name), 0, pid);
+    let first_bytes = b"first raw file\n";
+    let mut first_reader = io::Cursor::new(first_bytes);
+    let mut first_raw = Vec::new();
+    drain_extension_stderr(
+        &mut first_reader,
+        &mut first_raw,
+        Some(mirror.logger(identity("first-raw", 21))),
+    );
+    attempted_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("mirror worker attempted flush");
+    failed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("mirror worker disabled sink and exited");
+    let second_bytes = b"second raw file\n";
+    let mut second_reader = io::Cursor::new(second_bytes);
+    let mut second_raw = Vec::new();
+    drain_extension_stderr(
+        &mut second_reader,
+        &mut second_raw,
+        Some(mirror.logger(identity("second-raw", 22))),
+    );
+    assert_eq!(first_raw, first_bytes);
+    assert_eq!(second_raw, second_bytes);
 }
 
 /// Bounded joins must detach threads that remain alive in post-run teardown,
@@ -349,6 +633,8 @@ fn builtin_spawn_failure_is_contextual_and_secret_safe() {
         Path::new("/tmp/tau-state"),
         false,
         &Default::default(),
+        None,
+        0,
     ) {
         Ok(_) => panic!("missing built-in executable must fail"),
         Err(error) => error,
@@ -368,9 +654,9 @@ fn builtin_spawn_failure_is_contextual_and_secret_safe() {
     let os_error = error
         .source()
         .and_then(|source| source.source())
-        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .and_then(|source| source.downcast_ref::<io::Error>())
         .expect("extension context must retain the underlying OS error");
-    assert_eq!(os_error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(os_error.kind(), io::ErrorKind::NotFound);
     assert!(diagnostic.ends_with(&os_error.to_string()));
 }
 
@@ -403,6 +689,8 @@ fn custom_spawn_failure_includes_only_relevant_bounded_context() {
         Path::new("/tmp/tau-state"),
         false,
         &Default::default(),
+        None,
+        0,
     ) {
         Ok(_) => panic!("missing custom cwd must fail"),
         Err(error) => error,
@@ -424,7 +712,7 @@ fn custom_spawn_failure_includes_only_relevant_bounded_context() {
     let os_error = error
         .source()
         .and_then(|source| source.source())
-        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .and_then(|source| source.downcast_ref::<io::Error>())
         .expect("custom spawn failure must retain its OS source");
     assert!(diagnostic.ends_with(&os_error.to_string()));
 }

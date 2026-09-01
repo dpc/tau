@@ -1257,6 +1257,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 existing: _,
                 bootstrap_prompt_file,
                 bootstrap_id,
+                mirror_extension_stderr,
             }) => {
                 ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info,warn");
                 let options = tau_harness::FixedSessionServeOptions {
@@ -1275,6 +1276,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                             prompt_file,
                             id,
                         }),
+                    mirror_extension_stderr,
                 };
                 if create {
                     tau_harness::run_create_session_component_with_internal_tools(options)

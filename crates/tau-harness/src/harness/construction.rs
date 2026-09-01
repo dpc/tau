@@ -552,6 +552,7 @@ impl Harness {
                 ignore_startup_environment: false,
                 memory_only_agent_store: false,
                 project_root: std::env::current_dir()?.canonicalize()?,
+                extension_stderr_mirror: None,
             },
             &mut initial_client_error_stream,
         )
@@ -583,6 +584,7 @@ impl Harness {
                 ignore_startup_environment: true,
                 memory_only_agent_store: false,
                 project_root: std::env::current_dir()?.canonicalize()?,
+                extension_stderr_mirror: None,
             },
             &mut initial_client_error_stream,
         )
@@ -625,6 +627,7 @@ impl Harness {
             ignore_startup_environment,
             memory_only_agent_store,
             project_root,
+            extension_stderr_mirror,
         } = startup_inputs;
         let (mut harness, startup) = Self::build_configured_harness(
             config,
@@ -638,6 +641,7 @@ impl Harness {
                 project_root,
             },
         )?;
+        harness.extensions.stderr_mirror = extension_stderr_mirror;
         harness.install_internal_tool_handlers(internal_tool_handlers);
 
         if launch.mode.is_resume() {

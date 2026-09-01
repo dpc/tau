@@ -162,6 +162,8 @@ fn connect_supervised_test_process(
         &h.session_runtime.state_dir,
         h.session_runtime.storage_mode.is_memory_only(),
         &Default::default(),
+        None,
+        0,
     )
     .expect("spawn supervised test process");
     let connection_id = spawned.connection_id.clone();

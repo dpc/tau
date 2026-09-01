@@ -149,3 +149,27 @@ do not grant either model tool. It preserves the ordinary busy rejection except
 when the target's sole remaining foreground call is the same still-installed
 harness-owned wait; Tau commits that wait's cancellation and closes the tool
 round before starting compaction.
+## Supervised extension stderr
+
+Durable sessions keep each supervised extension's raw stderr in its private
+per-session log. A foreground fixed-session service can additionally request
+`tau serve --mirror-extension-stderr`. The option is default-off and unavailable
+to interactive, resume, attach, component, ephemeral, and prompt-stdin modes.
+
+The private file remains authoritative. The process-stderr copy is escaped,
+framed, generation/PID attributed, bounded, and best-effort: queue saturation
+can drop mirror records and sink failure disables mirroring without impeding
+extension draining or harness progress. `TAU_LOG` remains solely the child's
+producer-side filter. Custom extension stderr is unredacted, journal readers
+are a wider audience, and the mirror never includes stdout/protocol, events,
+journals, debug JSONL, provider captures, or Configure payloads.
+The mirror worker uses an independent duplicate of inherited stderr when
+possible; setup failure disables only mirroring. It may still contribute to the
+shared sink's capacity, and ordinary harness tracing remains synchronous.
+Records use the fixed prefix `tau: extension stderr:`, then validated
+`extension`, immutable `generation`, child `pid`, `boundary`, and an escaped
+quoted `message`. Boundaries are `line`, `chunk`, `eof`, or the loss notice
+`dropped`. Fragments use a 4096-byte raw cap plus at most three UTF-8 lookahead
+bytes, never split valid UTF-8, omit splitting LF, escape controls/invalid bytes
+and bidi formatting characters, and end in exactly one LF. Ordering is
+guaranteed only within one extension generation.

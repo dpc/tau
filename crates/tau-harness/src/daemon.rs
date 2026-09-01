@@ -23,6 +23,8 @@ use tau_proto::{
     HarnessOutputMessage, HarnessOutputWriter, Hello, PROTOCOL_VERSION, Subscribe, UiCreateAgent,
 };
 
+use crate::extension_stderr_mirror::ExtensionStderrMirror;
+
 /// Validated durable identity for one serve bootstrap generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapId(String);
@@ -937,6 +939,7 @@ pub fn run_daemon_with_internal_tools(
             ignore_startup_environment: options.ignore_startup_environment,
             memory_only_agent_store: false,
             project_root,
+            extension_stderr_mirror: None,
         },
         &mut initial_client_error_stream,
     )?;
@@ -1634,6 +1637,8 @@ struct RuntimeHarnessLaunch<'a> {
     termination_signals: Option<signal_hook::iterator::Signals>,
     /// Optional fixed-session bootstrap operation.
     bootstrap: Option<BootstrapPromptOptions<'a>>,
+    /// Optional process-local extension stderr mirror.
+    extension_stderr_mirror: Option<crate::extension_stderr_mirror::ExtensionStderrMirror>,
 }
 
 fn run_harness_daemon_with_internal_tools_and_initial_client(
@@ -1652,6 +1657,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         introduction_notice_eligible,
         termination_signals,
         bootstrap,
+        extension_stderr_mirror,
     } = launch;
     let project_root = canonical_project_root(project_root)?;
     validate_pre_resolved_serve_options(&options, config)?;
@@ -1691,6 +1697,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
                 ignore_startup_environment: false,
                 memory_only_agent_store: std::env::var_os(MEMORY_ONLY_AGENT_STORE_ENV).is_some(),
                 project_root,
+                extension_stderr_mirror,
             },
             &mut initial_client_error_stream,
         ),
@@ -1833,6 +1840,9 @@ pub struct FixedSessionServeOptions<'a> {
     pub internal_tool_handlers: crate::InternalToolHandlers,
     /// Optional at-most-once prompt admitted after full daemon readiness.
     pub bootstrap: Option<BootstrapPromptOptions<'a>>,
+    /// Whether supervised extension stderr is safely mirrored to process
+    /// stderr.
+    pub mirror_extension_stderr: bool,
 }
 
 /// Complete inputs for one supported foreground existing-session launch.
@@ -1885,6 +1895,7 @@ fn run_fixed_session_component_with_internal_tools(
         harness_config_overrides,
         internal_tool_handlers,
         bootstrap,
+        mirror_extension_stderr,
     } = options;
     let termination_signals = prepare_termination_signals()?;
     let config = crate::settings::resolve_config_with_cli_overrides(
@@ -1916,6 +1927,9 @@ fn run_fixed_session_component_with_internal_tools(
             introduction_notice_eligible: false,
             termination_signals: Some(termination_signals),
             bootstrap,
+            extension_stderr_mirror: mirror_extension_stderr
+                .then(ExtensionStderrMirror::stderr)
+                .flatten(),
         },
     )
     .map_err(Into::into)
@@ -2053,6 +2067,7 @@ fn run_component_with_internal_tools_and_initial_client(
                     .is_some(),
                 termination_signals: None,
                 bootstrap: None,
+                extension_stderr_mirror: None,
             },
         )
         .map_err(Into::into)
