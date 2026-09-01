@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use crate::key::{PickerEvent, PickerKey};
 use crate::raw_mode::RawModeCleanup;
 use crate::{
-    PickerError, PickerItem, pick_with_event_reader, pick_with_io, pick_with_raw_mode, picker_lines,
+    NavigationDirection, PickerError, PickerItem, adjacent_enabled_item, pick_with_event_reader,
+    pick_with_io, pick_with_raw_mode, picker_lines,
 };
 
 struct InterruptedReader {
@@ -261,6 +262,54 @@ fn disabled_items_are_skipped() {
     assert_eq!(run(b"j\n", &it).expect("skip disabled"), 2);
     // Two js wraps back to 0.
     assert_eq!(run(b"jj\n", &it).expect("skip disabled twice"), 0);
+}
+
+/// Proves named traversal directions preserve cyclic wrapping, disabled-row
+/// skipping, and the current selection when it is the only enabled row.
+#[test]
+fn adjacent_enabled_item_preserves_navigation_direction_behavior() {
+    let with_disabled_middle = vec![
+        PickerItem::enabled("a"),
+        PickerItem::disabled("b"),
+        PickerItem::enabled("c"),
+    ];
+
+    assert_eq!(
+        adjacent_enabled_item(&with_disabled_middle, 0, NavigationDirection::Forward),
+        2,
+        "forward skips a disabled row",
+    );
+    assert_eq!(
+        adjacent_enabled_item(&with_disabled_middle, 2, NavigationDirection::Backward),
+        0,
+        "backward skips a disabled row",
+    );
+    assert_eq!(
+        adjacent_enabled_item(&with_disabled_middle, 2, NavigationDirection::Forward),
+        0,
+        "forward wraps",
+    );
+    assert_eq!(
+        adjacent_enabled_item(&with_disabled_middle, 0, NavigationDirection::Backward),
+        2,
+        "backward wraps",
+    );
+
+    let only_enabled = vec![
+        PickerItem::disabled("a"),
+        PickerItem::enabled("b"),
+        PickerItem::disabled("c"),
+    ];
+    assert_eq!(
+        adjacent_enabled_item(&only_enabled, 1, NavigationDirection::Forward),
+        1,
+        "forward retains the sole enabled selection",
+    );
+    assert_eq!(
+        adjacent_enabled_item(&only_enabled, 1, NavigationDirection::Backward),
+        1,
+        "backward retains the sole enabled selection",
+    );
 }
 
 /// Verifies the initial cursor lands on the first enabled item when earlier

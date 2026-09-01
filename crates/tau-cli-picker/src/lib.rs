@@ -178,10 +178,11 @@ fn pick_with_event_reader(
         loop {
             match read_event()? {
                 PickerEvent::Key(PickerKey::Down) => {
-                    selected = adjacent_enabled_item(items, selected, true);
+                    selected = adjacent_enabled_item(items, selected, NavigationDirection::Forward);
                 }
                 PickerEvent::Key(PickerKey::Up) => {
-                    selected = adjacent_enabled_item(items, selected, false);
+                    selected =
+                        adjacent_enabled_item(items, selected, NavigationDirection::Backward);
                 }
                 PickerEvent::Key(PickerKey::Enter) => {
                     clear_picker_frame(&mut screen, &mut writer)?;
@@ -288,12 +289,20 @@ fn visible_window(total: usize, selected: usize, visible: usize) -> (usize, usiz
     (start, start + visible)
 }
 
-fn adjacent_enabled_item(items: &[PickerItem], selected: usize, forward: bool) -> usize {
+enum NavigationDirection {
+    Forward,
+    Backward,
+}
+
+fn adjacent_enabled_item(
+    items: &[PickerItem],
+    selected: usize,
+    direction: NavigationDirection,
+) -> usize {
     for offset in 1..items.len() {
-        let idx = if forward {
-            (selected + offset) % items.len()
-        } else {
-            (selected + items.len() - offset) % items.len()
+        let idx = match direction {
+            NavigationDirection::Forward => (selected + offset) % items.len(),
+            NavigationDirection::Backward => (selected + items.len() - offset) % items.len(),
         };
         if items[idx].is_enabled() {
             return idx;
