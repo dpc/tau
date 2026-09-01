@@ -49,6 +49,11 @@ pub(crate) fn run_ls(
     {
         entries.push(render_entry_name(&entry.name, entry.is_dir));
     }
+
+    Ok(render_listing(entries, limit, display_args))
+}
+
+fn render_listing(mut entries: Vec<LsEntry>, limit: usize, display_args: String) -> ToolOutput {
     entries.sort_by_key(|entry| entry.sort_key());
 
     if entries.is_empty() {
@@ -58,7 +63,7 @@ pub(crate) fn run_ls(
             lines: Some(0),
             bytes: Some(0),
         };
-        return Ok(ToolOutput {
+        return ToolOutput {
             result: CborValue::Map(vec![
                 (
                     CborValue::Text("entries".to_owned()),
@@ -71,7 +76,7 @@ pub(crate) fn run_ls(
             ]),
             provider_content: Vec::new(),
             display,
-        });
+        };
     }
     let observed_entries = entries.len();
     let rendered_lines = entries
@@ -130,11 +135,11 @@ pub(crate) fn run_ls(
             crate::shell_output_spool::append_metadata(&mut result_entries, &full_output_text);
         }
     }
-    Ok(ToolOutput {
+    ToolOutput {
         result: CborValue::Map(result_entries),
         provider_content: Vec::new(),
         display,
-    })
+    }
 }
 
 fn parse_limit(arguments: &CborValue) -> Result<usize, ToolFailure> {

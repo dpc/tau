@@ -282,23 +282,13 @@ fn ls_byte_budget_truncation_reports_standard_total_headers() {
 /// reports complete totals.
 #[test]
 fn ls_line_count_truncation_keeps_head_tail_separator_and_totals() {
-    let tempdir = tempfile::TempDir::new().expect("tempdir");
-    for index in 0..2001 {
-        std::fs::write(tempdir.path().join(format!("entry-{index:04}")), "x").expect("write entry");
-    }
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("path".to_owned()),
-            CborValue::Text(tempdir.path().display().to_string()),
-        ),
-        (
-            CborValue::Text("limit".to_owned()),
-            CborValue::Integer(MAX_LS_LIMIT.into()),
-        ),
-    ]);
-
-    let mut world = path_crate_tools_world::ShellWorld::real();
-    let output = run_ls(&args, &mut world).expect("ls output");
+    let entries = (0..2001)
+        .map(|index| LsEntry {
+            name: format!("entry-{index:04}"),
+            flags: Vec::new(),
+        })
+        .collect();
+    let output = render_listing(entries, MAX_LS_LIMIT, "fixture".to_owned());
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert!(text.contains("\n...\n"));
