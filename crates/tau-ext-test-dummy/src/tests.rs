@@ -529,7 +529,8 @@ fn fixture_extension_originator() -> PromptOriginator {
     }
 }
 
-/// Verifies the historical random restart fixture can reply with a tool error.
+/// Verifies the historical random restart fixture can reply with a tool error
+/// while declaring that the restart tool never backgrounds.
 #[test]
 fn restart_tool_can_return_error() {
     let frames = run_restart_frames(&[invoke_restart()], 1);
@@ -546,6 +547,10 @@ fn restart_tool_can_return_error() {
             .as_ref()
             .map(|group| group.name.as_str()),
         Some("test")
+    );
+    assert_eq!(
+        declaration.tool.background_support,
+        Some(tau_proto::BackgroundSupport::Never)
     );
     assert!(matches!(frames[4], HarnessInputMessage::Ready(_)));
     let Some(Event::ToolErrorReported(error)) = frames.get(5).and_then(emitted_event) else {

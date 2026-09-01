@@ -645,7 +645,7 @@ fn restart_tool_spec() -> ToolSpec {
         format: None,
         tags: Vec::new(),
         enabled_by_default: true,
-        background_support: None,
+        background_support: Some(tau_proto::BackgroundSupport::Never),
         examples: Vec::new(),
     }
 }
