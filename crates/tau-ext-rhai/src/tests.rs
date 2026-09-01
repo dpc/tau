@@ -1188,50 +1188,79 @@ fn intercept_callback_can_return_replacement_event() {
 
 #[test]
 fn register_tool_emits_registration_before_ready() {
-    // Tool registrations are staged during init and emitted before Ready so
-    // the harness can route later calls only after the script is configured.
+    // Registration declarations must follow tool insertion order rather than
+    // group-map order. Repeated empty groups replace their prior staging entry,
+    // and an undeclared group retains the empty fallback before Ready.
     let dir = tempfile::tempdir().expect("tempdir");
     let script = write_script(
         &dir,
         r#"
             fn init(config) {
-                register_tool_group("host", #{});
-                register_tool("project_status", #{
-                    group: "host",
-                    description: "Get project status",
-                    parameters: #{ type: "object", additionalProperties: false },
-                }, Fn("project_status"));
+                register_tool_group("second", #{});
+                register_tool_group("first", #{});
+                register_tool_group("second", #{});
+                register_tool("first_tool", #{ group: "first" }, Fn("first_tool"));
+                register_tool("fallback_tool", #{ group: "undeclared" }, Fn("fallback_tool"));
+                register_tool("second_tool", #{ group: "second" }, Fn("second_tool"));
             }
-            fn project_status(args, c) { return "ok"; }
+            fn first_tool(args, c) { return "ok"; }
+            fn fallback_tool(args, c) { return "ok"; }
+            fn second_tool(args, c) { return "ok"; }
         "#,
     );
 
     let frames = run_frames(&[configure_with_script(&script)]);
 
-    let declaration_pos = frames
+    let declarations = frames
         .iter()
-        .position(|frame| {
-            matches!(
-                emitted_event(frame),
-                Some(Event::ToolRegistrationDeclared(_))
-            )
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolRegistrationDeclared(declaration)) => Some(declaration),
+            _ => None,
         })
-        .expect("tool.registration_declared");
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 3);
+    assert_eq!(
+        declarations
+            .iter()
+            .map(|declaration| declaration.tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["first_tool", "fallback_tool", "second_tool"]
+    );
+    assert_eq!(
+        declarations
+            .iter()
+            .map(|declaration| {
+                declaration
+                    .tool_group
+                    .as_ref()
+                    .map(|group| (group.name.as_str(), group.prompt_fragment.as_ref()))
+            })
+            .collect::<Vec<_>>(),
+        [
+            Some(("first", None)),
+            Some(("undeclared", None)),
+            Some(("second", None)),
+        ]
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !matches!(frame, HarnessInputMessage::ConfigError(_)))
+    );
+    assert!(matches!(frames.last(), Some(HarnessInputMessage::Ready(_))));
     let ready_pos = frames
         .iter()
         .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
         .expect("ready");
-    assert!(declaration_pos < ready_pos);
-    let Some(Event::ToolRegistrationDeclared(declaration)) =
-        emitted_event(&frames[declaration_pos])
-    else {
-        panic!("expected tool.registration_declared");
-    };
-    assert_eq!(declaration.tool.name.as_str(), "project_status");
-    assert_eq!(
-        declaration.tool_group.as_ref().map(|g| g.name.as_str()),
-        Some("host")
-    );
+    assert!(declarations.iter().all(|declaration| {
+        frames[..ready_pos].iter().any(|frame| {
+            matches!(
+                emitted_event(frame),
+                Some(Event::ToolRegistrationDeclared(emitted))
+                    if emitted.tool.name == declaration.tool.name
+            )
+        })
+    }));
 }
 
 /// A late prefix-composition failure rejects the whole Rhai init plan before

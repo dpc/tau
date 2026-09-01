@@ -14,7 +14,7 @@ mod shell;
 mod tests;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::io::{Read, Write};
@@ -130,7 +130,7 @@ struct HostState {
     /// True only while `init(config)` is running.
     init_active: bool,
     /// Tool groups staged by `register_tool_group` during init.
-    groups: BTreeMap<String, StagedToolGroup>,
+    groups: HashMap<ToolGroupName, StagedToolGroup>,
     /// Tool registrations staged by `register_tool` during init.
     tools: Vec<StagedTool>,
     /// Most recently allocated host-local shell job id.
@@ -927,7 +927,7 @@ fn stage_tool_group(state: &HostStateRef, name: &str, spec: Map) -> Result<(), S
         return Err("register_tool_group is only available during init".to_owned());
     }
     state.groups.insert(
-        group_name.as_str().to_owned(),
+        group_name.clone(),
         StagedToolGroup {
             name: group_name,
             prompt_fragment: None,
@@ -1161,7 +1161,7 @@ impl ScriptRuntime {
                 tool_group: tool.group.as_ref().map(|group_name| {
                     state
                         .groups
-                        .get(group_name.as_str())
+                        .get(group_name)
                         .map(|group| ToolGroup {
                             name: group.name.clone(),
                             prompt_fragment: group.prompt_fragment.clone(),
