@@ -8,6 +8,48 @@ use tau_proto::ProviderFailureKind;
 use super::*;
 use crate::ScenarioLaneV2;
 
+/// Proves both special watch handlers commit cursor, flushed trace, and
+/// terminal in causal order rather than exposing the terminal before trace
+/// publication.
+#[test]
+fn completed_special_watch_plans_order_cursor_trace_and_terminal() {
+    #[derive(Debug, PartialEq, Eq)]
+    enum Effect {
+        CursorPersisted,
+        TraceMatchedFlushed,
+        Terminal(&'static str),
+    }
+
+    for (plan, terminal) in [
+        (
+            WatchPromptPlan::batch(true, "watch-batch-terminal"),
+            "watch-batch-terminal",
+        ),
+        (
+            WatchPromptPlan::chain(true, "watch-chain-terminal"),
+            "watch-chain-terminal",
+        ),
+    ] {
+        let effects = plan
+            .into_effects()
+            .into_iter()
+            .map(|effect| match effect {
+                WatchPromptEffect::PersistCursor => Effect::CursorPersisted,
+                WatchPromptEffect::TraceStage => Effect::TraceMatchedFlushed,
+                WatchPromptEffect::EmitTerminal(terminal) => Effect::Terminal(terminal),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            effects,
+            [
+                Effect::CursorPersisted,
+                Effect::TraceMatchedFlushed,
+                Effect::Terminal(terminal),
+            ]
+        );
+    }
+}
+
 /// Keeps deterministic watch expectations aligned with the production
 /// exact-close internal envelope when fixture content resembles its delimiter.
 #[test]

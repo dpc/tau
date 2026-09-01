@@ -256,6 +256,53 @@ struct WatchChainContents {
     completion: String,
 }
 
+/// Special watch action whose committed effects must precede its terminal.
+struct WatchPromptPlan<T> {
+    /// Whether this prompt completes and consumes the current lane action.
+    consumes_action: bool,
+    /// Prepared provider terminal emitted after all preceding effects.
+    terminal: T,
+}
+
+impl<T> WatchPromptPlan<T> {
+    /// Prepares the effects for one staged or completed watch-batch prompt.
+    fn batch(consumes_action: bool, terminal: T) -> Self {
+        Self {
+            consumes_action,
+            terminal,
+        }
+    }
+
+    /// Prepares the effects for one staged or completed watch-chain prompt.
+    fn chain(consumes_action: bool, terminal: T) -> Self {
+        Self {
+            consumes_action,
+            terminal,
+        }
+    }
+
+    /// Returns the exact externally meaningful effect order for this prompt.
+    fn into_effects(self) -> Vec<WatchPromptEffect<T>> {
+        let mut effects = Vec::with_capacity(3);
+        if self.consumes_action {
+            effects.push(WatchPromptEffect::PersistCursor);
+        }
+        effects.push(WatchPromptEffect::TraceStage);
+        effects.push(WatchPromptEffect::EmitTerminal(self.terminal));
+        effects
+    }
+}
+
+/// One ordered effect committed for a special watch prompt.
+enum WatchPromptEffect<T> {
+    /// Advance and durably persist the lane cursor.
+    PersistCursor,
+    /// Append and flush the staged or matched trace record.
+    TraceStage,
+    /// Emit the already prepared provider terminal.
+    EmitTerminal(T),
+}
+
 /// Narrow current watch action needed during live notification admission.
 enum WatchExpectation {
     /// One exact next fact in an ordered S1 batch.
@@ -796,7 +843,7 @@ impl FakeState {
         expected: Vec<WatchNotificationV2>,
         response: String,
         handle: &tau_client::ClientHandle,
-    ) -> ClientResult<()> {
+    ) -> ClientResult<WatchPromptPlan<Event>> {
         let progress = self
             .watch_progress
             .get(&prompt.agent_id)
@@ -835,21 +882,23 @@ impl FakeState {
                 originator: prompt.originator.clone(),
             },
         ))?;
-        let terminal_response = if next_progress == expected.len() {
+        let consumes_action = next_progress == expected.len();
+        let terminal_response = if consumes_action {
             self.watch_progress.remove(&prompt.agent_id);
-            self.lane_cursors[lane_index] += 1;
-            self.persist_cursors()?;
             response
         } else {
             self.watch_progress
                 .insert(prompt.agent_id.clone(), next_progress);
             "watch notification accepted".to_owned()
         };
-        handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-            prompt,
-            vec![assistant_message(terminal_response)],
-            ProviderStopReason::EndTurn,
-        )))
+        Ok(WatchPromptPlan::batch(
+            consumes_action,
+            Event::ProviderResponseFinishedReported(finished(
+                prompt,
+                vec![assistant_message(terminal_response)],
+                ProviderStopReason::EndTurn,
+            )),
+        ))
     }
 
     fn handle_watch_chain_prompt(
@@ -859,7 +908,7 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         contents: WatchChainContents,
         handle: &tau_client::ClientHandle,
-    ) -> ClientResult<()> {
+    ) -> ClientResult<WatchPromptPlan<Event>> {
         let progress = self
             .watch_progress
             .get(&prompt.agent_id)
@@ -906,7 +955,8 @@ impl FakeState {
                 originator: prompt.originator.clone(),
             },
         ))?;
-        let terminal_response = if next_progress == 2 {
+        let consumes_action = next_progress == 2;
+        let terminal_response = if consumes_action {
             let admitted = self
                 .watch_chain_progress
                 .remove(&prompt.agent_id)
@@ -915,19 +965,20 @@ impl FakeState {
                 return Err(self.mismatch(cursor, "watch chain completed without both facts"));
             }
             self.watch_progress.remove(&prompt.agent_id);
-            self.lane_cursors[lane_index] += 1;
-            self.persist_cursors()?;
             contents.completion
         } else {
             self.watch_progress
                 .insert(prompt.agent_id.clone(), next_progress);
             "watch notification accepted".to_owned()
         };
-        handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-            prompt,
-            vec![assistant_message(terminal_response)],
-            ProviderStopReason::EndTurn,
-        )))
+        Ok(WatchPromptPlan::chain(
+            consumes_action,
+            Event::ProviderResponseFinishedReported(finished(
+                prompt,
+                vec![assistant_message(terminal_response)],
+                ProviderStopReason::EndTurn,
+            )),
+        ))
     }
 
     fn validate_watch_notification_messages(
@@ -1025,6 +1076,42 @@ impl FakeState {
                     .unwrap_or_default()
             ))
         }
+    }
+
+    /// Commits a prepared watch plan without exposing its terminal before trace
+    /// publication.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_watch_prompt_plan(
+        &mut self,
+        plan: WatchPromptPlan<Event>,
+        lane_id: &str,
+        cursor: usize,
+        action_count: usize,
+        lane_index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        before: usize,
+        handle: &tau_client::ClientHandle,
+    ) -> ClientResult<()> {
+        for effect in plan.into_effects() {
+            match effect {
+                WatchPromptEffect::PersistCursor => {
+                    self.lane_cursors[lane_index] += 1;
+                    self.persist_cursors()?;
+                }
+                WatchPromptEffect::TraceStage => self.trace_watch_action_stage(
+                    lane_id,
+                    cursor,
+                    action_count,
+                    lane_index,
+                    prompt,
+                    before,
+                )?,
+                WatchPromptEffect::EmitTerminal(terminal) => {
+                    handle.emit_transient(terminal)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn status_policy_tool_call(
@@ -1415,7 +1502,7 @@ impl FakeState {
                     "lane={lane_id} action={cursor} prompt_id={}",
                     prompt.agent_prompt_id
                 ))?;
-                self.handle_watch_batch_prompt(
+                let plan = self.handle_watch_batch_prompt(
                     lane_index,
                     cursor,
                     prompt,
@@ -1423,13 +1510,15 @@ impl FakeState {
                     response,
                     handle,
                 )?;
-                self.trace_watch_action_stage(
+                self.commit_watch_prompt_plan(
+                    plan,
                     &lane_id,
                     cursor,
                     action_count,
                     lane_index,
                     prompt,
                     before,
+                    handle,
                 )?;
                 return Ok(());
             }
@@ -1443,7 +1532,7 @@ impl FakeState {
                     "lane={lane_id} action={cursor} prompt_id={}",
                     prompt.agent_prompt_id
                 ))?;
-                self.handle_watch_chain_prompt(
+                let plan = self.handle_watch_chain_prompt(
                     lane_index,
                     cursor,
                     prompt,
@@ -1454,13 +1543,15 @@ impl FakeState {
                     },
                     handle,
                 )?;
-                self.trace_watch_action_stage(
+                self.commit_watch_prompt_plan(
+                    plan,
                     &lane_id,
                     cursor,
                     action_count,
                     lane_index,
                     prompt,
                     before,
+                    handle,
                 )?;
                 return Ok(());
             }

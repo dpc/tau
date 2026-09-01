@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use serde::Deserialize;
 use tau_e2e_tests::{
     AgentWatchResultExpectationV2, DeterministicFixture, DurableSessionSnapshot, ScenarioActionV2,
     ScenarioLaneV2, ScenarioV2, WatchNotificationV2,
@@ -22,6 +23,16 @@ use super::daemon_support::{
     OutputLengthCrashCut, disconnect_ui, spawn_daemon, spawn_daemon_at_output_length_cut,
 };
 use super::{DUMMY_TOOL, FAKE_PROVIDER};
+
+/// Maximum accepted size of the fake provider's durable cursor checkpoint.
+const MAX_FAKE_CURSOR_CHECKPOINT_BYTES: u64 = 64 * 1024;
+
+/// Decoded fake-provider cursor state used to prove replay consumes no action.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct FakeCursorCheckpoint {
+    /// Next action index for each configured scenario lane.
+    cursors: Vec<usize>,
+}
 
 fn bind_persistence_barrier(path: &Path) -> std::io::Result<UnixListener> {
     if path.exists() {
@@ -1257,13 +1268,19 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
         &identities,
         ProviderTurnCounts { main: 3, worker: 1 },
     )?;
-    let boot_a_action_matches = fixture
-        .trace()?
-        .lines()
-        .filter(|line| line.contains(" matched "))
-        .count();
     disconnect_ui(&mut observer_a.peer)?;
     daemon_a.finish()?;
+    let boot_a_action_matches = matched_action_count(&fixture)?;
+    assert_eq!(
+        boot_a_action_matches, 4,
+        "S1 Boot A must consume exactly three main and one worker action"
+    );
+    let boot_a_cursor = fake_provider_cursor(&fixture)?;
+    assert_eq!(
+        boot_a_cursor.cursors,
+        [3, 1],
+        "S1 Boot A must persist the exact next-action cursors"
+    );
 
     let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     assert_durable_boot_a(&snapshot_a, &identities)?;
@@ -1286,6 +1303,11 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
             .count(),
         boot_a_action_matches,
         "cold replay must not consume a fake-provider lane action"
+    );
+    assert_eq!(
+        fake_provider_cursor(&fixture)?,
+        boot_a_cursor,
+        "S1 cold replay must preserve the exact fake-provider cursor checkpoint"
     );
 
     let current = observer_b.roster(&session_id, SessionAgentListScope::Current)?;
@@ -1404,9 +1426,19 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
         &identities,
         ProviderTurnCounts { main: 3, worker: 1 },
     )?;
-    let boot_a_action_matches = matched_action_count(&fixture)?;
     disconnect_ui(&mut observer_a.peer)?;
     daemon_a.finish()?;
+    let boot_a_action_matches = matched_action_count(&fixture)?;
+    assert_eq!(
+        boot_a_action_matches, 4,
+        "S2 Boot A must consume exactly three main and one worker action"
+    );
+    let boot_a_cursor = fake_provider_cursor(&fixture)?;
+    assert_eq!(
+        boot_a_cursor.cursors,
+        [3, 1],
+        "S2 Boot A must persist the exact next-action cursors"
+    );
 
     let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     assert_durable_boot_a(&snapshot_a, &identities)?;
@@ -1423,6 +1455,9 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
     assert_replay_is_observational(&observer_b.events, &identities)?;
     if matched_action_count(&fixture)? != boot_a_action_matches {
         return Err("S2 cold replay consumed a fake-provider action".into());
+    }
+    if fake_provider_cursor(&fixture)? != boot_a_cursor {
+        return Err("S2 cold replay changed the fake-provider cursor checkpoint".into());
     }
 
     let watch_start = observer_b.events.len();
@@ -1588,6 +1623,21 @@ fn matched_action_count(
         .lines()
         .filter(|line| line.contains(" matched "))
         .count())
+}
+
+/// Reads the bounded provider-local checkpoint used as independent action
+/// consumption authority across a no-input cold-resume boundary.
+fn fake_provider_cursor(
+    fixture: &DeterministicFixture,
+) -> Result<FakeCursorCheckpoint, Box<dyn std::error::Error>> {
+    let path = fixture
+        .harness_state_dir()
+        .join("ext/e2e-fake-provider/scenario-cursor.json");
+    let metadata = std::fs::metadata(&path)?;
+    if metadata.len() > MAX_FAKE_CURSOR_CHECKPOINT_BYTES {
+        return Err("fake-provider cursor checkpoint exceeds its bounded schema".into());
+    }
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
 fn initial_live_watch_subscription_id(
