@@ -42,6 +42,7 @@ fn sparse_cold_restore_attaches_pending_creator_subtree_once() {
     let b = tau_proto::AgentId::parse("b").expect("test agent id");
     let c = tau_proto::AgentId::parse("c").expect("test agent id");
     let session_id = test_session_id("s1");
+    let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
     let mut harness = echo_harness(&state_dir).expect("harness");
     for (agent_id, creator) in [
         (a.clone(), Some(tau_proto::AgentCreator::User)),
@@ -68,7 +69,12 @@ fn sparse_cold_restore_attaches_pending_creator_subtree_once() {
             )
             .expect("persist durable creation");
     }
+    harness.shutdown().expect("shutdown seed harness");
     drop(harness);
+    assert!(
+        !tau_core::session_is_locked(&sessions_dir, "s1").expect("probe released session lock"),
+        "graceful shutdown must release the seed session lock before cold restore"
+    );
 
     let mut restored =
         echo_harness_with_start_reason("s1", &state_dir, tau_proto::SessionStartReason::Resume)
