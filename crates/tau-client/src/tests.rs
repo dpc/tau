@@ -4150,6 +4150,53 @@ fn detached_raw_ready_cannot_duplicate_official_ready() {
     ));
 }
 
+/// The detached FIFO's indirect lifecycle cuts remain exact: inactive queues
+/// withhold output, activation is idempotent, and closure is terminal but
+/// drain-enabled.
+#[test]
+fn detached_output_lifecycle_transition_matrix_preserves_indirect_cuts() {
+    use crate::detached_output::{DetachedOutput, QueuedFrame};
+
+    let detached = DetachedOutput::new();
+    let frame = QueuedFrame::admit(
+        PeerOutput::prepare(HarnessInputMessage::Disconnect(
+            tau_proto::Disconnect::default(),
+        ))
+        .expect("prepare detached frame"),
+    )
+    .expect("admit individual frame");
+    detached.admit(frame).expect("admit while inactive");
+
+    assert_eq!(detached.active_batch_len(), 0);
+    assert!(detached.pop().is_none());
+
+    detached.activate().expect("activate inactive FIFO");
+    detached.activate().expect("repeat active activation");
+    assert_eq!(detached.active_batch_len(), 1);
+    assert!(detached.pop().is_some());
+
+    detached.close();
+    detached.close();
+    assert_eq!(detached.active_batch_len(), 0);
+    assert!(detached.pop().is_none());
+    assert!(matches!(
+        detached.activate(),
+        Err(ClientError::WriterClosed)
+    ));
+
+    let frame = QueuedFrame::admit(
+        PeerOutput::prepare(HarnessInputMessage::Disconnect(
+            tau_proto::Disconnect::default(),
+        ))
+        .expect("prepare post-close frame"),
+    )
+    .expect("admit individual post-close frame");
+    assert!(matches!(
+        detached.admit(frame),
+        Err(ClientError::WriterClosed)
+    ));
+}
+
 /// Detached admission accepts exactly 64 queued frames while transport is
 /// blocked, rejects frame 65, and resumes after the writer releases FIFO
 /// budget.

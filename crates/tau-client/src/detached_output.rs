@@ -100,10 +100,47 @@ struct State {
     queue: VecDeque<QueuedFrame>,
     /// Aggregate encoded size of queued frames.
     encoded_bytes: EncodedBytes,
-    /// Whether the writer may drain accepted frames.
-    active: bool,
-    /// Whether admission has terminated.
-    closed: bool,
+    /// Admission and drain phase of the detached FIFO.
+    lifecycle: DetachedLifecycle,
+}
+
+/// Process-local admission and drain phase of the detached FIFO.
+#[derive(Clone, Copy)]
+enum DetachedLifecycle {
+    /// Admission is open, but startup still withholds draining.
+    Inactive,
+    /// Admission is open and the writer may drain accepted frames.
+    Active,
+    /// Admission is closed and the writer may perform the final drain.
+    Closed,
+}
+
+impl DetachedLifecycle {
+    /// Returns whether admission has terminated.
+    fn is_closed(self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    /// Enables draining while preserving terminal closure.
+    fn activate(&mut self) -> ClientResult<()> {
+        match self {
+            Self::Inactive | Self::Active => {
+                *self = Self::Active;
+                Ok(())
+            }
+            Self::Closed => Err(ClientError::WriterClosed),
+        }
+    }
+
+    /// Terminates admission and enables final draining.
+    fn close(&mut self) {
+        *self = Self::Closed;
+    }
+
+    /// Returns whether the writer may drain accepted frames.
+    fn can_drain(self) -> bool {
+        matches!(self, Self::Active | Self::Closed)
+    }
 }
 
 impl DetachedOutput {
@@ -113,8 +150,7 @@ impl DetachedOutput {
             state: Mutex::new(State {
                 queue: VecDeque::new(),
                 encoded_bytes: EncodedBytes::default(),
-                active: false,
-                closed: false,
+                lifecycle: DetachedLifecycle::Inactive,
             }),
         }
     }
@@ -123,7 +159,7 @@ impl DetachedOutput {
     /// progress.
     pub(crate) fn admit(&self, frame: QueuedFrame) -> ClientResult<()> {
         let mut state = self.state.lock().expect("lock detached output");
-        if state.closed {
+        if state.lifecycle.is_closed() {
             return Err(ClientError::WriterClosed);
         }
         let Some(total_bytes) = state.encoded_bytes.checked_add(frame.encoded_bytes()) else {
@@ -140,30 +176,29 @@ impl DetachedOutput {
     /// Enables ordered draining after `Ready` or a pre-Ready `ConfigError`.
     pub(crate) fn activate(&self) -> ClientResult<()> {
         let mut state = self.state.lock().expect("lock detached output");
-        if state.closed {
-            return Err(ClientError::WriterClosed);
-        }
-        state.active = true;
-        Ok(())
+        state.lifecycle.activate()
     }
 
     /// Closes admission and enables final draining of every accepted frame.
     pub(crate) fn close(&self) {
         let mut state = self.state.lock().expect("lock detached output");
-        state.closed = true;
-        state.active = true;
+        state.lifecycle.close();
     }
 
     /// Captures the active queue length for one fair writer batch.
     pub(crate) fn active_batch_len(&self) -> usize {
         let state = self.state.lock().expect("lock detached output");
-        if state.active { state.queue.len() } else { 0 }
+        if state.lifecycle.can_drain() {
+            state.queue.len()
+        } else {
+            0
+        }
     }
 
     /// Removes the next active frame and releases its queue budget.
     pub(crate) fn pop(&self) -> Option<PeerOutput> {
         let mut state = self.state.lock().expect("lock detached output");
-        if !state.active {
+        if !state.lifecycle.can_drain() {
             return None;
         }
         let frame = state.queue.pop_front()?;
