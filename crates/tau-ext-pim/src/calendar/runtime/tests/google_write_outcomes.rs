@@ -595,8 +595,9 @@ fn google_network_test_engine_for_calendar(
         },
     };
     let google = GoogleBackend::new(BTreeMap::new());
+    let account_id = CalendarAccountId::test("google");
     google
-        .prime_access_token_cache("google", "test-access-token".to_owned(), Some(3600))
+        .prime_access_token_cache(&account_id, "test-access-token".to_owned(), Some(3600))
         .expect("prime access token");
     Engine {
         config: cfg.validate().expect("valid config"),

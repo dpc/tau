@@ -7,7 +7,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime};
 use url::form_urlencoded;
 
-use super::config::{ValidatedAccount, ValidatedBackendConfig};
+use super::config::{CalendarAccountId, ValidatedAccount, ValidatedBackendConfig};
 use super::ics_feed::TimeRange;
 use super::identity::{EventEtag, EventId, ICalUid, ProviderCalendarId};
 use super::runtime::InviteResponse;
@@ -28,7 +28,7 @@ const OUTCOME_UNKNOWN_MESSAGE: &str =
 /// Read/write-capable Google Calendar API backend.
 pub struct GoogleBackend {
     agent: ureq::Agent,
-    oauth: GoogleOauthClient,
+    oauth: GoogleOauthClient<CalendarAccountId>,
 }
 
 /// Failure phase for one side-effecting Google Calendar request.
@@ -352,9 +352,9 @@ impl GoogleBackend {
     }
 
     /// Prime the access token cache from a freshly completed OAuth flow.
-    pub fn prime_access_token_cache(
+    pub(crate) fn prime_access_token_cache(
         &self,
-        account_id: &str,
+        account_id: &CalendarAccountId,
         access_token: String,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {

@@ -1,4 +1,6 @@
 use super::*;
+use crate::calendar::CalendarAccountId;
+use crate::email::EmailAccountId;
 
 /// Ensures Google OAuth JSON parsing accepts Google's documented
 /// verification_uri spelling and keeps token values out of errors.
@@ -82,7 +84,7 @@ fn installed_app_authorization_url_contains_pkce_and_offline_access() {
 /// lifetime as a duration before email persistence converts it to milliseconds.
 #[test]
 fn gmail_installed_app_start_uses_ten_minute_duration() {
-    let client = GoogleOauthClient::new(BTreeMap::from([(
+    let client: GoogleOauthClient<String> = GoogleOauthClient::new(BTreeMap::from([(
         "client-id".to_owned(),
         SecretValue::new("client-id"),
     )]));
@@ -273,13 +275,14 @@ fn oauth_http_errors_redact_submitted_secret_values() {
 /// access-token cache by overflowing `Instant`.
 #[test]
 fn huge_expires_in_skips_cache_without_panicking() {
-    let client = GoogleOauthClient::new(BTreeMap::new());
+    let client: GoogleOauthClient<String> = GoogleOauthClient::new(BTreeMap::new());
+    let account_id = "work".to_owned();
     client
-        .prime_access_token_cache("work", "access-token".to_owned(), Some(u64::MAX))
+        .prime_access_token_cache(&account_id, "access-token".to_owned(), Some(u64::MAX))
         .expect("huge expiry is ignored");
     assert_eq!(
         client
-            .cached_access_token("work")
+            .cached_access_token(&account_id)
             .expect("cache remains readable"),
         None
     );
@@ -289,18 +292,61 @@ fn huge_expires_in_skips_cache_without_panicking() {
 /// takes the same no-cache overflow path as raw provider expiries.
 #[test]
 fn huge_installed_app_lifetime_skips_cache_without_panicking() {
-    let client = GoogleOauthClient::new(BTreeMap::new());
+    let client: GoogleOauthClient<String> = GoogleOauthClient::new(BTreeMap::new());
+    let account_id = "work".to_owned();
     client
         .prime_access_token_cache_with_lifetime(
-            "work",
+            &account_id,
             "access-token".to_owned(),
             Some(Duration::from_secs(u64::MAX)),
         )
         .expect("huge lifetime is ignored");
     assert_eq!(
         client
-            .cached_access_token("work")
+            .cached_access_token(&account_id)
             .expect("cache remains readable"),
         None
+    );
+}
+
+/// Same-spelled email and calendar accounts must remain separate cache-key
+/// types while preserving each client's ordinary hit and invalidation behavior.
+#[test]
+fn access_token_caches_retain_feature_owned_account_identity() {
+    let email_id = EmailAccountId::test("shared");
+    let calendar_id = CalendarAccountId::test("shared");
+    let email: GoogleOauthClient<EmailAccountId> = GoogleOauthClient::new(BTreeMap::new());
+    let calendar: GoogleOauthClient<CalendarAccountId> = GoogleOauthClient::new(BTreeMap::new());
+
+    email
+        .prime_access_token_cache(&email_id, "email-token".to_owned(), Some(3600))
+        .expect("email cache prime");
+    calendar
+        .prime_access_token_cache(&calendar_id, "calendar-token".to_owned(), Some(3600))
+        .expect("calendar cache prime");
+
+    assert_eq!(
+        email.cached_access_token(&email_id).expect("email cache"),
+        Some("email-token".to_owned())
+    );
+    assert_eq!(
+        calendar
+            .cached_access_token(&calendar_id)
+            .expect("calendar cache"),
+        Some("calendar-token".to_owned())
+    );
+
+    email
+        .invalidate_access_token(&email_id)
+        .expect("email invalidation");
+    assert_eq!(
+        email.cached_access_token(&email_id).expect("email cache"),
+        None
+    );
+    assert_eq!(
+        calendar
+            .cached_access_token(&calendar_id)
+            .expect("calendar cache"),
+        Some("calendar-token".to_owned())
     );
 }

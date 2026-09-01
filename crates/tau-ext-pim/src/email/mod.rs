@@ -4,13 +4,14 @@
 //! tests and the real network backend exercise the same redaction and
 //! no-partial-send behavior.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::rc as path_std_rc;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fmt, rc as path_std_rc};
 
 use chrono::DateTime;
 use globset::{Glob, GlobMatcher};
@@ -418,14 +419,9 @@ impl EmailExtensionConfig {
         let mut accounts = BTreeMap::new();
         let mut account_order = Vec::new();
         for account in self.accounts {
-            if account.id.trim().is_empty() {
-                return Err("account id must not be empty".to_owned());
-            }
-            if account.id.contains('/') {
-                return Err("account id must not contain `/`".to_owned());
-            }
-            if !ids.insert(account.id.clone()) {
-                return Err(format!("duplicate account id `{}`", account.id));
+            let id = EmailAccountId::try_from(account.id.clone())?;
+            if !ids.insert(id.clone()) {
+                return Err(format!("duplicate account id `{id}`"));
             }
             if account.from.trim().is_empty() {
                 return Err(format!(
@@ -439,10 +435,10 @@ impl EmailExtensionConfig {
             if let Some(folder) = &account.folders.special_sent {
                 validate_folder_pattern(folder)?;
             }
-            account_order.push(account.id.clone());
+            account_order.push(id.clone());
             accounts.insert(
-                account.id.clone(),
-                ValidatedAccount::from_config(account, self.enable)?,
+                id.clone(),
+                ValidatedAccount::from_config(account, id, self.enable)?,
             );
         }
         Ok(ValidatedConfig {
@@ -459,15 +455,59 @@ impl EmailExtensionConfig {
     }
 }
 
+/// Validated email account identity retained only inside the email feature.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct EmailAccountId(String);
+
+#[cfg(test)]
+impl EmailAccountId {
+    /// Build a validated email account identity for focused internal tests.
+    pub(crate) fn test(value: &str) -> Self {
+        Self::try_from(value.to_owned()).expect("test email account id is valid")
+    }
+}
+
+impl TryFrom<String> for EmailAccountId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() {
+            return Err("account id must not be empty".to_owned());
+        }
+        if value.contains('/') {
+            return Err("account id must not contain `/`".to_owned());
+        }
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for EmailAccountId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for EmailAccountId {
+    fn borrow(&self) -> &str {
+        self.as_ref()
+    }
+}
+
+impl fmt::Display for EmailAccountId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_ref())
+    }
+}
+
 /// Validated extension configuration with compiled policy matchers.
 pub struct ValidatedConfig {
     /// Harness-level enable flag.
     pub enable: bool,
     /// Accounts keyed by configured account ID.
-    pub accounts: BTreeMap<String, ValidatedAccount>,
+    pub(crate) accounts: BTreeMap<EmailAccountId, ValidatedAccount>,
     /// Account IDs in configuration order. Used for deterministic defaults
     /// when a model omits the account argument.
-    pub account_order: Vec<String>,
+    pub(crate) account_order: Vec<EmailAccountId>,
     /// Compiled global policy.
     pub policy: ValidatedPolicy,
 }
@@ -475,7 +515,7 @@ pub struct ValidatedConfig {
 /// Validated account configuration.
 pub struct ValidatedAccount {
     /// Stable account identifier used in config and flattened folder ids.
-    pub id: String,
+    pub(crate) id: EmailAccountId,
     /// Whether this account is enabled.
     pub enable: bool,
     /// Optional display name.
@@ -498,7 +538,8 @@ impl TryFrom<AccountConfig> for ValidatedAccount {
     type Error = String;
 
     fn try_from(value: AccountConfig) -> Result<Self, Self::Error> {
-        Self::from_config(value, true)
+        let id = EmailAccountId::try_from(value.id.clone())?;
+        Self::from_config(value, id, true)
     }
 }
 
@@ -562,7 +603,11 @@ pub struct ValidatedAuthConfig {
 }
 
 impl ValidatedAccount {
-    fn from_config(value: AccountConfig, extension_enabled: bool) -> Result<Self, String> {
+    fn from_config(
+        value: AccountConfig,
+        id: EmailAccountId,
+        extension_enabled: bool,
+    ) -> Result<Self, String> {
         let matchers = value
             .folders
             .allow
@@ -584,7 +629,7 @@ impl ValidatedAccount {
             inactive_auth_config(value.auth)
         };
         Ok(Self {
-            id: value.id,
+            id,
             enable: account_enabled,
             display_name: value.display_name,
             from_normalized: normalize_address(&value.from)
@@ -3601,7 +3646,7 @@ impl<B: EmailBackend> Engine<B> {
         self.config
             .account_order
             .first()
-            .map(String::as_str)
+            .map(AsRef::as_ref)
             .ok_or_else(|| error_envelope(Some(command), "account_not_found", "account not found"))
     }
 
@@ -3629,14 +3674,14 @@ impl<B: EmailBackend> Engine<B> {
     fn list_folders(&self) -> CborValue {
         let mut visible = Vec::new();
         for account_id in &self.config.account_order {
-            let account = match self.account("list_folders", account_id) {
+            let account = match self.account("list_folders", account_id.as_ref()) {
                 Ok(account) => account,
                 Err(_) => continue,
             };
             if !account.imap_configured() {
                 continue;
             }
-            let folders = match self.backend.list_folders(account_id) {
+            let folders = match self.backend.list_folders(account_id.as_ref()) {
                 Ok(folders) => folders,
                 Err(message) => {
                     return backend_error_envelope(Some("list_folders"), "network_error", &message);
@@ -3646,7 +3691,7 @@ impl<B: EmailBackend> Engine<B> {
                 folders
                     .into_iter()
                     .filter(|f| account.folders.allows(&f.name))
-                    .map(|folder| format_folder_line(account_id, folder)),
+                    .map(|folder| format_folder_line(account_id.as_ref(), folder)),
             );
         }
         ok_line_envelope(
@@ -4206,13 +4251,13 @@ impl<B: EmailBackend> Engine<B> {
                     && (from_trimmed == account.from_identity
                         || from_normalized.as_deref() == Some(account.from_normalized.as_str()))
             }) {
-                return Some(id.clone());
+                return Some(id.as_ref().to_owned());
             }
         }
         self.config.account_order.iter().find_map(|id| {
             let account = self.config.accounts.get(id)?;
             if account.enable && account.smtp_configured() {
-                Some(id.clone())
+                Some(id.as_ref().to_owned())
             } else {
                 None
             }
@@ -4376,9 +4421,11 @@ impl<B: EmailBackend> Engine<B> {
 
     fn action_auth_google_start(&self, account_id: &str) -> Result<String, String> {
         let account = self.google_oauth_state_account(account_id)?;
-        let started = self.backend.start_google_installed_app_auth(&account.id)?;
+        let started = self
+            .backend
+            .start_google_installed_app_auth(account.id.as_ref())?;
         let pending = EmailGooglePendingAuth::installed_app(
-            &account.id,
+            account.id.as_ref(),
             &started.state,
             &started.pkce_verifier,
             &started.redirect_uri,
@@ -4387,9 +4434,9 @@ impl<B: EmailBackend> Engine<B> {
         self.state.save_pending_google_auth(&pending)?;
         Ok(format!(
             "Google email authorization started for account {}.\nOpen this URL:\n{}\nApprove access in the browser. The browser will fail to connect to localhost; copy the full final address-bar URL and run:\n:email auth google finish {} <copied-url>\nExpires in {} second(s).",
-            safe_display_line(&account.id),
+            safe_display_line(account.id.as_ref()),
             safe_oauth_url_display(&started.authorization_url),
-            safe_display_line(&account.id),
+            safe_display_line(account.id.as_ref()),
             started.pending_lifetime.as_secs(),
         ))
     }
@@ -4413,13 +4460,13 @@ impl<B: EmailBackend> Engine<B> {
         redirect_url: &str,
     ) -> Result<String, String> {
         let account_id = self.google_oauth_state_account(account_id)?.id.clone();
-        let pending = self.state.pending_google_auth(&account_id)?;
+        let pending = self.state.pending_google_auth(account_id.as_ref())?;
         if pending.expired() {
-            self.state.clear_pending_google_auth(&account_id)?;
+            self.state.clear_pending_google_auth(account_id.as_ref())?;
             return Err(format!(
                 "Google authorization for account `{}` expired; run `:email auth google start {}` again",
-                safe_display_line(&account_id),
-                safe_display_line(&account_id)
+                safe_display_line(account_id.as_ref()),
+                safe_display_line(account_id.as_ref())
             ));
         }
         let installed_app = pending.installed_app_data();
@@ -4429,24 +4476,24 @@ impl<B: EmailBackend> Engine<B> {
             installed_app.state,
         )?;
         let finished = self.backend.finish_google_installed_app_auth(
-            &account_id,
+            account_id.as_ref(),
             &redirect.code,
             installed_app.pkce_verifier,
             installed_app.redirect_uri,
         )?;
         self.state
-            .save_google_refresh_token(&account_id, &finished.refresh_token)?;
-        self.state.clear_pending_google_auth(&account_id)?;
+            .save_google_refresh_token(account_id.as_ref(), &finished.refresh_token)?;
+        self.state.clear_pending_google_auth(account_id.as_ref())?;
         if finished.access_token.is_some()
             && let Err(_message) = self
                 .backend
-                .prime_google_access_token_cache(&account_id, &finished)
+                .prime_google_access_token_cache(account_id.as_ref(), &finished)
         {
             tracing::warn!(target: LOG_TARGET, "failed to prime Google email access token cache");
         }
         Ok(format!(
             "Google email authorization stored for account {}.",
-            safe_display_line(&account_id)
+            safe_display_line(account_id.as_ref())
         ))
     }
 
@@ -5040,7 +5087,7 @@ impl<B: EmailBackend> Engine<B> {
         let account = self
             .config
             .accounts
-            .get(&approval.account)
+            .get(approval.account.as_str())
             .ok_or_else(|| "approval account not found".to_owned())?;
         if !self.config.enable || !account.enable {
             return Err("approval account is disabled".to_owned());
@@ -5302,7 +5349,7 @@ impl RuntimeState {
             .values()
             .filter(|account| {
                 account.enable
-                    && crate::is_safe_action_account_id(&account.id)
+                    && crate::is_safe_action_account_id(account.id.as_ref())
                     && matches!(
                         account.auth.as_ref(),
                         Some(ValidatedAuthConfig {
@@ -5313,7 +5360,7 @@ impl RuntimeState {
                         })
                     )
             })
-            .map(|account| account.id.clone())
+            .map(|account| account.id.as_ref().to_owned())
             .collect()
     }
 

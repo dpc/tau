@@ -1,5 +1,7 @@
 //! Internal calendar provider identity types.
 
+use super::config::CalendarAccountId;
+
 /// Opaque calendar identifier supplied by a calendar provider.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct ProviderCalendarId(String);
@@ -20,7 +22,7 @@ pub(super) struct EventEtag(String);
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct EventKey {
     /// Configured account that owns the event.
-    account: String,
+    account: CalendarAccountId,
     /// Provider calendar that contains the event.
     calendar: ProviderCalendarId,
     /// Provider event within the calendar.
@@ -79,20 +81,24 @@ impl EventEtag {
 impl EventKey {
     /// Build an event key from its already-separated namespaces.
     pub(super) fn new(
-        account: impl Into<String>,
+        account: &CalendarAccountId,
         calendar: ProviderCalendarId,
         event: EventId,
     ) -> Self {
         Self {
-            account: account.into(),
+            account: account.clone(),
             calendar,
             event,
         }
     }
 
     /// Return whether this key belongs to the selected account and calendar.
-    pub(super) fn belongs_to(&self, account: &str, calendar: &ProviderCalendarId) -> bool {
-        self.account == account && self.calendar == *calendar
+    pub(super) fn belongs_to(
+        &self,
+        account: &CalendarAccountId,
+        calendar: &ProviderCalendarId,
+    ) -> bool {
+        &self.account == account && self.calendar == *calendar
     }
 
     /// Borrow the event component.

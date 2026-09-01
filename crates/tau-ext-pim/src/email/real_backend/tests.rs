@@ -157,7 +157,7 @@ fn smtp_backend(
     let state = StateStore::open(temp.path().join("state")).expect("state");
     let oauth = Arc::new(GoogleOauthClient::new(secrets.clone()));
     let account = RealAccount {
-        id: "work".to_owned(),
+        id: EmailAccountId::test("work"),
         imap: None,
         smtp: Some(ValidatedSmtpConfig {
             host: "127.0.0.1".to_owned(),
@@ -172,7 +172,7 @@ fn smtp_backend(
         oauth: Arc::clone(&oauth),
     };
     RealEmailBackend {
-        accounts: BTreeMap::from([("work".to_owned(), account)]),
+        accounts: BTreeMap::from([(EmailAccountId::test("work"), account)]),
         runtime: Runtime::new().expect("runtime"),
         oauth,
     }

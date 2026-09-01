@@ -11,6 +11,8 @@ use tau_proto::{
 use time::format_description as path_time_format_description;
 use time_tz::{OffsetDateTimeExt, OffsetResult, PrimitiveDateTimeExt, TimeZone};
 
+#[cfg(test)]
+use super::config::CalendarAccountId;
 use super::config::{
     CalendarExtensionConfig, DescriptionPolicy, PrivateEventsPolicy, ValidatedAccount,
     ValidatedBackendConfig, ValidatedConfig, ValidatedPolicy,
@@ -219,7 +221,7 @@ impl RuntimeState {
             .values()
             .filter(|account| {
                 account.enable
-                    && crate::is_safe_action_account_id(&account.id)
+                    && crate::is_safe_action_account_id(account.id.as_ref())
                     && matches!(
                         &account.backend,
                         Some(ValidatedBackendConfig::Google {
@@ -228,7 +230,7 @@ impl RuntimeState {
                         })
                     )
             })
-            .map(|account| account.id.clone())
+            .map(|account| account.id.as_ref().to_owned())
             .collect()
     }
 
@@ -320,8 +322,12 @@ fn validate_config_secrets(
                 allow_plain_http,
                 ..
             }) => {
-                let value =
-                    required_config_secret(&account.id, "backend.url_secret", secret, secrets)?;
+                let value = required_config_secret(
+                    account.id.as_ref(),
+                    "backend.url_secret",
+                    secret,
+                    secrets,
+                )?;
                 normalize_feed_url(&value, *allow_plain_http)?;
             }
             Some(ValidatedBackendConfig::Google {
@@ -331,7 +337,7 @@ fn validate_config_secrets(
                 ..
             }) => {
                 required_config_secret(
-                    &account.id,
+                    account.id.as_ref(),
                     "backend.client_id_secret",
                     client_id_secret,
                     secrets,
@@ -347,7 +353,7 @@ fn validate_config_secrets(
                     ),
                 ] {
                     let Some(secret) = secret else { continue };
-                    required_config_secret(&account.id, field, secret, secrets)?;
+                    required_config_secret(account.id.as_ref(), field, secret, secrets)?;
                 }
             }
             Some(ValidatedBackendConfig::Caldav { .. })
@@ -636,7 +642,7 @@ impl Engine {
         let account = self.google_oauth_state_account(account_id)?;
         let started = self.google.start_device_auth(account)?;
         let pending = GooglePendingAuth::new(
-            &account.id,
+            account.id.as_ref(),
             &started.device_code,
             &started.user_code,
             &started.verification_uri,
@@ -644,26 +650,26 @@ impl Engine {
             started.interval_secs,
         );
         self.state.save_pending_google_auth(&pending)?;
-        Ok(format_google_auth_started(&account.id, &started))
+        Ok(format_google_auth_started(account.id.as_ref(), &started))
     }
 
     fn action_auth_google_finish(&self, account_id: &str) -> Result<String, String> {
         let account = self.google_oauth_state_account(account_id)?;
-        let pending = self.state.pending_google_auth(&account.id)?;
+        let pending = self.state.pending_google_auth(account.id.as_ref())?;
         if pending.expired() {
-            self.state.clear_pending_google_auth(&account.id)?;
+            self.state.clear_pending_google_auth(account.id.as_ref())?;
             return Err(format!(
                 "Google authorization for account `{}` expired; run `:calendar auth google start {}` again",
-                safe_display_line(&account.id),
-                safe_display_line(&account.id)
+                safe_display_line(account.id.as_ref()),
+                safe_display_line(account.id.as_ref())
             ));
         }
         let finished = self
             .google
             .finish_device_auth(account, &pending.device_code)?;
         self.state
-            .save_google_refresh_token(&account.id, &finished.refresh_token)?;
-        self.state.clear_pending_google_auth(&account.id)?;
+            .save_google_refresh_token(account.id.as_ref(), &finished.refresh_token)?;
+        self.state.clear_pending_google_auth(account.id.as_ref())?;
         if let Some(access_token) = finished.access_token
             && let Err(_message) = self.google.prime_access_token_cache(
                 &account.id,
@@ -675,7 +681,7 @@ impl Engine {
         }
         Ok(format!(
             "Google Calendar authorization stored for account {}.",
-            safe_display_line(&account.id)
+            safe_display_line(account.id.as_ref())
         ))
     }
 
@@ -927,7 +933,7 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                flatten_calendar_id(&account.id, calendar.id.as_str()),
+                                flatten_calendar_id(account.id.as_ref(), calendar.id.as_str()),
                                 flags,
                                 quoted_display_field(&calendar.display_name)
                             ));
@@ -946,7 +952,7 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                flatten_calendar_id(&account.id, calendar.id.as_str()),
+                                flatten_calendar_id(account.id.as_ref(), calendar.id.as_str()),
                                 flags,
                                 quoted_display_field(&calendar.summary)
                             ));
@@ -1030,7 +1036,7 @@ impl Engine {
                 event,
             ));
         }
-        let flattened_calendar = flatten_calendar_id(&account.id, calendar);
+        let flattened_calendar = flatten_calendar_id(account.id.as_ref(), calendar);
         let cursor_query = CalendarCursorQuery::search(
             &flattened_calendar,
             range_start
@@ -1048,7 +1054,7 @@ impl Engine {
             (
                 "calendar",
                 CborValue::Text(safe_display_line(&flatten_calendar_id(
-                    &account.id,
+                    account.id.as_ref(),
                     calendar,
                 ))),
             ),
@@ -1081,7 +1087,7 @@ impl Engine {
                 (
                     "calendar",
                     CborValue::Text(safe_display_line(&flatten_calendar_id(
-                        &account.id,
+                        account.id.as_ref(),
                         calendar,
                     ))),
                 ),
@@ -1138,7 +1144,7 @@ impl Engine {
             (
                 "calendar",
                 CborValue::Text(safe_display_line(&flatten_calendar_id(
-                    &account.id,
+                    account.id.as_ref(),
                     calendar,
                 ))),
             ),
@@ -1224,7 +1230,7 @@ impl Engine {
                 event,
             ));
         }
-        let flattened_calendar = flatten_calendar_id(&account.id, calendar);
+        let flattened_calendar = flatten_calendar_id(account.id.as_ref(), calendar);
         let cursor_query = CalendarCursorQuery::free_busy(
             &flattened_calendar,
             range_start
@@ -1240,7 +1246,7 @@ impl Engine {
             (
                 "calendar",
                 CborValue::Text(safe_display_line(&flatten_calendar_id(
-                    &account.id,
+                    account.id.as_ref(),
                     calendar,
                 ))),
             ),
@@ -1258,7 +1264,7 @@ impl Engine {
                 (
                     "calendar",
                     CborValue::Text(safe_display_line(&flatten_calendar_id(
-                        &account.id,
+                        account.id.as_ref(),
                         calendar,
                     ))),
                 ),
@@ -1309,7 +1315,7 @@ impl Engine {
         calendar: &str,
     ) -> Result<CalendarChangeApproval, String> {
         let mut change =
-            CalendarChangeApproval::pending(command_name(command), &account.id, calendar);
+            CalendarChangeApproval::pending(command_name(command), account.id.as_ref(), calendar);
         match command {
             CalendarCommand::CreateEvent => {
                 self.fill_create_event_change(&mut change, args, account)?
@@ -1317,8 +1323,12 @@ impl Engine {
             CalendarCommand::UpdateEvent => {
                 self.fill_update_event_change(&mut change, args, account)?
             }
-            CalendarCommand::DeleteEvent => self.fill_delete_event_change(&mut change, args)?,
-            CalendarCommand::RespondInvite => self.fill_respond_invite_change(&mut change, args)?,
+            CalendarCommand::DeleteEvent => {
+                self.fill_delete_event_change(&mut change, args, account)?
+            }
+            CalendarCommand::RespondInvite => {
+                self.fill_respond_invite_change(&mut change, args, account)?
+            }
             CalendarCommand::ListCalendars
             | CalendarCommand::ListEvents
             | CalendarCommand::ReadEvent
@@ -1357,7 +1367,7 @@ impl Engine {
         account: &ValidatedAccount,
     ) -> Result<(), String> {
         change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
-        change.etag = Some(self.cached_etag_for_change(change)?);
+        change.etag = Some(self.cached_etag_for_change(change, account)?);
         change.title = optional_line(args.title.as_deref(), "title", false)?;
         change.description = optional_description(args.description.as_deref())?;
         change.location = optional_line(args.location.as_deref(), "location", true)?;
@@ -1375,9 +1385,10 @@ impl Engine {
         &self,
         change: &mut CalendarChangeApproval,
         args: &ChangeArgs,
+        account: &ValidatedAccount,
     ) -> Result<(), String> {
         change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
-        change.etag = Some(self.cached_etag_for_change(change)?);
+        change.etag = Some(self.cached_etag_for_change(change, account)?);
         Ok(())
     }
 
@@ -1385,9 +1396,10 @@ impl Engine {
         &self,
         change: &mut CalendarChangeApproval,
         args: &ChangeArgs,
+        account: &ValidatedAccount,
     ) -> Result<(), String> {
         change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
-        change.etag = Some(self.cached_etag_for_change(change)?);
+        change.etag = Some(self.cached_etag_for_change(change, account)?);
         change.response = Some(
             required_response(args.response.as_deref())?
                 .as_str()
@@ -1414,12 +1426,16 @@ impl Engine {
         self.etags.borrow_mut().insert(key, etag.clone());
     }
 
-    fn cached_etag_for_change(&self, change: &CalendarChangeApproval) -> Result<String, String> {
+    fn cached_etag_for_change(
+        &self,
+        change: &CalendarChangeApproval,
+        account: &ValidatedAccount,
+    ) -> Result<String, String> {
         let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
         self.etags
             .borrow()
             .get(&EventKey::new(
-                &change.account,
+                &account.id,
                 ProviderCalendarId::new(&change.calendar),
                 EventId::new(event_id),
             ))
@@ -1436,6 +1452,7 @@ impl Engine {
     fn remember_mutation_result(
         &self,
         change: &CalendarChangeApproval,
+        account: &ValidatedAccount,
         result: &CalendarMutationResult,
     ) {
         let calendar = ProviderCalendarId::new(&change.calendar);
@@ -1443,7 +1460,7 @@ impl Engine {
             CalendarMutationResult::Event(event) => {
                 if let Some(etag) = &event.etag {
                     self.etags.borrow_mut().insert(
-                        EventKey::new(&change.account, calendar, event.id.clone()),
+                        EventKey::new(&account.id, calendar, event.id.clone()),
                         etag.clone(),
                     );
                 }
@@ -1451,7 +1468,7 @@ impl Engine {
             CalendarMutationResult::Deleted => {
                 if let Some(event_id) = &change.event_id {
                     self.etags.borrow_mut().remove(&EventKey::new(
-                        &change.account,
+                        &account.id,
                         calendar,
                         EventId::new(event_id),
                     ));
@@ -1628,7 +1645,7 @@ impl Engine {
                 "unsupported calendar change command `{other}`"
             ))),
         }?;
-        self.remember_mutation_result(change, &result);
+        self.remember_mutation_result(change, account, &result);
         Ok(result)
     }
 
@@ -1796,7 +1813,7 @@ impl Engine {
                 ..
             }) => self
                 .state
-                .google_refresh_token(&account.id)?
+                .google_refresh_token(account.id.as_ref())?
                 .map(Some)
                 .ok_or_else(|| {
                     format!(
@@ -2597,7 +2614,7 @@ fn format_event_detail(
     let mut lines = vec![
         format!(
             "calendar {}",
-            safe_field(&flatten_calendar_id(&account.id, calendar))
+            safe_field(&flatten_calendar_id(account.id.as_ref(), calendar))
         ),
         format!("event_id {}", safe_field(event_id(event).as_str())),
         format!(

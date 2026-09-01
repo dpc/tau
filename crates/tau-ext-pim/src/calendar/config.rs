@@ -1,4 +1,6 @@
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use serde::Deserialize;
 use url::Url;
@@ -164,9 +166,9 @@ pub struct ValidatedConfig {
     /// Whether calendar access is enabled.
     pub enable: bool,
     /// Accounts keyed by configured account ID.
-    pub accounts: BTreeMap<String, ValidatedAccount>,
+    pub(crate) accounts: BTreeMap<CalendarAccountId, ValidatedAccount>,
     /// Account IDs in configuration order for deterministic display.
-    pub account_order: Vec<String>,
+    pub(crate) account_order: Vec<CalendarAccountId>,
     /// Validated calendar privacy and write policy.
     pub policy: ValidatedPolicy,
 }
@@ -198,7 +200,7 @@ pub struct ValidatedWritePolicy {
 /// Validated calendar account configuration.
 pub struct ValidatedAccount {
     /// Stable account identifier used by tool commands.
-    pub id: String,
+    pub(crate) id: CalendarAccountId,
     /// Whether this account is enabled.
     pub enable: bool,
     /// Optional display name.
@@ -211,6 +213,51 @@ pub struct ValidatedAccount {
     pub allowed_calendars: Vec<String>,
     /// Default IANA timezone.
     pub timezone: Option<String>,
+}
+
+/// Validated calendar account identity retained only inside the calendar
+/// feature.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CalendarAccountId(String);
+
+#[cfg(test)]
+impl CalendarAccountId {
+    /// Build a validated calendar account identity for focused internal tests.
+    pub(crate) fn test(value: &str) -> Self {
+        Self::try_from(value.to_owned()).expect("test calendar account id is valid")
+    }
+}
+
+impl TryFrom<String> for CalendarAccountId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() {
+            return Err("calendar account id must not be empty".to_owned());
+        }
+        if value.contains('/') {
+            return Err("calendar account id must not contain `/`".to_owned());
+        }
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for CalendarAccountId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for CalendarAccountId {
+    fn borrow(&self) -> &str {
+        self.as_ref()
+    }
+}
+
+impl fmt::Display for CalendarAccountId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_ref())
+    }
 }
 
 /// Validated backend-specific calendar account configuration.
@@ -254,14 +301,9 @@ impl CalendarExtensionConfig {
         let mut accounts = BTreeMap::new();
         let mut account_order = Vec::new();
         for account in self.accounts {
-            if account.id.trim().is_empty() {
-                return Err("calendar account id must not be empty".to_owned());
-            }
-            if account.id.contains('/') {
-                return Err("calendar account id must not contain `/`".to_owned());
-            }
-            if !ids.insert(account.id.clone()) {
-                return Err(format!("duplicate calendar account id `{}`", account.id));
+            let id = CalendarAccountId::try_from(account.id.clone())?;
+            if !ids.insert(id.clone()) {
+                return Err(format!("duplicate calendar account id `{id}`"));
             }
             validate_calendar_patterns(&account.calendars.allow)?;
             if let Some(default) = &account.calendars.default {
@@ -278,9 +320,8 @@ impl CalendarExtensionConfig {
                     ));
                 }
             }
-            let id = account.id.clone();
             account_order.push(id.clone());
-            accounts.insert(id, ValidatedAccount::from_config(account)?);
+            accounts.insert(id.clone(), ValidatedAccount::from_config(account, id)?);
         }
         Ok(ValidatedConfig {
             enable: self.enable,
@@ -313,7 +354,7 @@ impl CalendarPolicyConfig {
 }
 
 impl ValidatedAccount {
-    fn from_config(value: CalendarAccountConfig) -> Result<Self, String> {
+    fn from_config(value: CalendarAccountConfig, id: CalendarAccountId) -> Result<Self, String> {
         let backend = match value.backend {
             Some(CalendarBackendConfig::IcsFeed {
                 url_secret,
@@ -356,7 +397,7 @@ impl ValidatedAccount {
             None => None,
         };
         Ok(Self {
-            id: value.id,
+            id,
             enable: value.enable,
             display_name: value.display_name,
             backend,

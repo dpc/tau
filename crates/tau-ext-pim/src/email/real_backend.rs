@@ -35,9 +35,9 @@ use tokio_rustls::client::TlsStream;
 
 use super::{
     AuthMethod, AuthenticationResultsEvidence, BackendAttachment, BackendFolder, BackendMessage,
-    BackendMessagePage, EmailBackend, EmailOauth2Provider, EmailSendFailure, MessageFlagMutation,
-    OutgoingMessage, READ_BODY_MAX_BYTES, StateStore, TlsMode, ValidatedAuthConfig,
-    ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig, recent_cutoff,
+    BackendMessagePage, EmailAccountId, EmailBackend, EmailOauth2Provider, EmailSendFailure,
+    MessageFlagMutation, OutgoingMessage, READ_BODY_MAX_BYTES, StateStore, TlsMode,
+    ValidatedAuthConfig, ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig, recent_cutoff,
 };
 use crate::google_oauth::{
     GoogleInstalledAppAuthFinish, GoogleInstalledAppAuthStart, GoogleOauthClient,
@@ -55,9 +55,9 @@ pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str =
 
 /// Production IMAP/SMTP backend for configured email accounts.
 pub struct RealEmailBackend {
-    accounts: BTreeMap<String, RealAccount>,
+    accounts: BTreeMap<EmailAccountId, RealAccount>,
     runtime: Runtime,
-    oauth: Arc<GoogleOauthClient>,
+    oauth: Arc<GoogleOauthClient<EmailAccountId>>,
 }
 
 /// Bounds metadata requests and candidate rows while filling one recent-mail
@@ -133,13 +133,13 @@ impl SmtpSubmissionStage {
 
 #[derive(Clone)]
 struct RealAccount {
-    id: String,
+    id: EmailAccountId,
     imap: Option<ValidatedImapConfig>,
     smtp: Option<ValidatedSmtpConfig>,
     auth: Option<ValidatedAuthConfig>,
     secrets: Arc<BTreeMap<String, tau_proto::SecretValue>>,
     state: StateStore,
-    oauth: Arc<GoogleOauthClient>,
+    oauth: Arc<GoogleOauthClient<EmailAccountId>>,
 }
 
 impl RealEmailBackend {
@@ -367,8 +367,9 @@ impl EmailBackend for RealEmailBackend {
         let Some(access_token) = &finished.access_token else {
             return Ok(());
         };
+        let account = self.account(account)?;
         self.oauth.prime_access_token_cache_with_lifetime(
-            account,
+            &account.id,
             access_token.clone(),
             finished.access_token_lifetime,
         )
@@ -414,12 +415,16 @@ impl RealAccount {
         let stored_refresh_token = if config.refresh_token_secret.is_some() {
             None
         } else {
-            Some(self.state.google_refresh_token(&self.id)?.ok_or_else(|| {
+            Some(
+                self.state
+                    .google_refresh_token(self.id.as_ref())?
+                    .ok_or_else(|| {
                 format!(
                     "Google email account `{}` is not authorized; run `:email auth google start {}` and then `:email auth google finish {} <copied-url>`",
                     self.id, self.id, self.id
                 )
-            })?)
+            })?,
+            )
         };
         self.oauth.access_token(
             &self.id,

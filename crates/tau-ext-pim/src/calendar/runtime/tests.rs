@@ -53,9 +53,9 @@ fn omitted_calendar_account_defaults_to_first_enabled_account() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = test_engine(temp.path());
     engine.config.accounts.insert(
-        "later".to_owned(),
+        CalendarAccountId::test("later"),
         ValidatedAccount {
-            id: "later".to_owned(),
+            id: CalendarAccountId::test("later"),
             enable: true,
             display_name: Some("Later".to_owned()),
             backend: Some(ValidatedBackendConfig::IcsFeed {
@@ -68,12 +68,15 @@ fn omitted_calendar_account_defaults_to_first_enabled_account() {
             timezone: Some("UTC".to_owned()),
         },
     );
-    engine.config.account_order.push("later".to_owned());
+    engine
+        .config
+        .account_order
+        .push(CalendarAccountId::test("later"));
 
     let account = engine.single_account(None).expect("default account");
-    assert_eq!(account.id, "feed");
+    assert_eq!(account.id.as_ref(), "feed");
     let (account, calendar) = engine.resolve_calendar_arg(None).expect("default calendar");
-    assert_eq!(account.id, "feed");
+    assert_eq!(account.id.as_ref(), "feed");
     assert_eq!(calendar, "main");
 
     let invocation = ToolInvocation {
@@ -869,9 +872,10 @@ fn google_create_event_queues_pending_change_with_default_end() {
 fn google_update_event_builds_default_end_with_cached_etag() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = google_test_engine(temp.path());
+    let account_id = &engine.config.accounts.get("google").expect("account").id;
     engine.etags.borrow_mut().insert(
         EventKey::new(
-            "google",
+            account_id,
             ProviderCalendarId::new("primary"),
             EventId::new("evt1"),
         ),
@@ -901,9 +905,10 @@ fn google_update_event_builds_default_end_with_cached_etag() {
 fn update_event_rejects_invite_response_argument() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = google_test_engine(temp.path());
+    let account_id = &engine.config.accounts.get("google").expect("account").id;
     engine.etags.borrow_mut().insert(
         EventKey::new(
-            "google",
+            account_id,
             ProviderCalendarId::new("primary"),
             EventId::new("evt1"),
         ),
@@ -998,7 +1003,7 @@ fn private_event_details_are_busy_only_by_default() {
     // Provider-private events should not leak summaries or descriptions to
     // the model unless policy explicitly opts into details.
     let account = ValidatedAccount {
-        id: "google".to_owned(),
+        id: CalendarAccountId::test("google"),
         enable: true,
         display_name: None,
         backend: Some(ValidatedBackendConfig::Google {
@@ -1063,7 +1068,7 @@ fn google_event_details_hide_etag_from_agent() {
     // Google read responses keep ETags internally for conditional writes;
     // model-visible event details should stay focused on user data.
     let account = ValidatedAccount {
-        id: "google".to_owned(),
+        id: CalendarAccountId::test("google"),
         enable: true,
         display_name: None,
         backend: Some(ValidatedBackendConfig::Google {
@@ -1123,7 +1128,7 @@ fn calendar_event_output_uses_account_timezone() {
     // timezone. Event rows should use the same timezone instead of handing UTC
     // rows to the model and expecting it to convert them correctly.
     let account = ValidatedAccount {
-        id: "feed".to_owned(),
+        id: CalendarAccountId::test("feed"),
         enable: true,
         display_name: None,
         backend: Some(ValidatedBackendConfig::IcsFeed {
@@ -1196,9 +1201,9 @@ fn read_event_validates_output_timezone_before_backend_access() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = test_engine(temp.path());
     engine.config.accounts.insert(
-        "bad-tz".to_owned(),
+        CalendarAccountId::test("bad-tz"),
         ValidatedAccount {
-            id: "bad-tz".to_owned(),
+            id: CalendarAccountId::test("bad-tz"),
             enable: true,
             display_name: None,
             backend: Some(ValidatedBackendConfig::IcsFeed {
@@ -1211,7 +1216,10 @@ fn read_event_validates_output_timezone_before_backend_access() {
             timezone: Some("Not/AZone".to_owned()),
         },
     );
-    engine.config.account_order.push("bad-tz".to_owned());
+    engine
+        .config
+        .account_order
+        .push(CalendarAccountId::test("bad-tz"));
 
     let err = engine
         .read_event(
@@ -1252,7 +1260,7 @@ fn google_event_etag_cache_is_cleared_by_missing_provider_etag() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = test_engine(temp.path());
     let account = ValidatedAccount {
-        id: "google".to_owned(),
+        id: CalendarAccountId::test("google"),
         enable: true,
         display_name: None,
         backend: Some(ValidatedBackendConfig::Google {
@@ -1287,7 +1295,9 @@ fn google_event_etag_cache_is_cleared_by_missing_provider_etag() {
 
     engine.remember_event_etag(&account, "primary", &event);
     assert_eq!(
-        engine.cached_etag_for_change(&change).expect("cached etag"),
+        engine
+            .cached_etag_for_change(&change, &account)
+            .expect("cached etag"),
         "abc"
     );
 
@@ -1296,7 +1306,7 @@ fn google_event_etag_cache_is_cleared_by_missing_provider_etag() {
     }
     engine.remember_event_etag(&account, "primary", &event);
 
-    assert!(engine.cached_etag_for_change(&change).is_err());
+    assert!(engine.cached_etag_for_change(&change, &account).is_err());
 }
 
 /// ETag cache lookup must retain account, calendar, and event namespaces so an
@@ -1304,10 +1314,31 @@ fn google_event_etag_cache_is_cleared_by_missing_provider_etag() {
 #[test]
 fn google_event_etag_cache_rejects_cross_namespace_reuse() {
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let engine = test_engine(temp.path());
+    let mut engine = test_engine(temp.path());
+    for raw in ["work", "personal"] {
+        let id = CalendarAccountId::test(raw);
+        engine.config.accounts.insert(
+            id.clone(),
+            ValidatedAccount {
+                id,
+                enable: true,
+                display_name: None,
+                backend: None,
+                default_calendar: Some("primary".to_owned()),
+                allowed_calendars: vec!["primary".to_owned()],
+                timezone: Some("UTC".to_owned()),
+            },
+        );
+    }
+    let work = engine.config.accounts.get("work").expect("work account");
+    let personal = engine
+        .config
+        .accounts
+        .get("personal")
+        .expect("personal account");
     engine.etags.borrow_mut().insert(
         EventKey::new(
-            "work",
+            &work.id,
             ProviderCalendarId::new("primary"),
             EventId::new("shared"),
         ),
@@ -1322,27 +1353,30 @@ fn google_event_etag_cache_rejects_cross_namespace_reuse() {
 
     assert_eq!(
         engine
-            .cached_etag_for_change(&change("work", "primary"))
+            .cached_etag_for_change(&change("work", "primary"), work)
             .expect("exact namespace matches"),
         "etag-work-primary"
     );
     assert!(
         engine
-            .cached_etag_for_change(&change("personal", "primary"))
+            .cached_etag_for_change(&change("personal", "primary"), personal)
             .is_err()
     );
     assert!(
         engine
-            .cached_etag_for_change(&change("work", "secondary"))
+            .cached_etag_for_change(&change("work", "secondary"), work)
             .is_err()
     );
     assert!(
         engine
-            .cached_etag_for_change(&{
-                let mut other_event = change("work", "primary");
-                other_event.event_id = Some("other".to_owned());
-                other_event
-            })
+            .cached_etag_for_change(
+                &{
+                    let mut other_event = change("work", "primary");
+                    other_event.event_id = Some("other".to_owned());
+                    other_event
+                },
+                work,
+            )
             .is_err()
     );
 }
@@ -1621,7 +1655,7 @@ fn semantic_page_rejects_two_token_cursor_cycle() {
 #[test]
 fn cursor_round_trips_query_and_rejects_mixed_arguments() {
     let account = ValidatedAccount {
-        id: "feed".to_owned(),
+        id: CalendarAccountId::test("feed"),
         enable: true,
         display_name: None,
         backend: None,
@@ -1629,7 +1663,7 @@ fn cursor_round_trips_query_and_rejects_mixed_arguments() {
         allowed_calendars: vec!["main".to_owned()],
         timezone: Some("UTC".to_owned()),
     };
-    let calendar = flatten_calendar_id(&account.id, "main");
+    let calendar = flatten_calendar_id(account.id.as_ref(), "main");
     let cursor = CalendarCursor::encode_next(
         Some("ics:20".to_owned()),
         &CalendarCursorQuery::search(
@@ -1866,7 +1900,7 @@ fn read_event_can_use_single_recent_event_for_agent() {
     let engine = test_engine(temp.path());
     let agent_id = AgentId::parse("agent").expect("agent id");
     let account = ValidatedAccount {
-        id: "feed".to_owned(),
+        id: CalendarAccountId::test("feed"),
         enable: true,
         display_name: None,
         backend: None,
@@ -1908,7 +1942,7 @@ fn recent_event_resolution_retains_namespace_and_provider_parity() {
     let engine = test_engine(temp.path());
     let agent_id = AgentId::parse("agent").expect("agent id");
     let account = |id: &str, calendar: &str| ValidatedAccount {
-        id: id.to_owned(),
+        id: CalendarAccountId::test(id),
         enable: true,
         display_name: None,
         backend: None,
@@ -2066,7 +2100,7 @@ fn natural_date_bounds_are_accepted_without_configured_timezone() {
             ..Default::default()
         },
         &ValidatedAccount {
-            id: "google".to_owned(),
+            id: CalendarAccountId::test("google"),
             enable: true,
             display_name: None,
             backend: None,

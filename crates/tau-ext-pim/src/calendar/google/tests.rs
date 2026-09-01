@@ -333,7 +333,7 @@ fn public_rsvp_checks_calendar_before_raw_response() {
 
 fn google_account(allowed_calendars: Vec<&str>) -> ValidatedAccount {
     ValidatedAccount {
-        id: "google".to_owned(),
+        id: CalendarAccountId::test("google"),
         enable: true,
         display_name: None,
         backend: Some(ValidatedBackendConfig::Google {

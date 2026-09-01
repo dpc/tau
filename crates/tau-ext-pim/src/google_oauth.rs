@@ -123,13 +123,16 @@ struct CachedAccessToken {
 }
 
 /// Shared Google OAuth client with a per-account access-token cache.
-pub(crate) struct GoogleOauthClient {
+pub(crate) struct GoogleOauthClient<AccountId> {
     secrets: BTreeMap<String, SecretValue>,
     agent: ureq::Agent,
-    access_token_cache: Mutex<BTreeMap<String, CachedAccessToken>>,
+    access_token_cache: Mutex<BTreeMap<AccountId, CachedAccessToken>>,
 }
 
-impl GoogleOauthClient {
+impl<AccountId> GoogleOauthClient<AccountId>
+where
+    AccountId: Clone + Ord,
+{
     /// Build a Google OAuth client using the extension-authorized secrets.
     pub(crate) fn new(secrets: BTreeMap<String, SecretValue>) -> Self {
         Self {
@@ -284,7 +287,7 @@ impl GoogleOauthClient {
     /// Return a cached or freshly refreshed Google access token.
     pub(crate) fn access_token(
         &self,
-        account_id: &str,
+        account_id: &AccountId,
         config: GoogleOauthSecretConfig<'_>,
         stored_refresh_token: Option<&str>,
         not_authorized_message: &str,
@@ -311,7 +314,7 @@ impl GoogleOauthClient {
     /// Prime the access token cache from a freshly completed OAuth flow.
     pub(crate) fn prime_access_token_cache(
         &self,
-        account_id: &str,
+        account_id: &AccountId,
         access_token: String,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {
@@ -321,7 +324,7 @@ impl GoogleOauthClient {
     /// Prime the access-token cache with an already validated token lifetime.
     pub(crate) fn prime_access_token_cache_with_lifetime(
         &self,
-        account_id: &str,
+        account_id: &AccountId,
         access_token: String,
         access_token_lifetime: Option<Duration>,
     ) -> Result<(), String> {
@@ -329,7 +332,7 @@ impl GoogleOauthClient {
     }
 
     /// Invalidate any cached access token for an account.
-    pub(crate) fn invalidate_access_token(&self, account_id: &str) -> Result<(), String> {
+    pub(crate) fn invalidate_access_token(&self, account_id: &AccountId) -> Result<(), String> {
         let mut cache = self
             .access_token_cache
             .lock()
@@ -389,7 +392,7 @@ impl GoogleOauthClient {
         parse_access_token_response(&text, "Google token response")
     }
 
-    fn cached_access_token(&self, account_id: &str) -> Result<Option<String>, String> {
+    fn cached_access_token(&self, account_id: &AccountId) -> Result<Option<String>, String> {
         let now = Instant::now();
         let mut cache = self
             .access_token_cache
@@ -406,7 +409,7 @@ impl GoogleOauthClient {
 
     fn cache_access_token(
         &self,
-        account_id: &str,
+        account_id: &AccountId,
         access_token: String,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {
@@ -419,7 +422,7 @@ impl GoogleOauthClient {
 
     fn cache_access_token_with_lifetime(
         &self,
-        account_id: &str,
+        account_id: &AccountId,
         access_token: String,
         access_token_lifetime: Option<Duration>,
     ) -> Result<(), String> {
@@ -436,7 +439,7 @@ impl GoogleOauthClient {
             .lock()
             .map_err(|_| "Google access token cache lock was poisoned".to_owned())?;
         cache.insert(
-            account_id.to_owned(),
+            account_id.clone(),
             CachedAccessToken {
                 access_token,
                 expires_at,

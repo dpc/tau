@@ -1,5 +1,66 @@
 use super::*;
 
+/// Calendar account validation must retain raw accepted bytes, configuration
+/// order, and the exact empty/slash/duplicate diagnostic precedence.
+#[test]
+fn calendar_account_ids_preserve_exact_domain_diagnostics_and_order() {
+    let account = |id: &str| CalendarAccountConfig {
+        id: id.to_owned(),
+        ..Default::default()
+    };
+
+    for (id, expected) in [
+        (" \t ", "calendar account id must not be empty"),
+        (" work/account ", "calendar account id must not contain `/`"),
+    ] {
+        let error = CalendarExtensionConfig {
+            accounts: vec![account(id)],
+            ..Default::default()
+        }
+        .validate()
+        .err()
+        .expect("invalid account id rejected");
+        assert_eq!(error, expected);
+    }
+
+    let mut duplicate = account("work");
+    duplicate.calendars.allow = vec!["".to_owned()];
+    let error = CalendarExtensionConfig {
+        accounts: vec![account("work"), duplicate],
+        ..Default::default()
+    }
+    .validate()
+    .err()
+    .expect("duplicate rejected before calendar patterns");
+    assert_eq!(error, "duplicate calendar account id `work`");
+
+    let validated = CalendarExtensionConfig {
+        accounts: vec![account(" zed "), account("alpha")],
+        ..Default::default()
+    }
+    .validate()
+    .expect("raw account ids validate");
+    assert_eq!(
+        validated
+            .account_order
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>(),
+        vec![" zed ", "alpha"]
+    );
+    let first = validated.accounts.get(" zed ").expect("raw key retained");
+    assert_eq!(first.id.as_ref(), " zed ");
+    assert_eq!(
+        validated
+            .accounts
+            .get("alpha")
+            .expect("second key")
+            .id
+            .as_ref(),
+        "alpha"
+    );
+}
+
 #[test]
 fn google_config_normalizes_api_base_and_rejects_query_fragments() {
     // The backend appends fixed API paths and query strings, so accepting a

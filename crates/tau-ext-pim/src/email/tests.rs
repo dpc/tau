@@ -1692,22 +1692,87 @@ fn email_google_oauth_actions_reject_manual_refresh_token_accounts() {
     );
 }
 
+/// Account identity validation must preserve the exact raw bytes, diagnostic
+/// text, and check precedence owned by the email configuration boundary.
 #[test]
-fn duplicate_account_ids_and_invalid_regex_are_rejected() {
-    let mut dup = cfg();
-    dup.accounts.push(dup.accounts[0].clone());
-    let duplicate_error = dup.validate().err().expect("duplicate rejected");
-    assert!(duplicate_error.contains("duplicate account id"));
+fn email_account_ids_preserve_exact_domain_diagnostics_and_order() {
+    let mut whitespace = cfg();
+    whitespace.accounts[0].id = " \t ".to_owned();
+    assert_eq!(
+        whitespace.validate().err().expect("whitespace id rejected"),
+        "account id must not be empty"
+    );
 
+    let mut slash = cfg();
+    slash.accounts[0].id = " work/account ".to_owned();
+    assert_eq!(
+        slash.validate().err().expect("slash id rejected"),
+        "account id must not contain `/`"
+    );
+
+    let mut dup = cfg();
+    let mut duplicate = dup.accounts[0].clone();
+    duplicate.from.clear();
+    dup.accounts.push(duplicate);
+    assert_eq!(
+        dup.validate().err().expect("duplicate rejected first"),
+        "duplicate account id `work`"
+    );
+
+    let mut ordered = cfg();
+    ordered.accounts[0].id = " zed ".to_owned();
+    let mut second = ordered.accounts[0].clone();
+    second.id = "alpha".to_owned();
+    ordered.accounts.push(second);
+    let validated = ordered.validate().expect("raw account ids validate");
+    assert_eq!(
+        validated
+            .account_order
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>(),
+        vec![" zed ", "alpha"]
+    );
+    let first = validated.accounts.get(" zed ").expect("raw key retained");
+    assert_eq!(first.id.as_ref(), " zed ");
+    assert_eq!(
+        validated
+            .accounts
+            .get("alpha")
+            .expect("second key")
+            .id
+            .as_ref(),
+        "alpha"
+    );
+}
+
+/// Email and calendar account namespaces must accept the same exact spelling
+/// independently rather than sharing an interchangeable PIM identity.
+#[test]
+fn email_and_calendar_account_namespaces_accept_the_same_spelling() {
+    let mut email = cfg();
+    email.accounts[0].id = " shared ".to_owned();
+    email.validate().expect("email spelling validates");
+
+    crate::calendar::CalendarExtensionConfig {
+        accounts: vec![crate::calendar::CalendarAccountConfig {
+            id: " shared ".to_owned(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .validate()
+    .expect("calendar spelling validates independently");
+}
+
+/// Invalid sender-policy regexes must still fail independently of account
+/// identity validation.
+#[test]
+fn invalid_regex_is_rejected() {
     let mut bad_regex = cfg();
     bad_regex.policy.incoming_allow = vec!["re:(".to_owned()];
     let regex_error = bad_regex.validate().err().expect("regex rejected");
     assert!(regex_error.contains("invalid regex"));
-
-    let mut slash_id = cfg();
-    slash_id.accounts[0].id = "work/account".to_owned();
-    let slash_error = slash_id.validate().err().expect("slash id rejected");
-    assert!(slash_error.contains("account id must not contain `/`"));
 }
 
 #[test]
