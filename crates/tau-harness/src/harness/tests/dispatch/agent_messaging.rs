@@ -1,5 +1,7 @@
 //! Tests for agent messaging behavior.
 
+use tau_config::settings::AgentWatchRetryNotificationPolicy;
+
 use super::*;
 
 #[test]
@@ -3720,7 +3722,7 @@ fn agent_watch_provider_retry_threshold_zero_preserves_category_dedupe() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.config
         .accepted_harness_settings
-        .agent_watch_retry_notification_threshold = 0;
+        .agent_watch_retry_notification_threshold = AgentWatchRetryNotificationPolicy::from_raw(0);
     let watched_cid = ensure_test_user_agent(&mut h);
     let watcher_cid = h.create_durable_user_agent(
         h.session_runtime.current_session_id.clone(),
@@ -3949,7 +3951,7 @@ fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
     let mut h = echo_harness(&sp).expect("start");
     h.config
         .accepted_harness_settings
-        .agent_watch_retry_notification_threshold = 0;
+        .agent_watch_retry_notification_threshold = AgentWatchRetryNotificationPolicy::from_raw(0);
     let a_cid = ensure_test_user_agent(&mut h);
     let b_cid = h.create_durable_user_agent(
         h.session_runtime.current_session_id.clone(),

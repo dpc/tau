@@ -1,5 +1,7 @@
 //! Tests for status reporting behavior.
 
+use tau_config::settings::AgentWatchRetryNotificationPolicy;
+
 use super::*;
 
 /// An exact current prompt snapshot without status must not inherit stale
@@ -901,7 +903,7 @@ fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
     let mut h = echo_harness(&sp).expect("start");
     h.config
         .accepted_harness_settings
-        .agent_watch_retry_notification_threshold = 0;
+        .agent_watch_retry_notification_threshold = AgentWatchRetryNotificationPolicy::from_raw(0);
     h.config.selected_model = Some("test/model".into());
     let a_cid = ensure_test_user_agent(&mut h);
     let b_cid = h.create_durable_user_agent(

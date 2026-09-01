@@ -1075,14 +1075,20 @@ fn wait_timeout_bounds_merge_partial_override_before_validation() {
     assert_eq!(bounds.maximum().get(), 13);
 }
 
-/// The built-in watch retry threshold must suppress the first five attempts,
-/// while layered config can disable threshold suppression completely.
+/// The effective watch retry policy must preserve zero, the built-in threshold,
+/// inclusive boundaries, and the full raw `u32` domain after config loading.
 #[test]
 fn agent_watch_retry_notification_threshold_defaults_and_overrides() {
-    assert_eq!(
-        HarnessSettings::built_in().agent_watch_retry_notification_threshold,
-        5
-    );
+    let disabled = AgentWatchRetryNotificationPolicy::from_raw(0);
+    assert!(!disabled.suppresses(0));
+
+    let built_in = HarnessSettings::built_in().agent_watch_retry_notification_threshold;
+    assert!(built_in.suppresses(0));
+    assert!(built_in.suppresses(5));
+    assert!(!built_in.suppresses(6));
+
+    let maximum = AgentWatchRetryNotificationPolicy::from_raw(u32::MAX);
+    assert!(maximum.suppresses(u32::MAX));
 
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
@@ -1091,7 +1097,11 @@ fn agent_watch_retry_notification_threshold_defaults_and_overrides() {
     )
     .expect("write config");
     let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load threshold");
-    assert_eq!(settings.agent_watch_retry_notification_threshold, 0);
+    assert!(
+        !settings
+            .agent_watch_retry_notification_threshold
+            .suppresses(0)
+    );
 }
 
 /// Ensures an inverted activating-input wait range fails configuration loading

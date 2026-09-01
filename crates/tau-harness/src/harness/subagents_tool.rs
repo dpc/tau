@@ -1933,17 +1933,15 @@ impl Harness {
             return;
         };
         if !initial {
-            let retry_notification_threshold = self
+            let retry_notification_policy = self
                 .config
                 .accepted_harness_settings
                 .agent_watch_retry_notification_threshold;
-            if retry_notification_threshold != 0
-                && matches!(
-                status.state,
-                tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
-                    if attempt <= retry_notification_threshold
-                )
-            {
+            if matches!(
+            status.state,
+            tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
+                if retry_notification_policy.suppresses(attempt)
+            ) {
                 return;
             }
             let deliveries = self

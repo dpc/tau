@@ -895,6 +895,31 @@ impl Default for ProviderCacheRefresh {
     }
 }
 
+/// Inclusive threshold policy for live agent-watch retry notifications.
+///
+/// The raw YAML threshold remains an unrestricted `u32`: zero disables
+/// threshold suppression, while a nonzero value suppresses retries through that
+/// attempt inclusively.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentWatchRetryNotificationPolicy {
+    /// Largest live retry attempt included by the suppression threshold.
+    threshold: u32,
+}
+
+impl AgentWatchRetryNotificationPolicy {
+    /// Preserves a raw configuration threshold without changing its validity.
+    #[must_use]
+    pub const fn from_raw(threshold: u32) -> Self {
+        Self { threshold }
+    }
+
+    /// Returns whether a live retry attempt is hidden from a watching agent.
+    #[must_use]
+    pub const fn suppresses(self, attempt: u32) -> bool {
+        self.threshold != 0 && attempt <= self.threshold
+    }
+}
+
 /// Harness/agent settings loaded from `harness.yaml`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
@@ -915,9 +940,8 @@ pub struct HarnessSettings {
     pub show_introduction_notice: bool,
     /// Validated inclusive policy for activating-input wait timeouts.
     pub wait_timeout_bounds: WaitTimeoutBounds,
-    /// Largest provider retry attempt suppressed from model-visible agent-watch
-    /// notifications.
-    pub agent_watch_retry_notification_threshold: u32,
+    /// Inclusive policy for suppressing live agent-watch retry notifications.
+    pub agent_watch_retry_notification_threshold: AgentWatchRetryNotificationPolicy,
     /// Disabled-by-default bounded Provider cache refresh policy.
     pub provider_cache_refresh: ProviderCacheRefresh,
     /// Default Tau-state presentation for supervised extension instances.
@@ -1119,7 +1143,9 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             diagnostic_retention_days: wire.diagnostic_retention_days,
             show_introduction_notice: wire.show_introduction_notice,
             wait_timeout_bounds,
-            agent_watch_retry_notification_threshold: wire.agent_watch_retry_notification_threshold,
+            agent_watch_retry_notification_threshold: AgentWatchRetryNotificationPolicy::from_raw(
+                wire.agent_watch_retry_notification_threshold,
+            ),
             provider_cache_refresh: wire.provider_cache_refresh,
             tau_state_access: wire.tau_state_access,
             extensions: wire.extensions,
