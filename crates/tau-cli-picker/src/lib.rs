@@ -258,10 +258,10 @@ fn picker_lines(
 
     // Reserve one row for the prompt; leave at least one item visible.
     let visible = terminal_height.saturating_sub(1).max(1);
-    let (start, end) = visible_window(items.len(), selected, visible);
-    let mut lines = Vec::with_capacity(end - start + 1);
+    let window = visible_window(items.len(), selected, visible);
+    let mut lines = Vec::with_capacity(window.len() + 1);
     lines.push(StyledText::from(truncate_to_width(&format!("? {prompt}"), width)).to_cells());
-    for (idx, item) in items.iter().enumerate().take(end).skip(start) {
+    for (idx, item) in items.iter().enumerate().take(window.end).skip(window.start) {
         let marker = if !item.is_enabled() {
             'X'
         } else if idx == selected {
@@ -272,21 +272,21 @@ fn picker_lines(
         let line = truncate_to_width(&format!("{marker} {}", item.label()), width);
         lines.push(StyledText::from(line).to_cells());
     }
-    (lines, selected - start + 1)
+    (lines, selected - window.start + 1)
 }
 
 /// Returns `[start, end)` of the items to render, ensuring `selected`
 /// is within view.
-fn visible_window(total: usize, selected: usize, visible: usize) -> (usize, usize) {
+fn visible_window(total: usize, selected: usize, visible: usize) -> std::ops::Range<usize> {
     if total <= visible {
-        return (0, total);
+        return 0..total;
     }
     let half = visible / 2;
     let mut start = selected.saturating_sub(half);
     if total < start + visible {
         start = total - visible;
     }
-    (start, start + visible)
+    start..start + visible
 }
 
 enum NavigationDirection {

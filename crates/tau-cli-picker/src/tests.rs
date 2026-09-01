@@ -339,11 +339,12 @@ fn byte_reader_ignores_unknown_chars() {
 fn visible_window_centers_selection() {
     use crate::visible_window;
     // Fits entirely: full range.
-    assert_eq!(visible_window(5, 2, 10), (0, 5));
+    assert_eq!(visible_window(5, 2, 10), 0..5);
     // Overflow: window slides with selection.
-    assert_eq!(visible_window(20, 0, 5), (0, 5));
-    assert_eq!(visible_window(20, 10, 5), (8, 13));
-    assert_eq!(visible_window(20, 19, 5), (15, 20));
+    assert_eq!(visible_window(20, 0, 5), 0..5);
+    assert_eq!(visible_window(20, 10, 5), 8..13);
+    assert_eq!(visible_window(20, 19, 5), 15..20);
+    assert_eq!(visible_window(20, 10, 1), 10..11);
 }
 
 fn line_text(line: &[tau_term_screen::style::Cell]) -> String {
