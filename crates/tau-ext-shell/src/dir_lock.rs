@@ -1269,15 +1269,43 @@ pub(crate) fn dispatch_dir_lock_tool(
         }
     };
 
-    match request.command.as_str() {
-        "update" => dispatch_dir_lock_update(invoke, manager, tx, request, lifecycle),
-        "unlock" => dispatch_dir_lock_unlock(invoke, manager, tx, request),
-        _ => send_event(tx, invalid_dir_lock_command_error(&invoke, &request)),
+    match request.command {
+        DirLockCommand::Update => {
+            dispatch_dir_lock_update(invoke, manager, tx, request, lifecycle);
+        }
+        DirLockCommand::Unlock => dispatch_dir_lock_unlock(invoke, manager, tx, request),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirLockCommand {
+    Update,
+    Unlock,
+}
+
+impl DirLockCommand {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Unlock => "unlock",
+        }
+    }
+}
+
+impl TryFrom<&str> for DirLockCommand {
+    type Error = ();
+
+    fn try_from(command: &str) -> Result<Self, Self::Error> {
+        match command {
+            "update" => Ok(Self::Update),
+            "unlock" => Ok(Self::Unlock),
+            _ => Err(()),
+        }
     }
 }
 
 struct DirLockToolRequest {
-    command: String,
+    command: DirLockCommand,
     input_directory: String,
     dir: PathBuf,
 }
@@ -1298,6 +1326,8 @@ impl DirLockToolRequest {
                 Some(input_directory.clone()),
             ))
         })?;
+        let command = DirLockCommand::try_from(command.as_str())
+            .map_err(|()| Box::new(invalid_dir_lock_command_error(invoke, &command, &dir)))?;
 
         Ok(Self {
             command,
@@ -1436,17 +1466,16 @@ fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner
 }
 
 fn send_dir_lock_update_result(invoke: &ToolStarted, tx: &Output, request: &DirLockToolRequest) {
-    send_dir_lock_result(invoke, tx, "update", request, true);
+    send_dir_lock_result(invoke, tx, request, true);
 }
 
 fn send_dir_lock_unlock_result(invoke: &ToolStarted, tx: &Output, request: &DirLockToolRequest) {
-    send_dir_lock_result(invoke, tx, "unlock", request, false);
+    send_dir_lock_result(invoke, tx, request, false);
 }
 
 fn send_dir_lock_result(
     invoke: &ToolStarted,
     tx: &Output,
-    command: &str,
     request: &DirLockToolRequest,
     locked: bool,
 ) {
@@ -1455,7 +1484,7 @@ fn send_dir_lock_result(
         tool_result(
             invoke,
             dir_lock_result_value(&request.input_directory, &request.dir, Some(locked)),
-            dir_lock_display(command, &request.dir),
+            dir_lock_display(request.command.as_str(), &request.dir),
         ),
     );
 }
@@ -1498,12 +1527,12 @@ fn send_abandoned_dir_lock_error(
     );
 }
 
-fn invalid_dir_lock_command_error(invoke: &ToolStarted, request: &DirLockToolRequest) -> Event {
+fn invalid_dir_lock_command_error(invoke: &ToolStarted, command: &str, dir: &Path) -> Event {
     tool_error_with_args(
         invoke,
         "argument `command` must be `update` or `unlock`".to_owned(),
         Some(invoke.arguments.clone()),
-        Some(dir_lock_display_args(&request.command, &request.dir)),
+        Some(dir_lock_display_args(command, dir)),
     )
 }
 

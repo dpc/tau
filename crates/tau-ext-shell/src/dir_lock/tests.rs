@@ -17,6 +17,149 @@ fn agent_id(value: &str) -> AgentId {
     AgentId::parse(value).expect("valid test agent id")
 }
 
+/// Preserve exact command conversion and parser error precedence while making
+/// every successfully parsed directory-lock request hold a valid command.
+#[test]
+fn dir_lock_request_retains_only_valid_commands_after_existing_directory_checks() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let canonical_dir = tempdir.path().canonicalize().expect("canonical tempdir");
+    let file = tempdir.path().join("file");
+    path_std_fs::write(&file, b"file").expect("write regular file");
+    let missing = tempdir.path().join("missing");
+
+    for (raw, expected) in [
+        ("update", Some(DirLockCommand::Update)),
+        ("unlock", Some(DirLockCommand::Unlock)),
+        ("", None),
+        ("Update", None),
+        ("unlock ", None),
+        ("other", None),
+    ] {
+        let parsed = DirLockCommand::try_from(raw).ok();
+        assert_eq!(parsed, expected, "raw command {raw:?}");
+        if let Some(command) = parsed {
+            assert_eq!(command.as_str(), raw);
+        }
+    }
+
+    let text = |value: &str| CborValue::Text(value.to_owned());
+    let map = |entries: Vec<(&str, CborValue)>| {
+        CborValue::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (text(key), value))
+                .collect(),
+        )
+    };
+    let invoke = |arguments| ToolStarted {
+        invocation_policy: Default::default(),
+        call_id: ToolCallId::new("dir-lock-request"),
+        tool_name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),
+        arguments,
+        agent_id: agent_id("agent-a"),
+        originator: tau_proto::PromptOriginator::User,
+    };
+
+    for (raw, expected) in [
+        ("update", DirLockCommand::Update),
+        ("unlock", DirLockCommand::Unlock),
+    ] {
+        let request = DirLockToolRequest::parse(&invoke(map(vec![
+            ("command", text(raw)),
+            (
+                "directory",
+                text(tempdir.path().to_str().expect("UTF-8 tempdir")),
+            ),
+        ])))
+        .expect("valid directory-lock request");
+        assert_eq!(request.command, expected);
+        assert_eq!(request.command.as_str(), raw);
+        assert_eq!(request.dir, canonical_dir);
+    }
+
+    let missing_error = missing
+        .canonicalize()
+        .expect_err("test path must remain absent");
+    let cases = [
+        (
+            CborValue::Map(Vec::new()),
+            "missing string argument: command".to_owned(),
+            None,
+        ),
+        (
+            map(vec![("command", CborValue::Integer(1.into()))]),
+            "argument `command` must be a string".to_owned(),
+            None,
+        ),
+        (
+            map(vec![("command", text("invalid"))]),
+            "missing string argument: directory".to_owned(),
+            None,
+        ),
+        (
+            map(vec![
+                ("command", text("invalid")),
+                ("directory", CborValue::Integer(1.into())),
+            ]),
+            "argument `directory` must be a string".to_owned(),
+            None,
+        ),
+        (
+            map(vec![
+                ("command", text("invalid")),
+                (
+                    "directory",
+                    text(missing.to_str().expect("UTF-8 missing path")),
+                ),
+            ]),
+            format!(
+                "directory {} does not exist: {missing_error}",
+                missing.display()
+            ),
+            Some(missing.display().to_string()),
+        ),
+        (
+            map(vec![
+                ("command", text("invalid")),
+                ("directory", text(file.to_str().expect("UTF-8 file path"))),
+            ]),
+            format!(
+                "{} is not a directory",
+                file.canonicalize().expect("canonical file").display()
+            ),
+            Some(file.display().to_string()),
+        ),
+        (
+            map(vec![
+                ("command", text("invalid")),
+                (
+                    "directory",
+                    text(tempdir.path().to_str().expect("UTF-8 tempdir")),
+                ),
+            ]),
+            "argument `command` must be `update` or `unlock`".to_owned(),
+            Some(dir_lock_display_args("invalid", &canonical_dir)),
+        ),
+    ];
+
+    for (arguments, expected_message, expected_args) in cases {
+        let invoke = invoke(arguments.clone());
+        let error = match DirLockToolRequest::parse(&invoke) {
+            Ok(_) => panic!("request must fail"),
+            Err(error) => error,
+        };
+        let Event::ToolError(error) = *error else {
+            panic!("expected tool error");
+        };
+        assert_eq!(error.message, expected_message);
+        assert_eq!(error.details, Some(arguments));
+        let display = error.display.expect("error display");
+        assert_eq!(display.args, expected_args.unwrap_or_default());
+        assert_eq!(display.status, ToolUseStatus::Error);
+        assert_eq!(display.status_text, "dir_lock failed");
+    }
+}
+
 fn cbor_text_field<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
     let CborValue::Map(entries) = value else {
         return None;
