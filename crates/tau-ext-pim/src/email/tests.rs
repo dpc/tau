@@ -1853,18 +1853,106 @@ fn list_folders_returns_flattened_ids_and_hides_secrets() {
 
 /// Folder ids returned in list payloads are opaque tokens that the model passes
 /// back verbatim. Preserve spaces, percent signs, and provider hierarchy
-/// separators across that round trip so follow-up reads target the listed
-/// backend folder exactly.
+/// separators, including non-ASCII UTF-8, across that round trip so follow-up
+/// reads target the listed backend folder exactly.
 #[test]
 fn folder_ids_round_trip_model_visible_opaque_tokens() {
-    let folder_id = flatten_folder_id("work", "Project 100%/alpha beta");
-    assert_eq!(folder_id, "work/Project%20100%25%2Falpha%20beta");
+    let folder_id: OpaqueFolderId = OpaqueFolderId::encode("work", "Project 100%/alpha beta");
+    assert_eq!(folder_id.as_str(), "work/Project%20100%25%2Falpha%20beta");
 
-    let (account, folder) =
-        parse_flattened_folder_arg("read", Some(&folder_id)).expect("folder id parses");
+    let selection: FolderSelection =
+        parse_flattened_folder_arg("read", Some(folder_id.as_str())).expect("folder id parses");
 
-    assert_eq!(account, "work");
-    assert_eq!(folder, "Project 100%/alpha beta");
+    assert_eq!(selection.account, "work");
+    assert_eq!(selection.provider_id, "Project 100%/alpha beta");
+
+    let utf8_id = OpaqueFolderId::encode("wörk", "收件/✓ %");
+    assert_eq!(
+        utf8_id.as_str(),
+        "w%C3%B6rk/%E6%94%B6%E4%BB%B6%2F%E2%9C%93%20%25"
+    );
+    let utf8_selection = utf8_id.selection().expect("UTF-8 folder id decodes");
+    assert_eq!(utf8_selection.account, "wörk");
+    assert_eq!(utf8_selection.provider_id, "收件/✓ %");
+}
+
+/// The email parser must retain its permissive historical spelling domain and
+/// exact feature-specific invalid-input envelope.
+#[test]
+fn folder_id_parser_preserves_accepted_domain_and_diagnostics() {
+    for (raw, expected_account, expected_provider_id) in [
+        ("w%c3%b6rk/Project%2fraw", "wörk", "Project/raw"),
+        ("work/Project/raw", "work", "Project/raw"),
+    ] {
+        let selection =
+            parse_flattened_folder_arg("read", Some(raw)).expect("accepted folder id parses");
+        assert_eq!(selection.account, expected_account);
+        assert_eq!(selection.provider_id, expected_provider_id);
+    }
+
+    for raw in [
+        "work",
+        "/INBOX",
+        "%20/INBOX",
+        "work/",
+        "work/%20",
+        "work/%",
+        "work/%GG",
+        "work/%FF",
+    ] {
+        let error = match parse_flattened_folder_arg("read", Some(raw)) {
+            Ok(_) => panic!("invalid folder id unexpectedly parsed: {raw}"),
+            Err(error) => error,
+        };
+        assert_eq!(cbor_text_field(&error, "command"), Some("read"));
+        let structured = cbor_field(&error, "error").expect("structured error");
+        assert_eq!(cbor_text_field(structured, "code"), Some("invalid_input"));
+        assert_eq!(
+            cbor_text_field(structured, "message"),
+            Some("folder must be a folder id from email_list_folders")
+        );
+    }
+
+    let omitted =
+        parse_flattened_folder_arg("list", None).expect("omitted folder keeps default selection");
+    assert_eq!(omitted.account, "");
+    assert_eq!(omitted.provider_id, DEFAULT_FOLDER);
+}
+
+/// A canonical opaque folder token must lower back to the same configured
+/// account and exact provider folder bytes before policy and backend routing.
+#[test]
+fn folder_id_round_trip_routes_exact_provider_bytes() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let provider_id = "Project 100%/收件";
+    let mut config = cfg();
+    config.accounts[0]
+        .folders
+        .allow
+        .push(provider_id.to_owned());
+    let mut backend = FakeBackend::with_work_mail();
+    backend.messages.insert(
+        ("work".to_owned(), provider_id.to_owned()),
+        vec![recent_message(
+            "exact-provider-folder",
+            "2026-05-24T00:00:00Z",
+        )],
+    );
+    let mut engine = Engine {
+        config: config.validate().expect("valid config"),
+        state: StateStore::open(temp.path().join("email-state")).expect("state"),
+        backend,
+    };
+    let folder_id = OpaqueFolderId::encode("work", provider_id);
+    let command = parse_command(&command_args(
+        "list",
+        vec![("folder", CborValue::Text(folder_id.as_str().to_owned()))],
+    ))
+    .expect("opaque folder command parses");
+
+    let result = engine.dispatch(command);
+
+    assert_eq!(listed_uids(&result), ["exact-provider-folder"]);
 }
 
 #[test]

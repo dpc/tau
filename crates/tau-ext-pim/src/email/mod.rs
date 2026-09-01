@@ -3295,7 +3295,7 @@ fn format_folder_line(account_id: &str, folder: BackendFolder) -> CborValue {
     };
     CborValue::Text(format!(
         "{} {}",
-        flatten_folder_id(account_id, &folder.name),
+        OpaqueFolderId::encode(account_id, &folder.name).as_str(),
         flags
     ))
 }
@@ -3810,7 +3810,7 @@ impl<B: EmailBackend> Engine<B> {
                 (
                     "folder",
                     CborValue::Text(safe_model_line(
-                        &flatten_folder_id(account_id, folder),
+                        OpaqueFolderId::encode(account_id, folder).as_str(),
                         MAX_HEADER_VALUE_CHARS,
                     )),
                 ),
@@ -3825,7 +3825,7 @@ impl<B: EmailBackend> Engine<B> {
                 (
                     "folder",
                     CborValue::Text(safe_model_line(
-                        &flatten_folder_id(account_id, folder),
+                        OpaqueFolderId::encode(account_id, folder).as_str(),
                         MAX_HEADER_VALUE_CHARS,
                     )),
                 ),
@@ -3899,7 +3899,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            &flatten_folder_id(&account_id, folder),
+                            OpaqueFolderId::encode(&account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -3956,7 +3956,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            &flatten_folder_id(&account_id, folder),
+                            OpaqueFolderId::encode(&account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4033,7 +4033,7 @@ impl<B: EmailBackend> Engine<B> {
                 (
                     "folder",
                     CborValue::Text(safe_model_line(
-                        &flatten_folder_id(&account_id, folder),
+                        OpaqueFolderId::encode(&account_id, folder).as_str(),
                         MAX_HEADER_VALUE_CHARS,
                     )),
                 ),
@@ -4080,7 +4080,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            &flatten_folder_id(&account_id, folder),
+                            OpaqueFolderId::encode(&account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4115,7 +4115,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            &flatten_folder_id(&account_id, folder),
+                            OpaqueFolderId::encode(&account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4184,7 +4184,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            &flatten_folder_id(&account_id, folder),
+                            OpaqueFolderId::encode(&account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4215,7 +4215,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            &flatten_folder_id(&account_id, folder),
+                            OpaqueFolderId::encode(&account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -6285,7 +6285,11 @@ fn parse_list_by_uid(
 ) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
     let folder_arg = optional_string(args, &mut seen, "folder", Some(command))?;
-    let (account, folder) = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
+    let selection = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
+    let FolderSelection {
+        account,
+        provider_id: folder,
+    } = selection;
     let limit = optional_positive_u32(args, &mut seen, "limit", Some(command))?
         .unwrap_or(DEFAULT_LIST_LIMIT);
     let cursor = optional_string(args, &mut seen, "cursor", Some(command))?;
@@ -6303,7 +6307,11 @@ fn parse_list_recent(
 ) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
     let folder_arg = optional_string(args, &mut seen, "folder", Some(command))?;
-    let (account, folder) = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
+    let selection = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
+    let FolderSelection {
+        account,
+        provider_id: folder,
+    } = selection;
     let limit = optional_positive_u32(args, &mut seen, "limit", Some(command))?
         .unwrap_or(DEFAULT_LIST_LIMIT);
     let days = optional_positive_u32(args, &mut seen, "days", Some(command))?
@@ -6362,47 +6370,70 @@ fn parse_trash(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCo
 fn parse_flattened_folder_arg(
     command: &str,
     folder: Option<&str>,
-) -> Result<(String, String), CborValue> {
+) -> Result<FolderSelection, CborValue> {
     let Some(folder) = folder else {
-        return Ok((String::new(), DEFAULT_FOLDER.to_owned()));
+        return Ok(FolderSelection {
+            account: String::new(),
+            provider_id: DEFAULT_FOLDER.to_owned(),
+        });
     };
-    let Some((account, folder)) = folder.split_once('/') else {
-        return Err(error_envelope(
-            Some(command),
-            "invalid_input",
-            "folder must be a folder id from email_list_folders",
-        ));
-    };
-    let account = crate::opaque_id::decode_component(account).map_err(|_| {
-        error_envelope(
-            Some(command),
-            "invalid_input",
-            "folder must be a folder id from email_list_folders",
-        )
-    })?;
-    let folder = crate::opaque_id::decode_component(folder).map_err(|_| {
-        error_envelope(
-            Some(command),
-            "invalid_input",
-            "folder must be a folder id from email_list_folders",
-        )
-    })?;
-    if account.trim().is_empty() || folder.trim().is_empty() {
-        return Err(error_envelope(
-            Some(command),
-            "invalid_input",
-            "folder must be a folder id from email_list_folders",
-        ));
-    }
-    Ok((account, folder))
+    OpaqueFolderId::parse(folder)
+        .and_then(|folder_id| folder_id.selection())
+        .map_err(|_| {
+            error_envelope(
+                Some(command),
+                "invalid_input",
+                "folder must be a folder id from email_list_folders",
+            )
+        })
 }
 
-fn flatten_folder_id(account: &str, folder: &str) -> String {
-    format!(
-        "{}/{}",
-        crate::opaque_id::encode_component(account),
-        crate::opaque_id::encode_component(folder)
-    )
+/// A decoded email folder selection from a model-visible opaque folder ID.
+struct FolderSelection {
+    /// Configured email account component.
+    account: String,
+    /// Provider-owned folder component.
+    provider_id: String,
+}
+
+/// A private email-owned model-visible folder token.
+struct OpaqueFolderId(String);
+
+impl OpaqueFolderId {
+    /// Encode an account and provider folder into the canonical opaque token.
+    fn encode(account: &str, provider_id: &str) -> Self {
+        Self(format!(
+            "{}/{}",
+            crate::opaque_id::encode_component(account),
+            crate::opaque_id::encode_component(provider_id)
+        ))
+    }
+
+    /// Parse and validate a raw model-provided opaque folder token.
+    fn parse(raw: &str) -> Result<Self, ()> {
+        let folder_id = Self(raw.to_owned());
+        folder_id.selection()?;
+        Ok(folder_id)
+    }
+
+    /// Decode the token into its email-specific account and provider selection.
+    fn selection(&self) -> Result<FolderSelection, ()> {
+        let (account, provider_id) = self.0.split_once('/').ok_or(())?;
+        let account = crate::opaque_id::decode_component(account).map_err(|_| ())?;
+        let provider_id = crate::opaque_id::decode_component(provider_id).map_err(|_| ())?;
+        if account.trim().is_empty() || provider_id.trim().is_empty() {
+            return Err(());
+        }
+        Ok(FolderSelection {
+            account,
+            provider_id,
+        })
+    }
+
+    /// Borrow the exact model-visible token bytes.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 fn parse_message_target(
@@ -6411,10 +6442,10 @@ fn parse_message_target(
 ) -> Result<(String, String, String), CborValue> {
     let mut seen = BTreeSet::new();
     let folder_arg = optional_string(args, &mut seen, "folder", Some(command))?;
-    let (account, folder) = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
+    let selection = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
     let uid = required_string(args, &mut seen, "uid", Some(command))?;
     reject_extra(args, &seen, Some(command))?;
-    Ok((account, folder, uid))
+    Ok((selection.account, selection.provider_id, uid))
 }
 fn parse_send(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();

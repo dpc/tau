@@ -896,9 +896,10 @@ impl Engine {
             .and_then(|data| cbor_text_field(data, "calendar"))
             .or_else(|| args.and_then(|args| cbor_text_field(args, "calendar")))
             .and_then(|calendar| {
-                split_flattened_calendar_id(calendar)
+                OpaqueCalendarId::parse(calendar)
                     .ok()
-                    .map(|(account, _)| account.to_owned())
+                    .and_then(|calendar_id| calendar_id.selection().ok())
+                    .map(|selection| selection.account)
             })
     }
 
@@ -912,9 +913,10 @@ impl Engine {
             .and_then(|data| cbor_text_field(data, "calendar"))
             .or_else(|| args.and_then(|args| cbor_text_field(args, "calendar")))
             .and_then(|calendar| {
-                split_flattened_calendar_id(calendar)
+                OpaqueCalendarId::parse(calendar)
                     .ok()
-                    .map(|(_, calendar)| calendar.to_owned())
+                    .and_then(|calendar_id| calendar_id.selection().ok())
+                    .map(|selection| selection.provider_id)
             })
     }
 
@@ -933,7 +935,8 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                flatten_calendar_id(account.id.as_ref(), calendar.id.as_str()),
+                                OpaqueCalendarId::encode(account.id.as_ref(), calendar.id.as_str())
+                                    .as_str(),
                                 flags,
                                 quoted_display_field(&calendar.display_name)
                             ));
@@ -952,7 +955,8 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                flatten_calendar_id(account.id.as_ref(), calendar.id.as_str()),
+                                OpaqueCalendarId::encode(account.id.as_ref(), calendar.id.as_str())
+                                    .as_str(),
                                 flags,
                                 quoted_display_field(&calendar.summary)
                             ));
@@ -1036,9 +1040,9 @@ impl Engine {
                 event,
             ));
         }
-        let flattened_calendar = flatten_calendar_id(account.id.as_ref(), calendar);
+        let flattened_calendar = OpaqueCalendarId::encode(account.id.as_ref(), calendar);
         let cursor_query = CalendarCursorQuery::search(
-            &flattened_calendar,
+            flattened_calendar.as_str(),
             range_start
                 .as_deref()
                 .expect("calendar range always has a start"),
@@ -1053,10 +1057,9 @@ impl Engine {
         let data = cbor_map(vec![
             (
                 "calendar",
-                CborValue::Text(safe_display_line(&flatten_calendar_id(
-                    account.id.as_ref(),
-                    calendar,
-                ))),
+                CborValue::Text(safe_display_line(
+                    OpaqueCalendarId::encode(account.id.as_ref(), calendar).as_str(),
+                )),
             ),
             ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
             ("start", optional_text(range_start.clone())),
@@ -1086,10 +1089,9 @@ impl Engine {
             vec![
                 (
                     "calendar",
-                    CborValue::Text(safe_display_line(&flatten_calendar_id(
-                        account.id.as_ref(),
-                        calendar,
-                    ))),
+                    CborValue::Text(safe_display_line(
+                        OpaqueCalendarId::encode(account.id.as_ref(), calendar).as_str(),
+                    )),
                 ),
                 ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
                 ("start", optional_text(range_start)),
@@ -1143,10 +1145,9 @@ impl Engine {
         let mut data = vec![
             (
                 "calendar",
-                CborValue::Text(safe_display_line(&flatten_calendar_id(
-                    account.id.as_ref(),
-                    calendar,
-                ))),
+                CborValue::Text(safe_display_line(
+                    OpaqueCalendarId::encode(account.id.as_ref(), calendar).as_str(),
+                )),
             ),
             (
                 "event_id",
@@ -1230,9 +1231,9 @@ impl Engine {
                 event,
             ));
         }
-        let flattened_calendar = flatten_calendar_id(account.id.as_ref(), calendar);
+        let flattened_calendar = OpaqueCalendarId::encode(account.id.as_ref(), calendar);
         let cursor_query = CalendarCursorQuery::free_busy(
-            &flattened_calendar,
+            flattened_calendar.as_str(),
             range_start
                 .as_deref()
                 .expect("calendar range always has a start"),
@@ -1245,10 +1246,9 @@ impl Engine {
         let data = cbor_map(vec![
             (
                 "calendar",
-                CborValue::Text(safe_display_line(&flatten_calendar_id(
-                    account.id.as_ref(),
-                    calendar,
-                ))),
+                CborValue::Text(safe_display_line(
+                    OpaqueCalendarId::encode(account.id.as_ref(), calendar).as_str(),
+                )),
             ),
             ("format", CborValue::Text(FREE_BUSY_FORMAT.to_owned())),
             ("start", optional_text(range_start.clone())),
@@ -1263,10 +1263,9 @@ impl Engine {
             vec![
                 (
                     "calendar",
-                    CborValue::Text(safe_display_line(&flatten_calendar_id(
-                        account.id.as_ref(),
-                        calendar,
-                    ))),
+                    CborValue::Text(safe_display_line(
+                        OpaqueCalendarId::encode(account.id.as_ref(), calendar).as_str(),
+                    )),
                 ),
                 ("format", CborValue::Text(FREE_BUSY_FORMAT.to_owned())),
                 ("start", optional_text(range_start)),
@@ -1751,9 +1750,9 @@ impl Engine {
         calendar: Option<&str>,
     ) -> Result<(&ValidatedAccount, String), String> {
         if let Some(calendar_id) = calendar {
-            let (account_id, calendar) = split_flattened_calendar_id(calendar_id)?;
-            let account = self.account_by_id(&account_id)?;
-            return Ok((account, calendar));
+            let selection = OpaqueCalendarId::parse(calendar_id)?.selection()?;
+            let account = self.account_by_id(&selection.account)?;
+            return Ok((account, selection.provider_id));
         }
         let account = self.single_account(None)?;
         let Some(calendar) = default_calendar_id_for_account(account) else {
@@ -2614,7 +2613,7 @@ fn format_event_detail(
     let mut lines = vec![
         format!(
             "calendar {}",
-            safe_field(&flatten_calendar_id(account.id.as_ref(), calendar))
+            safe_field(OpaqueCalendarId::encode(account.id.as_ref(), calendar).as_str())
         ),
         format!("event_id {}", safe_field(event_id(event).as_str())),
         format!(
@@ -2910,10 +2909,9 @@ fn format_change_queued(id: &str, change: &CalendarChangeApproval) -> CborValue 
         ("approval_id", CborValue::Text(safe_display_line(id))),
         (
             "calendar",
-            CborValue::Text(safe_display_line(&flatten_calendar_id(
-                &change.account,
-                &change.calendar,
-            ))),
+            CborValue::Text(safe_display_line(
+                OpaqueCalendarId::encode(&change.account, &change.calendar).as_str(),
+            )),
         ),
     ];
     if let Some(event_id) = change.event_id.as_deref() {
@@ -3018,10 +3016,9 @@ fn format_mutation_result_envelope(
         ("change_id", CborValue::Text(safe_display_line(id))),
         (
             "calendar",
-            CborValue::Text(safe_display_line(&flatten_calendar_id(
-                &change.account,
-                &change.calendar,
-            ))),
+            CborValue::Text(safe_display_line(
+                OpaqueCalendarId::encode(&change.account, &change.calendar).as_str(),
+            )),
         ),
     ];
     match result {
@@ -3055,26 +3052,56 @@ fn mutation_result_status(command: &str, result: &CalendarMutationResult) -> &'s
     }
 }
 
-fn flatten_calendar_id(account: &str, calendar: &str) -> String {
-    format!(
-        "{}/{}",
-        crate::opaque_id::encode_component(account),
-        crate::opaque_id::encode_component(calendar)
-    )
+/// A decoded calendar selection from a model-visible opaque calendar ID.
+struct CalendarSelection {
+    /// Configured calendar account component.
+    account: String,
+    /// Provider-owned calendar component.
+    provider_id: String,
 }
 
-fn split_flattened_calendar_id(calendar_id: &str) -> Result<(String, String), String> {
-    let Some((account, calendar)) = calendar_id.split_once('/') else {
-        return Err("calendar must be a calendar id from calendar_list_calendars".to_owned());
-    };
-    let account = crate::opaque_id::decode_component(account)
-        .map_err(|_| "calendar must be a calendar id from calendar_list_calendars".to_owned())?;
-    let calendar = crate::opaque_id::decode_component(calendar)
-        .map_err(|_| "calendar must be a calendar id from calendar_list_calendars".to_owned())?;
-    if account.trim().is_empty() || calendar.trim().is_empty() {
-        return Err("calendar must be a calendar id from calendar_list_calendars".to_owned());
+/// A private calendar-owned model-visible calendar token.
+struct OpaqueCalendarId(String);
+
+impl OpaqueCalendarId {
+    /// Encode an account and provider calendar into the canonical opaque token.
+    fn encode(account: &str, provider_id: &str) -> Self {
+        Self(format!(
+            "{}/{}",
+            crate::opaque_id::encode_component(account),
+            crate::opaque_id::encode_component(provider_id)
+        ))
     }
-    Ok((account, calendar))
+
+    /// Parse and validate a raw model-provided opaque calendar token.
+    fn parse(raw: &str) -> Result<Self, String> {
+        let calendar_id = Self(raw.to_owned());
+        calendar_id.selection()?;
+        Ok(calendar_id)
+    }
+
+    /// Decode the token into its calendar-specific account and provider
+    /// selection.
+    fn selection(&self) -> Result<CalendarSelection, String> {
+        let diagnostic =
+            || "calendar must be a calendar id from calendar_list_calendars".to_owned();
+        let (account, provider_id) = self.0.split_once('/').ok_or_else(diagnostic)?;
+        let account = crate::opaque_id::decode_component(account).map_err(|_| diagnostic())?;
+        let provider_id =
+            crate::opaque_id::decode_component(provider_id).map_err(|_| diagnostic())?;
+        if account.trim().is_empty() || provider_id.trim().is_empty() {
+            return Err(diagnostic());
+        }
+        Ok(CalendarSelection {
+            account,
+            provider_id,
+        })
+    }
+
+    /// Borrow the exact model-visible token bytes.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 fn command_name(command: CalendarCommand) -> &'static str {

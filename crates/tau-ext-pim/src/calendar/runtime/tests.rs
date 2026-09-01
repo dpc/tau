@@ -32,17 +32,82 @@ fn invite_response_parses_exact_vocabulary() {
 
 /// Calendar ids in the first list column are opaque tokens for follow-up tool
 /// calls. Encode lossy display characters reversibly instead of applying
-/// display sanitization that would change spaces, percent signs, or slashes.
+/// display sanitization that would change spaces, percent signs, slashes, or
+/// non-ASCII UTF-8.
 #[test]
 fn calendar_ids_round_trip_model_visible_opaque_tokens() {
-    let calendar_id = flatten_calendar_id("feed", "Team 100%/primary");
-    assert_eq!(calendar_id, "feed/Team%20100%25%2Fprimary");
+    let calendar_id: OpaqueCalendarId = OpaqueCalendarId::encode("feed", "Team 100%/primary");
+    assert_eq!(calendar_id.as_str(), "feed/Team%20100%25%2Fprimary");
 
-    let (account, calendar) =
-        split_flattened_calendar_id(&calendar_id).expect("calendar id parses");
+    let selection: CalendarSelection = calendar_id.selection().expect("calendar id parses");
 
-    assert_eq!(account, "feed");
-    assert_eq!(calendar, "Team 100%/primary");
+    assert_eq!(selection.account, "feed");
+    assert_eq!(selection.provider_id, "Team 100%/primary");
+
+    let utf8_id = OpaqueCalendarId::encode("fëed", "日程/✓ %");
+    assert_eq!(
+        utf8_id.as_str(),
+        "f%C3%ABed/%E6%97%A5%E7%A8%8B%2F%E2%9C%93%20%25"
+    );
+    let utf8_selection = utf8_id.selection().expect("UTF-8 calendar id decodes");
+    assert_eq!(utf8_selection.account, "fëed");
+    assert_eq!(utf8_selection.provider_id, "日程/✓ %");
+}
+
+/// The calendar parser must retain its permissive historical spelling domain
+/// and exact feature-specific diagnostic.
+#[test]
+fn calendar_id_parser_preserves_accepted_domain_and_diagnostics() {
+    for (raw, expected_account, expected_provider_id) in [
+        ("f%c3%abed/Team%2fraw", "fëed", "Team/raw"),
+        ("feed/Team/raw", "feed", "Team/raw"),
+    ] {
+        let selection = OpaqueCalendarId::parse(raw)
+            .and_then(|calendar_id| calendar_id.selection())
+            .expect("accepted calendar id parses");
+        assert_eq!(selection.account, expected_account);
+        assert_eq!(selection.provider_id, expected_provider_id);
+    }
+
+    for raw in [
+        "feed", "/main", "%20/main", "feed/", "feed/%20", "feed/%", "feed/%GG", "feed/%FF",
+    ] {
+        let error = match OpaqueCalendarId::parse(raw) {
+            Ok(_) => panic!("invalid calendar id unexpectedly parsed: {raw}"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "calendar must be a calendar id from calendar_list_calendars"
+        );
+    }
+}
+
+/// A canonical opaque calendar token must lower back to the same typed account
+/// lookup and exact provider calendar bytes before allowlist enforcement.
+#[test]
+fn calendar_id_round_trip_routes_exact_provider_bytes() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = test_engine(temp.path());
+    let provider_id = "Team 100%/日程";
+    engine
+        .config
+        .accounts
+        .get_mut("feed")
+        .expect("feed account")
+        .allowed_calendars
+        .push(provider_id.to_owned());
+    let calendar_id = OpaqueCalendarId::encode("feed", provider_id);
+
+    let (account, resolved_provider_id) = engine
+        .resolve_calendar_arg(Some(calendar_id.as_str()))
+        .expect("opaque calendar resolves");
+
+    assert_eq!(account.id.as_ref(), "feed");
+    assert_eq!(resolved_provider_id, provider_id);
+    engine
+        .ensure_calendar_allowed(account, &resolved_provider_id)
+        .expect("exact provider calendar remains allowed");
 }
 
 #[test]
@@ -1663,11 +1728,11 @@ fn cursor_round_trips_query_and_rejects_mixed_arguments() {
         allowed_calendars: vec!["main".to_owned()],
         timezone: Some("UTC".to_owned()),
     };
-    let calendar = flatten_calendar_id(account.id.as_ref(), "main");
+    let calendar = OpaqueCalendarId::encode(account.id.as_ref(), "main");
     let cursor = CalendarCursor::encode_next(
         Some("ics:20".to_owned()),
         &CalendarCursorQuery::search(
-            &calendar,
+            calendar.as_str(),
             "2026-06-02T00:00:00Z",
             "2026-06-03T00:00:00Z",
             20,
@@ -1706,7 +1771,7 @@ fn cursor_round_trips_query_and_rejects_mixed_arguments() {
     let free_busy_cursor = CalendarCursor::encode_next(
         Some("ics:20".to_owned()),
         &CalendarCursorQuery::free_busy(
-            &calendar,
+            calendar.as_str(),
             "2026-06-02T00:00:00Z",
             "2026-06-03T00:00:00Z",
             20,
