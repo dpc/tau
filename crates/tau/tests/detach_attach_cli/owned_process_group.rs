@@ -233,6 +233,7 @@ impl OwnedProcessGroup {
         }
 
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut reap_deadline = deadline;
         while !owned_group_ready_to_reap(self.pgid)? {
             if deadline <= Instant::now() {
                 if let Err(error) = signal_group(self.pgid, Signal::KILL)
@@ -241,14 +242,14 @@ impl OwnedProcessGroup {
                 {
                     first_error = Some(error.into());
                 }
+                reap_deadline = Instant::now() + Duration::from_secs(2);
                 break;
             }
             std::thread::yield_now();
         }
 
         if !owned_group_ready_to_reap(self.pgid)? {
-            let kill_deadline = Instant::now() + Duration::from_secs(2);
-            while !owned_group_ready_to_reap(self.pgid)? && Instant::now() < kill_deadline {
+            while !owned_group_ready_to_reap(self.pgid)? && Instant::now() < reap_deadline {
                 std::thread::yield_now();
             }
             if !owned_group_ready_to_reap(self.pgid)? && first_error.is_none() {
@@ -259,7 +260,8 @@ impl OwnedProcessGroup {
             }
         }
 
-        if owned_group_ready_to_reap(self.pgid)? {
+        let group_ready_to_reap = owned_group_ready_to_reap(self.pgid)?;
+        if group_ready_to_reap {
             let root_only_result = self
                 .liveness
                 .as_mut()
@@ -278,22 +280,21 @@ impl OwnedProcessGroup {
                 }
             }
             if self.watchdog_root_only || self.watchdog.is_none() {
-                let status = self
-                    .child
-                    .as_mut()
-                    .expect("direct child remains owned")
-                    .try_wait()?;
+                let status = wait_child_until(
+                    self.child.as_mut().expect("direct child remains owned"),
+                    reap_deadline,
+                )?;
                 if let Some(status) = status {
                     self.child.take();
                     self.child_status = Some(status);
                 } else if first_error.is_none() {
                     first_error = Some(io::Error::other(
-                        "zombie group leader was not immediately reaped",
+                        "zombie group leader was not reaped before cleanup deadline",
                     ));
                 }
             }
         }
-        self.group_cleaned = !group_exists(self.pgid)? && self.child_status.is_some();
+        self.group_cleaned = group_ready_to_reap && self.child_status.is_some();
 
         if strict && let Some(error) = first_error {
             return Err(error);
@@ -356,9 +357,18 @@ impl Drop for OwnedProcessGroup {
 
 /// Reaps one child only while the real deadline remains.
 fn wait_child_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitStatus>> {
+    poll_until(deadline, || child.try_wait())
+}
+
+/// Polls one bounded completion condition without treating a transient miss as
+/// terminal.
+fn poll_until<T>(
+    deadline: Instant,
+    mut poll: impl FnMut() -> io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
+        if let Some(value) = poll()? {
+            return Ok(Some(value));
         }
         if deadline <= Instant::now() {
             return Ok(None);
@@ -452,11 +462,22 @@ pub(crate) fn run_watchdog_worker_from_env() {
         Path::new(&temp_root),
         &leader_pidfd,
         io::stdin().lock(),
-        true,
-        true,
+        WatchdogWait {
+            group_exit: true,
+            tracked_exit: true,
+        },
         |_| Ok(()),
+        || Ok(()),
     )
     .expect("watchdog exact cleanup");
+}
+
+/// Selects the bounded completion evidence a watchdog invocation must observe.
+struct WatchdogWait {
+    /// Require absence of the still-identity-safe process group.
+    group_exit: bool,
+    /// Require stable absence of every committed PID/start identity.
+    tracked_exit: bool,
 }
 
 /// Applies committed watchdog control frames and performs only identity-safe
@@ -466,9 +487,9 @@ fn watchdog_cleanup(
     temp_root: &Path,
     leader_pidfd: &OwnedFd,
     mut input: impl io::BufRead,
-    wait_for_group_exit: bool,
-    wait_for_tracked_exit: bool,
+    wait: WatchdogWait,
     mut on_leader_stopped: impl FnMut(u32) -> io::Result<()>,
+    mut on_identity_wait_started: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     let mut tracked = Vec::new();
     let mut disarmed = false;
@@ -509,60 +530,69 @@ fn watchdog_cleanup(
         return Ok(());
     }
 
-    let anchor = tracked
-        .iter()
-        .find_map(|&(pid, start_time)| (pid == pgid).then_some(start_time));
-    let anchor_matches =
-        anchor.is_none_or(|start_time| process_start_time(pgid) == Some(start_time));
     let mut signaled_group = false;
-    if !root_only && anchor_matches {
-        match pidfd_send_signal(leader_pidfd, Signal::STOP) {
-            Ok(()) => {
-                let stop_deadline = Instant::now() + Duration::from_secs(2);
-                loop {
-                    match process_state_and_start_time(pgid) {
-                        Some((state, start_time))
-                            if matches!(state, "T" | "t")
-                                && anchor.is_none_or(|anchor| anchor == start_time) =>
-                        {
-                            on_leader_stopped(pgid)?;
-                            match signal_group(pgid, Signal::KILL) {
-                                Ok(()) | Err(Errno::SRCH) => signaled_group = true,
-                                Err(error) => return Err(error.into()),
+    if !root_only {
+        let anchor = tracked
+            .iter()
+            .find_map(|&(pid, start_time)| (pid == pgid).then_some(start_time));
+        let anchor_matches =
+            anchor.is_none_or(|start_time| process_start_time(pgid) == Some(start_time));
+        if anchor_matches {
+            match pidfd_send_signal(leader_pidfd, Signal::STOP) {
+                Ok(()) => {
+                    let stop_deadline = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        match process_state_and_start_time(pgid) {
+                            Some((state, start_time))
+                                if matches!(state, "T" | "t")
+                                    && anchor.is_none_or(|anchor| anchor == start_time) =>
+                            {
+                                on_leader_stopped(pgid)?;
+                                match signal_group(pgid, Signal::KILL) {
+                                    Ok(()) | Err(Errno::SRCH) => signaled_group = true,
+                                    Err(error) => return Err(error.into()),
+                                }
+                                break;
                             }
-                            break;
-                        }
-                        Some((_, start_time))
-                            if anchor.is_some_and(|anchor| anchor != start_time) =>
-                        {
-                            let _ = pidfd_send_signal(leader_pidfd, Signal::CONT);
-                            break;
-                        }
-                        None => break,
-                        Some(_) if Instant::now() < stop_deadline => {
-                            std::thread::yield_now();
-                        }
-                        Some(_) => {
-                            let _ = pidfd_send_signal(leader_pidfd, Signal::CONT);
-                            return Err(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                format!("owned group leader {pgid} did not enter SIGSTOP"),
-                            ));
+                            Some((_, start_time))
+                                if anchor.is_some_and(|anchor| anchor != start_time) =>
+                            {
+                                let _ = pidfd_send_signal(leader_pidfd, Signal::CONT);
+                                break;
+                            }
+                            None => break,
+                            Some(_) if Instant::now() < stop_deadline => {
+                                std::thread::yield_now();
+                            }
+                            Some(_) => {
+                                let _ = pidfd_send_signal(leader_pidfd, Signal::CONT);
+                                return Err(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    format!("owned group leader {pgid} did not enter SIGSTOP"),
+                                ));
+                            }
                         }
                     }
                 }
+                Err(Errno::SRCH) => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(Errno::SRCH) => {}
-            Err(error) => return Err(error.into()),
         }
     }
 
-    if signaled_group && wait_for_group_exit {
+    let require_group_absence = signaled_group && wait.group_exit;
+    let require_identity_absence = wait.tracked_exit && (signaled_group || root_only);
+    if require_group_absence || require_identity_absence {
+        on_identity_wait_started()?;
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut gone_since = None;
         loop {
-            let group_gone = !group_exists(pgid)?;
-            let identities_gone = !wait_for_tracked_exit
+            let group_gone = if require_group_absence {
+                !group_exists(pgid)?
+            } else {
+                true
+            };
+            let identities_gone = !require_identity_absence
                 || tracked
                     .iter()
                     .all(|&(pid, start_time)| process_start_time(pid) != Some(start_time));
@@ -577,7 +607,7 @@ fn watchdog_cleanup(
             if deadline <= Instant::now() {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("owned group {pgid} or tracked members survived watchdog SIGKILL"),
+                    format!("owned group {pgid} or tracked members survived watchdog cleanup"),
                 ));
             }
             std::thread::yield_now();
@@ -608,9 +638,12 @@ pub(crate) fn watchdog_rejects_mismatched_anchor(temp_root: &Path) -> io::Result
             temp_root,
             &leader_pidfd,
             io::Cursor::new(control.into_bytes()),
-            false,
-            false,
+            WatchdogWait {
+                group_exit: false,
+                tracked_exit: false,
+            },
             |_| Ok(()),
+            || Ok(()),
         )?;
         canary.is_running()
     })();
@@ -636,8 +669,10 @@ pub(crate) fn watchdog_confirms_matching_anchor_stopped(temp_root: &Path) -> io:
             temp_root,
             &leader_pidfd,
             io::Cursor::new(control.into_bytes()),
-            false,
-            false,
+            WatchdogWait {
+                group_exit: false,
+                tracked_exit: false,
+            },
             |stopped_pid| {
                 observed_stopped_match = process_state_and_start_time(stopped_pid).is_some_and(
                     |(state, observed_start)| {
@@ -646,8 +681,99 @@ pub(crate) fn watchdog_confirms_matching_anchor_stopped(temp_root: &Path) -> io:
                 );
                 Ok(())
             },
+            || Ok(()),
         )?;
         Ok(observed_stopped_match)
+    })();
+    let cleanup = canary.cleanup();
+    cleanup?;
+    result
+}
+
+/// Proves one transient non-ready reap poll is retried within the existing
+/// deadline rather than converted into an immediate lifecycle failure.
+pub(crate) fn child_reap_poll_survives_transient_none() -> io::Result<bool> {
+    let mut polls = 0_u8;
+    let result = poll_until(Instant::now() + Duration::from_secs(2), || {
+        polls += 1;
+        Ok((1 < polls).then_some(()))
+    })?;
+    Ok(result.is_some() && polls == 2)
+}
+
+/// Proves root-only cleanup waits for exact tracked identity disappearance
+/// without signaling or querying the now-stale numeric process group.
+pub(crate) fn watchdog_waits_for_root_only_tracked_identity(temp_root: &Path) -> io::Result<bool> {
+    let mut canary = BoundedCanary::spawn()?;
+    let result = (|| {
+        let pgid = canary.pgid();
+        let leader = rustix_pid(pgid)?;
+        let start_time = process_start_time(pgid)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "canary identity"))?;
+        let leader_pidfd = pidfd_open(leader, PidfdFlags::empty())?;
+        let control = format!("track {pgid}:{start_time}\nroot-only\n");
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+
+        std::thread::scope(|scope| -> io::Result<bool> {
+            scope.spawn(|| {
+                let result = watchdog_cleanup(
+                    pgid,
+                    temp_root,
+                    &leader_pidfd,
+                    io::Cursor::new(control.into_bytes()),
+                    WatchdogWait {
+                        group_exit: true,
+                        tracked_exit: true,
+                    },
+                    |_| Ok(()),
+                    || {
+                        entered_tx.send(()).map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "root-only wait barrier receiver closed",
+                            )
+                        })
+                    },
+                );
+                let _ = done_tx.send(result);
+            });
+
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("watchdog did not enter root-only identity wait: {error}"),
+                    )
+                })?;
+            let canary_survived = canary.is_running();
+            let early_result = match done_rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "root-only watchdog result sender disconnected",
+                ))),
+            };
+            let cleanup = canary.cleanup();
+            let returned_early = early_result.is_some();
+            let watchdog_result = match early_result {
+                Some(result) => result,
+                None => done_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("watchdog did not finish after tracked identity exit: {error}"),
+                        )
+                    })?,
+            };
+            canary_survived?;
+            cleanup?;
+            watchdog_result?;
+            Ok(!returned_early && !temp_root.exists())
+        })
     })();
     let cleanup = canary.cleanup();
     cleanup?;

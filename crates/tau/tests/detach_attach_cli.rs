@@ -15,8 +15,9 @@ use rustix_v1::process::{Pid, Signal, kill_process};
 mod owned_process_group;
 
 use owned_process_group::{
-    OwnedProcessGroup, group_exists, run_watchdog_worker_from_env,
-    watchdog_confirms_matching_anchor_stopped, watchdog_rejects_mismatched_anchor,
+    OwnedProcessGroup, child_reap_poll_survives_transient_none, group_exists,
+    run_watchdog_worker_from_env, watchdog_confirms_matching_anchor_stopped,
+    watchdog_rejects_mismatched_anchor, watchdog_waits_for_root_only_tracked_identity,
 };
 
 /// Isolated process environment shared by every CLI in one lifecycle test.
@@ -651,6 +652,32 @@ fn owned_process_group_watchdog_stops_matching_anchor_before_group_signal() {
     assert!(
         !root.path().exists(),
         "watchdog did not remove stopped-anchor canary root"
+    );
+}
+
+/// A transient non-ready child poll after root-only commit is retried within
+/// the existing cleanup deadline instead of becoming an immediate failure.
+#[test]
+fn owned_process_group_retries_transient_child_reap_poll() {
+    assert!(
+        child_reap_poll_survives_transient_none().expect("run child reap polling oracle"),
+        "bounded child reap did not retry one transient non-ready poll"
+    );
+}
+
+/// Root-only cleanup revokes numeric-PGID signaling but retains exact tracked
+/// identity observation until the process disappears.
+#[test]
+fn owned_process_group_root_only_waits_for_tracked_identity() {
+    let root = tempfile::tempdir().expect("root-only identity-wait temporary root");
+    assert!(
+        watchdog_waits_for_root_only_tracked_identity(root.path())
+            .expect("run root-only identity-wait watchdog canary"),
+        "root-only watchdog returned early or signaled the tracked canary"
+    );
+    assert!(
+        !root.path().exists(),
+        "watchdog did not remove root-only identity-wait canary root"
     );
 }
 
