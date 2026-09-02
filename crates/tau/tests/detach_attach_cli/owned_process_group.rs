@@ -1,12 +1,11 @@
 use std::ffi::OsString;
-use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
-use std::os::fd::OwnedFd;
+use std::io::{self, BufRead as _, BufReader, Write as _};
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
-use std::thread::Builder;
 use std::time::{Duration, Instant};
 
 use rustix_v1::io::Errno;
@@ -40,7 +39,7 @@ pub(crate) struct OwnedProcessGroup {
 /// Provisionally owns every raw process and control endpoint during setup.
 ///
 /// This guard exists before any further fallible or panicking operation, so a
-/// failed watchdog-reader thread spawn cannot strand either child.
+/// failed post-watchdog-spawn setup step cannot strand either child.
 struct ProvisionalOwnedProcessGroup {
     pgid: u32,
     arm: Option<UnixStream>,
@@ -73,19 +72,14 @@ impl OwnedProcessGroup {
     /// Starts a fully specified command in a dedicated process group, then arms
     /// an external watchdog that kills only that group if this process dies.
     pub(crate) fn spawn_piped_stderr(command: &Command, temp_root: &Path) -> io::Result<Self> {
-        Self::spawn_piped_stderr_with_reader(command, temp_root, |watchdog_stdout, ready, _, _| {
-            Builder::new()
-                .name("owned-process-watchdog-reader".into())
-                .spawn(move || read_watchdog_readiness(watchdog_stdout, ready))
-                .map(|_| ())
-        })
+        Self::spawn_piped_stderr_with_post_watchdog_spawn_hook(command, temp_root, |_, _| Ok(()))
     }
 
-    /// Starts the group with an injectable readiness-reader spawn operation.
-    fn spawn_piped_stderr_with_reader(
+    /// Starts the group with an injectable post-watchdog-spawn setup operation.
+    fn spawn_piped_stderr_with_post_watchdog_spawn_hook(
         command: &Command,
         temp_root: &Path,
-        spawn_reader: impl FnOnce(ChildStdout, mpsc::Sender<io::Result<()>>, u32, u32) -> io::Result<()>,
+        after_watchdog_spawn: impl FnOnce(u32, u32) -> io::Result<()>,
     ) -> io::Result<Self> {
         let program = command.get_program().to_owned();
         let args = command.get_args().map(OsString::from).collect::<Vec<_>>();
@@ -153,33 +147,28 @@ impl OwnedProcessGroup {
             .env("TAU_OWNED_PROCESS_GROUP_WATCHDOG_PGID", pgid.to_string())
             .env("TAU_OWNED_PROCESS_GROUP_WATCHDOG_ROOT", temp_root)
             .stdin(Stdio::from(OwnedFd::from(liveness_reader)))
-            .stdout(Stdio::piped())
+            .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .process_group(0);
         provisional.watchdog = Some(watchdog.spawn()?);
-        let watchdog_stdout = provisional
-            .watchdog
-            .as_mut()
-            .expect("provisional watchdog remains owned")
-            .stdout
-            .take()
-            .expect("capture watchdog readiness");
-        let (watchdog_ready_tx, watchdog_ready_rx) = mpsc::channel();
         let watchdog_pid = provisional
             .watchdog
             .as_ref()
             .expect("provisional watchdog remains owned")
             .id();
-        spawn_reader(watchdog_stdout, watchdog_ready_tx, pgid, watchdog_pid)?;
-        match watchdog_ready_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err(error),
-            Err(error) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("watchdog did not initialize before launcher arm: {error}"),
-                ));
-            }
+        after_watchdog_spawn(pgid, watchdog_pid)?;
+        let liveness_reader = provisional
+            .liveness
+            .as_ref()
+            .expect("provisional liveness endpoint remains owned")
+            .try_clone()?;
+        let mut readiness_reader = BufReader::new(liveness_reader);
+        let mut readiness = String::new();
+        readiness_reader.read_line(&mut readiness)?;
+        if readiness != "WATCHDOG_READY\n" {
+            return Err(io::Error::other(format!(
+                "watchdog did not initialize before launcher arm: {readiness:?}"
+            )));
         }
 
         provisional
@@ -439,27 +428,6 @@ fn reap_or_kill_watchdog(watchdog: &mut Child) {
     let _ = wait_child_until(watchdog, Instant::now() + Duration::from_secs(2));
 }
 
-/// Drains watchdog stdout after publishing its single readiness event.
-fn read_watchdog_readiness(watchdog_stdout: ChildStdout, ready: mpsc::Sender<io::Result<()>>) {
-    let mut reader = BufReader::new(watchdog_stdout);
-    loop {
-        let mut line = Vec::new();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) => break,
-            Ok(_) if line == b"WATCHDOG_READY\n" => {
-                let _ = ready.send(Ok(()));
-            }
-            Ok(_) => {}
-            Err(error) => {
-                let _ = ready.send(Err(error));
-                return;
-            }
-        }
-    }
-    let mut sink = Vec::new();
-    let _ = reader.read_to_end(&mut sink);
-}
-
 /// Reaps the watchdog within either its disarm or delegated-cleanup deadline,
 /// escalating only its exact PID when needed.
 fn reap_watchdog_bounded(watchdog: &mut Child, delegated_cleanup: bool) -> io::Result<()> {
@@ -508,17 +476,22 @@ pub(crate) fn run_watchdog_worker_from_env() {
     let temp_root =
         std::env::var_os("TAU_OWNED_PROCESS_GROUP_WATCHDOG_ROOT").expect("watchdog temporary root");
     let pgid = pgid.parse::<u32>().expect("watchdog numeric PGID");
+    let stdin = io::stdin();
+    let input =
+        UnixStream::from(rustix_v1::io::dup(stdin.as_fd()).expect("duplicate watchdog fd0"));
+    let mut readiness =
+        UnixStream::from(rustix_v1::io::dup(stdin.as_fd()).expect("duplicate watchdog readiness"));
     watchdog_cleanup(
         pgid,
         Path::new(&temp_root),
-        io::stdin().lock(),
+        BufReader::new(input),
         WatchdogWait {
             group_exit: true,
             tracked_exit: true,
         },
         || {
-            println!("WATCHDOG_READY");
-            io::stdout().flush()
+            readiness.write_all(b"WATCHDOG_READY\n")?;
+            readiness.flush()
         },
         |_| Ok(()),
         || Ok(()),
@@ -792,22 +765,22 @@ pub(crate) fn child_reap_poll_survives_transient_none() -> io::Result<bool> {
     Ok(result.is_some() && polls == 2)
 }
 
-/// Proves a readiness-reader spawn failure unwinds through provisional
+/// Proves a post-watchdog-spawn setup failure unwinds through provisional
 /// ownership and boundedly reaps both raw children.
-pub(crate) fn reader_spawn_failure_reaps_provisional_children(
+pub(crate) fn post_watchdog_spawn_failure_reaps_provisional_children(
     command: &Command,
     temp_root: &Path,
 ) -> io::Result<bool> {
     let mut identities = None;
-    let result = OwnedProcessGroup::spawn_piped_stderr_with_reader(
+    let result = OwnedProcessGroup::spawn_piped_stderr_with_post_watchdog_spawn_hook(
         command,
         temp_root,
-        |_, _, pgid, watchdog_pid| {
+        |pgid, watchdog_pid| {
             identities = Some((
                 (pgid, process_start_time(pgid)),
                 (watchdog_pid, process_start_time(watchdog_pid)),
             ));
-            Err(io::Error::other("injected watchdog reader spawn failure"))
+            Err(io::Error::other("injected post-watchdog-spawn failure"))
         },
     );
     if result.is_ok() {

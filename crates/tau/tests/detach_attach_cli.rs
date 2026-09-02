@@ -1,8 +1,9 @@
 use std::fs::{File, Permissions};
 use std::io::{self, BufRead as _, BufReader, Read as _, Write};
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::ExitStatusExt as _;
+use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -10,20 +11,27 @@ use std::thread::Builder;
 use std::time::{Duration, Instant};
 
 use rustix_openpty::rustix::termios::Winsize;
+use rustix_v1::io::Errno;
 use rustix_v1::process::{Pid, Signal, kill_process};
 
 #[path = "detach_attach_cli/owned_process_group.rs"]
 mod owned_process_group;
 #[path = "detach_attach_cli/sigterm_worker_action.rs"]
 mod sigterm_worker_action;
+#[path = "detach_attach_cli/subreaper_controller.rs"]
+mod subreaper_controller;
 
 use owned_process_group::{
     OwnedProcessGroup, child_reap_poll_survives_transient_none, group_exists,
-    reader_spawn_failure_reaps_provisional_children, run_watchdog_worker_from_env,
+    post_watchdog_spawn_failure_reaps_provisional_children, run_watchdog_worker_from_env,
     watchdog_confirms_matching_anchor_stopped, watchdog_rejects_incomplete_initial_identity,
     watchdog_rejects_mismatched_anchor, watchdog_waits_for_root_only_tracked_identity,
 };
 use sigterm_worker_action::{SigtermCompletionWorker, complete_worker_via_sigterm};
+use subreaper_controller::{
+    BrokeredCleanupWorker, require_group_absent, require_group_filtered_echild,
+    set_isolated_child_subreaper,
+};
 
 /// Isolated process environment shared by every CLI in one lifecycle test.
 struct TestEnvironment {
@@ -686,6 +694,338 @@ fn owned_process_group_cleanup_worker() {
     }
 }
 
+/// Hidden entrypoint that gives lifecycle cleanup one isolated process-global
+/// subreaper without changing child ownership in the shared libtest process.
+#[test]
+fn owned_process_group_cleanup_controller() {
+    let real_mode = std::env::var("TAU_OWNED_PROCESS_GROUP_CONTROLLER").ok();
+    let controlled = std::env::var_os("TAU_OWNED_PROCESS_GROUP_DIRECT_REAP_CONTROLLER").is_some();
+    if real_mode.is_none() && !controlled {
+        return;
+    }
+    set_isolated_child_subreaper().expect("install isolated cleanup subreaper");
+    if let Some(mode) = real_mode {
+        assert_owned_process_group_worker_cleanup_in_controller(&mode);
+        println!("CONTROLLER_COMPLETE");
+    } else {
+        run_controlled_broker_oracle().expect("run controlled wait-broker oracle");
+        println!("DIRECT_REAP_COMPLETE");
+    }
+}
+
+/// A controlled worker creates a deeper future-adoption member and a real
+/// duplex-readiness watcher whose stdout/stderr outlive worker SIGTERM.
+#[test]
+fn owned_process_group_broker_canary_worker() {
+    if std::env::var_os("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_WORKER").is_none() {
+        return;
+    }
+    let current_exe = std::env::current_exe().expect("current integration test binary");
+    let (mut holder_control, holder_endpoint) =
+        UnixStream::pair().expect("create controlled holder socket");
+    let mut holder = Command::new(&current_exe);
+    holder
+        .args([
+            "--exact",
+            "owned_process_group_broker_canary_holder",
+            "--nocapture",
+        ])
+        .env("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_HOLDER", "1")
+        .stdin(Stdio::from(OwnedFd::from(holder_endpoint)))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let holder = holder.spawn().expect("spawn controlled holder");
+    let mut holder_reader =
+        BufReader::new(holder_control.try_clone().expect("clone holder control"));
+    let mut holder_readiness = String::new();
+    holder_reader
+        .read_line(&mut holder_readiness)
+        .expect("read controlled holder readiness");
+    let member = ProcessIdentity::parse(
+        holder_readiness
+            .trim_end()
+            .strip_prefix("MEMBER_READY\t")
+            .expect("controlled member readiness prefix"),
+    );
+
+    let (mut liveness, watchdog_liveness) =
+        UnixStream::pair().expect("create controlled duplex liveness");
+    let mut watcher = Command::new(current_exe);
+    watcher
+        .args([
+            "--exact",
+            "owned_process_group_broker_canary_watcher",
+            "--nocapture",
+        ])
+        .env(
+            "TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_MEMBER",
+            member.encode(),
+        )
+        .stdin(Stdio::from(OwnedFd::from(watchdog_liveness)))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .process_group(0);
+    let watcher = watcher.spawn().expect("spawn controlled watcher");
+    let watcher_identity =
+        process_identity(watcher.id()).expect("capture controlled watcher identity");
+    let mut readiness_reader =
+        BufReader::new(liveness.try_clone().expect("clone controlled liveness"));
+    let mut readiness = String::new();
+    readiness_reader
+        .read_line(&mut readiness)
+        .expect("read controlled watcher readiness");
+    assert_eq!(readiness, "WATCHDOG_READY\n");
+
+    println!(
+        "READY\t{}\t{}\t{}",
+        member.pid,
+        watcher_identity.encode(),
+        member.encode()
+    );
+    std::io::stdout()
+        .flush()
+        .expect("flush controlled worker readiness");
+
+    let stdin = std::io::stdin();
+    let mut controller = BufReader::new(stdin.lock());
+    let mut registration = String::new();
+    let read = controller
+        .read_line(&mut registration)
+        .expect("read controlled registration");
+    if read == 0 {
+        drop(holder_control);
+        drop(liveness);
+        drop(holder);
+        drop(watcher);
+        return;
+    }
+    assert_eq!(registration, "REGISTERED\n");
+    holder_control
+        .write_all(b"ADOPT\n")
+        .expect("arm controlled holder adoption");
+    holder_control
+        .flush()
+        .expect("flush controlled holder adoption");
+    liveness
+        .write_all(b"ADOPTED\n")
+        .expect("arm controlled watcher");
+    liveness.flush().expect("flush controlled watcher arm");
+    println!("ADOPTION_ARMED");
+    std::io::stdout()
+        .flush()
+        .expect("flush controlled adoption boundary");
+
+    let _holder_control = holder_control;
+    let _holder = holder;
+    let _watcher = watcher;
+    let _liveness = liveness;
+    let mut release = [0_u8; 1];
+    controller
+        .read_exact(&mut release)
+        .expect("SIGTERM must terminate controlled broker worker");
+}
+
+/// The intermediate holder keeps the target member outside the controller's
+/// child set until worker death closes this holder's stdin.
+#[test]
+fn owned_process_group_broker_canary_holder() {
+    if std::env::var_os("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_HOLDER").is_none() {
+        return;
+    }
+    let current_exe = std::env::current_exe().expect("current integration test binary");
+    let mut member = Command::new(current_exe);
+    member
+        .args([
+            "--exact",
+            "owned_process_group_broker_canary_member",
+            "--nocapture",
+        ])
+        .env("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_MEMBER_PROCESS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let member = member
+        .spawn()
+        .expect("spawn controlled target-group member");
+    let mut member = ProvisionalControlledMember::new(member);
+    let identity = member
+        .capture_identity()
+        .expect("capture controlled target-group identity");
+    let stdin = std::io::stdin();
+    let mut control =
+        UnixStream::from(rustix_v1::io::dup(stdin.as_fd()).expect("duplicate holder fd0"));
+    control
+        .write_all(format!("MEMBER_READY\t{}\n", identity.encode()).as_bytes())
+        .expect("publish member readiness on holder socket");
+    control.flush().expect("flush member readiness");
+    let mut input = BufReader::new(UnixStream::from(
+        rustix_v1::io::dup(stdin.as_fd()).expect("duplicate holder input"),
+    ));
+    let mut command = String::new();
+    let read = input
+        .read_line(&mut command)
+        .expect("read controlled holder command");
+    if read == 0 {
+        member
+            .cleanup()
+            .expect("clean provisional controlled member before adoption");
+        return;
+    }
+    assert_eq!(command, "ADOPT\n");
+    let mut eof = Vec::new();
+    input
+        .read_to_end(&mut eof)
+        .expect("read worker-liveness EOF after adoption");
+    assert!(eof.is_empty(), "holder received bytes after ADOPT");
+    member.disarm();
+}
+
+/// The target group member remains live until the controlled watcher signals
+/// its exact anchored process group.
+#[test]
+fn owned_process_group_broker_canary_member() {
+    if std::env::var_os("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_MEMBER_PROCESS").is_none() {
+        return;
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
+/// The controlled watcher uses the same duplex fd0 readiness and inherited
+/// stdout/stderr contract as the real watchdog.
+#[test]
+fn owned_process_group_broker_canary_watcher() {
+    let Ok(member) = std::env::var("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_MEMBER") else {
+        return;
+    };
+    let member = ProcessIdentity::parse(&member);
+    let stdin = std::io::stdin();
+    let input =
+        UnixStream::from(rustix_v1::io::dup(stdin.as_fd()).expect("duplicate controlled fd0"));
+    let mut readiness = UnixStream::from(
+        rustix_v1::io::dup(stdin.as_fd()).expect("duplicate controlled readiness"),
+    );
+    readiness
+        .write_all(b"WATCHDOG_READY\n")
+        .expect("publish controlled duplex readiness");
+    readiness
+        .flush()
+        .expect("flush controlled duplex readiness");
+    let mut input = BufReader::new(input);
+    let mut arm = String::new();
+    let read = input
+        .read_line(&mut arm)
+        .expect("read controlled watcher arm");
+    if read == 0 {
+        return;
+    }
+    assert_eq!(arm, "ADOPTED\n");
+    let mut eof = Vec::new();
+    input
+        .read_to_end(&mut eof)
+        .expect("read controlled worker liveness EOF");
+    assert!(
+        eof.is_empty(),
+        "controlled liveness carried unexpected bytes"
+    );
+
+    let pgid = Pid::from_raw(i32::try_from(member.pid).expect("controlled PGID fits i32"))
+        .expect("positive controlled PGID");
+    rustix_v1::process::kill_process_group(pgid, Signal::KILL)
+        .expect("kill exact controlled process group");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_identity(member.pid) == Some(member) {
+        assert!(
+            Instant::now() < deadline,
+            "controlled watcher retained an unreaped target-group member"
+        );
+        std::thread::yield_now();
+    }
+    println!("WATCHDOG_POSTAMBLE");
+    eprintln!("WATCHDOG_CLEANUP_COMPLETE");
+}
+
+/// Owns a controlled member immediately after spawn until exact ADOPT transfers
+/// cleanup authority to the isolated controller.
+struct ProvisionalControlledMember {
+    /// Direct member child retained for unconditional exact kill and reap.
+    child: Option<Child>,
+    /// PID/start anchor once procfs identity capture succeeds.
+    identity: Option<ProcessIdentity>,
+}
+
+impl ProvisionalControlledMember {
+    /// Installs direct-child ownership before any later fallible operation.
+    fn new(child: Child) -> Self {
+        Self {
+            child: Some(child),
+            identity: None,
+        }
+    }
+
+    /// Captures and retains the exact member PID/start group anchor.
+    fn capture_identity(&mut self) -> io::Result<ProcessIdentity> {
+        let pid = self.child.as_ref().expect("member remains owned").id();
+        let identity = process_identity(pid)
+            .ok_or_else(|| io::Error::other("controlled member identity disappeared"))?;
+        self.identity = Some(identity);
+        Ok(identity)
+    }
+
+    /// Signals the anchored group when possible, then always kills and reaps
+    /// the exact direct child before reporting a group-signal error.
+    fn cleanup(&mut self) -> io::Result<()> {
+        let mut group_error = None;
+        if let Some(identity) = self.identity
+            && process_identity(identity.pid) == Some(identity)
+        {
+            let pgid = Pid::from_raw(i32::try_from(identity.pid).expect("member PGID fits i32"))
+                .expect("positive member PGID");
+            match rustix_v1::process::kill_process_group(pgid, Signal::KILL) {
+                Ok(()) | Err(Errno::SRCH) => {}
+                Err(error) => group_error = Some(io::Error::from(error)),
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(identity) = self.identity
+            && group_exists(identity.pid)?
+        {
+            return Err(io::Error::other(format!(
+                "provisional controlled member group {} survived cleanup",
+                identity.pid
+            )));
+        }
+        if let Some(error) = group_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Releases the still-live child handle only after exact ADOPT.
+    fn disarm(&mut self) {
+        drop(self.child.take());
+    }
+}
+
+impl Drop for ProvisionalControlledMember {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+/// The combined controlled oracle proves future adoption and watchdog stdout
+/// lifetime through the same sole-broker and duplex-fd protocol as the real
+/// path.
+#[test]
+fn owned_process_group_wait_broker_covers_future_adoption_and_stdout_lifetime() {
+    run_isolated_controller(None).expect("run isolated controlled wait-broker controller");
+}
+
 /// Hidden entrypoint for the parent-liveness watchdog that remains outside the
 /// Tau process group and acts only after its control pipe reaches EOF.
 #[test]
@@ -735,17 +1075,17 @@ fn owned_process_group_retries_transient_child_reap_poll() {
     );
 }
 
-/// A fallible readiness-reader spawn occurs only after provisional RAII owns
-/// both raw children, so injected failure cannot strand either process.
+/// A fallible post-watchdog-spawn setup step occurs only after provisional
+/// RAII owns both raw children, so injected failure cannot strand either one.
 #[test]
-fn owned_process_group_reader_spawn_failure_reaps_provisional_children() {
-    let root = tempfile::tempdir().expect("reader-spawn failure temporary root");
+fn owned_process_group_post_watchdog_spawn_failure_reaps_provisional_children() {
+    let root = tempfile::tempdir().expect("post-watchdog-spawn failure temporary root");
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "exec sleep 30"]);
     assert!(
-        reader_spawn_failure_reaps_provisional_children(&command, root.path())
-            .expect("run reader-spawn failure oracle"),
-        "provisional owner did not reap both children after reader spawn failure"
+        post_watchdog_spawn_failure_reaps_provisional_children(&command, root.path())
+            .expect("run post-watchdog-spawn failure oracle"),
+        "provisional owner did not reap both children after post-watchdog-spawn failure"
     );
 }
 
@@ -822,7 +1162,7 @@ fn owned_process_group_worker_barrier_timeout_cleans_raw_worker() {
 }
 
 /// One PID and Linux start time, used to reject PID reuse in cleanup oracles.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProcessIdentity {
     /// Linux process identifier.
     pid: u32,
@@ -856,6 +1196,7 @@ enum WorkerLine {
 /// Owns a nested lifecycle worker and both pipe readers across every panic and
 /// early return.
 struct BoundedCleanupWorker {
+    pid: u32,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     stdout: mpsc::Receiver<WorkerLine>,
@@ -870,7 +1211,9 @@ impl BoundedCleanupWorker {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let child = command.spawn()?;
+        let pid = child.id();
         let mut owner = Self {
+            pid,
             child: Some(child),
             stdin: None,
             stdout: mpsc::channel().1,
@@ -938,7 +1281,13 @@ impl BoundedCleanupWorker {
 
     /// Returns the direct worker PID while it remains owned.
     fn id(&self) -> u32 {
-        self.child.as_ref().expect("worker remains owned").id()
+        self.pid
+    }
+
+    /// Relinquishes only the `Child` wait handle after the sole broker starts;
+    /// stdin and both pipe readers remain owned here.
+    fn release_child_wait_handle(&mut self) -> Option<Child> {
+        self.child.take()
     }
 
     /// Receives one whole line before the caller's local barrier deadline.
@@ -962,6 +1311,17 @@ impl BoundedCleanupWorker {
     /// Closes the worker release pipe.
     fn close_stdin(&mut self) {
         drop(self.stdin.take());
+    }
+
+    /// Writes one explicit controlled-test barrier without relinquishing the
+    /// retained stdin failure authority.
+    fn write_stdin(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "worker stdin is closed"))?;
+        stdin.write_all(bytes)?;
+        stdin.flush()
     }
 
     /// Waits for the direct worker only within the caller's deadline.
@@ -1049,6 +1409,57 @@ impl SigtermCompletionWorker for BoundedCleanupWorker {
 /// Runs one exact nested worker and proves that all captured processes and
 /// resources disappear after the selected failure mode.
 fn assert_owned_process_group_worker_cleanup(mode: &str) {
+    if mode.starts_with("sigterm") {
+        run_isolated_controller(Some(mode)).expect("run isolated cleanup controller");
+        return;
+    }
+    assert_owned_process_group_panic_cleanup(mode);
+}
+
+/// Runs one hidden controller with the existing lifecycle deadline and retains
+/// all controller stdout/stderr on failure.
+fn run_isolated_controller(mode: Option<&str>) -> io::Result<()> {
+    let mut command =
+        Command::new(std::env::current_exe().expect("current integration test binary"));
+    command.args([
+        "--exact",
+        "owned_process_group_cleanup_controller",
+        "--nocapture",
+    ]);
+    if let Some(mode) = mode {
+        command
+            .env("TAU_OWNED_PROCESS_GROUP_CONTROLLER", mode)
+            .env("CARGO_BIN_EXE_tau", env!("CARGO_BIN_EXE_tau"));
+    } else {
+        command.env("TAU_OWNED_PROCESS_GROUP_DIRECT_REAP_CONTROLLER", "1");
+    }
+    let mut controller = BoundedCleanupWorker::spawn(command)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stdout = String::new();
+    while let Some(line) = controller.recv_line_until(deadline, "controller stdout EOF")? {
+        stdout.push_str(&line);
+    }
+    let status = controller
+        .wait_until(deadline)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "reap cleanup controller"))?;
+    let stderr = controller.collect_stderr_until(deadline)?;
+    let expected = if mode.is_some() {
+        "CONTROLLER_COMPLETE\n"
+    } else {
+        "DIRECT_REAP_COMPLETE\n"
+    };
+    if !status.success() || !stdout.contains(expected) {
+        return Err(io::Error::other(format!(
+            "isolated cleanup controller failed: {status}\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&stderr)
+        )));
+    }
+    Ok(())
+}
+
+/// Retains the original panic/unwind oracle outside the SIGTERM subreaper
+/// protocol.
+fn assert_owned_process_group_panic_cleanup(mode: &str) {
     let mut command =
         Command::new(std::env::current_exe().expect("current integration test binary"));
     command
@@ -1079,12 +1490,74 @@ fn assert_owned_process_group_worker_cleanup(mode: &str) {
         }
     };
     let readiness = parse_cleanup_readiness(&readiness);
+    let completion_deadline = Instant::now() + Duration::from_secs(10);
+    let mut remainder = String::new();
+    while let Some(line) = worker
+        .recv_line_until(completion_deadline, "stdout EOF")
+        .expect("worker and watchdog close stdout before deadline")
+    {
+        remainder.push_str(&line);
+    }
+    let status = worker
+        .wait_until(completion_deadline)
+        .expect("poll cleanup worker status")
+        .expect("reap cleanup worker before deadline");
+    let worker_stderr = worker
+        .collect_stderr_until(completion_deadline)
+        .expect("collect cleanup worker stderr before deadline");
+    assert!(
+        !status.success(),
+        "{mode} cleanup worker unexpectedly succeeded.\nstdout:\n{}\nstderr:\n{}",
+        remainder,
+        String::from_utf8_lossy(&worker_stderr)
+    );
+    assert!(!mode.starts_with("sigterm"));
+
+    assert_cleanup_readiness_absent(&readiness, mode);
+}
+
+/// Executes the SIGTERM lifecycle after the isolated controller installs its
+/// sole wait broker.
+fn assert_owned_process_group_worker_cleanup_in_controller(mode: &str) {
+    assert!(mode.starts_with("sigterm"), "controller owns SIGTERM modes");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut command =
+        Command::new(std::env::current_exe().expect("current integration test binary"));
+    command
+        .args([
+            "--exact",
+            "owned_process_group_cleanup_worker",
+            "--nocapture",
+        ])
+        .env("TAU_OWNED_PROCESS_GROUP_WORKER", mode)
+        .env("CARGO_BIN_EXE_tau", env!("CARGO_BIN_EXE_tau"));
+    let mut worker =
+        BrokeredCleanupWorker::spawn(command, deadline).expect("spawn brokered cleanup worker");
+    let readiness = loop {
+        let Some(line) = worker
+            .recv_line_until(deadline, "READY")
+            .expect("read cleanup worker readiness before deadline")
+        else {
+            panic!("cleanup worker exited before readiness");
+        };
+        if line.starts_with("READY\t") {
+            break parse_cleanup_readiness(&line);
+        }
+    };
+    let group_anchor = readiness
+        .identities
+        .iter()
+        .copied()
+        .find(|identity| identity.pid == readiness.pgid)
+        .expect("readiness retains exact Tau group leader");
+    worker
+        .register_readiness(readiness.watchdog, group_anchor)
+        .expect("register exact broker sentinels");
 
     if mode == "sigterm-after-group-cleanup" {
-        let boundary_deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let boundary = worker
-                .recv_line_until(boundary_deadline, "GROUP_CLEANED")
+                .recv_line_until(deadline, "GROUP_CLEANED")
                 .expect("read cleanup-order boundary before deadline")
                 .expect("cleanup worker exited before group-cleaned boundary");
             if boundary == "GROUP_CLEANED\n" {
@@ -1092,47 +1565,168 @@ fn assert_owned_process_group_worker_cleanup(mode: &str) {
             }
         }
     }
-    let (status, remainder, worker_stderr) = if mode.starts_with("sigterm") {
-        let completion = complete_worker_via_sigterm(&mut worker, |_, _| Ok(()))
-            .expect("complete cleanup worker through SIGTERM");
-        (completion.status, completion.stdout, completion.stderr)
-    } else {
-        let completion_deadline = Instant::now() + Duration::from_secs(10);
-        let mut remainder = String::new();
-        while let Some(line) = worker
-            .recv_line_until(completion_deadline, "stdout EOF")
-            .expect("worker and watchdog close readiness pipe before deadline")
-        {
-            remainder.push_str(&line);
-        }
-        let status = worker
-            .wait_until(completion_deadline)
-            .expect("poll cleanup worker status")
-            .expect("reap cleanup worker before deadline");
-        let worker_stderr = worker
-            .collect_stderr_until(Instant::now() + Duration::from_secs(2))
-            .expect("collect cleanup worker stderr before deadline");
-        (status, remainder, worker_stderr)
-    };
-    assert!(
-        !status.success(),
-        "{mode} cleanup worker unexpectedly succeeded.\nstdout:\n{}\nstderr:\n{}",
-        remainder,
-        String::from_utf8_lossy(&worker_stderr)
-    );
-    if mode.starts_with("sigterm") {
-        assert_eq!(status.signal(), Some(Signal::TERM.as_raw()));
-    }
+    let completion = complete_worker_via_sigterm(&mut worker, deadline, |_, _| Ok(()))
+        .expect("complete brokered cleanup worker through SIGTERM");
+    worker
+        .finish_broker(&completion.stderr)
+        .expect("retain exact worker/watchdog statuses and final ECHILD");
+    assert_eq!(completion.status.signal(), Some(Signal::TERM.as_raw()));
+    assert_cleanup_readiness_absent(&readiness, mode);
+}
 
+/// Runs the combined future-adoption and inherited-stdout canary through the
+/// same broker and SIGTERM action as the real cleanup oracle.
+fn run_controlled_broker_oracle() -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    run_controlled_prearm_abort(deadline)?;
+    run_controlled_broker_success(deadline)
+}
+
+/// Aborts before registration so the holder must kill and reap its exact
+/// member before controller ownership can transfer.
+fn run_controlled_prearm_abort(deadline: Instant) -> io::Result<()> {
+    let (mut worker, pgid, watchdog, member) = spawn_controlled_broker_worker(deadline)?;
+    require_group_filtered_echild(pgid)?;
+    worker.close_stdin();
+    let _stdout = drain_controlled_stdout(&worker, deadline)?;
+    let status = worker
+        .wait_until(deadline)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "aborted worker status"))?;
+    let stderr = worker.collect_stderr_until(deadline)?;
+    worker.finish_prearm_abort(watchdog, &stderr)?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "pre-arm worker failed: {status}\nstderr:\n{}",
+            String::from_utf8_lossy(&stderr)
+        )));
+    }
+    require_group_absent(pgid)?;
+    if process_identity(member.pid).is_some() || process_identity(watchdog.pid).is_some() {
+        return Err(io::Error::other(
+            "pre-arm member or watcher survived provisional cleanup",
+        ));
+    }
+    Ok(())
+}
+
+/// Executes the strict REGISTERED-to-ADOPT ownership transfer before the sole
+/// SIGTERM action and final broker completion.
+fn run_controlled_broker_success(deadline: Instant) -> io::Result<()> {
+    let (mut worker, pgid, watchdog, member) = spawn_controlled_broker_worker(deadline)?;
+    require_group_filtered_echild(pgid)?;
+    worker.register_readiness(watchdog, member)?;
+    worker.write_stdin(b"REGISTERED\n")?;
+    loop {
+        let line = worker
+            .recv_line_until(deadline, "ADOPTION_ARMED")?
+            .ok_or_else(|| io::Error::other("controlled worker exited before adoption arm"))?;
+        if line == "ADOPTION_ARMED\n" {
+            break;
+        }
+    }
+    let completion = complete_worker_via_sigterm(&mut worker, deadline, |_, _| Ok(()))?;
+    worker.finish_broker(&completion.stderr)?;
+    if completion.status.signal() != Some(Signal::TERM.as_raw()) {
+        return Err(io::Error::other(format!(
+            "controlled worker terminal was not SIGTERM: {}",
+            completion.status
+        )));
+    }
+    if !completion.stdout.contains("WATCHDOG_POSTAMBLE\n") {
+        return Err(io::Error::other(format!(
+            "controlled watcher stdout postamble missing before EOF:\n{}",
+            completion.stdout
+        )));
+    }
+    if !completion
+        .stderr
+        .windows(b"WATCHDOG_CLEANUP_COMPLETE\n".len())
+        .any(|window| window == b"WATCHDOG_CLEANUP_COMPLETE\n")
+    {
+        return Err(io::Error::other(format!(
+            "controlled watcher stderr completion missing before EOF:\n{}",
+            String::from_utf8_lossy(&completion.stderr)
+        )));
+    }
+    require_group_absent(pgid)?;
+    if process_identity(member.pid).is_some() || process_identity(watchdog.pid).is_some() {
+        return Err(io::Error::other(
+            "controlled member or watcher survived broker completion",
+        ));
+    }
+    Ok(())
+}
+
+/// Spawns one controlled worker and parses its socket-sourced member plus
+/// duplex-watcher readiness record.
+fn spawn_controlled_broker_worker(
+    deadline: Instant,
+) -> io::Result<(BrokeredCleanupWorker, u32, ProcessIdentity, ProcessIdentity)> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args([
+            "--exact",
+            "owned_process_group_broker_canary_worker",
+            "--nocapture",
+        ])
+        .env("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_WORKER", "1");
+    let worker = BrokeredCleanupWorker::spawn(command, deadline)?;
+    let readiness = loop {
+        let line = worker
+            .recv_line_until(deadline, "controlled READY")?
+            .ok_or_else(|| io::Error::other("controlled worker exited before READY"))?;
+        if line.starts_with("READY\t") {
+            break line;
+        }
+    };
+    let mut fields = readiness.trim_end().split('\t');
+    if fields.next() != Some("READY") {
+        return Err(io::Error::other("controlled readiness prefix"));
+    }
+    let pgid = fields
+        .next()
+        .ok_or_else(|| io::Error::other("controlled readiness PGID"))?
+        .parse::<u32>()
+        .map_err(io::Error::other)?;
+    let watchdog = ProcessIdentity::parse(
+        fields
+            .next()
+            .ok_or_else(|| io::Error::other("controlled watcher identity"))?,
+    );
+    let member = ProcessIdentity::parse(
+        fields
+            .next()
+            .ok_or_else(|| io::Error::other("controlled member identity"))?,
+    );
+    if fields.next().is_some() || member.pid != pgid {
+        return Err(io::Error::other("invalid controlled readiness fields"));
+    }
+    Ok((worker, pgid, watchdog, member))
+}
+
+/// Drains controlled stdout through holder, worker, and watcher terminal EOF.
+fn drain_controlled_stdout(
+    worker: &BrokeredCleanupWorker,
+    deadline: Instant,
+) -> io::Result<String> {
+    let mut stdout = String::new();
+    while let Some(line) = worker.recv_line_until(deadline, "controlled stdout EOF")? {
+        stdout.push_str(&line);
+    }
+    Ok(stdout)
+}
+
+/// Retains every original role-specific process and resource assertion.
+fn assert_cleanup_readiness_absent(readiness: &CleanupReadiness, mode: &str) {
     assert!(
         !group_exists(readiness.pgid).expect("query cleaned process group"),
         "owned process group {} survived {mode}",
         readiness.pgid
     );
-    for identity in &readiness.identities {
-        assert_identity_gone(*identity, mode);
+    for (index, identity) in readiness.identities.iter().enumerate() {
+        assert_identity_gone(*identity, &format!("{mode} fixture[{index}]"));
     }
-    assert_identity_gone(readiness.watchdog, mode);
+    assert_identity_gone(readiness.watchdog, &format!("{mode} watchdog"));
     assert!(
         !readiness.metadata.exists(),
         "runtime metadata survived {mode}: {}",

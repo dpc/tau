@@ -39,17 +39,19 @@ fn run_parent_oracle() {
         Some("READY\n".to_owned())
     );
 
-    let completion = complete_worker_via_sigterm(&mut worker, |worker, deadline| {
-        signal_pid(worker.id(), Signal::USR2).expect("request controlled child stdin sample");
-        assert_eq!(
-            worker
-                .recv_line_until(deadline, "STDIN_OPEN")
-                .expect("read controlled child stdin observation"),
-            Some("STDIN_OPEN\n".to_owned())
-        );
-        Ok(())
-    })
-    .expect("complete controlled child through shared SIGTERM action");
+    let completion_deadline = Instant::now() + Duration::from_secs(10);
+    let completion =
+        complete_worker_via_sigterm(&mut worker, completion_deadline, |worker, deadline| {
+            signal_pid(worker.id(), Signal::USR2).expect("request controlled child stdin sample");
+            assert_eq!(
+                worker
+                    .recv_line_until(deadline, "STDIN_OPEN")
+                    .expect("read controlled child stdin observation"),
+                Some("STDIN_OPEN\n".to_owned())
+            );
+            Ok(())
+        })
+        .expect("complete controlled child through shared SIGTERM action");
     assert_eq!(
         completion.status.signal(),
         Some(Signal::TERM.as_raw()),

@@ -40,7 +40,7 @@ nix = { version = "0.29", default-features = false, features = [
 ] }
 rostra-core.workspace = true
 rustix-openpty.workspace = true
-rustix-v1 = { workspace = true, features = ["process"] }
+rustix-v1 = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 tau-core = { workspace = true, features = ["test-legacy-writer"] }
 tau-harness.workspace = true

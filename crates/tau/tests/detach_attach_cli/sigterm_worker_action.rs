@@ -1,6 +1,6 @@
 use std::io;
 use std::process::ExitStatus;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustix_v1::process::{Pid, Signal, kill_process};
 
@@ -33,6 +33,7 @@ pub struct SigtermCompletion {
 /// worker's stdin failure barrier remains retained.
 pub fn complete_worker_via_sigterm<W>(
     worker: &mut W,
+    completion_deadline: Instant,
     after_sigterm: impl FnOnce(&mut W, Instant) -> io::Result<()>,
 ) -> io::Result<SigtermCompletion>
 where
@@ -41,7 +42,6 @@ where
     let pid = Pid::from_raw(i32::try_from(worker.id()).expect("worker PID fits i32"))
         .expect("positive worker PID");
     kill_process(pid, Signal::TERM).map_err(io::Error::from)?;
-    let completion_deadline = Instant::now() + Duration::from_secs(10);
     after_sigterm(worker, completion_deadline)?;
 
     let mut stdout = String::new();
@@ -53,7 +53,7 @@ where
     let status = worker
         .wait_until(completion_deadline)?
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "reap worker after SIGTERM"))?;
-    let stderr = worker.collect_stderr_until(Instant::now() + Duration::from_secs(2))?;
+    let stderr = worker.collect_stderr_until(completion_deadline)?;
     Ok(SigtermCompletion {
         status,
         stdout,
