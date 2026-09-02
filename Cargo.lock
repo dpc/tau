@@ -5664,6 +5664,7 @@ name = "tau"
 version = "0.1.0"
 dependencies = [
  "fs2",
+ "nix",
  "rostra-core",
  "rustix 1.1.4",
  "rustix-openpty",

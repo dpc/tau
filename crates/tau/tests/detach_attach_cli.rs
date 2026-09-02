@@ -14,6 +14,8 @@ use rustix_v1::process::{Pid, Signal, kill_process};
 
 #[path = "detach_attach_cli/owned_process_group.rs"]
 mod owned_process_group;
+#[path = "detach_attach_cli/sigterm_worker_action.rs"]
+mod sigterm_worker_action;
 
 use owned_process_group::{
     OwnedProcessGroup, child_reap_poll_survives_transient_none, group_exists,
@@ -21,6 +23,7 @@ use owned_process_group::{
     watchdog_confirms_matching_anchor_stopped, watchdog_rejects_incomplete_initial_identity,
     watchdog_rejects_mismatched_anchor, watchdog_waits_for_root_only_tracked_identity,
 };
+use sigterm_worker_action::{SigtermCompletionWorker, complete_worker_via_sigterm};
 
 /// Isolated process environment shared by every CLI in one lifecycle test.
 struct TestEnvironment {
@@ -1025,6 +1028,24 @@ impl Drop for BoundedCleanupWorker {
     }
 }
 
+impl SigtermCompletionWorker for BoundedCleanupWorker {
+    fn id(&self) -> u32 {
+        self.id()
+    }
+
+    fn recv_line_until(&self, deadline: Instant, boundary: &str) -> io::Result<Option<String>> {
+        self.recv_line_until(deadline, boundary)
+    }
+
+    fn wait_until(&mut self, deadline: Instant) -> io::Result<Option<ExitStatus>> {
+        self.wait_until(deadline)
+    }
+
+    fn collect_stderr_until(&mut self, deadline: Instant) -> io::Result<Vec<u8>> {
+        self.collect_stderr_until(deadline)
+    }
+}
+
 /// Runs one exact nested worker and proves that all captured processes and
 /// resources disappear after the selected failure mode.
 fn assert_owned_process_group_worker_cleanup(mode: &str) {
@@ -1071,26 +1092,28 @@ fn assert_owned_process_group_worker_cleanup(mode: &str) {
             }
         }
     }
-    if mode.starts_with("sigterm") {
-        signal_pid(worker.id(), Signal::TERM).expect("SIGTERM cleanup worker");
-    }
-    worker.close_stdin();
-
-    let completion_deadline = Instant::now() + Duration::from_secs(10);
-    let mut remainder = String::new();
-    while let Some(line) = worker
-        .recv_line_until(completion_deadline, "stdout EOF")
-        .expect("worker and watchdog close readiness pipe before deadline")
-    {
-        remainder.push_str(&line);
-    }
-    let status = worker
-        .wait_until(completion_deadline)
-        .expect("poll cleanup worker status")
-        .expect("reap cleanup worker before deadline");
-    let worker_stderr = worker
-        .collect_stderr_until(Instant::now() + Duration::from_secs(2))
-        .expect("collect cleanup worker stderr before deadline");
+    let (status, remainder, worker_stderr) = if mode.starts_with("sigterm") {
+        let completion = complete_worker_via_sigterm(&mut worker, |_, _| Ok(()))
+            .expect("complete cleanup worker through SIGTERM");
+        (completion.status, completion.stdout, completion.stderr)
+    } else {
+        let completion_deadline = Instant::now() + Duration::from_secs(10);
+        let mut remainder = String::new();
+        while let Some(line) = worker
+            .recv_line_until(completion_deadline, "stdout EOF")
+            .expect("worker and watchdog close readiness pipe before deadline")
+        {
+            remainder.push_str(&line);
+        }
+        let status = worker
+            .wait_until(completion_deadline)
+            .expect("poll cleanup worker status")
+            .expect("reap cleanup worker before deadline");
+        let worker_stderr = worker
+            .collect_stderr_until(Instant::now() + Duration::from_secs(2))
+            .expect("collect cleanup worker stderr before deadline");
+        (status, remainder, worker_stderr)
+    };
     assert!(
         !status.success(),
         "{mode} cleanup worker unexpectedly succeeded.\nstdout:\n{}\nstderr:\n{}",
