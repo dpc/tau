@@ -1444,7 +1444,15 @@ impl Harness {
                         && entry.kind == ClientKind::Provider
                         && entry.state != ExtensionState::Disconnected
                 });
-        if !source_is_current {
+        let admitted_terminal_owner = match &event {
+            Event::ProviderResponseFinishedReported(response) => extension
+                .provider_terminal_prompt_owner
+                .as_ref()
+                .filter(|(_, prompt_id)| prompt_id == &response.agent_prompt_id)
+                .map(|(cid, _)| cid.clone()),
+            _ => None,
+        };
+        if !source_is_current && admitted_terminal_owner.is_none() {
             // The observation remains committed, but a parked stale generation
             // cannot mutate prompt, retry, recovery, tool, or turn state.
             return;
@@ -1465,7 +1473,11 @@ impl Harness {
             Event::ProviderResponseFinishedReported(response) => {
                 #[cfg(test)]
                 provider_report_ownership::observe_owned_finished(&response);
-                self.process_provider_response_finished_report(source_id, response);
+                self.process_provider_response_finished_report(
+                    source_id,
+                    response,
+                    admitted_terminal_owner,
+                );
             }
             Event::ProviderCacheMissDiagnosticReported(diagnostic) => {
                 self.process_provider_cache_miss_diagnostic_report(source_id, &diagnostic);
@@ -1683,12 +1695,21 @@ impl Harness {
         &mut self,
         source_id: &tau_proto::ConnectionId,
         response: tau_proto::ProviderResponseFinished,
+        admitted_terminal_owner: Option<tau_proto::AgentId>,
     ) {
-        if self.provider_prompt_owner_matches(
+        let live_owner = self.provider_prompt_owner_matches(
             source_id,
             &response.agent_prompt_id,
             tau_proto::EventName::PROVIDER_RESPONSE_FINISHED_REPORTED,
-        ) {
+        );
+        if live_owner || admitted_terminal_owner.is_some() {
+            if let Some(cid) = admitted_terminal_owner {
+                self.prompt_coordination
+                    .prompt_runtime
+                    .agents
+                    .entry(response.agent_prompt_id.clone())
+                    .or_insert(cid);
+            }
             let result = self.with_derived_publish_source(
                 Some(crate::harness::harness_connection_id().clone()),
                 |harness| {
@@ -1704,6 +1725,9 @@ impl Harness {
                     .pending_error
                     .get_or_insert(error);
             }
+        } else if let Some(cid) = self.agent_id_for_prompt(&response.agent_prompt_id) {
+            self.apply_pending_cancel_for_agent(&cid);
+            self.try_publish_ready_uncertain_supersession(&cid);
         }
     }
 

@@ -6,6 +6,27 @@
 use super::prompt_materialization_timing::PrecheckpointMaterializationTiming;
 use super::*;
 
+/// Publication phase for one exact uncertain-inference supersession.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UncertainSupersessionPhase {
+    /// The exact terminal is owned but waits for an eligible publication cut.
+    Ready,
+    /// The exact terminal is queued or parked in interception.
+    PublicationPending,
+    /// Semantic admission rejected and the exact approved publication is
+    /// retained.
+    RetainedRetry,
+}
+
+/// Runtime-only owner for one exact uncertain ordinary inference supersession.
+#[derive(Clone)]
+pub(crate) struct PendingUncertainSupersession {
+    /// Exact durable Stale terminal that may release the old marked owner.
+    pub(crate) terminal: AgentPromptTerminated,
+    /// Current publication phase for de-duplication and retry arbitration.
+    pub(crate) phase: UncertainSupersessionPhase,
+}
+
 /// Runtime-only state associated with provider prompts and their continuations.
 #[derive(Default)]
 pub(crate) struct PromptRuntimeState {
@@ -43,6 +64,8 @@ pub(crate) struct PromptRuntimeState {
         HashMap<AgentId, Vec<ReplayPromptActivationOccurrence>>,
     /// Restored uncertain owners waiting for materialized activation.
     pub(super) pending_replay_uncertain_stale: HashMap<AgentId, AgentPromptTerminated>,
+    /// Exact HumanUI/live-activation supersessions owned per loaded agent.
+    pub(super) pending_uncertain_supersessions: HashMap<AgentId, PendingUncertainSupersession>,
     /// Harness route failures awaiting durable terminal response commit.
     pub(super) local_route_failures: HashSet<AgentPromptId>,
     /// Rejected completion-bearing steers waiting for branch reselection.

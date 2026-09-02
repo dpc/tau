@@ -18,7 +18,7 @@ use crate::harness::prompt_materialization::{
     dispatch_provider_sort_count, reset_dispatch_provider_sort_count,
 };
 use crate::harness::{
-    BackgroundCompletionPromptMode, GatedFinalDisposition, PendingRenderedPreview,
+    BackgroundCompletionPromptMode, GatedFinalDisposition, HarnessCommand, PendingRenderedPreview,
     PendingRenderedPrompt, PendingTool, RestoredCheckpointAuthority, STATUS_REMINDER,
     agent_message_activation_class, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,

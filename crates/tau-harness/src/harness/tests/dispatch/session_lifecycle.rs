@@ -611,12 +611,13 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
             if finished.outer_turn_id == expected_turn_id
     )));
 
-    second
-        .dispatch_prompt_for_agent(
-            &resumed_cid,
-            PendingPrompt::user("completed after restart".to_owned()),
-        )
-        .expect("dispatch completed prompt");
+    submit_authenticated_ui_prompt(
+        &mut second,
+        agent_id.clone(),
+        "completed after restart",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("dispatch completed prompt");
     let completed_prompt_id = second.agent_runtime.agent_registry.agents[&resumed_cid]
         .dispatch
         .in_flight_prompt
@@ -1697,6 +1698,44 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
         }
     ));
     assert_eq!(uncertain.agent_prompt_id, uncertain_prompt_id);
+    let cid = h
+        .runtime_agent_id_for_target_agent(Some("main"))
+        .expect("restored main route");
+    submit_authenticated_ui_prompt(
+        &mut h,
+        crate::parse_agent_id("main"),
+        "fresh HumanUI activation",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit authenticated UI prompt");
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events("main")
+        .expect("restored records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == uncertain_prompt_id
+                        && terminated.reason
+                            == tau_proto::AgentPromptTerminationReason::Stale
+            ))
+            .count(),
+        1,
+        "cold HumanUI activation closes the exact old owner once"
+    );
+    let successor = read_nth_prompt_created(&h, 0);
+    assert_ne!(successor.agent_prompt_id, uncertain_prompt_id);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .is_empty(),
+        "canonical Stale releases the queued HumanUI prompt"
+    );
     h.shutdown().expect("shutdown");
 }
 

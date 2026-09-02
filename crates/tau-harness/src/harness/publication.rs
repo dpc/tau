@@ -7,6 +7,7 @@ use tau_proto::ToolResultStatus;
 
 use super::prompt_acceptance_timing::{PromptAcceptanceTerminal, PromptAcceptanceTiming};
 use super::prompt_materialization_timing::MaterializationStage;
+use super::prompt_runtime_state::{PendingUncertainSupersession, UncertainSupersessionPhase};
 use super::start_coordinator::StartPhase;
 use super::*;
 use crate::debug_log::DebugEventSensitivity;
@@ -948,6 +949,7 @@ impl Harness {
             !matches!(
                 completion,
                 AgentPublishCompletion::InitialPromptSubmission { .. }
+                    | AgentPublishCompletion::UncertainSupersession { .. }
             )
         });
         let prompt_id = match &event {
@@ -1763,13 +1765,21 @@ impl Harness {
         self.try_advance_queue();
     }
 
-    /// Close an exact response-uncertain marked ordinary owner after a newly
-    /// committed live activating occurrence. The terminal publication remains
-    /// interceptable, and all runtime cleanup waits for its successful append.
+    /// Own and drive one exact Stale terminal for an eligible uncertain
+    /// ordinary inference. Repeated activating inputs coalesce behind the
+    /// same owner.
     pub(super) fn terminalize_uncertain_marked_owner_for_live_activation(
         &mut self,
         cid: &AgentId,
     ) -> bool {
+        if self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .contains_key(cid)
+        {
+            return true;
+        }
         let Some((durable_agent_id, agent_prompt_id, originator)) = self
             .agent_runtime
             .agent_registry
@@ -1795,6 +1805,28 @@ impl Harness {
         else {
             return false;
         };
+        if let Some(terminal) = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_replay_uncertain_stale
+            .remove(cid)
+            .filter(|terminated| terminated.agent_prompt_id == agent_prompt_id)
+        {
+            self.prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .insert(
+                    cid.clone(),
+                    PendingUncertainSupersession {
+                        terminal,
+                        phase: UncertainSupersessionPhase::Ready,
+                    },
+                );
+            if self.session_runtime.turn_state.is_idle() {
+                self.try_publish_ready_uncertain_supersession(cid);
+            }
+            return true;
+        }
         if self
             .session_runtime
             .agent_store
@@ -1804,17 +1836,271 @@ impl Harness {
         {
             return false;
         }
-        self.publish_for_agent(
-            cid,
-            Event::AgentPromptTerminated(AgentPromptTerminated {
-                automatic_compaction_decision: None,
-                agent_id: durable_agent_id,
-                agent_prompt_id,
-                reason: AgentPromptTerminationReason::Stale,
-                originator,
-            }),
-        );
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .insert(
+                cid.clone(),
+                PendingUncertainSupersession {
+                    terminal: AgentPromptTerminated {
+                        automatic_compaction_decision: None,
+                        agent_id: durable_agent_id,
+                        agent_prompt_id,
+                        reason: AgentPromptTerminationReason::Stale,
+                        originator,
+                    },
+                    phase: UncertainSupersessionPhase::Ready,
+                },
+            );
+        if self.session_runtime.turn_state.is_idle() {
+            self.try_publish_ready_uncertain_supersession(cid);
+        }
         true
+    }
+
+    /// Publish a ready supersession only while the old ordinary checkpoint is
+    /// still the sole live terminal authority.
+    pub(super) fn try_publish_ready_uncertain_supersession(&mut self, cid: &AgentId) {
+        if !self.session_runtime.turn_state.is_idle() {
+            return;
+        }
+        let Some(pending) = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .get(cid)
+            .cloned()
+        else {
+            return;
+        };
+        if pending.phase != UncertainSupersessionPhase::Ready
+            || !self.uncertain_supersession_is_eligible(cid, &pending.terminal.agent_prompt_id)
+        {
+            return;
+        }
+        if let Some(owner) = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .get_mut(cid)
+        {
+            owner.phase = UncertainSupersessionPhase::PublicationPending;
+        }
+        let agent_prompt_id = pending.terminal.agent_prompt_id.clone();
+        self.publish_event_for_agent_with_completion(
+            cid,
+            None,
+            Event::AgentPromptTerminated(pending.terminal),
+            Some(AgentPublishCompletion::UncertainSupersession {
+                agent_prompt_id,
+                owned_publication: None,
+            }),
+            false,
+        );
+    }
+
+    /// Return whether no provider terminal, retained continuation, tool,
+    /// compaction, output-length, or finish owner competes with this Stale.
+    pub(super) fn uncertain_supersession_is_eligible(
+        &self,
+        cid: &AgentId,
+        agent_prompt_id: &AgentPromptId,
+    ) -> bool {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return false;
+        };
+        let compaction_publication_targets_agent = |event: &Event| {
+            let target = match event {
+                Event::AgentManualCompactionRequested(requested) => &requested.target_agent_id,
+                Event::AgentStandaloneCompactionStarted(started) => &started.agent_id,
+                Event::AgentStandaloneCompactionFailed(failed) => &failed.agent_id,
+                _ => return false,
+            };
+            agent.identity.agent_id.as_ref() == Some(target)
+        };
+        let compaction_publication_pending = self
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| compaction_publication_targets_agent(&pending.event))
+            || self
+                .runtime_io
+                .publication
+                .deferred
+                .iter()
+                .any(|pending| compaction_publication_targets_agent(pending.event()));
+        let eligible = matches!(
+            &agent.dispatch.activation_dispatch,
+            ActivationDispatchState::DispatchUncertain {
+                owner: InferenceCheckpointOwner::Inference,
+                agent_prompt_id: owner,
+                ..
+            } if owner == agent_prompt_id
+        ) && agent.dispatch.in_flight_prompt.is_none()
+            && agent.dispatch.pending_cancel.is_none()
+            && !matches!(
+                agent.turn.outer_turn,
+                path_crate_agent::OuterTurnRuntimeState::FinishInFlight(_)
+                    | path_crate_agent::OuterTurnRuntimeState::FinishRetry(_)
+            )
+            && agent.turn.automatic_compaction.transaction_id().is_none()
+            && matches!(
+                agent.turn.output_length_continuation,
+                path_crate_agent::OutputLengthContinuationState::None
+                    | path_crate_agent::OutputLengthContinuationState::Spent { .. }
+            )
+            && !self.agent_has_open_foreground_tool_round(cid)
+            && !self
+                .tool_routing
+                .tool_runtime
+                .tool_agents
+                .values()
+                .any(|owner| owner == cid)
+            && !self
+                .tool_routing
+                .tool_runtime
+                .background_completion_targets
+                .values()
+                .any(|owner| owner == cid)
+            && !self
+                .provider_runtime
+                .pending_prompts
+                .contains_key(agent_prompt_id)
+            && !self.provider_terminal_publication_pending(cid, agent_prompt_id)
+            && !self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(cid)
+            && !compaction_publication_pending
+            && agent.identity.agent_id.as_ref().is_none_or(|agent_id| {
+                let compaction = &self.prompt_coordination.compaction_runtime;
+                !compaction
+                    .pending_manual_acceptances
+                    .keys()
+                    .any(|key| key.belongs_to(agent_id))
+                    && !compaction
+                        .accepted_manual_tools
+                        .keys()
+                        .any(|key| key.belongs_to(agent_id))
+                    && !compaction.pending_ui_after_wait.contains_key(cid)
+                    && !compaction.rejected_ui_starts.contains_key(cid)
+            });
+        if !eligible {
+            return false;
+        }
+        agent
+            .identity
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+            .and_then(|tree| tree.marked_inference_through(agent_prompt_id))
+            .is_some()
+    }
+
+    /// Drive HumanUI supersessions accepted during initialization immediately
+    /// before the first normal FIFO drain.
+    pub(super) fn try_publish_ready_uncertain_supersessions(&mut self) {
+        if !self.session_runtime.turn_state.is_idle() {
+            return;
+        }
+        let pending = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for cid in pending {
+            self.try_publish_ready_uncertain_supersession(&cid);
+        }
+    }
+
+    /// Retire a not-yet-canonical Stale because the exact provider terminal
+    /// regained priority.
+    pub(super) fn retire_uncertain_supersession_for_provider_terminal(
+        &mut self,
+        cid: &AgentId,
+        agent_prompt_id: &AgentPromptId,
+    ) {
+        if !self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .get(cid)
+            .is_some_and(|pending| &pending.terminal.agent_prompt_id == agent_prompt_id)
+        {
+            return;
+        }
+        let pending_matches = self
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| {
+                pending
+                    .sync_head_for
+                    .as_ref()
+                    .and_then(ConversationHeadSync::completion)
+                    .is_some_and(|completion| {
+                        matches!(
+                            completion,
+                            AgentPublishCompletion::UncertainSupersession {
+                                agent_prompt_id: owner,
+                                ..
+                            } if owner == agent_prompt_id
+                        )
+                    })
+            });
+        if pending_matches {
+            let pending = self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .take()
+                .expect("matched uncertain supersession intercept");
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+        }
+        self.runtime_io.publication.deferred.retain(|pending| {
+            !pending.completion().is_some_and(|completion| {
+                matches!(
+                    completion,
+                    AgentPublishCompletion::UncertainSupersession {
+                        agent_prompt_id: owner,
+                        ..
+                    } if owner == agent_prompt_id
+                )
+            })
+        });
+        if self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .get(cid)
+            .is_some_and(|completion| {
+                matches!(
+                    completion,
+                    AgentPublishCompletion::UncertainSupersession {
+                        agent_prompt_id: owner,
+                        ..
+                    } if owner == agent_prompt_id
+                )
+            })
+        {
+            self.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .remove(cid);
+        }
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .remove(cid);
+        if pending_matches {
+            self.drain_deferred_publishes();
+            self.drain_publish_idle_dispatches();
+        }
     }
 
     /// Final commit: persist (when applicable), append to the event
@@ -2041,6 +2327,60 @@ impl Harness {
             } else {
                 None
             };
+        if let Some((cid, agent_prompt_id)) = sync_head_for.as_ref().and_then(|sync| {
+            sync.completion().and_then(|completion| match completion {
+                AgentPublishCompletion::UncertainSupersession {
+                    agent_prompt_id, ..
+                } => Some((sync.cid.clone(), agent_prompt_id.clone())),
+                _ => None,
+            })
+        }) && {
+            let exact_event = self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .get(&cid)
+                .is_some_and(|pending| {
+                    event == Event::AgentPromptTerminated(pending.terminal.clone())
+                });
+            !exact_event || !self.uncertain_supersession_is_eligible(&cid, &agent_prompt_id)
+        } {
+            let old_owner_exists = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .is_some_and(|agent| {
+                    matches!(
+                        &agent.dispatch.activation_dispatch,
+                        ActivationDispatchState::DispatchUncertain {
+                            owner: InferenceCheckpointOwner::Inference,
+                            agent_prompt_id: owner,
+                            ..
+                        } if owner == &agent_prompt_id
+                    ) && agent
+                        .identity
+                        .agent_id
+                        .as_deref()
+                        .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+                        .and_then(|tree| tree.marked_inference_through(&agent_prompt_id))
+                        .is_some()
+                });
+            if !old_owner_exists {
+                self.prompt_coordination
+                    .prompt_runtime
+                    .pending_uncertain_supersessions
+                    .remove(&cid);
+            } else if let Some(owner) = self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .get_mut(&cid)
+            {
+                owner.phase = UncertainSupersessionPhase::Ready;
+            }
+            return;
+        }
         let semantic_persist_started = Instant::now();
         let append_result = self.persist_semantic_event(
             persistence_source,

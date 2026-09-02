@@ -21,6 +21,17 @@ the harness-local monotonic acceptance order; it never treats a derived
 journal/checkpoint authority described by
 [ARCH-tau-core](../../tau-core/specs/ARCH-tau-core.md).
 
+When that accepted prompt is authenticated HumanUI, non-internal, and
+inference-activating, it may request supersession of the target's exact ordinary
+dispatch-uncertain owner after FIFO insertion and prompt lifecycle observation.
+One per-agent runtime owner coalesces later prompts and retains the exact
+old-prompt Stale event and semantic parent through interception and admission
+retry. Any exact provider terminal or higher-priority retained completion,
+tool/background, compaction, output-length, or outer-finish owner resolves
+first. Only canonical Stale commit and fold releases uncertainty and lets FIFO
+dispatch mint a new prompt id; Tau never resends the old request. Transaction-
+owned compaction uncertainty is excluded.
+
 ## Prompt capability snapshot
 
 Prompt capability conditionals use one turn-local materialized surface. Tau

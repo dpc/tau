@@ -3060,7 +3060,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             activation_cut: Some(started.cut),
             output_length_continuation: None,
         };
-        let records = vec![
+        let records = [
             record(0, Event::AgentStandaloneCompactionStarted(started.clone())),
             record(1, Event::AgentCompacted(compacted)),
             record(2, Event::AgentInferenceDispatchStarted(checkpoint.clone())),
@@ -5370,7 +5370,7 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
                 activation_cut: Some(AgentHead::Root),
                 output_length_continuation: None,
             });
-        let records = vec![
+        let records = [
             record(
                 0,
                 AgentEventParent::Root,
@@ -5412,14 +5412,37 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
                 Default::default(),
             ),
         ];
-        let mut tree =
-            AgentTree::try_from_events(agent_id.clone(), &records).expect("terminal fold");
+        let mut live = AgentTree::from_events(agent_id.clone(), &[]);
+        for (index, record) in records.iter().enumerate() {
+            live.apply_persisted_record(record)
+                .expect("live terminal fold");
+            let replay = AgentTree::try_from_events(agent_id.clone(), &records[..=index])
+                .expect("cold written-prefix fold");
+            assert_eq!(
+                live, replay,
+                "live and cold fold differ after written prefix {index}"
+            );
+        }
+        let mut tree = live;
         assert_eq!(tree.nodes().len(), 2);
         assert_eq!(
             tree.node(NodeId::new(1)).expect("Q").parent_id,
             Some(NodeId::new(0))
         );
+        if reason == tau_proto::AgentPromptTerminationReason::Stale {
+            let duplicate = record(
+                4,
+                AgentEventParent::Under(NodeId::new(0)),
+                records[3].event.clone(),
+                Default::default(),
+            );
+            assert!(
+                tree.apply_persisted_record(&duplicate).is_err(),
+                "duplicate Stale must not acquire terminal authority"
+            );
+        }
         let response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+        let before_late = tree.clone();
         let late = record(
             4,
             AgentEventParent::Under(NodeId::new(0)),
@@ -5427,7 +5450,7 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
             Default::default(),
         );
         assert!(tree.apply_persisted_record(&late).is_err());
-        assert_eq!(tree.nodes().len(), 2);
+        assert_eq!(tree, before_late);
     }
 }
 

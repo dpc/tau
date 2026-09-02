@@ -218,12 +218,14 @@ totaling six main and two turns per worker. Roster queries and replay consume no
 fake-provider action. Boot C receives no input and consumes no provider action
 while proving cold restore recomputes both delegated workers as `active_auto`.
 
-S5 uses two lanes and compact 1,026-byte scenario JSON: exactly four main
-actions (the Boot A start pair and Boot B's explicit watch call/result pair) and one worker hold action, below the 16 KiB
-ceiling. Boot A spends two main and one worker provider turn. Boot B spends
-two main turns and zero worker turns; Boot C spends zero provider turns. The
-initial dispatch-uncertain watch snapshot, roster queries, replay, and the
-synchronized crash cut consume no additional fake-provider action.
+S5 uses two lanes and compact 1,470-byte scenario JSON: exactly six main
+actions (the Boot A start pair, Boot B's explicit watch call/result pair, and
+two resulting watch-notification responses) and two worker actions (the held
+dispatch and fresh HumanUI successor), below the 16 KiB ceiling. Boot A spends
+two main and one worker provider turn. Boot B spends four main turns and one
+fresh worker turn; Boot C spends zero provider turns. The initial
+dispatch-uncertain watch snapshot, roster queries, replay, and synchronized
+crash cut consume no additional fake-provider action.
 
 S6 uses two lanes and compact 1,085-byte scenario JSON: exactly two main
 actions (Boot A's start pair) and two worker
@@ -414,10 +416,11 @@ the mandatory dispatch-uncertain `harness.notice`, and does not automatically
 submit provider work. Recreate a fresh main-to-worker watch using S2's closed
 action and require its initial provider snapshot to contain
 `AgentWatchProviderState::DispatchUncertain` for the checkpointed
-`agent_prompt_id`; restoring the old watch is not allowed. The main stays usable
-and consumes no worker provider action. Stop Boot B without input to the worker,
-then cold-resume once more and assert the same fail-closed worker state and zero
-provider consumption.
+`agent_prompt_id`; restoring the old watch is not allowed. Then submit one
+authenticated non-internal HumanUI inference prompt directly to the worker.
+Require one exact old-prompt Stale, one fresh worker turn under a new prompt id,
+and no old request resend. Boot C receives no input and proves the written
+terminal and fresh turn replay without duplication or provider work.
 
 This proves conservative harness behavior after a synchronized cut. It does not
 prove whether an external backend performed work exactly once, and it must not
@@ -425,19 +428,18 @@ be used to claim crash-transactional fake-provider cursor recovery.
 
 Implemented by
 `session_restore::dispatch_uncertain::cold_resume_fails_closed_for_dispatch_uncertain_worker`
-using the prompt-correlated three-way crash cut and two fail-closed cold resumes.
+using the prompt-correlated three-way crash cut, a no-input fail-closed Boot B
+prefix, explicit HumanUI supersession, and a no-input Boot C replay.
 
-Recovery is a separately gated follow-on. The exact authority question is:
-
-> For an ordinary inference restored from a durable dispatch checkpoint with no
-> terminal response, which explicit user operation, if any, abandons or retries
-> the uncertain work; must it reuse the checkpointed `AgentPromptId` or mint a
-> new one; and when may later targeted input run?
-
-Current `:retry` is not that operation: it addresses a live provider-owned
-parked delayed retry and requires transient in-flight routing. Pause this
-follow-on until the user or a maintainer explicitly confirms the semantics; do not
-change recovery behavior to make the E2E terminate.
+The approved authority is the authenticated non-internal HumanUI inference
+activation. It first enters the runtime FIFO and may close only an exact ordinary
+inference-owned uncertain checkpoint when no competing terminal, retained
+completion, tool/background, compaction, output-length, or outer-finish owner
+exists. Tau retains one exact Stale through interception and admission retry;
+provider terminal authority wins until Stale commits. Canonical Stale fold
+releases the old owner and the queued prompt dispatches under a new prompt id.
+Current `:retry` remains unrelated because it transfers a live provider-owned
+retry job.
 
 ### S6 — Interrupted worker foreground tool
 

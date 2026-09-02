@@ -187,6 +187,7 @@ impl Harness {
             self.emit_duplicate_finished_response_notice(&response.agent_prompt_id);
             return Ok(());
         };
+        self.retire_uncertain_supersession_for_provider_terminal(&cid, &response.agent_prompt_id);
         if !self.assign_finished_response_agent_id(&cid, &mut response) {
             let Some(owner) = self
                 .prompt_coordination

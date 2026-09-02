@@ -1093,6 +1093,12 @@ impl Harness {
                         }
                         _ => None,
                     })
+                    .or_else(|| {
+                        conv.dispatch
+                            .pending_cancel
+                            .as_ref()
+                            .and_then(|pending| pending.agent_prompt_id.clone())
+                    })
                     .map(|agent_prompt_id| {
                         (
                             conv.identity.session_id.clone(),

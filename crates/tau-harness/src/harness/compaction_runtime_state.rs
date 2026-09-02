@@ -67,6 +67,11 @@ impl ManualCompactionRequestKey {
     pub(super) fn request_id(&self) -> &tau_proto::CompactionRequestId {
         &self.request_id
     }
+
+    /// Return whether this request targets the durable agent.
+    pub(super) fn belongs_to(&self, agent_id: &tau_proto::AgentId) -> bool {
+        &self.target_agent_id == agent_id
+    }
 }
 
 /// Runtime reason that a committed compaction start must not dispatch.

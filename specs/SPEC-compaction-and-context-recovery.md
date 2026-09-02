@@ -374,6 +374,10 @@ background and restore context is false. Interceptors may rewrite sanctioned
 text but cannot change the bit. Missing legacy fields deserialize false.
 Replay considers only true facts after the last completed checkpoint; an
 uncompleted checkpoint remains uncertain and is never automatically resent.
+Authenticated HumanUI supersession applies only to ordinary inference-owned
+uncertainty. A standalone-compaction transaction-owned checkpoint remains
+blocked under its transaction and cannot be closed by the ordinary Stale
+supersession path.
 
 Committed compaction replacement windows contain the provider items that the
 compacting request actually consumed. Replay does not reinterpret or rewrite

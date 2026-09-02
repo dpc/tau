@@ -42,6 +42,17 @@ A journal may end after the owner and before prompt-start. Duplicate prompt-star
 facts are invalid. Persisted full `agent.prompt_created` records are unsupported;
 Tau provides no migration, backfill, dual-read, or mixed-format precedence.
 
+An authenticated non-internal HumanUI inference activation may supersede an
+exact unresolved ordinary dispatch-uncertain owner, whether restored cold or
+left by a live disconnect. Tau first accepts the new prompt into its runtime
+FIFO, then owns one exact old-prompt `agent.prompt_terminated(stale)` through
+interception and semantic-admission retry. Provider-terminal, retained
+publication, tool, compaction, output-length, and outer-finish authority wins
+until that Stale commits and folds. Only that commit releases the old owner and
+permits dispatch under a new prompt id. With no qualifying HumanUI input,
+uncertainty remains blocked; queued prompt text and recently admitted Stale
+remain subject to the existing process-local and asynchronous crash-tail loss.
+
 An output-length continuation follows the same owner and prompt-start authority.
 Its embedded response plan may repair only the missing internal steer and missing
 owner. Once the owner exists, the ordinary conservative boundary applies:

@@ -278,70 +278,35 @@ impl Harness {
         if let Some(timing) = prompt_acceptance.as_mut() {
             timing.note_precursor_stats();
         }
-        // A fresh ordinary activation explicitly abandons a response-uncertain
-        // inference restored from a previous harness runtime. The historical
-        // outer start remains unterminated as the crash boundary; this runtime
-        // owns a new prompt-derived turn instead of letting the stale checkpoint
-        // block the agent forever.
+        // Queue before requesting supersession. Only the exact canonical Stale
+        // may release the old owner and make this FIFO item runnable.
         if prompt.creates_inference_activation()
             && !prompt.is_internal()
-            && let Some((durable_agent_id, uncertain_prompt_id, originator)) = self
+            && matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+            )
+            && self
                 .agent_runtime
                 .agent_registry
                 .agents
                 .get(agent_id)
-                .and_then(|agent| {
-                    if agent.dispatch.in_flight_prompt.is_none()
-                        && let path_crate_agent::ActivationDispatchState::DispatchUncertain {
-                            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
-                            agent_prompt_id,
-                            ..
-                        } = &agent.dispatch.activation_dispatch
-                    {
-                        Some((
-                            agent.identity.agent_id.clone()?,
-                            agent_prompt_id.clone(),
-                            agent.identity.originator.clone(),
-                        ))
-                    } else {
-                        None
-                    }
+                .is_some_and(|agent| {
+                    agent.dispatch.in_flight_prompt.is_none()
+                        && matches!(
+                            agent.dispatch.activation_dispatch,
+                            path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                                owner: path_crate_agent::InferenceCheckpointOwner::Inference,
+                                ..
+                            }
+                        )
                 })
-            && self
-                .session_runtime
-                .agent_store
-                .agent(&durable_agent_id)
-                .and_then(|tree| tree.marked_inference_through(&uncertain_prompt_id))
-                .is_some()
         {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id) {
                 agent.dispatch.pending_prompts.push_back(prompt);
             }
-            self.publish_for_agent(
-                agent_id,
-                tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
-                    automatic_compaction_decision: None,
-                    agent_id: durable_agent_id,
-                    agent_prompt_id: uncertain_prompt_id,
-                    reason: tau_proto::AgentPromptTerminationReason::Stale,
-                    originator,
-                }),
-            );
+            self.terminalize_uncertain_marked_owner_for_live_activation(agent_id);
             return Ok(());
-        }
-        if prompt.creates_inference_activation()
-            && !prompt.is_internal()
-            && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id)
-            && agent.dispatch.in_flight_prompt.is_none()
-            && matches!(
-                agent.dispatch.activation_dispatch,
-                crate::agent::ActivationDispatchState::DispatchUncertain {
-                    owner: crate::agent::InferenceCheckpointOwner::Inference,
-                    ..
-                }
-            )
-        {
-            agent.dispatch.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
         }
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id) {
             agent.turn.lifecycle_notification_only_turn = false;
@@ -417,6 +382,7 @@ impl Harness {
         {
             return;
         }
+        self.try_publish_ready_uncertain_supersessions();
         loop {
             let has_captured_output_length_owner = self
                 .agent_runtime

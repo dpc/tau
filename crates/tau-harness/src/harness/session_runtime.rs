@@ -387,6 +387,11 @@ impl Harness {
             || !self.session_runtime.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
+            let may_supersede_uncertain = matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+            ) && prompt.creates_inference_activation()
+                && !prompt.is_internal();
             let inference_activation = prompt.creates_inference_activation();
             let activation_kind = prompt.activation_kind();
             let activation = inference_activation.then(tau_proto::ObservationId::random);
@@ -411,11 +416,19 @@ impl Harness {
             );
             if let Some(activation) = activation {
                 self.activate_waits_for(&cid, activation);
+            }
+            if may_supersede_uncertain {
+                self.terminalize_uncertain_marked_owner_for_live_activation(&cid);
             }
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
         if self.dispatch_blocked_for(&cid) {
+            let may_supersede_uncertain = matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+            ) && prompt.creates_inference_activation()
+                && !prompt.is_internal();
             let inference_activation = prompt.creates_inference_activation();
             let activation_kind = prompt.activation_kind();
             let activation = inference_activation.then(tau_proto::ObservationId::random);
@@ -440,6 +453,9 @@ impl Harness {
             );
             if let Some(activation) = activation {
                 self.activate_waits_for(&cid, activation);
+            }
+            if may_supersede_uncertain {
+                self.terminalize_uncertain_marked_owner_for_live_activation(&cid);
             }
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
@@ -967,6 +983,10 @@ impl Harness {
         self.prompt_coordination
             .prompt_runtime
             .pending_replay_uncertain_stale
+            .clear();
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
             .clear();
         self.prompt_coordination
             .prompt_runtime
@@ -2159,6 +2179,7 @@ impl Harness {
         self.resume_restored_compaction_checkpoints(RestoredCheckpointAuthority::DiscoveryComplete);
         self.request_prompt_prewarm(&session_id);
         self.session_runtime.turn_state = TurnState::Idle;
+        self.try_publish_ready_uncertain_supersessions();
         self.try_advance_queue();
         Ok(())
     }

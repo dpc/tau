@@ -9172,6 +9172,35 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             category: tau_proto::AgentWatchProviderCategory::Compaction
         }
     ));
+    submit_authenticated_ui_prompt(
+        &mut resumed,
+        crate::parse_agent_id(&agent_id),
+        "must wait behind compaction-owned uncertainty",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit authenticated UI prompt");
+    assert!(
+        resumed
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty(),
+        "HumanUI cannot claim transaction-owned inference"
+    );
+    assert!(
+        resumed
+            .session_runtime
+            .agent_store
+            .agent_events(&agent_id)
+            .expect("records")
+            .iter()
+            .all(|record| !matches!(
+                record.event,
+                Event::AgentPromptTerminated(ref terminated)
+                    if terminated.agent_prompt_id == inference_prompt_id
+            )),
+        "transaction-owned uncertainty publishes no ordinary Stale"
+    );
     resumed.shutdown().expect("shutdown");
 }
 

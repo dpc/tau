@@ -1,7 +1,7 @@
 //! Synchronized interrupted-worker restore acceptance.
 
 use serde::Deserialize;
-use tau_e2e_tests::AgentWatchResultExpectationV2;
+use tau_e2e_tests::{AgentWatchResultExpectationV2, WatchNotificationV2};
 use tau_proto::{
     AgentId, AgentMessageKind, AgentPromptId, AgentWatchProviderCategory, AgentWatchProviderState,
     AgentWatchUpdateCause, Event, SessionAgentListScope, SessionId,
@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
-const SCENARIO_BYTES: usize = 1_039;
+const SCENARIO_BYTES: usize = 1_470;
 /// Existing bounded hold deadline used only to keep the provider prompt in
 /// flight until the synchronized process-group kill.
 const HOLD_TIMEOUT_MS: u64 = 10_000;
@@ -119,8 +119,7 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
     assert_resume_boundaries(&observer_b.events, &identities.all(), &session_id)?;
-    let notice_b =
-        interruption::assert_dispatch_uncertain_notice(&observer_b.events, &identities.worker)?;
+    interruption::assert_dispatch_uncertain_notice(&observer_b.events, &identities.worker)?;
     assert_no_restored_watch(&observer_b.events, &identities)?;
     assert_provider_turn_counts(
         &observer_b.events,
@@ -161,6 +160,35 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         return Err("S5 Boot B explicit watch exceeded its two-action main budget".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, [4, 1])?;
+    let worker_start = observer_b.events.len();
+    observer_b.submit(
+        &identities.worker,
+        "s5-fresh-worker",
+        "fresh worker after uncertainty",
+    )?;
+    observer_b.wait_for_agent_marker(
+        &identities.worker,
+        "fresh worker after uncertainty complete",
+        worker_start,
+    )?;
+    observer_b.wait_for_agent_idle_after(&identities.worker, worker_start)?;
+    observer_b.wait_for_agent_marker(
+        &identities.main,
+        "fresh worker response observed",
+        worker_start,
+    )?;
+    observer_b.wait_for_agent_idle_after(&identities.main, worker_start)?;
+    assert_provider_turn_counts(
+        &observer_b.events,
+        &identities,
+        ProviderTurnCounts { main: 4, worker: 1 },
+    )?;
+    if matched_action_count(&fixture)? != 8 {
+        return Err(
+            "S5 Boot B HumanUI supersession did not consume fresh worker/watch actions".into(),
+        );
+    }
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [6, 2])?;
     disconnect_ui(&mut observer_b.peer)?;
     daemon_b.finish()?;
 
@@ -182,9 +210,197 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     {
         return Err("S5 main work did not follow its exact initialization refresh".into());
     }
-    if !super::suffix_after_initialization(&snapshot_a, &snapshot_b, &identities.worker)?.is_empty()
+    let worker_suffix =
+        super::suffix_after_initialization(&snapshot_a, &snapshot_b, &identities.worker)?;
+    let successor_ids = worker_suffix
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentInferenceDispatchStarted(started) => Some(started.agent_prompt_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if successor_ids.len() != 1 || successor_ids[0] == dispatch.agent_prompt_id {
+        return Err(format!(
+            "S5 successor checkpoint did not use one fresh prompt id: {successor_ids:?}"
+        )
+        .into());
+    }
+    let successor_id = &successor_ids[0];
+    let old_outer_turn = tau_proto::AgentOuterTurnId::for_prompt(&dispatch.agent_prompt_id);
+    let successor_outer_turn = tau_proto::AgentOuterTurnId::for_prompt(successor_id);
+    let old_redispatches = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_prompt_id == dispatch.agent_prompt_id
+            ) || matches!(
+                &record.event,
+                Event::AgentPromptStarted(started)
+                    if started.agent_prompt_id == dispatch.agent_prompt_id
+            ) || matches!(
+                &record.event,
+                Event::AgentPromptCreated(created)
+                    if created.agent_prompt_id == dispatch.agent_prompt_id
+            )
+        })
+        .count();
+    let successor_starts = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptStarted(started)
+                    if &started.agent_prompt_id == successor_id
+            )
+        })
+        .count();
+    let successor_prompt_start_bindings = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptStarted(started)
+                    if &started.agent_prompt_id == successor_id
+                        && started.agent_id == identities.worker
+                        && started.session_id == session_id
+                        && started.outer_turn_id.as_ref() == Some(&successor_outer_turn)
+            )
+        })
+        .count();
+    let successor_creates = observer_b.events[worker_start..]
+        .iter()
+        .filter(|observed| {
+            matches!(
+                &observed.event,
+                Event::AgentPromptCreated(created)
+                    if &created.agent_prompt_id == successor_id
+            )
+        })
+        .count();
+    let successor_responses = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderResponseFinished(response)
+                    if &response.agent_prompt_id == successor_id
+            )
+        })
+        .count();
+    let old_outer_starts = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.outer_turn_id == old_outer_turn
+            )
+        })
+        .count();
+    let old_outer_starts_total = snapshot_b.agent_events[&identities.worker]
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.outer_turn_id == old_outer_turn
+                        && started.agent_prompt_id == dispatch.agent_prompt_id
+                        && started.agent_id == identities.worker
+                        && started.session_id == session_id
+            )
+        })
+        .count();
+    let successor_prompt_outer_starts_total = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if &started.agent_prompt_id == successor_id
+            )
+        })
+        .count();
+    let successor_outer_starts = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.outer_turn_id == successor_outer_turn
+                        && &started.agent_prompt_id == successor_id
+                        && started.agent_id == identities.worker
+                        && started.session_id == session_id
+            )
+        })
+        .count();
+    let old_finishes = snapshot_b.agent_events[&identities.worker]
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == old_outer_turn
+            )
+        })
+        .count();
+    let successor_finishes = worker_suffix
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == successor_outer_turn
+            )
+        })
+        .count();
+    if count_prompt(
+        worker_suffix,
+        &identities.worker,
+        "fresh worker after uncertainty",
+    ) != 1
+        || count_response(
+            worker_suffix,
+            &identities.worker,
+            "fresh worker after uncertainty complete",
+        ) != 1
+        || worker_suffix
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentPromptTerminated(terminated)
+                        if terminated.agent_prompt_id == dispatch.agent_prompt_id
+                            && terminated.reason
+                                == tau_proto::AgentPromptTerminationReason::Stale
+                )
+            })
+            .count()
+            != 1
+        || old_redispatches != 0
+        || successor_starts != 1
+        || successor_prompt_start_bindings != 1
+        || successor_creates != 1
+        || successor_responses != 1
+        || old_outer_starts != 0
+        || old_outer_starts_total != 1
+        || successor_prompt_outer_starts_total != 1
+        || successor_outer_starts != 1
+        || old_finishes != 0
+        || successor_finishes != 1
     {
-        return Err("S5 Boot B changed the worker beyond initialization refresh".into());
+        return Err(format!(
+            "S5 Boot B worker authority mismatch: old_redispatches={old_redispatches}, \
+             successor_starts={successor_starts}, \
+             successor_prompt_start_bindings={successor_prompt_start_bindings}, \
+             successor_creates={successor_creates}, successor_responses={successor_responses}, \
+             old_outer_starts={old_outer_starts}, old_outer_starts_total={old_outer_starts_total}, \
+             successor_prompt_outer_starts_total={successor_prompt_outer_starts_total}, \
+             successor_outer_starts={successor_outer_starts}, \
+             old_finishes={old_finishes}, successor_finishes={successor_finishes}"
+        )
+        .into());
     }
 
     let socket_c = fixture.socket_path("s5-boot-c");
@@ -196,21 +412,16 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let mut observer_c = SessionRestoreObserver::connect(&socket_c)?;
     observer_c.wait_for_session_boundary(&session_id)?;
     assert_resume_boundaries(&observer_c.events, &identities.all(), &session_id)?;
-    let notice_c =
-        interruption::assert_dispatch_uncertain_notice(&observer_c.events, &identities.worker)?;
-    if notice_c <= notice_b {
-        return Err("S5 Boot C did not publish a fresh dispatch-uncertain warning".into());
-    }
     assert_no_restored_watch(&observer_c.events, &identities)?;
     assert_provider_turn_counts(
         &observer_c.events,
         &identities,
         ProviderTurnCounts { main: 0, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 5 {
+    if matched_action_count(&fixture)? != 8 {
         return Err("S5 Boot C automatically consumed provider work".into());
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, [4, 1])?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [6, 2])?;
     let roster_c = observer_c.roster(&session_id, SessionAgentListScope::Current)?;
     assert_restored_roster(&roster_c, &identities)?;
     disconnect_ui(&mut observer_c.peer)?;
@@ -218,7 +429,6 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
 
     let snapshot_c = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     super::assert_initialization_only_refresh(&snapshot_b, &snapshot_c)?;
-    interruption::assert_unfinished_worker_dispatch(&snapshot_c, &identities.worker, &dispatch)?;
     fixture.assert_consumed()?;
     Ok(())
 }
@@ -252,14 +462,32 @@ fn dispatch_uncertain_scenario() -> ScenarioV2 {
                         expectation: AgentWatchResultExpectationV2::DispatchUncertainUnknown,
                         response: "uncertain worker watch recreated".to_owned(),
                     },
+                    ScenarioActionV2::WatchNotifications {
+                        notifications: vec![WatchNotificationV2::Prompt {
+                            content: "fresh worker after uncertainty".to_owned(),
+                        }],
+                        response: "fresh worker prompt observed".to_owned(),
+                    },
+                    ScenarioActionV2::WatchNotifications {
+                        notifications: vec![WatchNotificationV2::Response {
+                            content: "fresh worker after uncertainty complete".to_owned(),
+                        }],
+                        response: "fresh worker response observed".to_owned(),
+                    },
                 ],
             },
             ScenarioLaneV2 {
                 ctx_id: "s5-worker".to_owned(),
-                actions: vec![ScenarioActionV2::HoldUntilCancel {
-                    user_text: WORKER_PROVIDER_INITIAL.to_owned(),
-                    timeout_ms: HOLD_TIMEOUT_MS,
-                }],
+                actions: vec![
+                    ScenarioActionV2::HoldUntilCancel {
+                        user_text: WORKER_PROVIDER_INITIAL.to_owned(),
+                        timeout_ms: HOLD_TIMEOUT_MS,
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: "fresh worker after uncertainty".to_owned(),
+                        response: "fresh worker after uncertainty complete".to_owned(),
+                    },
+                ],
             },
         ],
     )
@@ -273,7 +501,7 @@ fn assert_scenario_budget(scenario: &ScenarioV2) -> Result<(), Box<dyn std::erro
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded = serde_json::to_vec(scenario)?;
-    if actions != [4, 1] || encoded.len() != SCENARIO_BYTES {
+    if actions != [6, 2] || encoded.len() != SCENARIO_BYTES {
         return Err(format!(
             "S5 scenario budget changed: lanes={}, actions={actions:?}, bytes={}",
             scenario.lanes.len(),

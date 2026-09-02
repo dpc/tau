@@ -8,6 +8,7 @@ use super::compaction_runtime::RollingCompactionPass;
 use super::compaction_runtime_state::SuppressedStart;
 use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublicationRetryPolicy};
 use super::prompt_materialization_timing::PromptMaterializationTiming;
+use super::prompt_runtime_state::UncertainSupersessionPhase;
 use super::start_coordinator::StartPhase;
 use super::*;
 
@@ -144,6 +145,26 @@ impl Harness {
             self.retry_capacity_rejected_activations();
         }
         self.retry_retained_start_terminals();
+        let pending_cancels = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .iter()
+            .filter_map(|(cid, agent)| agent.dispatch.pending_cancel.as_ref().map(|_| cid.clone()))
+            .collect::<Vec<_>>();
+        for cid in pending_cancels {
+            self.apply_pending_cancel_for_agent(&cid);
+        }
+        let retained = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for cid in retained {
+            self.retry_pending_agent_publish_completion(&cid);
+        }
     }
 
     /// Terminalize only starts owned by the exact failed persistence scope.
@@ -468,7 +489,8 @@ impl Harness {
                 AgentPublishCompletion::ReactiveContextRecovery { reducer, .. } => {
                     Some(reducer.checkpoint.through)
                 }
-                AgentPublishCompletion::ToolTerminal { .. }
+                AgentPublishCompletion::UncertainSupersession { .. }
+                | AgentPublishCompletion::ToolTerminal { .. }
                 | AgentPublishCompletion::InitialPromptSubmission { .. }
                 | AgentPublishCompletion::OutputLengthSteer { .. }
                 | AgentPublishCompletion::OutputLengthDormantRepair { .. }
@@ -505,7 +527,7 @@ impl Harness {
         cid: &AgentId,
         agent_prompt_id: &tau_proto::AgentPromptId,
     ) -> bool {
-        let matches_prompt = |event: &Event| {
+        let matches_canonical_prompt = |event: &Event| {
             matches!(
                 event,
                 Event::ProviderResponseFinished(response)
@@ -516,13 +538,24 @@ impl Harness {
             .publication
             .pending_intercept
             .as_ref()
-            .is_some_and(|pending| matches_prompt(&pending.event))
-            || self
-                .runtime_io
-                .publication
-                .deferred
-                .iter()
-                .any(|pending| matches_prompt(pending.event()))
+            .is_some_and(|pending| {
+                matches_canonical_prompt(&pending.event)
+                    || matches!(
+                        &pending.event,
+                        Event::ProviderResponseFinishedReported(response)
+                            if &response.agent_prompt_id == agent_prompt_id
+                                && pending.provider_terminal_owner_matches(cid, agent_prompt_id)
+                    )
+            })
+            || self.runtime_io.publication.deferred.iter().any(|pending| {
+                matches_canonical_prompt(pending.event())
+                    || matches!(
+                        pending.event(),
+                        Event::ProviderResponseFinishedReported(response)
+                            if &response.agent_prompt_id == agent_prompt_id
+                                && pending.provider_terminal_owner_matches(cid, agent_prompt_id)
+                    )
+            })
             || self
                 .prompt_coordination
                 .prompt_runtime
@@ -545,7 +578,7 @@ impl Harness {
             .identity
             .agent_id
             .as_deref()?;
-        let from_event = |event: &Event| match event {
+        let from_canonical_event = |event: &Event| match event {
             Event::ProviderResponseFinished(response) if response.agent_id.as_str() == agent_id => {
                 Some(response.agent_prompt_id.clone())
             }
@@ -555,13 +588,35 @@ impl Harness {
             .publication
             .pending_intercept
             .as_ref()
-            .and_then(|pending| from_event(&pending.event))
+            .and_then(|pending| {
+                from_canonical_event(&pending.event).or_else(|| match &pending.event {
+                    Event::ProviderResponseFinishedReported(response)
+                        if pending
+                            .provider_terminal_owner_matches(cid, &response.agent_prompt_id) =>
+                    {
+                        Some(response.agent_prompt_id.clone())
+                    }
+                    _ => None,
+                })
+            })
             .or_else(|| {
                 self.runtime_io
                     .publication
                     .deferred
                     .iter()
-                    .find_map(|pending| from_event(pending.event()))
+                    .find_map(|pending| {
+                        from_canonical_event(pending.event()).or_else(|| match pending.event() {
+                            Event::ProviderResponseFinishedReported(response)
+                                if pending.provider_terminal_owner_matches(
+                                    cid,
+                                    &response.agent_prompt_id,
+                                ) =>
+                            {
+                                Some(response.agent_prompt_id.clone())
+                            }
+                            _ => None,
+                        })
+                    })
             })
             .or_else(|| {
                 self.prompt_coordination
@@ -718,6 +773,24 @@ impl Harness {
         completion: AgentPublishCompletion,
         through: tau_proto::AgentHead,
     ) {
+        if let AgentPublishCompletion::UncertainSupersession {
+            agent_prompt_id, ..
+        } = completion
+        {
+            if self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .get(cid)
+                .is_some_and(|pending| pending.terminal.agent_prompt_id == agent_prompt_id)
+            {
+                self.prompt_coordination
+                    .prompt_runtime
+                    .pending_uncertain_supersessions
+                    .remove(cid);
+            }
+            return;
+        }
         if let AgentPublishCompletion::InitialPromptSubmission { mut correlation } = completion {
             correlation.activation_through = Some(through);
             self.prompt_coordination
@@ -1084,6 +1157,17 @@ impl Harness {
             owning_branch,
             retry_policy: OwnedPublicationRetryPolicy::ApprovedEventWithoutInterception,
         });
+        if matches!(
+            completion,
+            AgentPublishCompletion::UncertainSupersession { .. }
+        ) && let Some(owner) = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .get_mut(&cid)
+        {
+            owner.phase = UncertainSupersessionPhase::RetainedRetry;
+        }
         if let AgentPublishCompletion::StandaloneExecutionAccounting {
             key,
             owned_publication: Some(publication),
@@ -1160,6 +1244,17 @@ impl Harness {
         else {
             return;
         };
+        if let AgentPublishCompletion::UncertainSupersession {
+            agent_prompt_id, ..
+        } = &completion
+            && !self.uncertain_supersession_is_eligible(cid, agent_prompt_id)
+        {
+            self.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .insert(cid.clone(), completion);
+            return;
+        }
         if let AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } = &completion
         {
             let selected = self
@@ -2755,6 +2850,21 @@ impl Harness {
             self.continue_committed_ui_compaction(&cid, requested.target_agent_id.clone());
         }
         if let Event::ProviderResponseFinished(response) = event
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
+            && self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .get(&cid)
+                .is_some_and(|pending| pending.terminal.agent_prompt_id == response.agent_prompt_id)
+        {
+            self.prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .remove(&cid);
+        }
+        if let Event::ProviderResponseFinished(response) = event
             && let Some(decision) = &response.automatic_compaction_decision
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
@@ -3770,6 +3880,40 @@ impl Harness {
                     tau_proto::AgentPromptFailureStage::Canceled,
                     "initial prompt was canceled",
                 );
+            }
+            if self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .get(&cid)
+                .is_some_and(|pending| {
+                    pending.terminal.agent_prompt_id == terminated.agent_prompt_id
+                })
+            {
+                self.prompt_coordination
+                    .prompt_runtime
+                    .pending_uncertain_supersessions
+                    .remove(&cid);
+            }
+            if self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .get(&cid)
+                .is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        AgentPublishCompletion::UncertainSupersession {
+                            agent_prompt_id,
+                            ..
+                        } if agent_prompt_id == &terminated.agent_prompt_id
+                    )
+                })
+            {
+                self.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .remove(&cid);
             }
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 agent.dispatch.activation_dispatch =

@@ -1,5 +1,8 @@
 //! Tests for provider responses behavior.
 
+use std::fs::File;
+use std::io::Write;
+
 use super::super::lifecycle::seed_restored_compaction_checkpoint;
 use super::*;
 
@@ -515,6 +518,1102 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         );
         h.shutdown().expect("shutdown");
     }
+}
+
+/// Authenticated HumanUI prompts queue before one exact retained Stale,
+/// coalesce while interception is parked, and dispatch under a fresh prompt id
+/// after an admission-rejected terminal retries without another input.
+#[test]
+fn provider_loss_human_ui_supersession_coalesces_and_retries_exact_stale() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let replacement_model = h
+        .provider_runtime
+        .model_info
+        .values()
+        .find(|model| model.id == tau_proto::ModelId::from("test/model"))
+        .expect("test model")
+        .clone();
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+        .expect("dispatch owner");
+    let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+    let provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+    h.handle_disconnect(&provider);
+    connect_ready_configured_extension(
+        &mut h,
+        "replacement-provider",
+        "replacement-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    h.publish_provider_models_update(
+        &crate::test_connection_id("replacement-provider"),
+        crate::test_extension_name("replacement-provider"),
+        tau_proto::ProviderModelsDeclared {
+            models: vec![replacement_model],
+        },
+    );
+    connect_test_tool(&mut h, "stale-interceptor");
+    h.handle_extension_event(
+        "stale-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    for text in [
+        "first replacement",
+        "second replacement",
+        "third replacement",
+    ] {
+        submit_authenticated_ui_prompt(
+            &mut h,
+            crate::parse_agent_id(&durable_agent_id),
+            text,
+            tau_proto::PromptMessageClass::User,
+        )
+        .expect("submit authenticated UI prompt");
+    }
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .len(),
+        3,
+        "every accepted prompt remains FIFO-owned"
+    );
+    assert_eq!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .len(),
+        1,
+        "later prompts coalesce behind one exact Stale owner"
+    );
+    let replacement = Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        automatic_compaction_decision: None,
+        agent_id: durable_agent_id.clone(),
+        agent_prompt_id: test_agent_prompt_id("forged-replacement"),
+        reason: tau_proto::AgentPromptTerminationReason::Canceled,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "stale-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(replacement))),
+        })),
+    )
+    .expect("reject exact Stale admission");
+    assert!(matches!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions[&cid]
+            .phase,
+        super::super::super::prompt_runtime_state::UncertainSupersessionPhase::RetainedRetry
+    ));
+
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("persistence owner")
+        .signal_capacity_ready_for_test();
+    h.handle_runtime_event(
+        HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("retry retained Stale from capacity progress");
+    h.drain_publish_idle_dispatches();
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(&durable_agent_id)
+        .expect("durable records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason
+                            == tau_proto::AgentPromptTerminationReason::Stale
+            ))
+            .count(),
+        1,
+        "the immutable original Stale commits exactly once"
+    );
+    assert!(
+        records.iter().all(|record| !matches!(
+            &record.event,
+            Event::AgentPromptTerminated(terminated)
+                if terminated.agent_prompt_id.as_str() == "forged-replacement"
+        )),
+        "interception cannot replace the exact supersession terminal"
+    );
+    let new_prompt = read_nth_prompt_created(&h, 1);
+    assert_ne!(new_prompt.agent_prompt_id, old_prompt_id);
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// An exact late provider terminal that arrives before a parked HumanUI Stale
+/// commits wins canonical ownership and retires only that supersession.
+#[test]
+fn provider_terminal_wins_over_parked_human_ui_supersession() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+        .expect("dispatch owner");
+    let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+    let provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+    connect_test_tool(&mut h, "terminal-race-interceptor");
+    h.handle_extension_event(
+        "terminal-race-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_disconnect(&provider);
+    submit_authenticated_ui_prompt(
+        &mut h,
+        crate::parse_agent_id(&durable_agent_id),
+        "queued replacement",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit authenticated UI prompt");
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+
+    h.handle_provider_response_finished(provider_text_response(
+        &old_prompt_id,
+        durable_agent_id.clone(),
+        "late exact response",
+    ))
+    .expect("accept winning terminal");
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .all(|record| !matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+            )),
+        "the canceled Stale never becomes canonical"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A provider terminal report admitted before disconnect remains the exact
+/// winning authority while parked, so later HumanUI input cannot publish Stale.
+#[test]
+fn parked_provider_terminal_report_wins_before_human_ui_supersession() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+        .expect("dispatch owner");
+    let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+    let provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+    connect_test_tool(&mut h, "report-race-interceptor");
+    h.handle_extension_event(
+        "report-race-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register blocking interceptor");
+    h.emit_info("park report behind this observation");
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+    h.handle_extension_event_inner(
+        &provider,
+        Event::ProviderResponseFinishedReported(provider_text_response(
+            &old_prompt_id,
+            durable_agent_id.clone(),
+            "winning parked report",
+        )),
+    )
+    .expect("defer provider terminal report");
+    h.handle_disconnect(&provider);
+    submit_authenticated_ui_prompt(
+        &mut h,
+        durable_agent_id.clone(),
+        "queued after terminal report",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit authenticated UI prompt");
+    h.handle_extension_event(
+        "report-race-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit admitted report after disconnect");
+    while matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::HarnessNotice(_))
+    ) {
+        h.handle_extension_event(
+            "report-race-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("drain later notice interception");
+    }
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == old_prompt_id
+            )),
+        "the admitted report remains canonical terminal authority"
+    );
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .all(|record| !matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+            )),
+        "no competing Stale commits"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A non-owning provider's deferred report does not block the exact HumanUI
+/// Stale and its rejection wakes the Ready supersession without another input.
+#[test]
+fn nonowning_deferred_provider_report_does_not_wedge_human_ui_supersession() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+        .expect("dispatch owner");
+    let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+    let owning_provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+    connect_ready_configured_extension(
+        &mut h,
+        "nonowning-provider",
+        "nonowning-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let nonowner = crate::test_connection_id("nonowning-provider");
+    connect_test_tool(&mut h, "nonowner-race-interceptor");
+    h.handle_extension_event(
+        "nonowner-race-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register blocking interceptor");
+    h.emit_info("park nonowner report behind this observation");
+    h.handle_extension_event_inner(
+        &nonowner,
+        Event::ProviderResponseFinishedReported(provider_text_response(
+            &old_prompt_id,
+            durable_agent_id.clone(),
+            "spoofed terminal",
+        )),
+    )
+    .expect("defer nonowning report");
+    h.handle_disconnect(&owning_provider);
+    submit_authenticated_ui_prompt(
+        &mut h,
+        durable_agent_id.clone(),
+        "fresh HumanUI prompt",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit authenticated UI prompt");
+    h.handle_extension_event(
+        "nonowner-race-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release blocking observation");
+    while matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::HarnessNotice(_))
+    ) {
+        h.handle_extension_event(
+            "nonowner-race-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("drain later notice");
+    }
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason
+                            == tau_proto::AgentPromptTerminationReason::Stale
+            ))
+            .count(),
+        1,
+        "nonowner report retirement wakes the exact Stale"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Exercise retirement of an admitted exact provider report while cancellation
+/// and HumanUI supersession wait behind it.
+fn assert_retired_exact_provider_report_redrives_cancel(replace: bool) {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+        .expect("dispatch owner");
+    let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+    let provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+    connect_test_tool(&mut h, "stale-race-interceptor");
+    h.handle_extension_event(
+        "stale-race-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register Stale interceptor");
+    connect_test_tool(&mut h, "report-drop-interceptor");
+    h.handle_extension_event(
+        "report-drop-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED_REPORTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register report interceptor");
+
+    h.handle_disconnect(&provider);
+    connect_ready_configured_extension(
+        &mut h,
+        "late-provider",
+        "late-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let late_provider = crate::test_connection_id("late-provider");
+    submit_authenticated_ui_prompt(
+        &mut h,
+        durable_agent_id.clone(),
+        "fresh HumanUI prompt",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("park HumanUI Stale");
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "stale-race-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("retain exact Stale after admission pressure");
+    assert!(matches!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions[&cid]
+            .phase,
+        super::super::super::prompt_runtime_state::UncertainSupersessionPhase::RetainedRetry
+    ));
+    assert!(matches!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .get(&cid),
+        Some(super::super::super::interception::AgentPublishCompletion::UncertainSupersession {
+            agent_prompt_id,
+            ..
+        }) if agent_prompt_id == &old_prompt_id
+    ));
+    h.handle_disconnect(&crate::test_connection_id("stale-race-interceptor"));
+    // Model the admission-time route proof held by a terminal already read
+    // from the prompt's provider.
+    h.provider_runtime
+        .pending_prompts
+        .insert(old_prompt_id.clone(), late_provider.clone());
+    h.handle_extension_event_inner(
+        &late_provider,
+        Event::ProviderResponseFinishedReported(provider_text_response(
+            &old_prompt_id,
+            durable_agent_id.clone(),
+            "terminal dropped by policy",
+        )),
+    )
+    .expect("park exact provider terminal report");
+    assert!(matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::ProviderResponseFinishedReported(response))
+            if response.agent_prompt_id == old_prompt_id
+    ));
+    h.handle_disconnect(&late_provider);
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.session_runtime.current_session_id.clone(),
+            target_agent_id: Some(durable_agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "report-drop-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: if replace {
+                InterceptAction::Pass(Some(Box::new(Event::ProviderResponseFinishedReported(
+                    provider_text_response(
+                        &test_agent_prompt_id("replacement-report-prompt"),
+                        durable_agent_id.clone(),
+                        "replacement loses captured route authority",
+                    ),
+                ))))
+            } else {
+                InterceptAction::Drop
+            },
+        })),
+    )
+    .expect("retire admitted terminal report");
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_cancel
+            .is_some(),
+        "admission pressure retains the exact cancellation owner"
+    );
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("persistence owner")
+        .signal_capacity_ready_for_test();
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("capacity progress retries exact cancellation");
+
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason
+                            == tau_proto::AgentPromptTerminationReason::Canceled
+            ))
+            .count(),
+        1,
+        "report retirement wakes the exact cancellation without another input"
+    );
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .all(|record| !matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+            )),
+        "cancellation remains stronger than the queued HumanUI supersession"
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty(),
+        "canonical cancellation retires the exact retained Stale completion"
+    );
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_cancel
+            .is_none()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Dropping an admitted raw terminal re-drives exact cancellation before Stale.
+#[test]
+fn dropped_exact_provider_report_redrives_cancel_before_human_ui_supersession() {
+    assert_retired_exact_provider_report_redrives_cancel(false);
+}
+
+/// Replacing an admitted raw terminal with a different prompt also re-drives
+/// exact cancellation before Stale.
+#[test]
+fn replaced_exact_provider_report_redrives_cancel_before_human_ui_supersession() {
+    assert_retired_exact_provider_report_redrives_cancel(true);
+}
+
+/// HumanUI input accepted before restored activation handling coalesces behind
+/// the exact replay Stale owner instead of publishing a duplicate terminal.
+#[test]
+fn replay_uncertain_stale_owner_coalesces_human_ui_during_initialization_cut() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let replacement_model = h
+        .provider_runtime
+        .model_info
+        .values()
+        .find(|model| model.id == tau_proto::ModelId::from("test/model"))
+        .expect("test model")
+        .clone();
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+        .expect("dispatch owner");
+    let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+    let provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+    h.handle_disconnect(&provider);
+    connect_ready_configured_extension(
+        &mut h,
+        "replay-replacement-provider",
+        "replay-replacement-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    h.publish_provider_models_update(
+        &crate::test_connection_id("replay-replacement-provider"),
+        crate::test_extension_name("replay-replacement-provider"),
+        tau_proto::ProviderModelsDeclared {
+            models: vec![replacement_model],
+        },
+    );
+    h.prompt_coordination
+        .prompt_runtime
+        .pending_replay_uncertain_stale
+        .insert(
+            cid.clone(),
+            tau_proto::AgentPromptTerminated {
+                automatic_compaction_decision: None,
+                agent_id: durable_agent_id.clone(),
+                agent_prompt_id: old_prompt_id.clone(),
+                reason: tau_proto::AgentPromptTerminationReason::Stale,
+                originator: tau_proto::PromptOriginator::User,
+            },
+        );
+    connect_test_tool(&mut h, "replay-stale-interceptor");
+    h.handle_extension_event(
+        "replay-stale-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register replay Stale interceptor");
+
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.session_runtime.turn_state = TurnState::InitializingSession {
+        session_id: session_id.clone(),
+        reason: tau_proto::SessionStartReason::Resume,
+        waiting_on: path_std_collections::HashSet::new(),
+    };
+    submit_authenticated_ui_prompt(
+        &mut h,
+        durable_agent_id.clone(),
+        "queued during replay activation",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit authenticated UI prompt");
+    assert!(
+        h.runtime_io.publication.pending_intercept.is_none(),
+        "initialization retains the Ready Stale until repair completes"
+    );
+    h.try_publish_ready_uncertain_supersession(&cid);
+    assert!(
+        h.runtime_io.publication.pending_intercept.is_none(),
+        "incidental singular wakes cannot bypass the initialization cut"
+    );
+    h.complete_session_init(session_id, tau_proto::SessionStartReason::Resume)
+        .expect("complete session initialization");
+    assert!(
+        matches!(
+            h.runtime_io
+                .publication
+                .pending_intercept
+                .as_ref()
+                .map(|pending| &pending.event),
+            Some(Event::AgentPromptTerminated(terminated))
+                if terminated.agent_prompt_id == old_prompt_id
+        ),
+        "the explicit post-repair drive publishes the retained Stale"
+    );
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "replay-stale-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject replay Stale admission");
+    assert!(matches!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions[&cid]
+            .phase,
+        super::super::super::prompt_runtime_state::UncertainSupersessionPhase::RetainedRetry
+    ));
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_replay_uncertain_stale
+            .is_empty(),
+        "the replay owner transfers into the retained supersession envelope"
+    );
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .all(|record| !matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+            )),
+        "HumanUI does not publish a competing Stale"
+    );
+
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("persistence owner")
+        .signal_capacity_ready_for_test();
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("capacity progress retries replay Stale");
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+            ))
+            .count(),
+        1,
+        "the replay owner commits exactly once"
+    );
+    let successor = read_nth_prompt_created(&h, 1);
+    assert_ne!(
+        successor.agent_prompt_id, old_prompt_id,
+        "FIFO dispatch uses a fresh prompt id"
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold replay observes only the written journal prefix: a lost Stale restores
+/// uncertainty, while a written Stale closes the owner without reconstructing
+/// the process-local HumanUI queue.
+#[test]
+fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
+    for retain_stale in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        let (durable_agent_id, old_prompt_id, cut_records) = {
+            let mut h = quiet_provider_harness(&state).expect("start");
+            let cid = ensure_test_user_agent(&mut h);
+            let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+            h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+                .expect("dispatch owner");
+            let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+            let provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+            h.handle_disconnect(&provider);
+            let before_stale = h
+                .session_runtime
+                .agent_store
+                .agent_events(&durable_agent_id)
+                .expect("pre-Stale records")
+                .to_vec();
+            submit_authenticated_ui_prompt(
+                &mut h,
+                durable_agent_id.clone(),
+                "process-local crash-tail text",
+                tau_proto::PromptMessageClass::User,
+            )
+            .expect("submit HumanUI supersession");
+            let after_stale = h
+                .session_runtime
+                .agent_store
+                .agent_events(&durable_agent_id)
+                .expect("post-Stale records")
+                .to_vec();
+            let stale_index = after_stale
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentPromptTerminated(terminated)
+                            if terminated.agent_prompt_id == old_prompt_id
+                                && terminated.reason
+                                    == tau_proto::AgentPromptTerminationReason::Stale
+                    )
+                })
+                .expect("canonical Stale");
+            let cut_records = if retain_stale {
+                after_stale[..=stale_index].to_vec()
+            } else {
+                before_stale
+            };
+            h.shutdown().expect("flush seed before crash-tail rewrite");
+            (durable_agent_id, old_prompt_id, cut_records)
+        };
+
+        let journal_path = state
+            .join("agents")
+            .join(durable_agent_id.as_str())
+            .join("events.cbor");
+        let mut journal = File::create(&journal_path).expect("rewrite crash-tail prefix");
+        for record in &cut_records {
+            let mut encoded = Vec::new();
+            ciborium::into_writer(record, &mut encoded).expect("encode cut record");
+            journal
+                .write_all(&(encoded.len() as u64).to_le_bytes())
+                .expect("write record length");
+            journal.write_all(&encoded).expect("write cut record");
+        }
+        journal.sync_all().expect("sync crash-tail prefix");
+
+        let mut restored =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("cold restore");
+        let restored_cid = restored
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .get(durable_agent_id.as_str())
+            .cloned()
+            .expect("restored route");
+        let records = restored
+            .session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("restored records");
+        assert!(
+            records.starts_with(&cut_records),
+            "cold replay must preserve the exact written prefix"
+        );
+        assert!(
+            records[cut_records.len()..]
+                .iter()
+                .all(|record| matches!(record.event, Event::AgentInitializationContextSet(_))),
+            "resume may append only its initialization replacement"
+        );
+        let stale_count = records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentPromptTerminated(terminated)
+                        if terminated.agent_prompt_id == old_prompt_id
+                            && terminated.reason
+                                == tau_proto::AgentPromptTerminationReason::Stale
+                )
+            })
+            .count();
+        assert_eq!(stale_count, usize::from(retain_stale));
+        assert_eq!(
+            restored
+                .session_runtime
+                .agent_store
+                .agent(&durable_agent_id)
+                .and_then(|tree| tree.marked_inference_through(&old_prompt_id))
+                .is_some(),
+            !retain_stale
+        );
+        assert_eq!(
+            matches!(
+                &restored.agent_runtime.agent_registry.agents[&restored_cid]
+                    .dispatch
+                    .activation_dispatch,
+                crate::agent::ActivationDispatchState::DispatchUncertain {
+                    owner: crate::agent::InferenceCheckpointOwner::Inference,
+                    agent_prompt_id,
+                    ..
+                } if agent_prompt_id == &old_prompt_id
+            ),
+            !retain_stale,
+            "only the prefix without written Stale restores the exact old owner"
+        );
+        if retain_stale {
+            assert!(matches!(
+                restored.agent_runtime.agent_registry.agents[&restored_cid]
+                    .dispatch
+                    .activation_dispatch,
+                crate::agent::ActivationDispatchState::None
+            ));
+        }
+        assert!(
+            restored.agent_runtime.agent_registry.agents[&restored_cid]
+                .dispatch
+                .pending_prompts
+                .is_empty(),
+            "replay never reconstructs process-local queued prompt text"
+        );
+        assert!(records.iter().all(|record| {
+            !matches!(
+                &record.event,
+                Event::AgentUserMessageInjected(message)
+                    if message.text == "process-local crash-tail text"
+            )
+        }));
+        assert!(
+            restored
+                .prompt_coordination
+                .prompt_runtime
+                .pending_replay_uncertain_stale
+                .is_empty()
+        );
+        assert!(
+            restored
+                .prompt_coordination
+                .prompt_runtime
+                .pending_uncertain_supersessions
+                .is_empty()
+        );
+        assert!(
+            restored
+                .prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .is_empty()
+        );
+        restored.shutdown().expect("shutdown restored cut");
+    }
+}
+
+/// A retained manual-compaction start installed after HumanUI Stale
+/// interception gains priority before semantic admission.
+#[test]
+fn retained_manual_compaction_start_while_human_ui_stale_is_parked_wins() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let replacement_model = h
+        .provider_runtime
+        .model_info
+        .values()
+        .find(|model| model.id == tau_proto::ModelId::from("test/model"))
+        .expect("test model")
+        .clone();
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("old owner".to_owned()))
+        .expect("dispatch owner");
+    let old_prompt_id = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
+    let provider = h.provider_runtime.pending_prompts[&old_prompt_id].clone();
+    h.handle_disconnect(&provider);
+    connect_ready_configured_extension(
+        &mut h,
+        "replacement-provider",
+        "replacement-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    h.publish_provider_models_update(
+        &crate::test_connection_id("replacement-provider"),
+        crate::test_extension_name("replacement-provider"),
+        tau_proto::ProviderModelsDeclared {
+            models: vec![replacement_model],
+        },
+    );
+    connect_test_tool(&mut h, "manual-race-interceptor");
+    h.handle_extension_event(
+        "manual-race-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    submit_authenticated_ui_prompt(
+        &mut h,
+        durable_agent_id.clone(),
+        "queued behind manual compaction",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit authenticated UI prompt");
+    assert!(matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::AgentPromptTerminated(terminated))
+            if terminated.agent_prompt_id == old_prompt_id
+    ));
+    h.prompt_coordination
+        .compaction_runtime
+        .rejected_ui_starts
+        .insert(
+            cid.clone(),
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: durable_agent_id.clone(),
+                transaction_id: tau_proto::CompactionTransactionId::parse(
+                    "ct-retained-manual-start",
+                )
+                .expect("transaction"),
+                compact_prompt_id: test_agent_prompt_id("retained-manual-start"),
+                cut: tau_proto::AgentHead::Root,
+                resume_through: None,
+                model: "test/model".into(),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: tau_proto::PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::ManualUi {
+                    request_id: tau_proto::CompactionRequestId::parse("cr-retained-manual-start")
+                        .expect("request"),
+                },
+            }),
+        );
+    h.handle_extension_event(
+        "manual-race-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release Stale after compaction claim");
+
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("records")
+            .iter()
+            .all(|record| !matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+            )),
+        "manual compaction authority prevents Stale commit"
+    );
+    assert!(matches!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions[&cid]
+            .phase,
+        super::super::super::prompt_runtime_state::UncertainSupersessionPhase::Ready
+    ));
+    assert!(
+        !h.prompt_coordination
+            .compaction_runtime
+            .rejected_ui_starts
+            .is_empty(),
+        "retained manual start keeps target authority"
+    );
+    h.shutdown().expect("shutdown");
 }
 
 /// Provider loss must preserve a transaction-owned checkpoint even when an

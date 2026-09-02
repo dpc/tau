@@ -185,6 +185,28 @@ pub(crate) struct PendingIntercept {
 }
 
 impl PendingIntercept {
+    /// Return the exact provider prompt route captured at report admission.
+    pub(crate) fn provider_terminal_owner(
+        &self,
+    ) -> Option<&(tau_proto::AgentId, tau_proto::AgentPromptId)> {
+        self.source
+            .peer_context
+            .extension
+            .as_ref()
+            .and_then(|extension| extension.provider_terminal_prompt_owner.as_ref())
+    }
+
+    /// Return whether this parked report captured the exact provider route
+    /// owner.
+    pub(crate) fn provider_terminal_owner_matches(
+        &self,
+        cid: &AgentId,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) -> bool {
+        self.provider_terminal_owner()
+            .is_some_and(|(owner, prompt_id)| owner == cid && prompt_id == agent_prompt_id)
+    }
+
     /// Return immutable original-route privacy captured before any interceptor
     /// replacement in this publication chain.
     pub(crate) fn original_shell_report_targets_ephemeral(&self) -> bool {
@@ -248,6 +270,9 @@ pub(crate) struct AuthenticatedExtensionPublication {
     pub(crate) shell_report_targets_ephemeral: bool,
     /// Activation-stage reservation made before interception.
     pub(crate) activation_reservation: Option<ActivationReservation>,
+    /// Exact provider prompt route owned when a terminal report was admitted.
+    pub(crate) provider_terminal_prompt_owner:
+        Option<(tau_proto::AgentId, tau_proto::AgentPromptId)>,
 }
 
 /// Pre-activation quota reservation for one intercepted declaration.
@@ -353,6 +378,28 @@ impl DeferredPublish {
     /// Borrow the event independent of its eventual commit path.
     pub(crate) fn event(&self) -> &Event {
         &self.event
+    }
+
+    /// Borrow the synchronized completion carried by this deferred publication.
+    pub(crate) fn completion(&self) -> Option<&AgentPublishCompletion> {
+        self.sync_head_for
+            .as_ref()
+            .and_then(ConversationHeadSync::completion)
+    }
+
+    /// Return whether this deferred report captured the exact provider route
+    /// owner.
+    pub(crate) fn provider_terminal_owner_matches(
+        &self,
+        cid: &AgentId,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) -> bool {
+        self.source
+            .peer_context
+            .extension
+            .as_ref()
+            .and_then(|extension| extension.provider_terminal_prompt_owner.as_ref())
+            .is_some_and(|(owner, prompt_id)| owner == cid && prompt_id == agent_prompt_id)
     }
 }
 
@@ -499,6 +546,14 @@ pub(crate) enum OwnedPublicationRetryPolicy {
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
+    /// Release one exact ordinary uncertain inference only after Stale commits.
+    UncertainSupersession {
+        /// Exact old prompt whose marked owner remains authoritative until
+        /// commit.
+        agent_prompt_id: tau_proto::AgentPromptId,
+        /// Exact interceptor-approved Stale retained after append rejection.
+        owned_publication: Option<OwnedPublication>,
+    },
     /// Retain one canonical foreground tool terminal until its durable append
     /// commits.
     ToolTerminal {
@@ -635,7 +690,10 @@ impl AgentPublishCompletion {
     /// Return the retained owned publication, when admission has rejected it.
     pub(super) fn owned_publication(&self) -> Option<&OwnedPublication> {
         match self {
-            Self::ToolTerminal {
+            Self::UncertainSupersession {
+                owned_publication, ..
+            }
+            | Self::ToolTerminal {
                 owned_publication, ..
             }
             | Self::GatedFinal {
@@ -680,7 +738,10 @@ impl AgentPublishCompletion {
     /// existing contract retains an approved publication through rejection.
     pub(super) fn owned_publication_mut(&mut self) -> Option<&mut Option<OwnedPublication>> {
         match self {
-            Self::ToolTerminal {
+            Self::UncertainSupersession {
+                owned_publication, ..
+            }
+            | Self::ToolTerminal {
                 owned_publication, ..
             }
             | Self::GatedFinal {
@@ -733,7 +794,8 @@ impl AgentPublishCompletion {
             Self::StandaloneContinuation { batch_parent, .. } => {
                 Some(OwnedPublicationBranch::DescendantOf(*batch_parent))
             }
-            Self::ToolTerminal { .. }
+            Self::UncertainSupersession { .. }
+            | Self::ToolTerminal { .. }
             | Self::OutputLengthDormantRepair { .. }
             | Self::ReactiveContextRecovery { .. }
             | Self::ReactiveContextRecoveryStart { .. }
@@ -791,6 +853,7 @@ impl AgentPublishCompletion {
                 _ => None,
             },
             Self::ToolTerminal { .. }
+            | Self::UncertainSupersession { .. }
             | Self::InitialPromptSubmission { .. }
             | Self::GatedFinal { .. }
             | Self::OutputLengthSteer { .. }
@@ -816,7 +879,8 @@ impl AgentPublishCompletion {
     fn transaction_id(&self) -> &tau_proto::CompactionTransactionId {
         match self {
             Self::StandaloneContinuation { transaction_id, .. } => transaction_id,
-            Self::ToolTerminal { .. }
+            Self::UncertainSupersession { .. }
+            | Self::ToolTerminal { .. }
             | Self::GatedFinal { .. }
             | Self::OutputLengthContinuation { .. }
             | Self::OutputLengthSteer { .. }
@@ -1331,7 +1395,7 @@ impl Harness {
         })
     }
 
-    fn suspend_interceptor_after_destructive_cancel(
+    pub(super) fn suspend_interceptor_after_destructive_cancel(
         &mut self,
         connection_id: &tau_proto::ConnectionId,
     ) {
@@ -1363,6 +1427,10 @@ impl Harness {
     /// agent, suspend an in-flight responder, and resume unrelated FIFO
     /// work.
     pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .remove(cid);
         let mut canceled_prompt_ids = Vec::new();
         let mut canceled_initial_prompts = Vec::new();
         let mut canceled_watch_retirements = Vec::new();
@@ -1754,6 +1822,7 @@ impl Harness {
                 .first()
                 .is_some_and(path_crate_agent::PendingPrompt::should_notify_watchers),
             AgentPublishCompletion::ToolTerminal { .. }
+            | AgentPublishCompletion::UncertainSupersession { .. }
             | AgentPublishCompletion::GatedFinal { .. } => false,
             AgentPublishCompletion::OutputLengthContinuation { .. } => false,
             AgentPublishCompletion::OutputLengthSteer { .. } => false,
@@ -1774,6 +1843,19 @@ impl Harness {
                 .get(cid)
                 .and_then(|agent| agent.identity.agent_id.clone())
         });
+        let suppress_activation_dispatch = !matches!(
+            &completion,
+            AgentPublishCompletion::UncertainSupersession { .. }
+        );
+        let persist = event.defaults_to_persist()
+            || matches!(
+                &event,
+                Event::AgentPromptTerminated(_)
+                    if matches!(
+                        &completion,
+                        AgentPublishCompletion::UncertainSupersession { .. }
+                    )
+            );
         self.commit_event(
             source,
             &PeerPublicationContext {
@@ -1781,13 +1863,13 @@ impl Harness {
                 ..PeerPublicationContext::default()
             },
             event.clone(),
-            event.defaults_to_persist(),
+            persist,
             Some(ConversationHeadSync {
                 cid: cid.clone(),
                 agent_id,
                 session_generation: self.session_runtime.current_session_generation,
                 fold_parent: Some(semantic_parent),
-                suppress_activation_dispatch: true,
+                suppress_activation_dispatch,
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
                 notify_watchers,
             }),
@@ -2646,6 +2728,19 @@ impl Harness {
                 }),
                 shell_report_targets_ephemeral,
                 activation_reservation,
+                provider_terminal_prompt_owner: match &event {
+                    Event::ProviderResponseFinishedReported(response)
+                        if self
+                            .provider_runtime
+                            .pending_prompts
+                            .get(&response.agent_prompt_id)
+                            == Some(&entry.connection_id) =>
+                    {
+                        self.agent_id_for_prompt(&response.agent_prompt_id)
+                            .map(|cid| (cid, response.agent_prompt_id.clone()))
+                    }
+                    _ => None,
+                },
             }),
             debug_sensitivity,
         };
@@ -2843,11 +2938,28 @@ impl Harness {
             self.runtime_io.publication.pending_intercept = Some(pending);
             return Ok(());
         }
+        let retained_before_reply = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let provider_terminal_owner = pending
+            .provider_terminal_owner()
+            .map(|(cid, _)| cid.clone());
         self.advance_pending_intercept(pending, reply.action);
         self.take_pending_publish_error()?;
         self.drain_deferred_publishes();
         self.take_pending_publish_error()?;
         self.drain_publish_idle_dispatches();
+        if let Some(cid) = provider_terminal_owner {
+            self.apply_pending_cancel_for_agent(&cid);
+        }
+        self.try_publish_ready_uncertain_supersessions();
+        for cid in retained_before_reply {
+            self.retry_pending_agent_publish_completion(&cid);
+        }
         Ok(())
     }
 
@@ -2870,10 +2982,27 @@ impl Harness {
             connection_id = %conn_id,
             "interceptor disconnected mid-reply; treating as Pass(None)",
         );
+        let retained_before_reply = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let provider_terminal_owner = pending
+            .provider_terminal_owner()
+            .map(|(cid, _)| cid.clone());
         self.advance_pending_intercept(pending, InterceptAction::Pass(None));
         if self.runtime_io.publication.pending_error.is_none() {
             self.drain_deferred_publishes();
             self.drain_publish_idle_dispatches();
+            if let Some(cid) = provider_terminal_owner {
+                self.apply_pending_cancel_for_agent(&cid);
+            }
+            self.try_publish_ready_uncertain_supersessions();
+            for cid in retained_before_reply {
+                self.retry_pending_agent_publish_completion(&cid);
+            }
         }
     }
 
