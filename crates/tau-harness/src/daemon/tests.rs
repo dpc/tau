@@ -1,8 +1,8 @@
 use std::io::{BufReader, Read, Write};
 use std::os::unix as path_std_os_unix;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::process::Command as path_std_process_Command;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, fs, io as path_std_io, thread};
 
@@ -726,18 +726,69 @@ fn pre_resolved_daemon_rejects_environment_bypass_and_enforces_allowlist() {
     );
 }
 
-/// The shutdown boundary rejects a still-live raw listener and accepts its
-/// stale socket path only after the listener file descriptor is gone.
+/// Records one owned shutdown resource's exact drop position.
+struct ShutdownDropRecorder {
+    /// Step label appended when this owner is dropped.
+    step: &'static str,
+    /// Shared ordered shutdown trace.
+    steps: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Drop for ShutdownDropRecorder {
+    fn drop(&mut self) {
+        self.steps
+            .lock()
+            .expect("shutdown-order trace lock poisoned")
+            .push(self.step);
+    }
+}
+
+/// The shutdown helper joins the forwarder and drops listener ownership before
+/// checking retirement, then closes transports even when that check fails.
 #[test]
 fn listener_retirement_check_precedes_transport_shutdown() {
-    let temp = tempfile::tempdir().expect("temporary socket root");
-    let socket = temp.path().join("harness.sock");
-    let listener = UnixListener::bind(&socket).expect("bind listener");
-    assert!(
-        verify_listener_admission_retired(&socket).is_err(),
-        "live listener must fail the pre-transport shutdown boundary"
+    let steps = Arc::new(Mutex::new(Vec::new()));
+    let forwarder = ShutdownDropRecorder {
+        step: "forwarder retired",
+        steps: Arc::clone(&steps),
+    };
+    let listener = ShutdownDropRecorder {
+        step: "listener owner dropped",
+        steps: Arc::clone(&steps),
+    };
+    let retirement_steps = Arc::clone(&steps);
+    let shutdown_steps = Arc::clone(&steps);
+
+    let error = retire_listener_before_transport_shutdown(
+        forwarder,
+        listener,
+        move || {
+            retirement_steps
+                .lock()
+                .expect("shutdown-order trace lock poisoned")
+                .push("listener retirement checked");
+            Err(HarnessError::Participant(
+                "injected retirement failure".to_owned(),
+            ))
+        },
+        move || {
+            shutdown_steps
+                .lock()
+                .expect("shutdown-order trace lock poisoned")
+                .push("transports shut down");
+            Ok(())
+        },
+    )
+    .expect_err("injected retirement failure");
+
+    assert!(error.to_string().contains("injected retirement failure"));
+    assert_eq!(
+        *steps.lock().expect("shutdown-order trace lock poisoned"),
+        [
+            "forwarder retired",
+            "listener owner dropped",
+            "listener retirement checked",
+            "transports shut down",
+        ]
     );
-    drop(listener);
-    verify_listener_admission_retired(&socket)
-        .expect("retired listener must pass the pre-transport shutdown boundary");
 }

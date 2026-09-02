@@ -1746,12 +1746,13 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     }
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let shutdown_cause = harness.ui_runtime.shutdown_cause;
-    drop(forwarder);
-    drop(listener_handle);
-    let admission_retirement = verify_listener_admission_retired(&socket_path);
-    let shutdown = harness.shutdown();
+    let shutdown = retire_listener_before_transport_shutdown(
+        forwarder,
+        listener_handle,
+        || verify_listener_admission_retired(&socket_path),
+        || harness.shutdown(),
+    );
     harness_paths.cleanup();
-    admission_retirement?;
     shutdown?;
     if shutdown_cause == Some(ShutdownCause::BootstrapFailure) {
         let receiver = bootstrap_result.expect("bootstrap failure owns a result receiver");
@@ -1766,6 +1767,25 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         };
     }
     result
+}
+
+/// Retires listener ownership before checking admission and closing transports.
+fn retire_listener_before_transport_shutdown<Forwarder, Listener, Retirement, Transport>(
+    forwarder: Forwarder,
+    listener: Listener,
+    retirement_check: Retirement,
+    transport_shutdown: Transport,
+) -> Result<(), HarnessError>
+where
+    Retirement: FnOnce() -> Result<(), HarnessError>,
+    Transport: FnOnce() -> Result<(), HarnessError>,
+{
+    drop(forwarder);
+    drop(listener);
+    let admission_retirement = retirement_check();
+    let shutdown = transport_shutdown();
+    admission_retirement?;
+    shutdown
 }
 
 /// Verifies the raw listener boundary before extension transports are closed.
