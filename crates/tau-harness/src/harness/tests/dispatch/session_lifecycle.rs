@@ -851,9 +851,9 @@ fn ephemeral_same_session_agent_reload_does_not_warn() {
 }
 
 /// A completed durable worker must not recover the transient start request as
-/// the owner of future turns. This regression exercises a real tool-backed
-/// start, cold restoration, and a fresh targeted turn so a stale extension
-/// originator cannot emit a second result or unload the worker.
+/// the owner of future turns. This regression also preserves semantic turn
+/// closure when a resumed replacement reaches Idle while its published
+/// presentation state is already Idle, so queued targeted input advances once.
 #[test]
 fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
     let td = TempDir::new().expect("tempdir");
@@ -985,12 +985,259 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
             .originator
             .is_user()
     );
+    let fresh_outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&fresh_prompt_id);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&worker_cid)
+        .expect("restored worker")
+        .turn
+        .published_runtime_state = tau_proto::AgentRuntimeState::Idle;
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "queued behind resumed replacement".to_owned(),
+            agent_id: worker_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
+    .expect("queue second targeted worker turn");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&worker_cid]
+            .dispatch
+            .in_flight_prompt
+            .as_ref(),
+        Some(&fresh_prompt_id),
+        "the second targeted activation stays behind the active replacement"
+    );
+    let turn_generation_before_finish = h.agent_runtime.agent_registry.agents[&worker_cid]
+        .turn
+        .turn_generation;
+    let events_before_finish = event_log_events(&h).len();
     h.handle_provider_response_finished(provider_text_response(
         &fresh_prompt_id,
         worker_agent_id.clone(),
         "fresh worker response",
     ))
     .expect("finish fresh worker turn");
+    let queued_prompt_id = h.agent_runtime.agent_registry.agents[&worker_cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("queued targeted activation advances after the committed finish");
+    assert_ne!(queued_prompt_id, fresh_prompt_id);
+    let queued_outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&queued_prompt_id);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&worker_cid]
+            .turn
+            .turn_generation,
+        turn_generation_before_finish.saturating_next(),
+        "only the queued replacement's real Running presentation transition advances generation"
+    );
+    let events_after_finish = event_log_events(&h);
+    let presentation_suffix = events_after_finish[events_before_finish..]
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentState(changed) if changed.agent_id == worker_agent_id => {
+                Some(changed.state)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        presentation_suffix,
+        vec![tau_proto::AgentRuntimeState::Running],
+        "semantic-only Idle closure emits no presentation change; only the promoted turn runs"
+    );
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(worker_agent_id.as_str())
+        .expect("worker journal after queued activation advances");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == fresh_outer_turn_id
+            ))
+            .count(),
+        1,
+        "the presentation-state mismatch must not suppress or duplicate semantic closure"
+    );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&worker_cid]
+            .turn
+            .outer_turn,
+        crate::agent::OuterTurnRuntimeState::Active(ref outer_turn_id)
+            if outer_turn_id == &queued_outer_turn_id
+    ));
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&worker_cid),
+        "accepted finish leaves no retained publication completion"
+    );
+    let interaction_index = records
+        .iter()
+        .rposition(|record| {
+            matches!(
+                &record.event,
+                Event::AgentUserInteractionRecorded(interaction)
+                    if interaction.agent_id == worker_agent_id
+            )
+        })
+        .expect("durable second user interaction");
+    let activation_index = records
+        .iter()
+        .enumerate()
+        .skip(interaction_index + 1)
+        .find_map(|(index, record)| {
+            matches!(
+                &record.event,
+                Event::AgentActivationQueued(queued)
+                    if queued.kind == tau_proto::ActivationKind::VisibleUser
+            )
+            .then_some(index)
+        })
+        .expect("durable second activation");
+    let submitted_index = records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptSubmitted(submitted)
+                    if submitted.text == "queued behind resumed replacement"
+                        && submitted.submission_source
+                            == tau_proto::PromptSubmissionSource::HumanUi
+            )
+        })
+        .expect("second human UI activation submitted");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptSubmitted(submitted)
+                    if submitted.agent_id == worker_agent_id
+                        && submitted.text == "queued behind resumed replacement"
+                        && submitted.submission_source
+                            == tau_proto::PromptSubmissionSource::HumanUi
+            ))
+            .count(),
+        1,
+        "the queued human activation must promote through exactly one submitted fact"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptSteered(steered)
+                    if steered.agent_id == worker_agent_id
+                        && steered.text == "queued behind resumed replacement"
+                        && steered.submission_source
+                            == tau_proto::PromptSubmissionSource::HumanUi
+            ))
+            .count(),
+        0,
+        "a promoted activation starts a new outer turn rather than steering the old one"
+    );
+    let dispatch_index = records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_prompt_id == queued_prompt_id
+            )
+        })
+        .expect("second inference dispatch");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_prompt_id == queued_prompt_id
+            ))
+            .count(),
+        1,
+        "the promoted activation dispatches exactly once"
+    );
+    let started_index = records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptStarted(started)
+                    if started.agent_prompt_id == queued_prompt_id
+            )
+        })
+        .expect("second provider prompt started");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptStarted(started)
+                    if started.agent_prompt_id == queued_prompt_id
+            ))
+            .count(),
+        1,
+        "the provider prompt starts exactly once"
+    );
+    assert!(
+        interaction_index < activation_index
+            && activation_index < submitted_index
+            && submitted_index < dispatch_index
+            && dispatch_index < started_index
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &queued_prompt_id,
+        worker_agent_id.clone(),
+        "queued worker response",
+    ))
+    .expect("finish queued worker turn");
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(worker_agent_id.as_str())
+        .expect("worker journal after second terminal");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderResponseFinished(finished)
+                    if finished.agent_prompt_id == queued_prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == queued_outer_turn_id
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&worker_cid]
+            .turn
+            .outer_turn,
+        crate::agent::OuterTurnRuntimeState::None
+    ));
     assert_eq!(
         h.agent_runtime
             .agent_registry

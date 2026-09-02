@@ -1517,65 +1517,47 @@ impl Harness {
 
     pub(super) fn set_agent_turn_state(&mut self, cid: &AgentId, state: AgentTurnState) {
         let new_state = agent_runtime_state_for_turn(&state);
-        let changed_agent_id =
-            self.agent_runtime
-                .agent_registry
-                .agents
-                .get(cid)
-                .and_then(|agent| {
-                    let old_state = agent.turn.published_runtime_state;
-                    if old_state == new_state {
-                        return None;
-                    }
-                    agent.identity.agent_id.clone()
-                });
-
+        let mut changed_agent_id = None;
+        let mut finish = None;
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.turn.turn_state = state;
-            if changed_agent_id.is_some() {
+            if agent.turn.published_runtime_state != new_state {
+                changed_agent_id = agent.identity.agent_id.clone();
                 agent.turn.published_runtime_state = new_state;
                 if new_state == tau_proto::AgentRuntimeState::Running {
                     agent.turn.turn_generation = agent.turn.turn_generation.saturating_next();
                 }
             }
+            if new_state != tau_proto::AgentRuntimeState::Running
+                && let path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id) =
+                    &agent.turn.outer_turn
+                && let Some(agent_id) = agent.identity.agent_id.clone()
+            {
+                let outer_turn_id = outer_turn_id.clone();
+                agent.turn.outer_turn =
+                    path_crate_agent::OuterTurnRuntimeState::FinishInFlight(outer_turn_id.clone());
+                finish = Some(tau_proto::AgentOuterTurnFinished {
+                    automatic_compaction_decision: agent
+                        .turn
+                        .automatic_compaction
+                        .decision_id()
+                        .cloned(),
+                    agent_id,
+                    session_id: agent.identity.session_id.clone(),
+                    outer_turn_id,
+                    disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+                });
+            }
         }
 
+        if let Some(finish) = finish {
+            self.publish_for_agent(cid, Event::AgentOuterTurnFinished(finish));
+        }
         let Some(agent_id) = changed_agent_id else {
             return;
         };
         if new_state == tau_proto::AgentRuntimeState::Running {
             self.ensure_outer_turn_started(cid);
-        } else {
-            let finish = self
-                .agent_runtime
-                .agent_registry
-                .agents
-                .get_mut(cid)
-                .and_then(|agent| {
-                    let path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id) =
-                        &agent.turn.outer_turn
-                    else {
-                        return None;
-                    };
-                    let outer_turn_id = outer_turn_id.clone();
-                    agent.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
-                        outer_turn_id.clone(),
-                    );
-                    Some(tau_proto::AgentOuterTurnFinished {
-                        automatic_compaction_decision: agent
-                            .turn
-                            .automatic_compaction
-                            .decision_id()
-                            .cloned(),
-                        agent_id: agent.identity.agent_id.clone()?,
-                        session_id: agent.identity.session_id.clone(),
-                        outer_turn_id,
-                        disposition: tau_proto::AgentOuterTurnDisposition::Settled,
-                    })
-                });
-            if let Some(finish) = finish {
-                self.publish_for_agent(cid, Event::AgentOuterTurnFinished(finish));
-            }
         }
         if new_state == tau_proto::AgentRuntimeState::Running {
             self.agent_runtime
