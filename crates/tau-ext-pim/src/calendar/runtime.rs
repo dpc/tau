@@ -18,6 +18,7 @@ use super::config::{
     ValidatedBackendConfig, ValidatedConfig, ValidatedPolicy,
 };
 use super::cursor::{CalendarCursor, CalendarCursorQuery, CalendarCursorSelector};
+use super::event_time::EventTimeRange;
 use super::google::{
     GoogleBackend, GoogleEventListQuery, GoogleEventRecord, GoogleEventWrite, GoogleWriteError,
 };
@@ -449,6 +450,14 @@ struct ChangeArgs {
     response: Option<String>,
 }
 
+/// One raw persistence adapter paired with validated event-time state.
+struct PreparedCalendarChange {
+    /// Unchanged approval and persistence representation.
+    raw: CalendarChangeApproval,
+    /// Validated write range for create or time-changing update operations.
+    event_time: Option<EventTimeRange>,
+}
+
 impl From<CreateEventArgs> for ChangeArgs {
     fn from(args: CreateEventArgs) -> Self {
         Self {
@@ -768,9 +777,9 @@ impl Engine {
         }
         if self.state.change_pending_exists(id)? {
             let pending = self.state.pending_change_by_id(id)?;
-            self.validate_persisted_change(&pending)?;
+            let event_time = self.validate_persisted_change(&pending)?;
             let change = self.state.claim_change(id)?;
-            let result = match self.execute_change(&change) {
+            let result = match self.execute_change(&change, event_time.as_ref()) {
                 Ok(result) => result,
                 Err(GoogleWriteError::NotDispatched(error)) => {
                     return self.release_not_dispatched_change(id, error);
@@ -1285,20 +1294,24 @@ impl Engine {
     ) -> Result<CborValue, String> {
         let change = self.build_change(command, args)?;
         if self.config.policy.write.require_approval {
-            let id = self.state.pending_change(&change)?;
-            return Ok(format_change_queued(&id, &change));
+            let id = self.state.pending_change(&change.raw)?;
+            return Ok(format_change_queued(&id, &change.raw));
         }
         let result = self
-            .execute_change(&change)
+            .execute_change(&change.raw, change.event_time.as_ref())
             .map_err(google_write_error_for_user)?;
-        Ok(format_mutation_result_envelope("direct", &change, &result))
+        Ok(format_mutation_result_envelope(
+            "direct",
+            &change.raw,
+            &result,
+        ))
     }
 
     fn build_change(
         &self,
         command: CalendarCommand,
         args: ChangeArgs,
-    ) -> Result<CalendarChangeApproval, String> {
+    ) -> Result<PreparedCalendarChange, String> {
         let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
         let calendar = calendar.as_str();
         self.ensure_calendar_allowed(account, calendar)?;
@@ -1312,28 +1325,33 @@ impl Engine {
         args: &ChangeArgs,
         account: &ValidatedAccount,
         calendar: &str,
-    ) -> Result<CalendarChangeApproval, String> {
+    ) -> Result<PreparedCalendarChange, String> {
         let mut change =
             CalendarChangeApproval::pending(command_name(command), account.id.as_ref(), calendar);
-        match command {
+        let event_time = match command {
             CalendarCommand::CreateEvent => {
-                self.fill_create_event_change(&mut change, args, account)?
+                Some(self.fill_create_event_change(&mut change, args, account)?)
             }
             CalendarCommand::UpdateEvent => {
                 self.fill_update_event_change(&mut change, args, account)?
             }
             CalendarCommand::DeleteEvent => {
-                self.fill_delete_event_change(&mut change, args, account)?
+                self.fill_delete_event_change(&mut change, args, account)?;
+                None
             }
             CalendarCommand::RespondInvite => {
-                self.fill_respond_invite_change(&mut change, args, account)?
+                self.fill_respond_invite_change(&mut change, args, account)?;
+                None
             }
             CalendarCommand::ListCalendars
             | CalendarCommand::ListEvents
             | CalendarCommand::ReadEvent
             | CalendarCommand::FreeBusy => unreachable!("read commands are not calendar changes"),
-        }
-        Ok(change)
+        };
+        Ok(PreparedCalendarChange {
+            raw: change,
+            event_time,
+        })
     }
 
     fn fill_create_event_change(
@@ -1341,13 +1359,15 @@ impl Engine {
         change: &mut CalendarChangeApproval,
         args: &ChangeArgs,
         account: &ValidatedAccount,
-    ) -> Result<(), String> {
+    ) -> Result<EventTimeRange, String> {
         change.title = Some(required_text(args.title.as_deref(), "title")?);
-        let (start, end) = create_event_time_pair(
+        let event_time = create_event_time_pair(
             args.start.as_deref(),
             args.end.as_deref(),
             account.timezone.as_deref(),
         )?;
+        let start = event_time.start_raw().to_owned();
+        let end = event_time.end_raw().to_owned();
         change.start = Some(start);
         change.end = Some(end);
         change.description = optional_description(args.description.as_deref())?;
@@ -1356,7 +1376,7 @@ impl Engine {
             args.attendees.as_deref(),
             self.config.policy.write.max_attendees,
         )?;
-        Ok(())
+        Ok(event_time)
     }
 
     fn fill_update_event_change(
@@ -1364,20 +1384,20 @@ impl Engine {
         change: &mut CalendarChangeApproval,
         args: &ChangeArgs,
         account: &ValidatedAccount,
-    ) -> Result<(), String> {
+    ) -> Result<Option<EventTimeRange>, String> {
         change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
         change.etag = Some(self.cached_etag_for_change(change, account)?);
         change.title = optional_line(args.title.as_deref(), "title", false)?;
         change.description = optional_description(args.description.as_deref())?;
         change.location = optional_line(args.location.as_deref(), "location", true)?;
-        fill_update_time_change(change, args, account.timezone.as_deref())?;
+        let event_time = fill_update_time_change(change, args, account.timezone.as_deref())?;
         change.attendees = optional_attendees(
             args.attendees.as_deref(),
             self.config.policy.write.max_attendees,
         )?;
         ensure_update_change_has_payload(change)?;
         ensure_response_only_for_invites(args)?;
-        Ok(())
+        Ok(event_time)
     }
 
     fn fill_delete_event_change(
@@ -1540,7 +1560,10 @@ impl Engine {
         }
     }
 
-    fn validate_persisted_change(&self, change: &CalendarChangeApproval) -> Result<(), String> {
+    fn validate_persisted_change(
+        &self,
+        change: &CalendarChangeApproval,
+    ) -> Result<Option<EventTimeRange>, String> {
         let account = self.account_by_id(&change.account)?;
         self.ensure_calendar_allowed(account, &change.calendar)?;
         if !matches!(
@@ -1558,16 +1581,17 @@ impl Engine {
         {
             return Err("calendar change has too many attendees for current policy".to_owned());
         }
-        validate_change_shape(change)?;
+        let event_time = validate_change_shape(change)?;
         if change.etag.as_deref() == Some("*") {
             return Err("calendar change contains unsafe wildcard etag".to_owned());
         }
-        Ok(())
+        Ok(event_time)
     }
 
     fn execute_change(
         &self,
         change: &CalendarChangeApproval,
+        event_time: Option<&EventTimeRange>,
     ) -> Result<CalendarMutationResult, GoogleWriteError> {
         let account = self
             .account_by_id(&change.account)
@@ -1584,7 +1608,7 @@ impl Engine {
                     account,
                     stored_refresh_token.as_deref(),
                     &calendar,
-                    &google_write_from_change(change),
+                    (&google_write_from_change(change), event_time),
                 )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
             }
@@ -1601,7 +1625,7 @@ impl Engine {
                     &calendar,
                     &event_id,
                     &etag,
-                    &google_write_from_change(change),
+                    (&google_write_from_change(change), event_time),
                 )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
             }
@@ -2208,48 +2232,29 @@ fn create_event_time_pair(
     start: Option<&str>,
     end: Option<&str>,
     account_timezone: Option<&str>,
-) -> Result<(String, String), String> {
+) -> Result<EventTimeRange, String> {
     let start = required_text(start, "start")?;
     let start = normalize_write_time_value(&start, "start", account_timezone)?;
-    let end = match end {
+    match end {
         Some(end) if !end.trim().is_empty() => {
             let end = required_text(Some(end), "end")?;
-            normalize_write_time_value(&end, "end", account_timezone)?
+            let end = normalize_write_time_value(&end, "end", account_timezone)?;
+            EventTimeRange::from_exact(start, end)
         }
-        _ => default_create_event_end(&start)?,
-    };
-    validate_time_pair(&start, &end)?;
-    Ok((start, end))
-}
-
-fn default_create_event_end(start: &str) -> Result<String, String> {
-    if let Some(date) = parse_tool_date(start) {
-        let end = date
-            .next_day()
-            .ok_or_else(|| "default event end is out of range".to_owned())?;
-        return Ok(end.to_string());
+        _ => EventTimeRange::with_default_end(start),
     }
-    let start =
-        time::OffsetDateTime::parse(start, &path_time_format_description::well_known::Rfc3339)
-            .map_err(|error| format!("start must be RFC3339 or YYYY-MM-DD: {error}"))?;
-    let end = start
-        .checked_add(time::Duration::hours(1))
-        .ok_or_else(|| "default event end is out of range".to_owned())?;
-    end.format(&path_time_format_description::well_known::Rfc3339)
-        .map_err(|error| format!("default event end could not be formatted: {error}"))
 }
 
 fn required_time_pair(
     start: Option<&str>,
     end: Option<&str>,
     account_timezone: Option<&str>,
-) -> Result<(String, String), String> {
+) -> Result<EventTimeRange, String> {
     let start = required_text(start, "start")?;
     let end = required_text(end, "end")?;
     let start = normalize_write_time_value(&start, "start", account_timezone)?;
     let end = normalize_write_time_value(&end, "end", account_timezone)?;
-    validate_time_pair(&start, &end)?;
-    Ok((start, end))
+    EventTimeRange::from_exact(start, end)
 }
 
 fn normalize_write_time_value(
@@ -2279,39 +2284,6 @@ fn normalize_write_time_value(
     }
 }
 
-fn validate_time_pair(start: &str, end: &str) -> Result<(), String> {
-    let start_date = parse_tool_date(start);
-    let end_date = parse_tool_date(end);
-    match (start_date, end_date) {
-        (Some(start), Some(end)) => {
-            if !is_date_before(start, end) {
-                return Err("event start must be before event end".to_owned());
-            }
-            Ok(())
-        }
-        (None, None) => {
-            let start = time::OffsetDateTime::parse(
-                start,
-                &path_time_format_description::well_known::Rfc3339,
-            )
-            .map_err(|error| format!("start must be RFC3339 or YYYY-MM-DD: {error}"))?;
-            let end = time::OffsetDateTime::parse(
-                end,
-                &path_time_format_description::well_known::Rfc3339,
-            )
-            .map_err(|error| format!("end must be RFC3339 or YYYY-MM-DD: {error}"))?;
-            if !is_datetime_before(start, end) {
-                return Err("event start must be before event end".to_owned());
-            }
-            Ok(())
-        }
-        _ => Err(
-            "event start and end must both be all-day dates or both be RFC3339 date-times"
-                .to_owned(),
-        ),
-    }
-}
-
 fn parse_tool_date(value: &str) -> Option<time::Date> {
     let bytes = value.as_bytes();
     if bytes.len() != 10
@@ -2327,10 +2299,6 @@ fn parse_tool_date(value: &str) -> Option<time::Date> {
     let month = time::Month::try_from(value[5..7].parse::<u8>().ok()?).ok()?;
     let day = value[8..10].parse::<u8>().ok()?;
     time::Date::from_calendar_date(year, month, day).ok()
-}
-
-fn is_date_before(left: time::Date, right: time::Date) -> bool {
-    left < right
 }
 
 fn is_datetime_before(left: time::OffsetDateTime, right: time::OffsetDateTime) -> bool {
@@ -2365,22 +2333,26 @@ fn fill_update_time_change(
     change: &mut CalendarChangeApproval,
     args: &ChangeArgs,
     timezone: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<EventTimeRange>, String> {
     match (args.start.as_deref(), args.end.as_deref()) {
         (Some(_), Some(_)) => {
-            let (start, end) =
+            let event_time =
                 required_time_pair(args.start.as_deref(), args.end.as_deref(), timezone)?;
+            let start = event_time.start_raw().to_owned();
+            let end = event_time.end_raw().to_owned();
             change.start = Some(start);
             change.end = Some(end);
-            Ok(())
+            Ok(Some(event_time))
         }
         (Some(_), None) => {
-            let (start, end) = create_event_time_pair(args.start.as_deref(), None, timezone)?;
+            let event_time = create_event_time_pair(args.start.as_deref(), None, timezone)?;
+            let start = event_time.start_raw().to_owned();
+            let end = event_time.end_raw().to_owned();
             change.start = Some(start);
             change.end = Some(end);
-            Ok(())
+            Ok(Some(event_time))
         }
-        (None, None) => Ok(()),
+        (None, None) => Ok(None),
         (None, Some(_)) => {
             Err("end without start is ambiguous; pass start too, or omit both".to_owned())
         }
@@ -2410,13 +2382,15 @@ fn ensure_response_only_for_invites(args: &ChangeArgs) -> Result<(), String> {
     Err("response is only valid for respond_invite".to_owned())
 }
 
-fn validate_change_shape(change: &CalendarChangeApproval) -> Result<(), String> {
+fn validate_change_shape(
+    change: &CalendarChangeApproval,
+) -> Result<Option<EventTimeRange>, String> {
     match change.command.as_str() {
         "create_event" => {
             required_change_field(change.title.as_deref(), "title")?;
             let start = required_change_field(change.start.as_deref(), "start")?;
             let end = required_change_field(change.end.as_deref(), "end")?;
-            validate_time_pair(start, end)
+            EventTimeRange::from_exact(start.to_owned(), end.to_owned()).map(Some)
         }
         "update_event" => {
             required_change_field(change.event_id.as_deref(), "event_id")?;
@@ -2425,21 +2399,21 @@ fn validate_change_shape(change: &CalendarChangeApproval) -> Result<(), String> 
                 return Err("update_event requires at least one field to update".to_owned());
             }
             if let (Some(start), Some(end)) = (change.start.as_deref(), change.end.as_deref()) {
-                validate_time_pair(start, end)?;
+                return EventTimeRange::from_exact(start.to_owned(), end.to_owned()).map(Some);
             } else if change.start.is_some() || change.end.is_some() || change.timezone.is_some() {
                 return Err("start and end must be provided together for time updates".to_owned());
             }
-            Ok(())
+            Ok(None)
         }
         "delete_event" => {
             required_change_field(change.event_id.as_deref(), "event_id")?;
             required_change_field(change.etag.as_deref(), "etag")?;
-            Ok(())
+            Ok(None)
         }
         "respond_invite" => {
             required_change_field(change.event_id.as_deref(), "event_id")?;
             required_change_field(change.etag.as_deref(), "etag")?;
-            required_response(change.response.as_deref()).map(|_| ())
+            required_response(change.response.as_deref()).map(|_| None)
         }
         other => Err(format!("unsupported calendar change command `{other}`")),
     }

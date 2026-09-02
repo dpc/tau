@@ -6,6 +6,7 @@
 mod actions;
 mod config;
 mod cursor;
+mod event_time;
 mod google;
 mod ics_feed;
 mod identity;

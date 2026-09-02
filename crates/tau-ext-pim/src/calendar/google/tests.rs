@@ -227,16 +227,19 @@ fn parses_event_date_times_dates_and_attendees() {
 #[test]
 fn event_write_body_supports_all_day_and_timed_events() {
     let attendees = vec!["a@example.com".to_owned(), "b@example.com".to_owned()];
-    let body = google_event_body(&GoogleEventWrite {
-        title: Some("Trip"),
-        description: Some("desc"),
-        location: Some("There"),
-        start: Some("2026-05-28"),
-        end: Some("2026-05-29"),
-        timezone: None,
-        clear_opposite_time_kind: false,
-        attendees: Some(&attendees),
-    })
+    let body = google_event_body(
+        &GoogleEventWrite {
+            title: Some("Trip"),
+            description: Some("desc"),
+            location: Some("There"),
+            start: Some("2026-05-28"),
+            end: Some("2026-05-29"),
+            timezone: None,
+            clear_opposite_time_kind: false,
+            attendees: Some(&attendees),
+        },
+        None,
+    )
     .expect("body");
 
     assert_eq!(body["summary"], "Trip");
@@ -244,46 +247,95 @@ fn event_write_body_supports_all_day_and_timed_events() {
     assert_eq!(body["end"], json!({ "date": "2026-05-29" }));
     assert_eq!(body["attendees"][0]["email"], "a@example.com");
 
-    let body = google_event_body(&GoogleEventWrite {
-        start: Some("2026-05-28T12:00:00Z"),
-        end: Some("2026-05-28T13:00:00Z"),
-        timezone: Some("UTC"),
-        ..Default::default()
-    })
+    let body = google_event_body(
+        &GoogleEventWrite {
+            start: Some("2026-05-28T12:00:00Z"),
+            end: Some("2026-05-28T13:00:00Z"),
+            timezone: Some("UTC"),
+            ..Default::default()
+        },
+        None,
+    )
     .expect("timed body");
 
     assert_eq!(body["start"]["dateTime"], "2026-05-28T12:00:00Z");
     assert_eq!(body["start"]["timeZone"], "UTC");
     assert!(body["start"].get("date").is_none());
 
-    let body = google_event_body(&GoogleEventWrite {
-        start: Some("2026-05-28T12:00:00Z"),
-        end: Some("2026-05-28T13:00:00Z"),
-        clear_opposite_time_kind: true,
-        ..Default::default()
-    })
+    let body = google_event_body(
+        &GoogleEventWrite {
+            start: Some("2026-05-28T12:00:00Z"),
+            end: Some("2026-05-28T13:00:00Z"),
+            clear_opposite_time_kind: true,
+            ..Default::default()
+        },
+        None,
+    )
     .expect("timed patch body");
     assert_eq!(body["start"]["date"], Value::Null);
     assert_eq!(body["end"]["date"], Value::Null);
 
-    let body = google_event_body(&GoogleEventWrite {
-        start: Some("2026-05-28"),
-        end: Some("2026-05-29"),
-        clear_opposite_time_kind: true,
-        ..Default::default()
-    })
+    let body = google_event_body(
+        &GoogleEventWrite {
+            start: Some("2026-05-28"),
+            end: Some("2026-05-29"),
+            clear_opposite_time_kind: true,
+            ..Default::default()
+        },
+        None,
+    )
     .expect("all-day patch body");
     assert_eq!(body["start"]["dateTime"], Value::Null);
     assert_eq!(body["end"]["dateTime"], Value::Null);
 }
 
+/// Runtime lowering must consume the validated range without requiring
+/// duplicate raw start/end fields and must emit the same provider bytes.
+#[test]
+fn event_write_body_consumes_validated_time_range() {
+    let event_time = EventTimeRange::from_exact(
+        "2026-05-28T14:00:00+02:00".to_owned(),
+        "2026-05-28T15:00:00+02:00".to_owned(),
+    )
+    .expect("validated range");
+
+    let body = google_event_body(
+        &GoogleEventWrite {
+            timezone: Some("Europe/Warsaw"),
+            clear_opposite_time_kind: true,
+            ..Default::default()
+        },
+        Some(&event_time),
+    )
+    .expect("typed body");
+
+    assert_eq!(
+        body,
+        json!({
+            "start": {
+                "date": null,
+                "dateTime": "2026-05-28T14:00:00+02:00",
+                "timeZone": "Europe/Warsaw"
+            },
+            "end": {
+                "date": null,
+                "dateTime": "2026-05-28T15:00:00+02:00",
+                "timeZone": "Europe/Warsaw"
+            }
+        })
+    );
+}
+
 #[test]
 fn event_write_body_rejects_invalid_time_pairs() {
-    let err = google_event_body(&GoogleEventWrite {
-        start: Some("2026-05-29"),
-        end: Some("2026-05-28"),
-        ..Default::default()
-    })
+    let err = google_event_body(
+        &GoogleEventWrite {
+            start: Some("2026-05-29"),
+            end: Some("2026-05-28"),
+            ..Default::default()
+        },
+        None,
+    )
     .expect_err("inverted date is invalid");
 
     assert!(err.contains("before"), "{err}");

@@ -4,10 +4,10 @@ use std::io::Read;
 use serde_json::{Map, Value, json};
 use tau_proto::SecretValue;
 use time::format_description::well_known::Rfc3339;
-use time::{Date, Month, OffsetDateTime};
 use url::form_urlencoded;
 
 use super::config::{CalendarAccountId, ValidatedAccount, ValidatedBackendConfig};
+use super::event_time::EventTimeRange;
 use super::ics_feed::TimeRange;
 use super::identity::{EventEtag, EventId, ICalUid, ProviderCalendarId};
 use super::runtime::InviteResponse;
@@ -228,17 +228,6 @@ pub struct GoogleEventWrite<'a> {
 struct GoogleTimePair {
     start: Value,
     end: Value,
-}
-
-enum GoogleBoundary {
-    Date {
-        raw: String,
-        date: Date,
-    },
-    DateTime {
-        raw: String,
-        datetime: OffsetDateTime,
-    },
 }
 
 impl<'a> ErrorBodyRedaction<'a> {
@@ -508,7 +497,7 @@ impl GoogleBackend {
             account,
             stored_refresh_token,
             &ProviderCalendarId::new(calendar_id),
-            event,
+            (event, None),
         )
         .map(GoogleEvent::from)
         .map_err(GoogleWriteError::into_string)
@@ -520,8 +509,9 @@ impl GoogleBackend {
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
         calendar_id: &ProviderCalendarId,
-        event: &GoogleEventWrite<'_>,
+        event: (&GoogleEventWrite<'_>, Option<&EventTimeRange>),
     ) -> Result<GoogleEventRecord, GoogleWriteError> {
+        let (event, event_time) = event;
         ensure_google_calendar_allowed(account, calendar_id)
             .map_err(GoogleWriteError::NotDispatched)?;
         let token = self
@@ -536,7 +526,7 @@ impl GoogleBackend {
             encode_path_segment(calendar_id.as_str()),
             query.finish()
         );
-        let body = google_event_body(event).map_err(GoogleWriteError::NotDispatched)?;
+        let body = google_event_body(event, event_time).map_err(GoogleWriteError::NotDispatched)?;
         parse_event(&self.post_json_write(&url, &token, &body)?)
             .ok_or(GoogleWriteError::OutcomeUnknown)
     }
@@ -557,7 +547,7 @@ impl GoogleBackend {
             &ProviderCalendarId::new(calendar_id),
             &EventId::new(event_id),
             &EventEtag::new(etag),
-            event,
+            (event, None),
         )
         .map(GoogleEvent::from)
         .map_err(GoogleWriteError::into_string)
@@ -571,8 +561,9 @@ impl GoogleBackend {
         calendar_id: &ProviderCalendarId,
         event_id: &EventId,
         etag: &EventEtag,
-        event: &GoogleEventWrite<'_>,
+        event: (&GoogleEventWrite<'_>, Option<&EventTimeRange>),
     ) -> Result<GoogleEventRecord, GoogleWriteError> {
+        let (event, event_time) = event;
         ensure_google_calendar_allowed(account, calendar_id)
             .map_err(GoogleWriteError::NotDispatched)?;
         let token = self
@@ -588,7 +579,7 @@ impl GoogleBackend {
             encode_path_segment(event_id.as_str()),
             query.finish()
         );
-        let body = google_event_body(event).map_err(GoogleWriteError::NotDispatched)?;
+        let body = google_event_body(event, event_time).map_err(GoogleWriteError::NotDispatched)?;
         parse_event(&self.patch_json_write(&url, &token, Some(etag.as_str()), &body)?)
             .ok_or(GoogleWriteError::OutcomeUnknown)
     }
@@ -1090,7 +1081,10 @@ fn google_event_time(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn google_event_body(event: &GoogleEventWrite<'_>) -> Result<Value, String> {
+fn google_event_body(
+    event: &GoogleEventWrite<'_>,
+    event_time: Option<&EventTimeRange>,
+) -> Result<Value, String> {
     let mut object = Map::new();
     if let Some(title) = event.title {
         object.insert("summary".to_owned(), Value::String(title.to_owned()));
@@ -1104,11 +1098,16 @@ fn google_event_body(event: &GoogleEventWrite<'_>) -> Result<Value, String> {
     if let Some(location) = event.location {
         object.insert("location".to_owned(), Value::String(location.to_owned()));
     }
-    if event.start.is_some() || event.end.is_some() {
+    if let Some(event_time) = event_time {
+        let pair = google_time_pair(event_time, event.timezone, event.clear_opposite_time_kind);
+        object.insert("start".to_owned(), pair.start);
+        object.insert("end".to_owned(), pair.end);
+    } else if event.start.is_some() || event.end.is_some() {
         let (Some(start), Some(end)) = (event.start, event.end) else {
             return Err("Google event writes require both start and end".to_owned());
         };
-        let pair = google_time_pair(start, end, event.timezone, event.clear_opposite_time_kind)?;
+        let event_time = EventTimeRange::from_google_exact(start.to_owned(), end.to_owned())?;
+        let pair = google_time_pair(&event_time, event.timezone, event.clear_opposite_time_kind);
         object.insert("start".to_owned(), pair.start);
         object.insert("end".to_owned(), pair.end);
     }
@@ -1127,118 +1126,45 @@ fn google_event_body(event: &GoogleEventWrite<'_>) -> Result<Value, String> {
 }
 
 fn google_time_pair(
-    start: &str,
-    end: &str,
+    event_time: &EventTimeRange,
     timezone: Option<&str>,
     clear_opposite_time_kind: bool,
-) -> Result<GoogleTimePair, String> {
-    match (
-        parse_google_boundary(start, "start")?,
-        parse_google_boundary(end, "end")?,
-    ) {
-        (
-            GoogleBoundary::Date {
-                raw: start,
-                date: start_date,
-            },
-            GoogleBoundary::Date {
-                raw: end,
-                date: end_date,
-            },
-        ) => {
-            if !is_date_before(start_date, end_date) {
-                return Err("event start must be before event end".to_owned());
-            }
-            let mut start_value = Map::new();
-            start_value.insert("date".to_owned(), Value::String(start));
-            let mut end_value = Map::new();
-            end_value.insert("date".to_owned(), Value::String(end));
-            if clear_opposite_time_kind {
-                start_value.insert("dateTime".to_owned(), Value::Null);
-                end_value.insert("dateTime".to_owned(), Value::Null);
-            }
-            Ok(GoogleTimePair {
-                start: Value::Object(start_value),
-                end: Value::Object(end_value),
-            })
+) -> GoogleTimePair {
+    let start = event_time.start_raw();
+    let end = event_time.end_raw();
+    if event_time.is_all_day() {
+        let mut start_value = Map::new();
+        start_value.insert("date".to_owned(), Value::String(start.to_owned()));
+        let mut end_value = Map::new();
+        end_value.insert("date".to_owned(), Value::String(end.to_owned()));
+        if clear_opposite_time_kind {
+            start_value.insert("dateTime".to_owned(), Value::Null);
+            end_value.insert("dateTime".to_owned(), Value::Null);
         }
-        (
-            GoogleBoundary::DateTime {
-                raw: start,
-                datetime: start_datetime,
-            },
-            GoogleBoundary::DateTime {
-                raw: end,
-                datetime: end_datetime,
-            },
-        ) => {
-            if !is_datetime_before(start_datetime, end_datetime) {
-                return Err("event start must be before event end".to_owned());
-            }
-            let mut start_value = Map::new();
-            if clear_opposite_time_kind {
-                start_value.insert("date".to_owned(), Value::Null);
-            }
-            start_value.insert("dateTime".to_owned(), Value::String(start));
-            let mut end_value = Map::new();
-            if clear_opposite_time_kind {
-                end_value.insert("date".to_owned(), Value::Null);
-            }
-            end_value.insert("dateTime".to_owned(), Value::String(end));
-            if let Some(timezone) = timezone {
-                start_value.insert("timeZone".to_owned(), Value::String(timezone.to_owned()));
-                end_value.insert("timeZone".to_owned(), Value::String(timezone.to_owned()));
-            }
-            Ok(GoogleTimePair {
-                start: Value::Object(start_value),
-                end: Value::Object(end_value),
-            })
+        GoogleTimePair {
+            start: Value::Object(start_value),
+            end: Value::Object(end_value),
         }
-        _ => Err(
-            "event start and end must both be all-day dates or both be RFC3339 date-times"
-                .to_owned(),
-        ),
+    } else {
+        let mut start_value = Map::new();
+        if clear_opposite_time_kind {
+            start_value.insert("date".to_owned(), Value::Null);
+        }
+        start_value.insert("dateTime".to_owned(), Value::String(start.to_owned()));
+        let mut end_value = Map::new();
+        if clear_opposite_time_kind {
+            end_value.insert("date".to_owned(), Value::Null);
+        }
+        end_value.insert("dateTime".to_owned(), Value::String(end.to_owned()));
+        if let Some(timezone) = timezone {
+            start_value.insert("timeZone".to_owned(), Value::String(timezone.to_owned()));
+            end_value.insert("timeZone".to_owned(), Value::String(timezone.to_owned()));
+        }
+        GoogleTimePair {
+            start: Value::Object(start_value),
+            end: Value::Object(end_value),
+        }
     }
-}
-
-fn parse_google_boundary(value: &str, field: &str) -> Result<GoogleBoundary, String> {
-    if let Some(date) = parse_google_date(value) {
-        return Ok(GoogleBoundary::Date {
-            raw: value.to_owned(),
-            date,
-        });
-    }
-    let datetime = OffsetDateTime::parse(value, &Rfc3339)
-        .map_err(|error| format!("{field} must be RFC3339 or YYYY-MM-DD: {error}"))?;
-    Ok(GoogleBoundary::DateTime {
-        raw: value.to_owned(),
-        datetime,
-    })
-}
-
-fn parse_google_date(value: &str) -> Option<Date> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 10
-        || bytes.get(4) != Some(&b'-')
-        || bytes.get(7) != Some(&b'-')
-        || !bytes[..4].iter().all(u8::is_ascii_digit)
-        || !bytes[5..7].iter().all(u8::is_ascii_digit)
-        || !bytes[8..].iter().all(u8::is_ascii_digit)
-    {
-        return None;
-    }
-    let year = value[0..4].parse::<i32>().ok()?;
-    let month = Month::try_from(value[5..7].parse::<u8>().ok()?).ok()?;
-    let day = value[8..10].parse::<u8>().ok()?;
-    Date::from_calendar_date(year, month, day).ok()
-}
-
-fn is_date_before(left: Date, right: Date) -> bool {
-    left < right
-}
-
-fn is_datetime_before(left: OffsetDateTime, right: OffsetDateTime) -> bool {
-    left < right
 }
 
 fn attendee_response_patch(event: &Value, response: InviteResponse) -> Result<Value, String> {

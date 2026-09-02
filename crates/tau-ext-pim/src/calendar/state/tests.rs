@@ -98,6 +98,42 @@ fn pending_calendar_change_preserves_raw_identity_bytes() {
     );
 }
 
+/// Calendar write-time typing must not change exact schema-0 approval bytes or
+/// optional-field omission at the persistence adapter.
+#[test]
+fn pending_calendar_change_preserves_raw_event_time_bytes() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let state = StateStore::open(temp.path().join("state")).expect("state");
+    let mut change = CalendarChangeApproval::pending("create_event", "google", "primary");
+    change.title = Some("Offset meeting".to_owned());
+    change.start = Some("2026-05-28T14:00:00+02:00".to_owned());
+    change.end = Some("2026-05-28T15:00:00+02:00".to_owned());
+
+    let id = state.pending_change(&change).expect("pending change");
+    let bytes = fs::read(
+        temp.path()
+            .join(format!("state/approvals/calendar-change/pending/{id}.json")),
+    )
+    .expect("approval bytes");
+
+    assert_eq!(
+        bytes,
+        br#"{
+  "schema": 0,
+  "id": "1",
+  "kind": "calendar_change",
+  "status": "pending",
+  "command": "create_event",
+  "account": "google",
+  "calendar": "primary",
+  "title": "Offset meeting",
+  "start": "2026-05-28T14:00:00+02:00",
+  "end": "2026-05-28T15:00:00+02:00",
+  "reason": "user_approval_required"
+}"#
+    );
+}
+
 #[test]
 fn claimed_calendar_change_can_be_released_before_dispatch() {
     // Local preparation can fail after the approval record is claimed. When

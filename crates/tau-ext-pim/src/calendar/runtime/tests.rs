@@ -856,24 +856,24 @@ fn create_event_defaults_missing_end() {
     // Small local models often omit `end` even when they identified a
     // concrete start. Queueing a safe default prevents an avoidable retry
     // loop while keeping the pending change visible for user approval.
-    let (start, end) = create_event_time_pair(Some("2026-05-28T12:00:00Z"), None, Some("UTC"))
+    let event_time = create_event_time_pair(Some("2026-05-28T12:00:00Z"), None, Some("UTC"))
         .expect("default date-time end");
-    assert_eq!(start, "2026-05-28T12:00:00Z");
-    assert_eq!(end, "2026-05-28T13:00:00Z");
+    assert_eq!(event_time.start_raw(), "2026-05-28T12:00:00Z");
+    assert_eq!(event_time.end_raw(), "2026-05-28T13:00:00Z");
 
-    let (start, end) =
+    let event_time =
         create_event_time_pair(Some("2026-05-28"), None, Some("UTC")).expect("default all-day end");
-    assert_eq!(start, "2026-05-28");
-    assert_eq!(end, "2026-05-29");
+    assert_eq!(event_time.start_raw(), "2026-05-28");
+    assert_eq!(event_time.end_raw(), "2026-05-29");
 
-    let (start, end) = create_event_time_pair(
+    let event_time = create_event_time_pair(
         Some("2026-05-28T12:00:00"),
         Some("2026-05-28T13:00:00"),
         Some("UTC"),
     )
     .expect("local date-times use account timezone");
-    assert_eq!(start, "2026-05-28T12:00:00Z");
-    assert_eq!(end, "2026-05-28T13:00:00Z");
+    assert_eq!(event_time.start_raw(), "2026-05-28T12:00:00Z");
+    assert_eq!(event_time.end_raw(), "2026-05-28T13:00:00Z");
 }
 
 #[test]
@@ -959,9 +959,9 @@ fn google_update_event_builds_default_end_with_cached_etag() {
         )
         .expect("update change");
 
-    assert_eq!(change.etag.as_deref(), Some("etag-1"));
-    assert_eq!(change.start.as_deref(), Some("2026-05-28T12:00:00Z"));
-    assert_eq!(change.end.as_deref(), Some("2026-05-28T13:00:00Z"));
+    assert_eq!(change.raw.etag.as_deref(), Some("etag-1"));
+    assert_eq!(change.raw.start.as_deref(), Some("2026-05-28T12:00:00Z"));
+    assert_eq!(change.raw.end.as_deref(), Some("2026-05-28T13:00:00Z"));
 }
 
 /// Update requests must not accept invite responses. This keeps the command
@@ -991,7 +991,8 @@ fn update_event_rejects_invite_response_argument() {
                 ..empty_change_args()
             },
         )
-        .expect_err("response must be invite-only");
+        .err()
+        .expect("response must be invite-only");
 
     assert_eq!(err, "response is only valid for respond_invite");
 }
@@ -2081,9 +2082,75 @@ fn persisted_wildcard_etag_is_rejected_before_execution() {
 
     let error = engine
         .validate_persisted_change(&change)
-        .expect_err("wildcard must be rejected");
+        .err()
+        .expect("wildcard must be rejected");
 
     assert_eq!(error, "calendar change contains unsafe wildcard etag");
+}
+
+/// A cold state reload must reconstruct the validated range from unchanged raw
+/// approval fields and retain exact accepted offset spellings.
+#[test]
+fn persisted_event_time_reconstructs_exact_range_after_cold_reload() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = google_test_engine(temp.path());
+    let mut change = CalendarChangeApproval::pending("create_event", "google", "primary");
+    change.title = Some("Offset meeting".to_owned());
+    change.start = Some("2026-05-28T14:00:00+02:00".to_owned());
+    change.end = Some("2026-05-28T15:00:00+02:00".to_owned());
+    let id = engine.state.pending_change(&change).expect("pending");
+    drop(engine);
+
+    let restarted = google_test_engine(temp.path());
+    let loaded = restarted
+        .state
+        .pending_change_by_id(&id)
+        .expect("cold approval reload");
+    let event_time = restarted
+        .validate_persisted_change(&loaded)
+        .expect("persisted range")
+        .expect("create range");
+
+    assert_eq!(event_time.start_raw(), "2026-05-28T14:00:00+02:00");
+    assert_eq!(event_time.end_raw(), "2026-05-28T15:00:00+02:00");
+}
+
+/// Persisted mixed, reversed, and malformed pairs must keep their exact
+/// pre-dispatch diagnostics after typed reconstruction.
+#[test]
+fn persisted_event_time_rejects_invalid_pairs_before_execution() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = google_test_engine(temp.path());
+    let mut change = CalendarChangeApproval::pending("create_event", "google", "primary");
+    change.title = Some("Invalid meeting".to_owned());
+
+    for (start, end, expected) in [
+        (
+            "2026-05-28",
+            "2026-05-28T13:00:00Z",
+            "event start and end must both be all-day dates or both be RFC3339 date-times",
+        ),
+        (
+            "2026-05-29",
+            "2026-05-28",
+            "event start must be before event end",
+        ),
+        (
+            "💣",
+            "2026-05-28T13:00:00Z",
+            "start must be RFC3339 or YYYY-MM-DD: the 'year' component could not be parsed",
+        ),
+    ] {
+        change.start = Some(start.to_owned());
+        change.end = Some(end.to_owned());
+        assert_eq!(
+            engine
+                .validate_persisted_change(&change)
+                .err()
+                .expect("invalid persisted range"),
+            expected
+        );
+    }
 }
 
 /// RSVP approvals must keep their raw JSON representation while runtime reload
@@ -2098,14 +2165,16 @@ fn persisted_invite_response_keeps_raw_json_and_validates_after_load() {
     assert_eq!(
         engine
             .validate_persisted_change(&change)
-            .expect_err("missing response must reject"),
+            .err()
+            .expect("missing response must reject"),
         "response is required"
     );
     change.response = Some(" ".to_owned());
     assert_eq!(
         engine
             .validate_persisted_change(&change)
-            .expect_err("blank response must reject"),
+            .err()
+            .expect("blank response must reject"),
         "response is required"
     );
     change.response = Some("tentative".to_owned());
@@ -2152,7 +2221,8 @@ fn persisted_invite_response_keeps_raw_json_and_validates_after_load() {
     assert_eq!(
         engine
             .validate_persisted_change(&loaded)
-            .expect_err("provider-only response must reject before execution"),
+            .err()
+            .expect("provider-only response must reject before execution"),
         "response must be accepted, tentative, or declined"
     );
 }
