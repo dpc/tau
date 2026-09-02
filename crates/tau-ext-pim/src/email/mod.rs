@@ -25,8 +25,13 @@ use crate::google_oauth::{
 use crate::storage::{FsStorage, SharedStorage, StorageCreateError, file_name};
 
 mod message_identity;
+mod policy_identity;
 mod real_backend;
 use message_identity::{ImapUid, MailboxName, MessageRef, MessageTarget};
+use policy_identity::{
+    AuthservId, DomainName, NormalizedEmailAddress, TypedAddressPattern, TypedIncomingAuthPolicy,
+    TypedPolicy,
+};
 use real_backend::RealEmailBackend;
 
 const READ_BODY_MAX_BYTES: usize = 64 * 1024;
@@ -443,16 +448,19 @@ impl EmailExtensionConfig {
                 ValidatedAccount::from_config(account, id, self.enable)?,
             );
         }
+        let policy = ValidatedPolicy {
+            incoming_allow: compile_address_patterns(&self.policy.incoming_allow)?,
+            incoming_auth: validate_incoming_auth_policy(self.policy.incoming_auth)?,
+            outgoing_allow: compile_address_patterns(&self.policy.outgoing_allow)?,
+            allow_state_policy_extensions: self.policy.allow_state_policy_extensions,
+        };
+        let typed_policy = TypedPolicy::from_validated(&policy);
         Ok(ValidatedConfig {
             enable: self.enable,
             accounts,
             account_order,
-            policy: ValidatedPolicy {
-                incoming_allow: compile_address_patterns(&self.policy.incoming_allow)?,
-                incoming_auth: validate_incoming_auth_policy(self.policy.incoming_auth)?,
-                outgoing_allow: compile_address_patterns(&self.policy.outgoing_allow)?,
-                allow_state_policy_extensions: self.policy.allow_state_policy_extensions,
-            },
+            policy,
+            typed_policy,
         })
     }
 }
@@ -512,6 +520,8 @@ pub struct ValidatedConfig {
     pub(crate) account_order: Vec<EmailAccountId>,
     /// Compiled global policy.
     pub policy: ValidatedPolicy,
+    /// Private typed mirror of the compiled global policy.
+    typed_policy: TypedPolicy,
 }
 
 /// Validated account configuration.
@@ -526,6 +536,8 @@ pub struct ValidatedAccount {
     pub from_normalized: String,
     /// Original From identity for display.
     pub from_identity: String,
+    /// Private normalized From identity proof for internal policy comparisons.
+    from_address: NormalizedEmailAddress,
     /// Validated IMAP settings when configured.
     pub imap: Option<ValidatedImapConfig>,
     /// Validated SMTP settings when configured.
@@ -630,13 +642,15 @@ impl ValidatedAccount {
         } else {
             inactive_auth_config(value.auth)
         };
+        let from_address = NormalizedEmailAddress::parse(&value.from)
+            .ok_or_else(|| "from identity must contain an email address".to_owned())?;
         Ok(Self {
             id,
             enable: account_enabled,
             display_name: value.display_name,
-            from_normalized: normalize_address(&value.from)
-                .ok_or_else(|| "from identity must contain an email address".to_owned())?,
+            from_normalized: from_address.as_str().to_owned(),
             from_identity: value.from,
+            from_address,
             imap,
             smtp,
             auth,
@@ -1049,14 +1063,6 @@ impl AddressPattern {
             Self::Regex { regex, .. } => regex.is_match(&normalized),
         }
     }
-
-    fn pattern_text(&self) -> &str {
-        match self {
-            Self::Exact { pattern } | Self::Glob { pattern, .. } | Self::Regex { pattern, .. } => {
-                pattern
-            }
-        }
-    }
 }
 
 /// Match result for policy decisions.
@@ -1096,7 +1102,7 @@ fn compile_address_patterns(patterns: &[String]) -> Result<Vec<AddressPattern>, 
 
 fn incoming_auth_decision(
     message: &BackendMessage,
-    policy: &ValidatedIncomingAuthPolicy,
+    policy: &TypedIncomingAuthPolicy,
 ) -> PolicyDecision {
     if message.source_truncated && message.body_text.is_empty() {
         return PolicyDecision::denied("auth truncated");
@@ -1104,11 +1110,9 @@ fn incoming_auth_decision(
     if message.auth_results.is_empty() {
         return PolicyDecision::denied("auth missing");
     }
-    let Some(visible_domain) = normalize_address(&message.from).and_then(|address| {
-        address
-            .split_once('@')
-            .map(|(_, domain)| domain.to_ascii_lowercase())
-    }) else {
+    let Some(visible_domain) =
+        NormalizedEmailAddress::parse(&message.from).map(|address| address.domain())
+    else {
         return PolicyDecision::denied("auth unaligned");
     };
     // Authentication-Results headers below the newest one are attacker-controlled
@@ -1117,10 +1121,8 @@ fn incoming_auth_decision(
     let Some(evidence) = message.auth_results.first() else {
         return PolicyDecision::denied("auth missing");
     };
-    if !policy
-        .trusted_authserv_ids
-        .contains(&evidence.authserv_id.to_ascii_lowercase())
-    {
+    let observed_authserv_id = AuthservId::observed(&evidence.authserv_id);
+    if !policy.trusts(&observed_authserv_id) {
         return PolicyDecision::denied("untrusted auth server");
     }
 
@@ -1131,7 +1133,7 @@ fn incoming_auth_decision(
         if evidence
             .dmarc_header_from
             .as_deref()
-            .is_some_and(|domain| domain.eq_ignore_ascii_case(&visible_domain))
+            .is_some_and(|domain| DomainName::comparison_key(domain) == visible_domain)
         {
             saw_aligned_dmarc = true;
         }
@@ -1141,12 +1143,12 @@ fn incoming_auth_decision(
         if evidence
             .dkim_header_d
             .as_deref()
-            .is_some_and(|domain| domain.eq_ignore_ascii_case(&visible_domain))
+            .is_some_and(|domain| DomainName::comparison_key(domain) == visible_domain)
         {
             return PolicyDecision::allowed(Some("auth".to_owned()));
         }
     }
-    if policy.allow_dmarc_only && saw_aligned_dmarc {
+    if policy.allow_dmarc_only() && saw_aligned_dmarc {
         return PolicyDecision::allowed(Some("auth".to_owned()));
     }
     if saw_aligned_dmarc {
@@ -1161,33 +1163,7 @@ fn incoming_auth_decision(
 /// Normalize an email address/header to lowercase `local@domain` for policy
 /// matching.
 pub fn normalize_address(input: &str) -> Option<String> {
-    let raw = input.trim();
-    let candidate = if let (Some(start), Some(end)) = (raw.rfind('<'), raw.rfind('>')) {
-        if start < end {
-            &raw[start + 1..end]
-        } else {
-            raw
-        }
-    } else {
-        raw
-    };
-    let candidate = candidate.trim().trim_matches('"');
-    let (local, domain) = candidate.split_once('@')?;
-    if local.is_empty()
-        || domain.is_empty()
-        || candidate.contains(char::is_whitespace)
-        || candidate
-            .chars()
-            .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
-        || candidate.matches('@').count() != 1
-    {
-        return None;
-    }
-    Some(format!(
-        "{}@{}",
-        local.to_ascii_lowercase(),
-        domain.to_ascii_lowercase()
-    ))
+    NormalizedEmailAddress::parse(input).map(|address| address.as_str().to_owned())
 }
 
 fn validate_folder_pattern(pattern: &str) -> Result<(), String> {
@@ -4293,7 +4269,7 @@ impl<B: EmailBackend> Engine<B> {
         }
         if let Some(from) = from {
             let from_trimmed = from.trim();
-            let from_normalized = normalize_address(from);
+            let from_normalized = NormalizedEmailAddress::parse(from);
             if let Some(id) = self.config.account_order.iter().find(|id| {
                 let Some(account) = self.config.accounts.get(*id) else {
                     return false;
@@ -4301,7 +4277,7 @@ impl<B: EmailBackend> Engine<B> {
                 account.enable
                     && account.smtp_configured()
                     && (from_trimmed == account.from_identity
-                        || from_normalized.as_deref() == Some(account.from_normalized.as_str()))
+                        || from_normalized.as_ref() == Some(&account.from_address))
             }) {
                 return Some(id.as_ref().to_owned());
             }
@@ -5081,15 +5057,16 @@ impl<B: EmailBackend> Engine<B> {
     fn incoming_decision(&self, message: &BackendMessage) -> PolicyDecision {
         let sender_decision = self.address_decision(
             &message.from,
-            &self.config.policy.incoming_allow,
+            self.config.typed_policy.incoming_allow(),
             |s| s.load_incoming_allow(),
             "untrusted",
         );
-        if !self.config.policy.incoming_auth.require {
+        if !self.config.typed_policy.incoming_auth().require() {
             return sender_decision;
         }
 
-        let auth_decision = incoming_auth_decision(message, &self.config.policy.incoming_auth);
+        let auth_decision =
+            incoming_auth_decision(message, self.config.typed_policy.incoming_auth());
         if sender_decision.allowed && auth_decision.allowed {
             return PolicyDecision::allowed(sender_decision.matched_pattern);
         }
@@ -5107,7 +5084,7 @@ impl<B: EmailBackend> Engine<B> {
     fn recipient_allowed(&self, recipient: &str) -> bool {
         self.address_decision(
             recipient,
-            &self.config.policy.outgoing_allow,
+            self.config.typed_policy.outgoing_allow(),
             |s| s.load_outgoing_allow(),
             "recipient_not_whitelisted",
         )
@@ -5117,15 +5094,19 @@ impl<B: EmailBackend> Engine<B> {
     fn address_decision<F>(
         &self,
         address: &str,
-        config_patterns: &[AddressPattern],
+        config_patterns: &[TypedAddressPattern],
         load_state: F,
         denied: &str,
     ) -> PolicyDecision
     where
         F: Fn(&StateStore) -> Result<Vec<AddressPattern>, String>,
     {
+        let normalized = NormalizedEmailAddress::parse(address);
         for pattern in config_patterns {
-            if pattern.matches(address) {
+            if normalized
+                .as_ref()
+                .is_some_and(|address| pattern.matches(address))
+            {
                 return PolicyDecision::allowed(Some(pattern.pattern_text().to_owned()));
             }
         }
@@ -5133,7 +5114,11 @@ impl<B: EmailBackend> Engine<B> {
             && let Ok(patterns) = load_state(&self.state)
         {
             for pattern in patterns {
-                if pattern.matches(address) {
+                let pattern = TypedAddressPattern::from_validated(&pattern);
+                if normalized
+                    .as_ref()
+                    .is_some_and(|address| pattern.matches(address))
+                {
                     return PolicyDecision::allowed(Some(pattern.pattern_text().to_owned()));
                 }
             }
@@ -5188,7 +5173,7 @@ fn validate_send_from(from: Option<&str>, account_cfg: &ValidatedAccount) -> Res
         return Ok(());
     }
     if !from.contains(['<', '>'])
-        && normalize_address(from).as_deref() == Some(account_cfg.from_normalized.as_str())
+        && NormalizedEmailAddress::parse(from).as_ref() == Some(&account_cfg.from_address)
     {
         return Ok(());
     }

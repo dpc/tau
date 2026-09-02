@@ -1844,6 +1844,70 @@ fn invalid_regex_is_rejected() {
     assert!(regex_error.contains("invalid regex"));
 }
 
+/// Address normalization must preserve every historical selection, rejection,
+/// ASCII-folding, and non-ASCII behavior while the private proof type owns it.
+#[test]
+fn normalized_email_address_preserves_the_public_compatibility_algorithm() {
+    let accepted = [
+        (" Alice <FIRST@Example.COM> trailing ", "first@example.com"),
+        ("broken > ignored <LAST@Example.COM>", "last@example.com"),
+        (
+            "\"Odd.!#$%&'*+/=?^_`{|}~-@Example.COM\"",
+            "odd.!#$%&'*+/=?^_`{|}~-@example.com",
+        ),
+        ("Üser@EXAMPLE.COM", "Üser@example.com"),
+    ];
+    for (input, expected) in accepted {
+        let typed = NormalizedEmailAddress::parse(input).expect("address remains accepted");
+        assert_eq!(typed.as_str(), expected);
+        assert_eq!(normalize_address(input).as_deref(), Some(expected));
+    }
+
+    for input in [
+        "",
+        "@example.com",
+        "alice@",
+        "alice@example.com@other.test",
+        "alice @example.com",
+        "alice@\nexample.com",
+        "alice\u{202e}@example.com",
+    ] {
+        assert!(NormalizedEmailAddress::parse(input).is_none());
+        assert_eq!(normalize_address(input), None);
+    }
+}
+
+/// Public compiled patterns and their private mirror must retain identical
+/// classification, source text, match behavior, and first-match ordering.
+#[test]
+fn typed_policy_projection_retains_public_pattern_bytes_and_order() {
+    let validated = cfg().validate().expect("valid");
+    let AddressPattern::Glob { pattern, matcher } = &validated.policy.incoming_allow[0] else {
+        panic!("public pattern classification changed")
+    };
+    assert_eq!(pattern, "*@company.com");
+    assert!(matcher.is_match("team@company.com"));
+    assert_eq!(
+        validated.typed_policy.incoming_allow()[0].pattern_text(),
+        "*@company.com"
+    );
+    assert!(
+        validated.typed_policy.incoming_allow()[0]
+            .matches(&NormalizedEmailAddress::parse("TEAM@Company.COM").expect("normalized"))
+    );
+    assert_eq!(
+        validated.typed_policy.outgoing_allow()[0].pattern_text(),
+        "bob@company.com"
+    );
+    assert_eq!(
+        validated.typed_policy.outgoing_allow()[1].pattern_text(),
+        "re:.*@trusted\\.test"
+    );
+    let account = &validated.accounts["work"];
+    assert_eq!(account.from_normalized, account.from_address.as_str());
+    assert_eq!(account.from_identity, "Alice <alice@company.com>");
+}
+
 #[test]
 fn exact_glob_regex_address_matching_and_normalization() {
     assert_eq!(
@@ -1874,6 +1938,100 @@ fn exact_glob_regex_address_matching_and_normalization() {
         !AddressPattern::compile("bob@example.com")
             .expect("exact")
             .matches("Bob Example <alice@example.com>")
+    );
+}
+
+/// Trusted authserv configuration keeps its existing trim, diagnostic,
+/// lowercase, deduplication, and sorted public representation.
+#[test]
+fn trusted_authserv_configuration_and_typed_mirror_stay_exactly_aligned() {
+    let mut config = cfg();
+    config.policy.incoming_auth.trusted_authserv_ids = vec![
+        " Zed.EXAMPLE ".to_owned(),
+        "alpha.example".to_owned(),
+        "zed.example".to_owned(),
+    ];
+    let validated = config.validate().expect("trusted ids validate");
+    assert_eq!(
+        validated
+            .policy
+            .incoming_auth
+            .trusted_authserv_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["alpha.example", "zed.example"]
+    );
+    assert!(
+        validated
+            .typed_policy
+            .incoming_auth()
+            .trusts(&AuthservId::observed("ZED.EXAMPLE"))
+    );
+    assert!(
+        !validated
+            .typed_policy
+            .incoming_auth()
+            .trusts(&AuthservId::observed(" zed.example "))
+    );
+
+    let mut invalid = cfg();
+    invalid.policy.incoming_auth.trusted_authserv_ids = vec![" bad,id ".to_owned()];
+    assert_eq!(
+        invalid.validate().err().as_deref(),
+        Some("invalid incoming_auth trusted authserv-id ` bad,id `")
+    );
+}
+
+/// Arbitrary public authentication evidence must retain exact ASCII-only trust
+/// and domain equality, lowercase-pass, and topmost-record semantics.
+#[test]
+fn private_authentication_keys_do_not_broaden_raw_evidence() {
+    let validated = cfg().validate().expect("valid");
+    let policy = validated.typed_policy.incoming_auth();
+    let decision = |authserv_id: &str, result: &str, domain: &str| {
+        incoming_auth_decision(
+            &BackendMessage {
+                uid: "1".to_owned(),
+                uidvalidity: "uv".to_owned(),
+                date: "date".to_owned(),
+                from: "Team <team@Company.COM>".to_owned(),
+                to: Vec::new(),
+                cc: Vec::new(),
+                subject: String::new(),
+                source_truncated: false,
+                body_text: "body".to_owned(),
+                flags: Vec::new(),
+                has_attachments: false,
+                attachments: Vec::new(),
+                message_id: None,
+                auth_results: vec![AuthenticationResultsEvidence {
+                    authserv_id: authserv_id.to_owned(),
+                    dkim_result: Some(result.to_owned()),
+                    dkim_header_d: Some(domain.to_owned()),
+                    ..Default::default()
+                }],
+            },
+            policy,
+        )
+    };
+
+    assert!(decision("MX.COMPANY.COM", "pass", "COMPANY.com").allowed);
+    assert_eq!(
+        decision(" mx.company.com ", "pass", "company.com").reason,
+        "untrusted auth server"
+    );
+    assert_eq!(
+        decision("mx.company.com", "pass", " company.com ").reason,
+        "auth unaligned"
+    );
+    assert_eq!(
+        decision("mx.company.com", "pass", "sub.company.com").reason,
+        "auth unaligned"
+    );
+    assert_eq!(
+        decision("mx.company.com", "PASS", "company.com").reason,
+        "auth failed"
     );
 }
 
@@ -5340,6 +5498,35 @@ fn state_allowlist_load_save_and_policy_extension_disable() {
         uid: "9".to_owned(),
     });
     assert_eq!(cbor_text_field(&read, "status"), Some("preview"));
+}
+
+/// Policy evaluation must continue swallowing persisted policy parse and
+/// compilation failures instead of turning them into authorization errors.
+#[test]
+fn policy_evaluation_ignores_state_load_and_compile_errors() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut config = cfg();
+    config.policy.outgoing_allow.clear();
+    let engine = Engine {
+        config: config.validate().expect("valid"),
+        state: StateStore::open(temp.path().join("state")).expect("state"),
+        backend: FakeBackend::default(),
+    };
+    let policy_dir = temp.path().join("state/policy");
+    std::fs::create_dir_all(&policy_dir).expect("policy directory");
+    let path = policy_dir.join("outgoing-allow.json");
+
+    std::fs::write(&path, b"{not-json").expect("corrupt policy");
+    assert!(engine.state.load_outgoing_allow().is_err());
+    assert!(!engine.recipient_allowed("external@example.test"));
+
+    std::fs::write(
+        &path,
+        br#"{"schema":0,"patterns":[{"kind":"regex","pattern":"(","created_at":"now","created_by":"test","note":null}]}"#,
+    )
+    .expect("invalid compiled policy");
+    assert!(engine.state.load_outgoing_allow().is_err());
+    assert!(!engine.recipient_allowed("external@example.test"));
 }
 
 #[test]
