@@ -5665,6 +5665,7 @@ version = "0.1.0"
 dependencies = [
  "fs2",
  "rostra-core",
+ "rustix 1.1.4",
  "rustix-openpty",
  "serde_json",
  "tau-cli",

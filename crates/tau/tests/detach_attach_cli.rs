@@ -2,12 +2,22 @@ use std::fs::{File, Permissions};
 use std::io::{BufRead as _, BufReader, Read as _, Write};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rustix_openpty::rustix::termios::Winsize;
+use rustix_v1::process::{Pid, Signal, kill_process};
+
+#[path = "detach_attach_cli/owned_process_group.rs"]
+mod owned_process_group;
+
+use owned_process_group::{
+    OwnedProcessGroup, group_exists, run_watchdog_worker_from_env,
+    watchdog_confirms_matching_anchor_stopped, watchdog_rejects_mismatched_anchor,
+};
 
 /// Isolated process environment shared by every CLI in one lifecycle test.
 struct TestEnvironment {
@@ -411,21 +421,17 @@ fn fixed_session_stderr_mirror_attributes_real_respawn_overlap() {
     let (first_pid_path, release_protocol, release_old, second_started, old_written) =
         environment.configure_respawn_stderr_overlap();
     let session_id = "stderr-respawn-overlap";
-    let mut server = environment
-        .command()
-        .args([
-            "serve",
-            "--session",
-            session_id,
-            "--create",
-            "--mirror-extension-stderr",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut command = environment.command();
+    command.args([
+        "serve",
+        "--session",
+        session_id,
+        "--create",
+        "--mirror-extension-stderr",
+    ]);
+    let mut server = OwnedProcessGroup::spawn_piped_stderr(&command, environment.temp.path())
         .expect("spawn respawn-overlap server");
-    let stderr = server.stderr.take().expect("capture serve stderr");
+    let stderr = server.take_stderr().expect("capture serve stderr");
     let (stderr_line_tx, stderr_line_rx) = mpsc::channel();
     let stderr_reader = std::thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
@@ -481,11 +487,7 @@ fn fixed_session_stderr_mirror_attributes_real_respawn_overlap() {
         }
     }
     assert!(saw_new, "replacement record must precede late old stderr");
-    Command::new("kill")
-        .args(["-TERM", &server.id().to_string()])
-        .status()
-        .expect("signal respawn-overlap server");
-    let status = server.wait().expect("wait for overlap server");
+    let status = server.terminate().expect("clean up overlap process group");
     assert!(status.success());
     let stderr =
         String::from_utf8(stderr_reader.join().expect("stderr reader joins")).expect("UTF-8");
@@ -514,6 +516,505 @@ fn fixed_session_stderr_mirror_attributes_real_respawn_overlap() {
         !stderr.contains("stdout-protocol-private"),
         "Configure/protocol canary leaked into process stderr"
     );
+}
+
+/// A nested worker exposes the guarded real-respawn fixture to deterministic
+/// panic and external-SIGTERM lifecycle tests.
+#[test]
+fn owned_process_group_cleanup_worker() {
+    let Ok(mode) = std::env::var("TAU_OWNED_PROCESS_GROUP_WORKER") else {
+        return;
+    };
+    let environment = TestEnvironment::new();
+    let (first_started, ..) = environment.configure_respawn_stderr_overlap();
+    let mut command = environment.command();
+    command.args([
+        "serve",
+        "--session",
+        "stderr-respawn-overlap-cleanup-worker",
+        "--create",
+        "--mirror-extension-stderr",
+    ]);
+    let mut server = OwnedProcessGroup::spawn_piped_stderr(&command, environment.temp.path())
+        .expect("spawn guarded cleanup worker server");
+    let stderr = server.take_stderr().expect("capture cleanup worker stderr");
+    std::thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut sink = Vec::new();
+        stderr
+            .read_to_end(&mut sink)
+            .expect("drain cleanup worker stderr");
+    });
+    let metadata = environment.wait_for_metadata();
+    let socket = metadata.with_extension("sock");
+    let first_pid =
+        std::fs::read_to_string(first_started).expect("read first worker extension PID");
+    let identities = wait_for_owned_fixture_members(server.pgid(), first_pid.trim());
+    server
+        .track_pids(
+            identities
+                .iter()
+                .map(|identity| (identity.pid, identity.start_time)),
+        )
+        .expect("publish fixture PIDs to cleanup watchdog");
+    if mode == "sigterm-during-track-publication" {
+        server
+            .publish_incomplete_track_frame()
+            .expect("publish deliberately incomplete tracking frame");
+    }
+    let readiness = format!(
+        "READY\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        server.pgid(),
+        process_identity(server.watchdog_pid())
+            .expect("watchdog identity")
+            .encode(),
+        environment.temp.path().display(),
+        metadata.display(),
+        socket.display(),
+        identities
+            .iter()
+            .map(ProcessIdentity::encode)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    std::io::stdout()
+        .write_all(readiness.as_bytes())
+        .expect("publish cleanup worker readiness");
+    std::io::stdout()
+        .flush()
+        .expect("flush cleanup worker readiness");
+
+    match mode.as_str() {
+        "panic" => panic!("intentional owned-process-group cleanup panic"),
+        "sigterm" | "sigterm-during-track-publication" => {
+            let mut release = [0_u8; 1];
+            std::io::stdin()
+                .read_exact(&mut release)
+                .expect("external SIGTERM must terminate the blocked worker");
+        }
+        "sigterm-after-group-cleanup" => {
+            let status = server
+                .terminate()
+                .expect("explicit worker process-group cleanup");
+            assert!(
+                status.success(),
+                "worker process group exited unsuccessfully"
+            );
+            std::io::stdout()
+                .write_all(b"GROUP_CLEANED\n")
+                .expect("publish cleaned-group boundary");
+            std::io::stdout()
+                .flush()
+                .expect("flush cleaned-group boundary");
+            let mut release = [0_u8; 1];
+            std::io::stdin()
+                .read_exact(&mut release)
+                .expect("external SIGTERM must terminate the cleanup-boundary worker");
+        }
+        other => panic!("unknown owned-process-group worker mode: {other}"),
+    }
+}
+
+/// Hidden entrypoint for the parent-liveness watchdog that remains outside the
+/// Tau process group and acts only after its control pipe reaches EOF.
+#[test]
+fn owned_process_group_watchdog_worker() {
+    run_watchdog_worker_from_env();
+}
+
+/// A stale or reused numeric PGID whose leader start identity differs from the
+/// committed owner is never signaled by the watchdog.
+#[test]
+fn owned_process_group_watchdog_rejects_mismatched_anchor() {
+    let root = tempfile::tempdir().expect("watchdog mismatch temporary root");
+    assert!(
+        watchdog_rejects_mismatched_anchor(root.path())
+            .expect("run mismatched-anchor watchdog canary"),
+        "watchdog signaled an identity-mismatched process group"
+    );
+    assert!(
+        !root.path().exists(),
+        "watchdog did not remove mismatched-anchor canary root"
+    );
+}
+
+/// The watchdog observes the exact leader stopped with its committed start
+/// identity before it uses the numeric process-group signal.
+#[test]
+fn owned_process_group_watchdog_stops_matching_anchor_before_group_signal() {
+    let root = tempfile::tempdir().expect("watchdog stop-boundary temporary root");
+    assert!(
+        watchdog_confirms_matching_anchor_stopped(root.path())
+            .expect("run stopped-anchor watchdog canary"),
+        "watchdog did not confirm the matching leader stopped before group signal"
+    );
+    assert!(
+        !root.path().exists(),
+        "watchdog did not remove stopped-anchor canary root"
+    );
+}
+
+/// Panic unwinding tears down and reaps the exact real-respawn process group
+/// before the worker's temporary environment disappears.
+#[test]
+fn owned_process_group_cleans_real_respawn_fixture_on_panic() {
+    assert_owned_process_group_worker_cleanup("panic");
+}
+
+/// External SIGTERM bypasses Rust unwinding but the parent-liveness watchdog
+/// still removes only the real-respawn worker's group and temporary resources.
+#[test]
+fn owned_process_group_cleans_real_respawn_fixture_on_sigterm() {
+    assert_owned_process_group_worker_cleanup("sigterm");
+}
+
+/// External SIGTERM during an incomplete tracking publication cannot stop the
+/// watchdog from killing the exact group and removing its exact resources.
+#[test]
+fn owned_process_group_cleans_after_interrupted_tracking_publication() {
+    assert_owned_process_group_worker_cleanup("sigterm-during-track-publication");
+}
+
+/// The watchdog remains armed after explicit group cleanup until owner Drop has
+/// removed the exact root, closing the cleanup-order cancellation window.
+#[test]
+fn owned_process_group_cleans_if_sigterm_follows_group_cleanup() {
+    assert_owned_process_group_worker_cleanup("sigterm-after-group-cleanup");
+}
+
+/// One PID and Linux start time, used to reject PID reuse in cleanup oracles.
+#[derive(Clone, Copy, Debug)]
+struct ProcessIdentity {
+    /// Linux process identifier.
+    pid: u32,
+    /// Field 22 from `/proc/<pid>/stat`.
+    start_time: u64,
+}
+
+impl ProcessIdentity {
+    /// Encodes one identity for the worker's readiness record.
+    fn encode(&self) -> String {
+        format!("{}:{}", self.pid, self.start_time)
+    }
+
+    /// Parses one identity from the worker's readiness record.
+    fn parse(encoded: &str) -> Self {
+        let (pid, start_time) = encoded.split_once(':').expect("encoded process identity");
+        Self {
+            pid: pid.parse().expect("process identity PID"),
+            start_time: start_time.parse().expect("process identity start time"),
+        }
+    }
+}
+
+/// Runs one exact nested worker and proves that all captured processes and
+/// resources disappear after the selected failure mode.
+fn assert_owned_process_group_worker_cleanup(mode: &str) {
+    let mut worker =
+        Command::new(std::env::current_exe().expect("current integration test binary"))
+            .args([
+                "--exact",
+                "owned_process_group_cleanup_worker",
+                "--nocapture",
+            ])
+            .env("TAU_OWNED_PROCESS_GROUP_WORKER", mode)
+            .env("CARGO_BIN_EXE_tau", env!("CARGO_BIN_EXE_tau"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn exact cleanup worker");
+    let stdout = worker.stdout.take().expect("capture cleanup worker stdout");
+    let mut worker_stderr = worker.stderr.take().expect("capture cleanup worker stderr");
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stderr = Vec::new();
+        let result = worker_stderr.read_to_end(&mut stderr);
+        let _ = stderr_tx.send((result, stderr));
+    });
+    let mut stdout = BufReader::new(stdout);
+    let mut readiness = String::new();
+    loop {
+        readiness.clear();
+        stdout
+            .read_line(&mut readiness)
+            .expect("read cleanup worker readiness");
+        if readiness.starts_with("READY\t") {
+            break;
+        }
+        if readiness.is_empty() {
+            let status = worker.wait().expect("reap unready cleanup worker");
+            let (read_result, stderr) = stderr_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("collect unready cleanup worker stderr");
+            read_result.expect("read unready cleanup worker stderr");
+            panic!(
+                "cleanup worker exited before readiness: {status}\n{}",
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+    }
+    let readiness = parse_cleanup_readiness(&readiness);
+
+    if mode == "sigterm-after-group-cleanup" {
+        loop {
+            let mut boundary = String::new();
+            stdout
+                .read_line(&mut boundary)
+                .expect("read cleanup-order boundary");
+            assert!(
+                !boundary.is_empty(),
+                "cleanup worker exited before group-cleaned boundary"
+            );
+            if boundary == "GROUP_CLEANED\n" {
+                break;
+            }
+        }
+    }
+    if mode.starts_with("sigterm") {
+        signal_pid(worker.id(), Signal::TERM).expect("SIGTERM cleanup worker");
+    }
+    drop(worker.stdin.take());
+
+    let (eof_tx, eof_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut remainder = Vec::new();
+        let result = stdout.read_to_end(&mut remainder);
+        let _ = eof_tx.send((result, remainder));
+    });
+    let (read_result, remainder) = eof_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("worker and watchdog close readiness pipe before deadline");
+    read_result.expect("read cleanup worker output through EOF");
+    let status = worker.wait().expect("reap cleanup worker");
+    let (stderr_result, worker_stderr) = stderr_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("collect cleanup worker stderr");
+    stderr_result.expect("read cleanup worker stderr");
+    assert!(
+        !status.success(),
+        "{mode} cleanup worker unexpectedly succeeded.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&remainder),
+        String::from_utf8_lossy(&worker_stderr)
+    );
+    if mode.starts_with("sigterm") {
+        assert_eq!(status.signal(), Some(Signal::TERM.as_raw()));
+    }
+
+    assert!(
+        !group_exists(readiness.pgid).expect("query cleaned process group"),
+        "owned process group {} survived {mode}",
+        readiness.pgid
+    );
+    for identity in &readiness.identities {
+        assert_identity_gone(*identity, mode);
+    }
+    assert_identity_gone(readiness.watchdog, mode);
+    assert!(
+        !readiness.metadata.exists(),
+        "runtime metadata survived {mode}: {}",
+        readiness.metadata.display()
+    );
+    assert!(
+        !readiness.socket.exists(),
+        "runtime socket survived {mode}: {}",
+        readiness.socket.display()
+    );
+    assert!(
+        !readiness.temp_root.exists(),
+        "temporary root survived {mode}: {}",
+        readiness.temp_root.display()
+    );
+    assert_no_proc_reference(&readiness.temp_root, mode);
+}
+
+/// Parsed readiness data published after the real fixture and both polling
+/// helpers have started.
+struct CleanupReadiness {
+    /// Dedicated Tau process-group identifier.
+    pgid: u32,
+    /// External parent-liveness watchdog identity.
+    watchdog: ProcessIdentity,
+    /// Exact temporary root owned by the fixture.
+    temp_root: PathBuf,
+    /// Exact runtime metadata path.
+    metadata: PathBuf,
+    /// Exact runtime socket path.
+    socket: PathBuf,
+    /// Every process captured in the Tau process group at readiness.
+    identities: Vec<ProcessIdentity>,
+}
+
+/// Parses the worker's single blocking-pipe readiness record.
+fn parse_cleanup_readiness(line: &str) -> CleanupReadiness {
+    let mut fields = line.trim_end().split('\t');
+    assert_eq!(fields.next(), Some("READY"), "worker readiness prefix");
+    let pgid = fields
+        .next()
+        .expect("readiness PGID")
+        .parse()
+        .expect("numeric readiness PGID");
+    let watchdog = ProcessIdentity::parse(fields.next().expect("readiness watchdog identity"));
+    let temp_root = PathBuf::from(fields.next().expect("readiness temporary root"));
+    let metadata = PathBuf::from(fields.next().expect("readiness metadata"));
+    let socket = PathBuf::from(fields.next().expect("readiness socket"));
+    let identities = fields
+        .next()
+        .expect("readiness process identities")
+        .split(',')
+        .map(ProcessIdentity::parse)
+        .collect();
+    assert!(fields.next().is_none(), "unexpected readiness fields");
+    CleanupReadiness {
+        pgid,
+        watchdog,
+        temp_root,
+        metadata,
+        socket,
+        identities,
+    }
+}
+
+/// Waits without elapsed-delay synchronization until the Tau group contains
+/// its server, extension, and both first-generation polling helpers.
+fn wait_for_owned_fixture_members(pgid: u32, first_extension_pid: &str) -> Vec<ProcessIdentity> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let identities = process_group_identities(pgid);
+        let first_extension_pid = first_extension_pid
+            .parse::<u32>()
+            .expect("first extension PID");
+        let helper_count = identities
+            .iter()
+            .filter(|identity| {
+                process_cmdline(identity.pid)
+                    .is_some_and(|cmdline| cmdline.contains("respawn-stderr-overlap"))
+            })
+            .count();
+        if identities
+            .iter()
+            .any(|identity| identity.pid == first_extension_pid)
+            && helper_count >= 2
+        {
+            return identities;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "real-respawn fixture members did not become ready"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Captures every live member of one Linux process group.
+fn process_group_identities(pgid: u32) -> Vec<ProcessIdentity> {
+    std::fs::read_dir("/proc")
+        .expect("read /proc")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(process_stat)
+        .filter_map(|(identity, process_group)| (process_group == pgid).then_some(identity))
+        .collect()
+}
+
+/// Reads one PID's identity and process group from Linux procfs.
+fn process_stat(pid: u32) -> Option<(ProcessIdentity, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_name = stat.rsplit_once(") ")?.1;
+    let fields = after_name.split_ascii_whitespace().collect::<Vec<_>>();
+    let process_group = fields.get(2)?.parse().ok()?;
+    let start_time = fields.get(19)?.parse().ok()?;
+    Some((ProcessIdentity { pid, start_time }, process_group))
+}
+
+/// Returns one PID's identity while it still denotes the same live process.
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    process_stat(pid).map(|(identity, _)| identity)
+}
+
+/// Reads a process command line for exact fixture-helper identification.
+fn process_cmdline(pid: u32) -> Option<String> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(String::from_utf8_lossy(&bytes).replace('\0', " "))
+}
+
+/// Requires one captured PID to be absent or reused by a different process.
+fn assert_identity_gone(identity: ProcessIdentity, mode: &str) {
+    assert!(
+        process_identity(identity.pid)
+            .is_none_or(|current| current.start_time != identity.start_time),
+        "captured PID {} survived {mode} with start time {}",
+        identity.pid,
+        identity.start_time
+    );
+}
+
+/// Requires no process cwd, root, descriptor, or command line to retain the
+/// unique fixture root after cleanup.
+fn assert_no_proc_reference(temp_root: &Path, mode: &str) {
+    let needle = temp_root.as_os_str().as_encoded_bytes();
+    for entry in std::fs::read_dir("/proc")
+        .expect("read /proc for residue")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.as_bytes().iter().all(u8::is_ascii_digit))
+        })
+    {
+        let process = entry.path();
+        for link in ["cwd", "root"] {
+            if std::fs::read_link(process.join(link))
+                .ok()
+                .is_some_and(|path| {
+                    path.as_os_str()
+                        .as_encoded_bytes()
+                        .windows(needle.len())
+                        .any(|window| window == needle)
+                })
+            {
+                panic!(
+                    "process {} {link} retained fixture root after {mode}",
+                    entry.file_name().to_string_lossy()
+                );
+            }
+        }
+        if std::fs::read(process.join("cmdline"))
+            .ok()
+            .is_some_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+        {
+            panic!(
+                "process {} command line retained fixture root after {mode}",
+                entry.file_name().to_string_lossy()
+            );
+        }
+        if let Ok(descriptors) = std::fs::read_dir(process.join("fd")) {
+            for descriptor in descriptors.filter_map(Result::ok) {
+                if std::fs::read_link(descriptor.path())
+                    .ok()
+                    .is_some_and(|path| {
+                        path.as_os_str()
+                            .as_encoded_bytes()
+                            .windows(needle.len())
+                            .any(|window| window == needle)
+                    })
+                {
+                    panic!(
+                        "process {} descriptor retained fixture root after {mode}",
+                        entry.file_name().to_string_lossy()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Sends one exact signal to one worker PID.
+fn signal_pid(pid: u32, signal: Signal) -> std::io::Result<()> {
+    let pid = Pid::from_raw(i32::try_from(pid).expect("worker PID fits i32"))
+        .expect("worker PID is positive");
+    kill_process(pid, signal).map_err(Into::into)
 }
 
 /// One interactive Tau child and the PTY controller used to submit commands.

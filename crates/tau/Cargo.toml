@@ -36,6 +36,7 @@ tau-ext-zulip.workspace = true
 fs2.workspace = true
 rostra-core.workspace = true
 rustix-openpty.workspace = true
+rustix-v1 = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 tau-core = { workspace = true, features = ["test-legacy-writer"] }
 tau-harness.workspace = true
