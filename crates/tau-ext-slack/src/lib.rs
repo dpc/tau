@@ -48,6 +48,7 @@ mod posted_message_cache;
 mod reactions;
 mod send_delivery;
 mod transport_mentions;
+mod transport_url;
 
 use admission::{AdmissionQueue, OutstandingPermit, QueueDepthBucket, ReserveError};
 use admission_trace::{AdmissionOutcome, EventClass, LatencyTrace};
@@ -73,6 +74,7 @@ use send_delivery::{
 use transport_mentions::{
     NormalizedTransportMention, SLACK_BRIDGE_REFERENCE, normalize_transport_mentions,
 };
+use transport_url::{SlackApiBaseUrl, SlackSocketUrl};
 
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "slack";
@@ -365,8 +367,8 @@ struct RuntimeConfig {
     dynamic_direct_messages: Option<DynamicDirectMessages>,
     /// Whether agent-authored posts include the originating agent id prefix.
     prefix_agent_id: bool,
-    /// Slack Web API base URL.
-    api_base: String,
+    /// Exact validated Slack Web API base URL.
+    api_base: SlackApiBaseUrl,
     /// Maximum accepted inbound or outbound text size in bytes.
     max_message_bytes: usize,
 }
@@ -662,7 +664,7 @@ impl ExtConfig {
             .unwrap_or_else(|| DEFAULT_API_BASE.to_owned())
             .trim_end_matches('/')
             .to_owned();
-        validate_api_base(&api_base)?;
+        let api_base = SlackApiBaseUrl::parse_exact(api_base)?;
         let max_message_bytes = self.max_message_bytes.unwrap_or(DEFAULT_MAX_MESSAGE_BYTES);
         if max_message_bytes == 0 || MAX_MESSAGE_BYTES < max_message_bytes {
             return Err(format!(
@@ -2099,7 +2101,7 @@ impl Extension {
             .client
             .open_socket(cfg)
             .map_err(|error| error.to_string())?;
-        validate_socket_url(&socket_url)?;
+        let socket_url = SlackSocketUrl::parse_exact(socket_url)?;
         Ok(WorkerStartup {
             bot_user_id: installation.bot_user_id,
             installation_team_id: installation.team_id,
@@ -4368,7 +4370,7 @@ struct WorkerStartup {
     /// Exact authenticated installing T workspace.
     installation_team_id: String,
     /// Validated one-use Socket Mode websocket URL.
-    socket_url: String,
+    socket_url: SlackSocketUrl,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4452,7 +4454,7 @@ async fn socket_worker_once_with_heartbeat(
                 .client
                 .open_socket(cfg)
                 .map_err(|error| error.to_string())?;
-            validate_socket_url(&ws_url)?;
+            let ws_url = SlackSocketUrl::parse_exact(ws_url)?;
             let _submission = ext
                 .output_submission_gate
                 .lock()
@@ -4468,7 +4470,7 @@ async fn socket_worker_once_with_heartbeat(
         }
     };
     let (mut ws, _response) = tokio_tungstenite::connect_async_with_config(
-        &ws_url,
+        ws_url.raw(),
         Some(socket_websocket_config()),
         false,
     )
@@ -6137,48 +6139,6 @@ fn validate_slack_ts(value: &str) -> Result<(), ()> {
     Ok(())
 }
 
-fn validate_api_base(api_base: &str) -> Result<(), String> {
-    if api_base.is_empty() {
-        return Err("slack `api_base` must not be empty".to_owned());
-    }
-    let url = url::Url::parse(api_base)
-        .map_err(|e| format!("slack `api_base` must be a valid URL: {e}"))?;
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("slack `api_base` must not include userinfo".to_owned());
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("slack `api_base` must not include query or fragment".to_owned());
-    }
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" if url.host().is_some_and(is_loopback_host) => Ok(()),
-        "http" => Err("slack `api_base` may use http only for loopback hosts".to_owned()),
-        _ => Err("slack `api_base` must use https, or http for loopback tests".to_owned()),
-    }
-}
-
-fn validate_socket_url(ws_url: &str) -> Result<(), String> {
-    let url =
-        url::Url::parse(ws_url).map_err(|e| format!("Slack Socket Mode URL is invalid: {e}"))?;
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("Slack Socket Mode URL must not include userinfo".to_owned());
-    }
-    match url.scheme() {
-        "wss" => Ok(()),
-        "ws" if url.host().is_some_and(is_loopback_host) => Ok(()),
-        "ws" => Err("Slack Socket Mode URL may use ws only for loopback hosts".to_owned()),
-        _ => Err("Slack Socket Mode URL must use wss, or ws for loopback tests".to_owned()),
-    }
-}
-
-fn is_loopback_host(host: url::Host<&str>) -> bool {
-    match host {
-        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
-        url::Host::Ipv4(addr) => addr.is_loopback(),
-        url::Host::Ipv6(addr) => addr.is_loopback(),
-    }
-}
-
 struct HttpSlackClient {
     agent: ureq::Agent,
 }
@@ -6225,7 +6185,7 @@ impl HttpSlackClient {
         token: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, SlackApiError> {
-        let url = format!("{}/{method}", cfg.api_base);
+        let url = cfg.api_base.method_url(method);
         let mut response = self
             .agent
             .post(&url)
@@ -6252,7 +6212,7 @@ impl HttpSlackClient {
         cfg: &RuntimeConfig,
         user_id: &str,
     ) -> Result<serde_json::Value, SlackApiError> {
-        let url = format!("{}/users.info", cfg.api_base);
+        let url = cfg.api_base.method_url("users.info");
         let mut response = self
             .agent
             .post(&url)
@@ -6344,7 +6304,7 @@ impl SlackClient for HttpSlackClient {
         cfg: &RuntimeConfig,
         body: &FrozenPostBody,
     ) -> PostAttemptOutcome<PostedMessage> {
-        let url = format!("{}/chat.postMessage", cfg.api_base);
+        let url = cfg.api_base.method_url("chat.postMessage");
         let response = self
             .agent
             .post(&url)
@@ -6542,3 +6502,5 @@ fn bounded_text(text: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transport_url_tests;

@@ -368,6 +368,16 @@ impl SlackClient for IdentitySequenceClient {
     }
 }
 
+/// Construct one validated API base for private runtime-config test fixtures.
+fn api_base(raw: String) -> SlackApiBaseUrl {
+    SlackApiBaseUrl::parse_exact(raw).expect("valid API base")
+}
+
+/// Construct one validated Socket URL for private worker-startup test fixtures.
+fn test_socket_url(raw: String) -> SlackSocketUrl {
+    SlackSocketUrl::parse_exact(raw).expect("valid Socket URL")
+}
+
 fn cfg() -> RuntimeConfig {
     let policy = ConversationPolicy {
         alias: "team".to_owned(),
@@ -391,7 +401,7 @@ fn cfg() -> RuntimeConfig {
         proactive_aliases: BTreeSet::new(),
         dynamic_direct_messages: None,
         prefix_agent_id: false,
-        api_base: DEFAULT_API_BASE.to_owned(),
+        api_base: api_base(DEFAULT_API_BASE.to_owned()),
         max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
     }
 }
@@ -2129,7 +2139,7 @@ async fn socket_worker_result_for_frames(
         Some(WorkerStartup {
             bot_user_id: "UBOT123".to_owned(),
             installation_team_id: "T123".to_owned(),
-            socket_url,
+            socket_url: test_socket_url(socket_url),
         }),
         &AdmissionQueue::new(),
         SlackConnectionGeneration::new(1),
@@ -2284,7 +2294,7 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
             Some(WorkerStartup {
                 bot_user_id: "UBOT123".to_owned(),
                 installation_team_id: "T123".to_owned(),
-                socket_url,
+                socket_url: test_socket_url(socket_url),
             }),
             &AdmissionQueue::new(),
             SlackConnectionGeneration::new(1),
@@ -2336,7 +2346,7 @@ async fn socket_worker_once_reconnects_after_missing_heartbeat_pong() {
             Some(WorkerStartup {
                 bot_user_id: "UBOT123".to_owned(),
                 installation_team_id: "T123".to_owned(),
-                socket_url,
+                socket_url: test_socket_url(socket_url),
             }),
             &AdmissionQueue::new(),
             SlackConnectionGeneration::new(1),
@@ -2409,7 +2419,7 @@ async fn socket_worker_once_keeps_responsive_idle_connection() {
             Some(WorkerStartup {
                 bot_user_id: "UBOT123".to_owned(),
                 installation_team_id: "T123".to_owned(),
-                socket_url,
+                socket_url: test_socket_url(socket_url),
             }),
             &AdmissionQueue::new(),
             SlackConnectionGeneration::new(1),
@@ -2481,7 +2491,7 @@ async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic(
             Some(WorkerStartup {
                 bot_user_id: "UBOT123".to_owned(),
                 installation_team_id: "T123".to_owned(),
-                socket_url,
+                socket_url: test_socket_url(socket_url),
             }),
             &AdmissionQueue::new(),
             SlackConnectionGeneration::new(1),
@@ -2677,7 +2687,7 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
             Some(WorkerStartup {
                 bot_user_id: "UBOT123".to_owned(),
                 installation_team_id: "T123".to_owned(),
-                socket_url,
+                socket_url: test_socket_url(socket_url),
             }),
             &worker_queue,
             SlackConnectionGeneration::new(1),
@@ -2763,7 +2773,7 @@ async fn saturated_admission_does_not_ack_supported_envelope() {
         Some(WorkerStartup {
             bot_user_id: "UBOT123".to_owned(),
             installation_team_id: "T123".to_owned(),
-            socket_url,
+            socket_url: test_socket_url(socket_url),
         }),
         &queue,
         SlackConnectionGeneration::new(1),
@@ -4584,7 +4594,42 @@ fn config_rejects_unsafe_api_base_overrides() {
     }
     .validate(&secrets)
     .expect("loopback accepted");
-    assert_eq!(cfg.api_base, "http://127.0.0.1:8080/api");
+    assert_eq!(cfg.api_base.raw(), "http://127.0.0.1:8080/api");
+
+    let default_cfg = ExtConfig {
+        app_token_secret: Some("app".to_owned()),
+        bot_token_secret: Some("bot".to_owned()),
+        allowed_user_ids: vec!["U123".to_owned()],
+        dynamic_direct_messages: Some(DynamicDirectMessages {
+            receive: ReceiveMode::AllMessages,
+        }),
+        ..Default::default()
+    }
+    .validate(&secrets)
+    .expect("default API base");
+    assert_eq!(default_cfg.api_base.raw(), DEFAULT_API_BASE);
+    assert_eq!(
+        default_cfg.api_base.method_url("auth.test"),
+        "https://slack.com/api/auth.test"
+    );
+
+    let exact_cfg = ExtConfig {
+        app_token_secret: Some("app".to_owned()),
+        bot_token_secret: Some("bot".to_owned()),
+        allowed_user_ids: vec!["U123".to_owned()],
+        dynamic_direct_messages: Some(DynamicDirectMessages {
+            receive: ReceiveMode::AllMessages,
+        }),
+        api_base: Some("https://EXAMPLE.com:443/a%2Fb///".to_owned()),
+        ..Default::default()
+    }
+    .validate(&secrets)
+    .expect("exact API base");
+    assert_eq!(exact_cfg.api_base.raw(), "https://EXAMPLE.com:443/a%2Fb");
+    assert_eq!(
+        exact_cfg.api_base.method_url("auth.test"),
+        "https://EXAMPLE.com:443/a%2Fb/auth.test"
+    );
 }
 
 /// Once Socket Mode owns a config snapshot, reconfiguration must fail closed
@@ -5299,7 +5344,7 @@ fn users_info_uses_form_encoding() {
         .expect("write users.info response");
     });
     let cfg = RuntimeConfig {
-        api_base: format!("http://{address}/api"),
+        api_base: api_base(format!("http://{address}/api")),
         ..cfg()
     };
     assert!(
@@ -5371,7 +5416,7 @@ fn post_http_outcomes_are_typed_bounded_and_body_safe() {
         }
     });
     let cfg = RuntimeConfig {
-        api_base: format!("http://{address}/api"),
+        api_base: api_base(format!("http://{address}/api")),
         ..cfg()
     };
     let client = HttpSlackClient::default();
@@ -5464,7 +5509,7 @@ fn reactions_use_exact_json_wire_contract() {
         }
     });
     let cfg = RuntimeConfig {
-        api_base: format!("http://{address}/api"),
+        api_base: api_base(format!("http://{address}/api")),
         ..cfg()
     };
     let client = HttpSlackClient::default();
@@ -5498,7 +5543,7 @@ fn reaction_http_errors_are_typed_and_body_safe() {
         }
     });
     let cfg = RuntimeConfig {
-        api_base: format!("http://{address}/api"),
+        api_base: api_base(format!("http://{address}/api")),
         ..cfg()
     };
     let client = HttpSlackClient::default();
@@ -6745,8 +6790,12 @@ fn bot_self_and_subtype_messages_are_ignored() {
 /// loopback-only test transport.
 #[test]
 fn socket_url_transport_validation_is_fail_closed() {
-    assert!(validate_socket_url("ws://example.com/socket?ticket=secret").is_err());
-    assert!(validate_socket_url("ws://127.0.0.1:9000/socket?ticket=secret").is_ok());
+    assert!(
+        SlackSocketUrl::parse_exact("ws://example.com/socket?ticket=secret".to_owned()).is_err()
+    );
+    assert!(
+        SlackSocketUrl::parse_exact("ws://127.0.0.1:9000/socket?ticket=secret".to_owned()).is_ok()
+    );
 }
 
 /// A users.info outage rejects every occurrence, reports only once per

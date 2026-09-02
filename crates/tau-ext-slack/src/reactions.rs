@@ -991,7 +991,7 @@ impl HttpSlackClient {
             ReactionActionKind::Add => "reactions.add",
             ReactionActionKind::Remove => "reactions.remove",
         };
-        let url = format!("{}/{method}", cfg.api_base);
+        let url = cfg.api_base.method_url(method);
         let mut response = self
             .agent
             .post(&url)
