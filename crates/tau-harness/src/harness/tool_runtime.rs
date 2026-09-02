@@ -169,6 +169,25 @@ pub(crate) struct ToolRuntimeState {
     pub(super) background_completion_targets: HashMap<ToolCallId, AgentId>,
 }
 
+impl ToolRuntimeState {
+    /// Remove one wait settlement only when this exact preallocated canonical
+    /// terminal committed.
+    pub(super) fn take_wait_settlement_for_terminal(
+        &mut self,
+        call_id: &ToolCallId,
+        terminal: tau_proto::ObservationId,
+    ) -> Option<subagents_tool::PendingWaitSettlement> {
+        self.pending_wait_settlements
+            .get(call_id)
+            .is_some_and(|settlement| settlement.wait_terminal == Some(terminal))
+            .then(|| {
+                self.pending_wait_settlements
+                    .remove(call_id)
+                    .expect("matched wait settlement remains pending")
+            })
+    }
+}
+
 impl Harness {
     /// Returns the effective foreground/background support for a tool name.
     /// Missing registration metadata uses the protocol default of
@@ -638,6 +657,17 @@ impl Harness {
         call_id: &ToolCallId,
         completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
+        if !matches!(
+            completion_prompt_mode,
+            BackgroundCompletionPromptMode::DoNotQueue
+        ) && self
+            .tool_routing
+            .tool_runtime
+            .suppressed_background_completion_prompts
+            .contains(call_id)
+        {
+            self.record_wait_exact_all_notice_blocked(call_id);
+        }
         self.tool_routing
             .tool_runtime
             .background_completion_targets
@@ -709,6 +739,60 @@ impl Harness {
         advance_queue: bool,
         make_prompt: impl FnOnce(String) -> PendingPrompt,
     ) {
+        self.queue_background_completion_prompt_inner_with_source(
+            cid,
+            call_id,
+            advance_queue,
+            self.wait_tool_terminal_observation(call_id),
+            self.wait_tool_call_ref(call_id),
+            make_prompt,
+        );
+    }
+
+    pub(super) fn queue_background_completion_prompt_with_source(
+        &mut self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+        source_terminal: Option<tau_proto::ObservationId>,
+        source_call: Option<tau_proto::ToolCallRef>,
+    ) {
+        self.queue_background_completion_prompt_inner_with_source(
+            cid,
+            call_id,
+            true,
+            source_terminal,
+            source_call,
+            PendingPrompt::activating_background_completion,
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn queue_passive_background_completion_prompt_with_source(
+        &mut self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+        source_terminal: Option<tau_proto::ObservationId>,
+        source_call: Option<tau_proto::ToolCallRef>,
+    ) {
+        self.queue_background_completion_prompt_inner_with_source(
+            cid,
+            call_id,
+            false,
+            source_terminal,
+            source_call,
+            PendingPrompt::passive_background_completion,
+        );
+    }
+
+    fn queue_background_completion_prompt_inner_with_source(
+        &mut self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+        advance_queue: bool,
+        source_terminal: Option<tau_proto::ObservationId>,
+        source_call: Option<tau_proto::ToolCallRef>,
+        make_prompt: impl FnOnce(String) -> PendingPrompt,
+    ) {
         if self
             .tool_routing
             .tool_runtime
@@ -718,17 +802,31 @@ impl Harness {
             return;
         }
         let prompt = background_completion_prompt(call_id);
+        let correlation = BackgroundCompletionCorrelation {
+            call_id: call_id.clone(),
+            source_call,
+            source_terminal,
+        };
         let activation = tau_proto::ObservationId::random();
         let queued = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            if conv
-                .dispatch
-                .pending_prompts
-                .iter()
-                .any(|pending| pending.text == prompt)
-            {
+            if conv.dispatch.pending_prompts.iter().any(|pending| {
+                pending.text == prompt
+                    && match &pending.background_completion {
+                        Some(existing)
+                            if existing.source_call.is_some()
+                                && existing.source_terminal.is_some()
+                                && correlation.source_call.is_some()
+                                && correlation.source_terminal.is_some() =>
+                        {
+                            existing == &correlation
+                        }
+                        _ => true,
+                    }
+            }) {
                 return;
             }
             let mut prompt = make_prompt(prompt);
+            prompt.background_completion = Some(correlation);
             let inference_activation = prompt.creates_inference_activation();
             prompt.activation_observation = inference_activation.then_some(activation);
             conv.dispatch.pending_prompts.push_back(prompt);
@@ -741,8 +839,8 @@ impl Harness {
                 cid,
                 activation,
                 tau_proto::ActivationKind::BackgroundCompletion,
-                self.wait_tool_terminal_observation(call_id),
-                self.wait_tool_call_ref(call_id),
+                source_terminal,
+                source_call,
             );
             self.activate_waits_for(cid, activation);
         }
@@ -770,16 +868,65 @@ impl Harness {
         }
     }
 
-    pub(super) fn suppress_background_completion_prompt(&mut self, call_id: ToolCallId) {
+    pub(super) fn suppress_background_completion_prompt(&mut self, call_id: ToolCallId) -> bool {
+        let current_call = self.wait_tool_call_ref(&call_id);
+        let current_terminal = self.wait_tool_terminal_observation(&call_id);
         self.tool_routing
             .tool_runtime
             .suppressed_background_completion_prompts
             .insert(call_id.clone());
         let prompt = background_completion_prompt(&call_id);
+        let mut removed = false;
         for conv in self.agent_runtime.agent_registry.agents.values_mut() {
-            conv.dispatch
-                .pending_prompts
-                .retain(|pending| pending.text != prompt);
+            conv.dispatch.pending_prompts.retain(|pending| {
+                let matches_generation =
+                    pending
+                        .background_completion
+                        .as_ref()
+                        .is_none_or(|correlation| {
+                            current_call.is_none_or(|call| correlation.source_call == Some(call))
+                                && current_terminal.is_none_or(|terminal| {
+                                    correlation.source_terminal == Some(terminal)
+                                })
+                        });
+                let keep = pending.text != prompt || !matches_generation;
+                removed |= !keep;
+                keep
+            });
+        }
+        removed
+    }
+
+    pub(super) fn release_background_completion_prompt_suppression(
+        &mut self,
+        call_id: &ToolCallId,
+    ) {
+        self.tool_routing
+            .tool_runtime
+            .suppressed_background_completion_prompts
+            .remove(call_id);
+    }
+
+    pub(super) fn remove_pending_background_completion_notice(
+        &mut self,
+        call_id: &ToolCallId,
+        source_call: Option<tau_proto::ToolCallRef>,
+        source_terminal: Option<tau_proto::ObservationId>,
+    ) {
+        let prompt = background_completion_prompt(call_id);
+        for conv in self.agent_runtime.agent_registry.agents.values_mut() {
+            conv.dispatch.pending_prompts.retain(|pending| {
+                if pending.text != prompt {
+                    return true;
+                }
+                pending
+                    .background_completion
+                    .as_ref()
+                    .is_some_and(|correlation| {
+                        correlation.source_call != source_call
+                            || correlation.source_terminal != source_terminal
+                    })
+            });
         }
     }
 

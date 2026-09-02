@@ -294,10 +294,16 @@ fake provider emits four fixed commands that create only four dotfile barrier
 markers below the private core-shell cwd, use monotonic clocks, sleep for three
 seconds, and print bounded identity/timing records. The markers remain inside
 the private temporary fixture until its teardown so the all-arrived state cannot
-regress. Four
-exact waits collect the real background completions before shutdown. The
+regress. One bounded plural exact wait collects the four real background
+completions before shutdown. The
 scripts accept no prompt-derived command, path, environment control, or network
 input; same-UID execution and the Nix sandbox remain the outer boundary.
+
+The mixed plural-wait oracle is a separate closed scenario. It enables the same
+exact `shell`, `workdir`, and harness-owned `wait` tools, runs the fixed helper
+version command, and requests one fresh relative missing directory. The provider
+then joins those two terminals with one bounded plural wait. It adds no
+prompt-derived path, command, environment, or network input.
 
 `VcrFixture` is deliberately non-hermetic. It can use real provider credentials
 and lets `core-shell` execute with the user's permissions. Its cassettes can

@@ -21,10 +21,12 @@ The content-free observation events are
 
 Every provider-declared wait receives a pre-resolution
 `agent.tool_wait_observed` identity. Its typed mode distinguishes a resolved
-exact target, an unresolved exact target, next-background selection,
-activating-input timeout, and invalid arguments. Active registrations and every
-settlement refer back to that observation; immediate settlements retain no
-registration.
+exact target, a bounded ordered resolved exact-target set, unresolved exact
+selection, next-background selection, activating-input timeout, and invalid
+arguments. A plural selection contains one through 64 distinct targets in request
+order and records no synthetic target when any requested display ID cannot resolve
+to its exact declaration occurrence. Active registrations and every settlement
+refer back to that observation; immediate settlements retain no registration.
 
 They are valid per-agent journal records but replay as fold no-ops. Replay never
 dispatches work, installs or settles a waiter, queues input, consumes output,
@@ -33,8 +35,17 @@ cancels a call, or repeats a continuation.
 A canonical final terminal owns its output. Its event-envelope observation ID is
 the output reference. A completion-delivering wait retains only that reference and
 its typed envelope; it never owns or copies the source payload or output counts.
+A successful plural wait retains one bounded ordered delivered-source record per
+requested target. Every source record contains the exact call reference, canonical
+terminal observation, terminal phase, and wait envelope. All records share the
+plural wait call and terminal, preserve request order rather than completion order,
+and copy no source payload.
 A terminal classification precedes the canonical terminal, and a wait settlement
 can survive only after that canonical terminal commits.
+An undelivered background-completion notice retains the same exact call and
+terminal pair. If a provider-visible call ID is reused, each generation keeps a
+distinct notice identity; the harness neither deduplicates nor removes one
+generation's notice through another generation's display ID.
 When UI manual compaction preempts the sole installed harness-owned wait, its
 canonical null-output cancellation produces
 `agent.tool_wait_settled` with outcome `Cancelled`. Because no

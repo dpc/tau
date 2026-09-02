@@ -48,9 +48,7 @@ fn run_core_shell_four_sibling_commands(
     let call_ids = std::array::from_fn(|index| {
         tau_proto::ToolCallId::new(format!("parallel-shell-{}", index + 1))
     });
-    let wait_call_ids = std::array::from_fn(|index| {
-        tau_proto::ToolCallId::new(format!("parallel-wait-{}", index + 1))
-    });
+    let wait_call_id = tau_proto::ToolCallId::new("parallel-wait-all");
     let scenario = ScenarioV2::new(
         "core-shell-parallel",
         vec![ScenarioLaneV2 {
@@ -66,13 +64,13 @@ fn run_core_shell_four_sibling_commands(
                     user_text: PROMPT.to_owned(),
                     advertise_parallel,
                     call_ids: call_ids.clone(),
-                    wait_call_ids: wait_call_ids.clone(),
+                    wait_call_id: wait_call_id.clone(),
                 },
                 ScenarioActionV2::CoreShellParallelResult {
                     user_text: PROMPT.to_owned(),
                     advertise_parallel,
                     call_ids: call_ids.clone(),
-                    wait_call_ids,
+                    wait_call_id: wait_call_id.clone(),
                     response: RESPONSE.to_owned(),
                 },
             ],
@@ -201,6 +199,11 @@ fn run_core_shell_four_sibling_commands(
         .collect::<Vec<_>>();
     assert_eq!(background_results.len(), 4);
     assert_eq!(
+        background_results,
+        call_ids.iter().rev().collect::<Vec<_>>(),
+        "staggered probes must complete in reverse request order"
+    );
+    assert_eq!(
         background_results
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>(),
@@ -211,6 +214,48 @@ fn run_core_shell_four_sibling_commands(
         event,
         Event::ToolBackgroundError(error) if call_ids.contains(&error.call_id)
     )));
+    let aggregate = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ProviderToolResult(result) if result.call_id == wait_call_id => {
+                Some(&result.result)
+            }
+            _ => None,
+        })
+        .expect("plural wait aggregate");
+    let CborValue::Map(root) = aggregate else {
+        panic!("plural wait aggregate must be a map");
+    };
+    let CborValue::Array(members) = root
+        .iter()
+        .find_map(|(key, value)| (key == &CborValue::Text("results".to_owned())).then_some(value))
+        .expect("plural wait results")
+    else {
+        panic!("plural wait results must be an array");
+    };
+    assert_eq!(
+        members
+            .iter()
+            .map(|member| {
+                let CborValue::Map(entries) = member else {
+                    panic!("plural wait member must be a map");
+                };
+                entries
+                    .iter()
+                    .find_map(|(key, value)| {
+                        (key == &CborValue::Text("original_tool_call_id".to_owned()))
+                            .then_some(value)
+                    })
+                    .and_then(|value| match value {
+                        CborValue::Text(value) => Some(value.clone()),
+                        _ => None,
+                    })
+                    .expect("plural member text call id")
+            })
+            .collect::<Vec<_>>(),
+        call_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "aggregate order must remain provider request order despite reverse completion",
+    );
 
     let intervals = call_ids
         .iter()

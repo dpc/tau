@@ -2480,9 +2480,9 @@ impl Harness {
         if let Some(settlement) = self
             .tool_routing
             .tool_runtime
-            .pending_wait_settlements
-            .remove(call_id)
+            .take_wait_settlement_for_terminal(call_id, append_outcome.observation_id)
         {
+            self.commit_exact_all_wait_terminal(call_id);
             self.append_best_effort_observation(
                 &cid,
                 tau_proto::ObservationId::random(),

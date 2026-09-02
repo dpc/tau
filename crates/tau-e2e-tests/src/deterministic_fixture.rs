@@ -104,6 +104,8 @@ enum FixtureMode {
     Standard,
     CoreShell,
     CoreShellParallel,
+    /// Core-shell success/error siblings joined by one plural wait.
+    WaitAllMixed,
     SessionRestore,
     SessionRestoreWatch,
     SessionRestoreMultipleWorkers,
@@ -494,6 +496,24 @@ impl DeterministicFixture {
         )
     }
 
+    /// Creates the closed harness-owned mixed-result plural-wait fixture.
+    pub fn new_wait_all_mixed(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface::default(),
+            FixtureMode::WaitAllMixed,
+        )
+    }
+
     fn new_serialized(
         name: &str,
         scenario: serde_json::Value,
@@ -505,7 +525,7 @@ impl DeterministicFixture {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let core_shell_enabled = matches!(
             mode,
-            FixtureMode::CoreShell | FixtureMode::CoreShellParallel
+            FixtureMode::CoreShell | FixtureMode::CoreShellParallel | FixtureMode::WaitAllMixed
         );
         let FixtureToolSurface {
             dummy_tool_bin,
@@ -671,6 +691,8 @@ impl DeterministicFixture {
             );
             if mode == FixtureMode::CoreShellParallel {
                 serde_json::json!(["shell", "wait"])
+            } else if mode == FixtureMode::WaitAllMixed {
+                serde_json::json!(["shell", "workdir", "wait"])
             } else {
                 serde_json::json!(["workdir", "edit"])
             }
@@ -849,6 +871,12 @@ impl DeterministicFixture {
             allowed_extensions.insert(
                 tau_proto::ExtensionName::parse("e2e-test-dummy")
                     .expect("dummy extension name must satisfy the extension identifier grammar"),
+            );
+        }
+        if self.core_shell_enabled {
+            allowed_extensions.insert(
+                tau_proto::ExtensionName::parse("core-shell")
+                    .expect("core-shell name must satisfy the extension identifier grammar"),
             );
         }
         let result = run_embedded_message_with_options_and_internal_tools(

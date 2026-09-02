@@ -1870,7 +1870,8 @@ impl FakeState {
             }
             | ScenarioActionV2::CoreShellCreateResult { response, .. }
             | ScenarioActionV2::CoreShellResumeEditResult { response, .. }
-            | ScenarioActionV2::CoreShellParallelResult { response, .. } => {
+            | ScenarioActionV2::CoreShellParallelResult { response, .. }
+            | ScenarioActionV2::WaitAllMixedResult { response, .. } => {
                 emit_text_response(prompt, handle, response)
             }
             ScenarioActionV2::StandaloneCompaction { narrative } => {
@@ -1975,13 +1976,34 @@ impl FakeState {
             ScenarioActionV2::CoreShellParallelCalls {
                 call_ids,
                 probe_executable,
+                advertise_parallel,
                 ..
-            } => emit_parallel_shell_calls(prompt, handle, call_ids, &probe_executable),
+            } => emit_parallel_shell_calls(
+                prompt,
+                handle,
+                call_ids,
+                &probe_executable,
+                advertise_parallel,
+            ),
             ScenarioActionV2::CoreShellParallelWaits {
                 call_ids,
-                wait_call_ids,
+                wait_call_id,
                 ..
-            } => emit_parallel_wait_calls(prompt, handle, call_ids, wait_call_ids),
+            } => emit_parallel_wait_call(prompt, handle, call_ids, wait_call_id),
+            ScenarioActionV2::WaitAllMixedCalls {
+                wait_call_id,
+                success_call_id,
+                error_call_id,
+                probe_executable,
+                ..
+            } => emit_wait_all_mixed_calls(
+                prompt,
+                handle,
+                wait_call_id,
+                success_call_id,
+                error_call_id,
+                &probe_executable,
+            ),
             ScenarioActionV2::Disconnect { reason, .. } => {
                 self.trace(&format!("deliberate_disconnect={reason}"))?;
                 Err(ClientError::handler(format!(
@@ -2426,6 +2448,10 @@ impl FakeState {
             | ScenarioActionV2::CoreShellResumeEditResult { .. }
             | ScenarioActionV2::CoreShellParallelResult { .. } => {
                 self.validate_v2_core_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::WaitAllMixedCalls { .. }
+            | ScenarioActionV2::WaitAllMixedResult { .. } => {
+                self.validate_v2_wait_all_mixed_action(cursor, prompt, action)
             }
             _ => Ok(()),
         }
@@ -3380,12 +3406,20 @@ impl FakeState {
                 }
             }
             ScenarioActionV2::CoreShellParallelResult { call_ids, .. } => {
-                let ScenarioActionV2::CoreShellParallelResult { wait_call_ids, .. } = action else {
+                let ScenarioActionV2::CoreShellParallelResult {
+                    wait_call_id,
+                    advertise_parallel,
+                    ..
+                } = action
+                else {
                     unreachable!()
                 };
-                if let Err(detail) =
-                    validate_complete_parallel_wait_round(prompt, call_ids, wait_call_ids)
-                {
+                if let Err(detail) = validate_complete_parallel_wait_round(
+                    prompt,
+                    call_ids,
+                    wait_call_id,
+                    *advertise_parallel,
+                ) {
                     self.trace(&format!(
                         "parallel_context={}",
                         serde_json::to_string(&prompt.context)
@@ -3395,6 +3429,42 @@ impl FakeState {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the closed harness-owned mixed-result plural-wait sequence.
+    fn validate_v2_wait_all_mixed_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        let mut names = prompt
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        if names != ["shell", "wait", "workdir"] {
+            return Err(self.mismatch(
+                cursor,
+                &format!("mixed wait-all tool snapshot mismatch: {names:?}"),
+            ));
+        }
+        let ScenarioActionV2::WaitAllMixedResult {
+            wait_call_id,
+            success_call_id,
+            error_call_id,
+            ..
+        } = action
+        else {
+            return Ok(());
+        };
+        if let Err(detail) =
+            validate_wait_all_mixed_round(prompt, wait_call_id, success_call_id, error_call_id)
+        {
+            return Err(self.mismatch(cursor, detail));
         }
         Ok(())
     }
@@ -3666,6 +3736,7 @@ fn emit_parallel_shell_calls(
     handle: &tau_client::ClientHandle,
     call_ids: [tau_proto::ToolCallId; 4],
     probe_executable: &std::path::Path,
+    _advertise_parallel: bool,
 ) -> ClientResult<()> {
     let probe_executable = probe_executable
         .to_str()
@@ -3696,34 +3767,89 @@ fn emit_parallel_shell_calls(
     )))
 }
 
-/// Publishes four sibling exact waits so the provider continuation cannot
-/// finish until every background shell command has produced its real result.
-fn emit_parallel_wait_calls(
+/// Publishes one plural exact wait so the provider continuation cannot finish
+/// until every background shell command has produced its real result.
+fn emit_parallel_wait_call(
     prompt: &tau_proto::AgentPromptCreated,
     handle: &tau_client::ClientHandle,
     call_ids: [tau_proto::ToolCallId; 4],
-    wait_call_ids: [tau_proto::ToolCallId; 4],
+    wait_call_id: tau_proto::ToolCallId,
 ) -> ClientResult<()> {
-    let output_items = call_ids
-        .into_iter()
-        .zip(wait_call_ids)
-        .map(|(background_call_id, wait_call_id)| {
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: wait_call_id,
-                name: ToolName::new("wait"),
-                tool_type: ToolType::Function,
-                arguments: cbor_map(vec![(
-                    "tool_call_id",
-                    CborValue::Text(background_call_id.to_string()),
-                )]),
-                raw_arguments_json: None,
-                responses_envelope: None,
-            })
-        })
-        .collect();
+    let output_items = vec![ContextItem::ToolCall(ToolCallItem {
+        call_id: wait_call_id,
+        name: ToolName::new("wait"),
+        tool_type: ToolType::Function,
+        arguments: cbor_map(vec![(
+            "tool_call_ids",
+            CborValue::Array(
+                call_ids
+                    .into_iter()
+                    .map(|call_id| CborValue::Text(call_id.to_string()))
+                    .collect(),
+            ),
+        )]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
     handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
         prompt,
         output_items,
+        ProviderStopReason::ToolCalls,
+    )))
+}
+
+/// Publishes a plural wait before one successful and one deterministic failing
+/// core-shell sibling so the aggregate must contain mixed outcomes.
+fn emit_wait_all_mixed_calls(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    wait_call_id: tau_proto::ToolCallId,
+    success_call_id: tau_proto::ToolCallId,
+    error_call_id: tau_proto::ToolCallId,
+    probe_executable: &std::path::Path,
+) -> ClientResult<()> {
+    let probe_executable = probe_executable
+        .to_str()
+        .ok_or_else(|| ClientError::handler("mixed wait probe path is not UTF-8"))?;
+    let success = ContextItem::ToolCall(ToolCallItem {
+        call_id: success_call_id.clone(),
+        name: ToolName::new("shell"),
+        tool_type: ToolType::Function,
+        arguments: cbor_map(vec![(
+            "command",
+            CborValue::Text(format!("{} --version", shell_quote(probe_executable))),
+        )]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    });
+    let error = ContextItem::ToolCall(ToolCallItem {
+        call_id: error_call_id.clone(),
+        name: ToolName::new("workdir"),
+        tool_type: ToolType::Function,
+        arguments: cbor_map(vec![(
+            "path",
+            CborValue::Text("missing-wait-all-directory".to_owned()),
+        )]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    });
+    let wait = ContextItem::ToolCall(ToolCallItem {
+        call_id: wait_call_id,
+        name: ToolName::new("wait"),
+        tool_type: ToolType::Function,
+        arguments: cbor_map(vec![(
+            "tool_call_ids",
+            CborValue::Array(vec![
+                CborValue::Text(success_call_id.to_string()),
+                CborValue::Text(error_call_id.to_string()),
+            ]),
+        )]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    });
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        vec![success, error, wait],
         ProviderStopReason::ToolCalls,
     )))
 }
@@ -3966,6 +4092,8 @@ impl ScenarioActionV2 {
             | Self::CoreShellParallelCalls { user_text, .. }
             | Self::CoreShellParallelWaits { user_text, .. }
             | Self::CoreShellParallelResult { user_text, .. }
+            | Self::WaitAllMixedCalls { user_text, .. }
+            | Self::WaitAllMixedResult { user_text, .. }
             | Self::Error { user_text, .. }
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }
@@ -4089,7 +4217,8 @@ fn validate_complete_parallel_dummy_round(
 fn validate_complete_parallel_wait_round(
     prompt: &tau_proto::AgentPromptCreated,
     expected_shell_call_ids: &[tau_proto::ToolCallId; 4],
-    expected_wait_call_ids: &[tau_proto::ToolCallId; 4],
+    expected_wait_call_id: &tau_proto::ToolCallId,
+    _advertise_parallel: bool,
 ) -> Result<(), &'static str> {
     let context = prompt.context.flatten();
     let shell_calls = context
@@ -4113,45 +4242,133 @@ fn validate_complete_parallel_wait_round(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let wait_mapping_matches =
-        wait_calls
-            .iter()
-            .zip(expected_shell_call_ids)
-            .all(|(wait, shell_id)| {
-                cbor_map_text_field(&wait.arguments, "tool_call_id") == Some(shell_id.as_str())
-            });
-    let expected_results = expected_shell_call_ids
+    let wait_mapping_matches = wait_calls.len() == 1
+        && cbor_map_text_array_field(&wait_calls[0].arguments, "tool_call_ids")
+            == Some(
+                expected_shell_call_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            );
+    let source_results = &all_results[..all_results.len().min(4)];
+    let wait_result = all_results.get(4);
+    let source_statuses_match = source_results
         .iter()
-        .chain(expected_wait_call_ids)
-        .collect::<Vec<_>>();
-    let wait_payloads_match = all_results
-        .iter()
-        .skip(4)
-        .enumerate()
-        .all(|(index, result)| {
-            result
-                .output
-                .body
-                .contains(&format!("id=parallel-{}", index + 1))
-        });
-    if shell_calls != expected_shell_call_ids.iter().collect::<Vec<_>>()
-        || wait_calls
-            .iter()
-            .map(|call| &call.call_id)
-            .collect::<Vec<_>>()
-            != expected_wait_call_ids.iter().collect::<Vec<_>>()
-        || !wait_mapping_matches
-        || all_results
-            .iter()
-            .map(|result| &result.call_id)
-            .collect::<Vec<_>>()
-            != expected_results
-        || all_results
-            .iter()
-            .any(|result| result.status != tau_proto::ToolResultStatus::Success)
-        || !wait_payloads_match
+        .all(|result| result.status == tau_proto::ToolResultStatus::Success);
+    let wait_payloads_match = wait_result.is_some_and(|result| {
+        result.status == tau_proto::ToolResultStatus::Success
+            && expected_shell_call_ids
+                .iter()
+                .all(|call_id| result.output.body.contains(call_id.as_str()))
+            && (0..4).all(|index| {
+                result
+                    .output
+                    .body
+                    .contains(&format!("id=parallel-{}", index + 1))
+            })
+    });
+    if shell_calls != expected_shell_call_ids.iter().collect::<Vec<_>>() {
+        return Err("parallel shell call identity/order mismatch");
+    }
+    if wait_calls.first().map(|call| &call.call_id) != Some(expected_wait_call_id)
+        || wait_calls.len() != 1
     {
-        return Err("parallel shell round identity/order mismatch");
+        return Err("plural wait call identity mismatch");
+    }
+    if !wait_mapping_matches {
+        return Err("plural wait target mapping mismatch");
+    }
+    if all_results.len() != 5 {
+        return Err("plural wait continuation result count mismatch");
+    }
+    if source_results
+        .iter()
+        .map(|result| &result.call_id)
+        .collect::<Vec<_>>()
+        != expected_shell_call_ids.iter().collect::<Vec<_>>()
+    {
+        return Err("parallel shell placeholder result identity/order mismatch");
+    }
+    if wait_result.map(|result| &result.call_id) != Some(expected_wait_call_id) {
+        return Err("plural wait result identity mismatch");
+    }
+    if !source_statuses_match {
+        return Err("parallel shell placeholder status mismatch");
+    }
+    if !wait_payloads_match {
+        return Err("plural wait aggregate payload mismatch");
+    }
+    Ok(())
+}
+
+/// Validates one successful plural wait whose two source members have mixed
+/// result and error outcomes.
+fn validate_wait_all_mixed_round(
+    prompt: &tau_proto::AgentPromptCreated,
+    expected_wait_call_id: &tau_proto::ToolCallId,
+    expected_success_call_id: &tau_proto::ToolCallId,
+    expected_error_call_id: &tau_proto::ToolCallId,
+) -> Result<(), &'static str> {
+    let context = prompt.context.flatten();
+    let calls = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let results = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_ids = [
+        expected_success_call_id,
+        expected_error_call_id,
+        expected_wait_call_id,
+    ];
+    if calls.iter().map(|call| &call.call_id).collect::<Vec<_>>() != expected_ids {
+        return Err("mixed wait-all call identity/order mismatch");
+    }
+    if calls
+        .iter()
+        .map(|call| call.name.as_str())
+        .collect::<Vec<_>>()
+        != ["shell", "workdir", "wait"]
+    {
+        return Err("mixed wait-all tool-name order mismatch");
+    }
+    if cbor_map_text_array_field(&calls[2].arguments, "tool_call_ids")
+        != Some(vec![
+            expected_success_call_id.to_string(),
+            expected_error_call_id.to_string(),
+        ])
+    {
+        return Err("mixed wait-all target mapping mismatch");
+    }
+    if results
+        .iter()
+        .map(|result| &result.call_id)
+        .collect::<Vec<_>>()
+        != expected_ids
+    {
+        return Err("mixed wait-all result identity/order mismatch");
+    }
+    if results[0].status != tau_proto::ToolResultStatus::Success
+        || !matches!(results[1].status, tau_proto::ToolResultStatus::Error { .. })
+        || results[2].status != tau_proto::ToolResultStatus::Success
+    {
+        return Err("mixed wait-all terminal status mismatch");
+    }
+    let aggregate = &results[2].output.body;
+    if !aggregate.contains(expected_success_call_id.as_str())
+        || !aggregate.contains(expected_error_call_id.as_str())
+        || !aggregate.contains("result")
+        || !aggregate.contains("error")
+    {
+        return Err("mixed wait-all aggregate payload mismatch");
     }
     Ok(())
 }
@@ -4362,6 +4579,26 @@ fn cbor_map_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str>
     entries.iter().find_map(|(key, value)| match (key, value) {
         (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.as_str()),
         _ => None,
+    })
+}
+
+fn cbor_map_text_array_field(value: &CborValue, field: &str) -> Option<Vec<String>> {
+    let CborValue::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| {
+        (key == &CborValue::Text(field.to_owned()))
+            .then_some(value)
+            .and_then(|value| match value {
+                CborValue::Array(values) => values
+                    .iter()
+                    .map(|value| match value {
+                        CborValue::Text(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => None,
+            })
     })
 }
 

@@ -1,7 +1,10 @@
 //! Tests for cancellation and background behavior.
 
+use std::collections::HashSet;
+
 use super::super::super::CancelTarget;
 use super::*;
+use crate::agent::PendingPromptSource;
 
 /// Background terminal events are harness-derived records. Extensions must not
 /// be able to inject them directly into an agent log.
@@ -1825,6 +1828,13 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
         .tool_runtime
         .background_completion_targets
         .insert(call_id.clone(), cid.clone());
+    h.record_wait_tool_call_ref(
+        call_id.clone(),
+        tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([61; 16]),
+            item_index: 0,
+        },
+    );
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
             call_id: call_id.clone(),
@@ -1878,6 +1888,1268 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     );
 
     h.shutdown().expect("shutdown");
+}
+
+/// A harness-level plural wait publishes one ordered native aggregate and
+/// commits all source consumption together.
+#[test]
+fn plural_wait_publishes_ordered_aggregate_and_durable_correlation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let source_a = ToolCallId::from("plural-source-a");
+    let source_b = ToolCallId::from("plural-source-b");
+    let source_a_ref = tau_proto::ToolCallRef {
+        declaration: tau_proto::ObservationId::from_bytes([21; 16]),
+        item_index: 0,
+    };
+    let source_b_ref = tau_proto::ToolCallRef {
+        declaration: tau_proto::ObservationId::from_bytes([22; 16]),
+        item_index: 0,
+    };
+    for (call_id, call_ref) in [
+        (source_a.clone(), source_a_ref),
+        (source_b.clone(), source_b_ref),
+    ] {
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_routing.tool_runtime.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new("slow"),
+                internal_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+        h.record_wait_tool_call_ref(call_id.clone(), call_ref);
+        h.record_wait_tool_request(&call_id);
+    }
+    let terminal_a = tau_proto::ObservationId::from_bytes([31; 16]);
+    let terminal_b = tau_proto::ObservationId::from_bytes([32; 16]);
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: source_a.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Map(vec![(
+                CborValue::Text("typed".to_owned()),
+                CborValue::Array(vec![CborValue::Integer(7.into())]),
+            )]),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(terminal_a),
+    );
+    h.record_wait_background_error(
+        tau_proto::ToolBackgroundError {
+            call_id: source_b.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "synthetic failure".to_owned(),
+            details: Some(CborValue::Bool(true)),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(terminal_b),
+    );
+
+    let wait_ref = tau_proto::ToolCallRef {
+        declaration: tau_proto::ObservationId::from_bytes([23; 16]),
+        item_index: 0,
+    };
+    let wait = AgentToolCall {
+        call_ref: Some(wait_ref),
+        id: "plural-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text(source_b.to_string()),
+                CborValue::Text(source_a.to_string()),
+            ]),
+        )]),
+    };
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("plural wait");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id == wait.id
+                && matches!(&result.result, CborValue::Map(root)
+                    if matches!(&root[0].1, CborValue::Array(members)
+                        if cbor_map_text(&members[0], "original_tool_call_id")
+                            == Some(source_b.as_str())
+                            && cbor_map_text(&members[0], "outcome") == Some("error")
+                            && cbor_map_text(&members[1], "original_tool_call_id")
+                                == Some(source_a.as_str())
+                            && cbor_map_text(&members[1], "outcome") == Some("result")))
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A rejected plural aggregate append retains its exact terminal and source
+/// transaction for retry. A different terminal observation for the same display
+/// ID cannot commit the settlement.
+#[test]
+fn plural_wait_terminal_append_retries_before_atomic_consumption() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let source = ToolCallId::from("plural-retry-source");
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert(source.clone(), cid.clone());
+    h.tool_routing.tool_runtime.pending_tools.insert(
+        source.clone(),
+        PendingTool {
+            name: ToolName::new("slow"),
+            internal_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    h.record_wait_tool_call_ref(
+        source.clone(),
+        tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([51; 16]),
+            item_index: 0,
+        },
+    );
+    h.record_wait_tool_request(&source);
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: source.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("retry payload".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([52; 16])),
+    );
+    let mut wait = AgentToolCall {
+        call_ref: None,
+        id: "plural-retry-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![CborValue::Text(source.to_string())]),
+        )]),
+    };
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    wait.call_ref = h.persisted_tool_call_ref(&cid, &wait.id);
+    assert!(wait.call_ref.is_some());
+    let _interceptor = connect_test_tool(&mut h, "plural-retry-interceptor");
+    h.handle_extension_event(
+        "plural-retry-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_TOOL_RESULT,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register plural terminal interceptor");
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("plural wait");
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "plural-retry-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject plural terminal append");
+
+    assert!(
+        !h.session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent records")
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                Event::ProviderToolResult(result) if result.call_id == wait.id
+            ))
+    );
+    assert!(h.wait_completion_is_retained_for_test(&cid, &source));
+    let expected_terminal = h.tool_routing.tool_runtime.pending_wait_settlements[&wait.id]
+        .wait_terminal
+        .expect("exact retained terminal");
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .take_wait_settlement_for_terminal(
+                &wait.id,
+                tau_proto::ObservationId::from_bytes([54; 16]),
+            )
+            .is_none(),
+        "stale terminal identity must not consume the settlement"
+    );
+    assert_eq!(
+        h.tool_routing.tool_runtime.pending_wait_settlements[&wait.id].wait_terminal,
+        Some(expected_terminal)
+    );
+
+    h.retry_pending_agent_publish_completion(&cid);
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent records")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderToolResult(result) if result.call_id == wait.id
+            ))
+            .count(),
+        1
+    );
+    assert!(!h.wait_completion_is_retained_for_test(&cid, &source));
+    assert!(
+        !h.tool_routing
+            .tool_runtime
+            .pending_wait_settlements
+            .contains_key(&wait.id)
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Cancelling an active plural wait releases every harness-level notice
+/// suppression, restores only the queued completed-source notice, and consumes
+/// no source terminal.
+#[test]
+fn plural_wait_call_cancellation_restores_notice_without_consuming_source() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let completed = ToolCallId::from("plural-cancel-completed");
+    let running = ToolCallId::from("plural-cancel-running");
+    for (index, call_id) in [&completed, &running].into_iter().enumerate() {
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_routing.tool_runtime.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new("slow"),
+                internal_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+        h.record_wait_tool_call_ref(
+            call_id.clone(),
+            tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes(
+                    [u8::try_from(61 + index).expect("small index"); 16],
+                ),
+                item_index: 0,
+            },
+        );
+        h.record_wait_tool_request(call_id);
+    }
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: completed.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("completed payload".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([63; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(completed.clone(), cid.clone());
+    h.queue_background_completion_prompt_without_advancing(&cid, &completed);
+    let notice = background_completion_prompt(&completed);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt.text == notice)
+    );
+
+    let wait = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([64; 16]),
+            item_index: 0,
+        }),
+        id: "plural-cancel-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text(completed.to_string()),
+                CborValue::Text(running.to_string()),
+            ]),
+        )]),
+    };
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("active plural wait");
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != notice)
+    );
+
+    h.record_wait_tool_cancelled(
+        &HashSet::from([wait.id.clone()]),
+        Some((&wait.id, tau_proto::ObservationId::from_bytes([65; 16]))),
+    );
+    assert!(h.wait_completion_is_retained_for_test(&cid, &completed));
+    assert!(
+        !h.tool_routing
+            .tool_runtime
+            .suppressed_background_completion_prompts
+            .contains(&completed)
+    );
+    assert!(
+        !h.tool_routing
+            .tool_runtime
+            .suppressed_background_completion_prompts
+            .contains(&running)
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == notice)
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Consuming a released old generation after display-ID reuse must not suppress
+/// the newer generation's queued completion notice.
+#[test]
+fn plural_wait_old_generation_delivery_preserves_reused_notice() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let reused = ToolCallId::from("plural-reused-notice");
+    let other = ToolCallId::from("plural-reused-other");
+    for (index, call_id) in [&reused, &other].into_iter().enumerate() {
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_routing.tool_runtime.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new("slow"),
+                internal_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+        h.record_wait_tool_call_ref(
+            call_id.clone(),
+            tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes(
+                    [u8::try_from(71 + index).expect("small index"); 16],
+                ),
+                item_index: 0,
+            },
+        );
+        h.record_wait_tool_request(call_id);
+    }
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: reused.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("old generation".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([73; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(reused.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &reused);
+
+    let plural = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([74; 16]),
+            item_index: 0,
+        }),
+        id: "plural-reused-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text(reused.to_string()),
+                CborValue::Text(other.to_string()),
+            ]),
+        )]),
+    };
+    seed_tools_running(&mut h, &cid, vec![plural.id.clone()]);
+    h.handle_wait_tool_call(&cid, &plural, ToolName::new("wait"))
+        .expect("active plural wait");
+
+    h.record_wait_tool_call_ref(
+        reused.clone(),
+        tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([75; 16]),
+            item_index: 0,
+        },
+    );
+    h.record_wait_tool_request(&reused);
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: reused.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("new generation".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([76; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(reused.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &reused);
+    let notice = background_completion_prompt(&reused);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt.text == notice)
+    );
+
+    h.activate_waits_for(&cid, tau_proto::ObservationId::from_bytes([77; 16]));
+    assert_eq!(
+        agent_event_count(&h, |event| {
+            matches!(
+                event,
+                Event::AgentActivationQueued(activation)
+                    if activation.kind == tau_proto::ActivationKind::BackgroundCompletion
+                        && activation.source_call
+                            == Some(tau_proto::ToolCallRef {
+                                declaration: tau_proto::ObservationId::from_bytes([71; 16]),
+                                item_index: 0,
+                            })
+                        && activation.source_observation
+                            == Some(tau_proto::ObservationId::from_bytes([73; 16]))
+            )
+        }),
+        1,
+        "restored notice durably names the old released generation"
+    );
+    let bare = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([78; 16]),
+            item_index: 0,
+        }),
+        id: "plural-reused-bare".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    seed_tools_running(&mut h, &cid, vec![bare.id.clone()]);
+    h.handle_wait_tool_call(&cid, &bare, ToolName::new("wait"))
+        .expect("consume old generation");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == notice)
+            .count(),
+        1,
+        "old-generation delivery must leave exactly one reused-generation notice queued"
+    );
+    assert!(h.wait_completion_is_retained_for_test(&cid, &reused));
+    h.shutdown().expect("shutdown");
+}
+
+/// If the reused generation is still running, consuming the released old
+/// generation removes only the stale restored notice. The new generation can
+/// later queue its own notice normally.
+#[test]
+fn plural_wait_old_generation_delivery_removes_stale_notice_until_reuse_completes() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let reused = ToolCallId::from("plural-reused-running");
+    let other = ToolCallId::from("plural-reused-running-other");
+    for (index, call_id) in [&reused, &other].into_iter().enumerate() {
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_routing.tool_runtime.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new("slow"),
+                internal_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+        h.record_wait_tool_call_ref(
+            call_id.clone(),
+            tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes(
+                    [u8::try_from(81 + index).expect("small index"); 16],
+                ),
+                item_index: 0,
+            },
+        );
+        h.record_wait_tool_request(call_id);
+    }
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: reused.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("old generation".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([83; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(reused.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &reused);
+    let plural = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([84; 16]),
+            item_index: 0,
+        }),
+        id: "plural-reused-running-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text(reused.to_string()),
+                CborValue::Text(other.to_string()),
+            ]),
+        )]),
+    };
+    seed_tools_running(&mut h, &cid, vec![plural.id.clone()]);
+    h.handle_wait_tool_call(&cid, &plural, ToolName::new("wait"))
+        .expect("active plural wait");
+    h.record_wait_tool_call_ref(
+        reused.clone(),
+        tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([85; 16]),
+            item_index: 0,
+        },
+    );
+    h.record_wait_tool_request(&reused);
+    h.activate_waits_for(&cid, tau_proto::ObservationId::from_bytes([86; 16]));
+
+    let notice = background_completion_prompt(&reused);
+    // Keep the restored notice pending rather than letting this synthetic test
+    // harness materialize it as a provider prompt before the bare wait runs.
+    h.queue_passive_background_completion_prompt_with_source(
+        &cid,
+        &reused,
+        Some(tau_proto::ObservationId::from_bytes([83; 16])),
+        Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([81; 16]),
+            item_index: 0,
+        }),
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == notice)
+            .count(),
+        1,
+        "interruption restores the old undelivered notice once"
+    );
+    let bare = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([87; 16]),
+            item_index: 0,
+        }),
+        id: "plural-reused-running-bare".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    seed_tools_running(&mut h, &cid, vec![bare.id.clone()]);
+    h.handle_wait_tool_call(&cid, &bare, ToolName::new("wait"))
+        .expect("consume old generation");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == notice)
+            .count(),
+        0,
+        "old notice must disappear while the reused generation is incomplete"
+    );
+
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: reused.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("new generation".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([88; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(reused.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &reused);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == notice)
+            .count(),
+        1,
+        "the reused generation queues its notice after its own completion"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// One generic notice represents every released completion with the same
+/// display ID. FIFO delivery removes it only after the last released
+/// generation.
+#[test]
+fn plural_wait_multi_generation_delivery_preserves_notice_until_last_release() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let reused = ToolCallId::from("plural-multi-reused");
+    let first_other = ToolCallId::from("plural-multi-first-other");
+    let second_other = ToolCallId::from("plural-multi-second-other");
+    for (index, call_id) in [&reused, &first_other, &second_other]
+        .into_iter()
+        .enumerate()
+    {
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_routing.tool_runtime.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new("slow"),
+                internal_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+        h.record_wait_tool_call_ref(
+            call_id.clone(),
+            tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes(
+                    [u8::try_from(91 + index).expect("small index"); 16],
+                ),
+                item_index: 0,
+            },
+        );
+        h.record_wait_tool_request(call_id);
+    }
+    let notice = background_completion_prompt(&reused);
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: reused.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("generation one".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([94; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(reused.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &reused);
+
+    let first_plural = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([95; 16]),
+            item_index: 0,
+        }),
+        id: "plural-multi-first-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text(reused.to_string()),
+                CborValue::Text(first_other.to_string()),
+            ]),
+        )]),
+    };
+    seed_tools_running(&mut h, &cid, vec![first_plural.id.clone()]);
+    h.handle_wait_tool_call(&cid, &first_plural, ToolName::new("wait"))
+        .expect("first plural wait");
+
+    h.record_wait_tool_call_ref(
+        reused.clone(),
+        tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([97; 16]),
+            item_index: 0,
+        },
+    );
+    h.record_wait_tool_request(&reused);
+    h.activate_waits_for(&cid, tau_proto::ObservationId::from_bytes([96; 16]));
+    h.queue_passive_background_completion_prompt_with_source(
+        &cid,
+        &reused,
+        Some(tau_proto::ObservationId::from_bytes([94; 16])),
+        Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([91; 16]),
+            item_index: 0,
+        }),
+    );
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: reused.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("generation two".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([98; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(reused.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &reused);
+
+    let second_plural = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([99; 16]),
+            item_index: 0,
+        }),
+        id: "plural-multi-second-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text(reused.to_string()),
+                CborValue::Text(second_other.to_string()),
+            ]),
+        )]),
+    };
+    seed_tools_running(&mut h, &cid, vec![second_plural.id.clone()]);
+    h.handle_wait_tool_call(&cid, &second_plural, ToolName::new("wait"))
+        .expect("second plural wait");
+    h.record_wait_tool_call_ref(
+        reused.clone(),
+        tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([100; 16]),
+            item_index: 0,
+        },
+    );
+    h.record_wait_tool_request(&reused);
+    h.activate_waits_for(&cid, tau_proto::ObservationId::from_bytes([101; 16]));
+    h.queue_passive_background_completion_prompt_with_source(
+        &cid,
+        &reused,
+        Some(tau_proto::ObservationId::from_bytes([98; 16])),
+        Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([97; 16]),
+            item_index: 0,
+        }),
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == notice)
+            .count(),
+        2,
+        "each released generation retains its own completion notice"
+    );
+
+    for (index, expected_notices) in [1, 0].into_iter().enumerate() {
+        let bare = AgentToolCall {
+            call_ref: Some(tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes(
+                    [u8::try_from(102 + index).expect("small index"); 16],
+                ),
+                item_index: 0,
+            }),
+            id: format!("plural-multi-bare-{index}").into(),
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        };
+        seed_tools_running(&mut h, &cid, vec![bare.id.clone()]);
+        h.handle_wait_tool_call(&cid, &bare, ToolName::new("wait"))
+            .expect("consume released generation");
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .pending_prompts
+                .iter()
+                .filter(|prompt| prompt.text == notice)
+                .count(),
+            expected_notices,
+            "notice count after released generation {index}"
+        );
+    }
+
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: reused.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("generation three".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([104; 16])),
+    );
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(reused.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &reused);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == notice)
+            .count(),
+        1,
+        "the current generation queues its own notice after completion"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Waiting explicitly for the current reused generation must restore the one
+/// generic notice still needed by an older released generation. This applies to
+/// both singular exact and plural exact-all consumption.
+#[test]
+fn current_generation_exact_waits_restore_released_generation_notice() {
+    for plural in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path().join("state")).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        let reused = ToolCallId::from("current-wait-reused");
+        let other = ToolCallId::from("current-wait-other");
+        let old_call_ref = tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([111; 16]),
+            item_index: 0,
+        };
+        let old_terminal = tau_proto::ObservationId::from_bytes([113; 16]);
+        let agent_id = h.ensure_agent_id_for_agent(&cid).expect("test agent id");
+        assert!(h.append_best_effort_observation(
+            &cid,
+            old_call_ref.declaration,
+            Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                automatic_compaction_decision: None,
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+                agent_prompt_id: test_agent_prompt_id("current-wait-old"),
+                agent_id: crate::parse_agent_id(&agent_id),
+                output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+                    call_id: reused.clone(),
+                    name: ToolName::new("slow"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                output_length_disposition: tau_proto::OutputLengthDisposition::None,
+                usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                compaction_original_input_tokens: None,
+                compaction_output_tokens: None,
+                backend: None,
+                provider_attempt: Default::default(),
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+        ));
+        assert!(h.append_best_effort_observation(
+            &cid,
+            tau_proto::ObservationId::from_bytes([121; 16]),
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: old_call_ref,
+                terminal: old_terminal,
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ));
+        assert!(h.append_best_effort_observation(
+            &cid,
+            old_terminal,
+            Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+                call_id: reused.clone(),
+                tool_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text("released generation".to_owned()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        ));
+        for (index, call_id) in [&reused, &other].into_iter().enumerate() {
+            h.tool_routing
+                .tool_runtime
+                .tool_agents
+                .insert(call_id.clone(), cid.clone());
+            h.tool_routing.tool_runtime.pending_tools.insert(
+                call_id.clone(),
+                PendingTool {
+                    name: ToolName::new("slow"),
+                    internal_name: ToolName::new("slow"),
+                    tool_type: tau_proto::ToolType::Function,
+                    allows_provider_image: false,
+                },
+            );
+            h.record_wait_tool_call_ref(
+                call_id.clone(),
+                if call_id == &reused {
+                    old_call_ref
+                } else {
+                    tau_proto::ToolCallRef {
+                        declaration: tau_proto::ObservationId::from_bytes(
+                            [u8::try_from(111 + index).expect("small index"); 16],
+                        ),
+                        item_index: 0,
+                    }
+                },
+            );
+            h.record_wait_tool_request(call_id);
+        }
+        h.record_wait_background_result(
+            tau_proto::ToolBackgroundResult {
+                call_id: reused.clone(),
+                tool_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text("released generation".to_owned()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            },
+            Some(old_terminal),
+        );
+        h.tool_routing
+            .tool_runtime
+            .background_completion_targets
+            .insert(reused.clone(), cid.clone());
+        h.queue_passive_background_completion_prompt_with_source(
+            &cid,
+            &reused,
+            Some(old_terminal),
+            Some(old_call_ref),
+        );
+
+        let reserving_wait = AgentToolCall {
+            call_ref: Some(tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes([114; 16]),
+                item_index: 0,
+            }),
+            id: "current-wait-reserving".into(),
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("tool_call_ids".to_owned()),
+                CborValue::Array(vec![
+                    CborValue::Text(reused.to_string()),
+                    CborValue::Text(other.to_string()),
+                ]),
+            )]),
+        };
+        seed_tools_running(&mut h, &cid, vec![reserving_wait.id.clone()]);
+        h.handle_wait_tool_call(&cid, &reserving_wait, ToolName::new("wait"))
+            .expect("reserve old generation");
+        h.record_wait_tool_call_ref(
+            reused.clone(),
+            tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes([115; 16]),
+                item_index: 0,
+            },
+        );
+        h.record_wait_tool_request(&reused);
+        h.tool_routing
+            .tool_runtime
+            .background_completion_targets
+            .remove(&reused);
+        h.activate_waits_for(&cid, tau_proto::ObservationId::from_bytes([116; 16]));
+        h.tool_routing
+            .tool_runtime
+            .background_completion_targets
+            .insert(reused.clone(), cid.clone());
+        h.queue_passive_background_completion_prompt_with_source(
+            &cid,
+            &reused,
+            Some(old_terminal),
+            Some(old_call_ref),
+        );
+
+        h.record_wait_background_result(
+            tau_proto::ToolBackgroundResult {
+                call_id: reused.clone(),
+                tool_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text("current generation".to_owned()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            },
+            Some(tau_proto::ObservationId::from_bytes([117; 16])),
+        );
+        h.tool_routing
+            .tool_runtime
+            .background_completion_targets
+            .insert(reused.clone(), cid.clone());
+        h.queue_passive_background_completion_prompt(&cid, &reused);
+        if !plural {
+            let old_activation = tau_proto::ObservationId::from_bytes([122; 16]);
+            let current_activation = tau_proto::ObservationId::from_bytes([123; 16]);
+            let agent = h
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get_mut(&cid)
+                .expect("test agent");
+            agent
+                .dispatch
+                .pending_prompts
+                .retain(|prompt| prompt.background_completion.is_some());
+            for prompt in &mut agent.dispatch.pending_prompts {
+                let correlation = prompt
+                    .background_completion
+                    .as_ref()
+                    .expect("completion correlation");
+                prompt.source = PendingPromptSource::ActivatingBackgroundCompletion;
+                prompt.activation_observation =
+                    Some(if correlation.source_call == Some(old_call_ref) {
+                        old_activation
+                    } else {
+                        current_activation
+                    });
+            }
+            let current_identity = HashSet::from([(
+                tau_proto::ToolCallRef {
+                    declaration: tau_proto::ObservationId::from_bytes([115; 16]),
+                    item_index: 0,
+                },
+                tau_proto::ObservationId::from_bytes([117; 16]),
+            )]);
+            assert!(h.has_pending_wait_preempting_prompt(
+                &cid,
+                &current_identity,
+                DeliveryDeadlineKind::WaitTool,
+            ));
+            assert_eq!(
+                h.pending_wait_preempting_activation(
+                    &cid,
+                    &current_identity,
+                    DeliveryDeadlineKind::WaitTool,
+                ),
+                Some(old_activation),
+                "exact-current wait is preempted by the older generation's notice"
+            );
+            let old_identity = HashSet::from([(old_call_ref, old_terminal)]);
+            assert!(h.has_pending_wait_preempting_prompt(
+                &cid,
+                &old_identity,
+                DeliveryDeadlineKind::WaitAny,
+            ));
+            assert_eq!(
+                h.pending_wait_preempting_activation(
+                    &cid,
+                    &old_identity,
+                    DeliveryDeadlineKind::WaitAny,
+                ),
+                Some(current_activation),
+                "bare-oldest wait is preempted by the newer generation's notice"
+            );
+            for prompt in &mut h
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get_mut(&cid)
+                .expect("test agent")
+                .dispatch
+                .pending_prompts
+            {
+                prompt.source = PendingPromptSource::PassiveBackgroundCompletion;
+                prompt.activation_observation = None;
+            }
+        }
+        if plural {
+            h.record_wait_background_result(
+                tau_proto::ToolBackgroundResult {
+                    call_id: other.clone(),
+                    tool_name: ToolName::new("slow"),
+                    tool_type: tau_proto::ToolType::Function,
+                    result: CborValue::Text("other".to_owned()),
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                },
+                Some(tau_proto::ObservationId::from_bytes([118; 16])),
+            );
+        }
+
+        let current_wait = AgentToolCall {
+            call_ref: Some(tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes([119; 16]),
+                item_index: 0,
+            }),
+            id: if plural {
+                "current-wait-plural".into()
+            } else {
+                "current-wait-exact".into()
+            },
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: if plural {
+                CborValue::Map(vec![(
+                    CborValue::Text("tool_call_ids".to_owned()),
+                    CborValue::Array(vec![
+                        CborValue::Text(reused.to_string()),
+                        CborValue::Text(other.to_string()),
+                    ]),
+                )])
+            } else {
+                CborValue::Map(vec![(
+                    CborValue::Text("tool_call_id".to_owned()),
+                    CborValue::Text(reused.to_string()),
+                )])
+            },
+        };
+        let notice = background_completion_prompt(&reused);
+        let delivered_notice_count_before = event_log_count(&h, |event| {
+            matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == notice)
+                || matches!(event, Event::AgentPromptSteered(prompt) if prompt.text == notice)
+        });
+        assert!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .pending_prompts
+                .iter()
+                .any(|prompt| {
+                    prompt
+                        .background_completion
+                        .as_ref()
+                        .is_some_and(|correlation| {
+                            correlation.source_call == Some(old_call_ref)
+                                && correlation.source_terminal == Some(old_terminal)
+                        })
+                }),
+            "released-generation notice is pending before current wait"
+        );
+        seed_tools_running(&mut h, &cid, vec![current_wait.id.clone()]);
+        h.handle_wait_tool_call(&cid, &current_wait, ToolName::new("wait"))
+            .expect("consume current generation");
+        if plural {
+            h.commit_exact_all_wait_terminal(&current_wait.id);
+        }
+        let pending_notice_count = h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.text == notice
+                    && prompt
+                        .background_completion
+                        .as_ref()
+                        .is_some_and(|correlation| {
+                            correlation.source_call == Some(old_call_ref)
+                                && correlation.source_terminal == Some(old_terminal)
+                        })
+            })
+            .count();
+        let delivered_notice_count_after = event_log_count(&h, |event| {
+            matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == notice)
+                || matches!(event, Event::AgentPromptSteered(prompt) if prompt.text == notice)
+        });
+        assert!(
+            pending_notice_count == 1
+                || delivered_notice_count_after > delivered_notice_count_before,
+            "{plural:?} current-generation wait must preserve the released-generation notice"
+        );
+        assert!(
+            !h.tool_routing
+                .tool_runtime
+                .suppressed_background_completion_prompts
+                .contains(&reused),
+            "{plural:?} current-generation wait must release display-ID suppression"
+        );
+
+        let bare = AgentToolCall {
+            call_ref: Some(tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes([120; 16]),
+                item_index: 0,
+            }),
+            id: "current-wait-bare".into(),
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        };
+        seed_tools_running(&mut h, &cid, vec![bare.id.clone()]);
+        h.handle_wait_tool_call(&cid, &bare, ToolName::new("wait"))
+            .expect("consume released generation");
+        assert!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .pending_prompts
+                .iter()
+                .all(|prompt| {
+                    prompt
+                        .background_completion
+                        .as_ref()
+                        .is_none_or(|correlation| {
+                            correlation.source_call != Some(old_call_ref)
+                                || correlation.source_terminal != Some(old_terminal)
+                        })
+                }),
+            "bare delivery removes only the released generation's notice"
+        );
+        h.shutdown().expect("shutdown");
+    }
 }
 
 /// Background tool completion stays with a preserved tool-backed delegate.
@@ -4664,6 +5936,239 @@ fn scheduler_wait_for_completed_background_call_retains_durable_correlation() {
         })
         .expect("wait settlement trace record");
     assert_eq!(settlement_record["output_ref"], source_terminal.to_string());
+}
+
+/// A scheduled plural wait retains request-ordered multi-source durable
+/// correlation and projects one payload-free trace relationship per source.
+#[test]
+fn scheduler_plural_wait_retains_ordered_durable_correlation() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    let _tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-plural-wait-correlation",
+        "configured-conn-plural-wait-correlation",
+        tau_proto::ClientKind::Tool,
+    );
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("conn-plural-wait-correlation"),
+        instant_background_test_tool_spec("plural_wait_source"),
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let source_a = ToolCallId::from("plural-durable-a");
+    let source_b = ToolCallId::from("plural-durable-b");
+    let prompt_id = test_agent_prompt_id("sp-plural-durable-sources");
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt_id,
+        agent_id: crate::parse_agent_id(&agent_id),
+        output_items: [&source_a, &source_b]
+            .into_iter()
+            .map(|source| {
+                ContextItem::ToolCall(ToolCallItem {
+                    call_id: source.clone(),
+                    name: ToolName::new("plural_wait_source"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })
+            })
+            .collect(),
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_output_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("start plural background sources");
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&source_a)
+    );
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&source_b)
+    );
+    let placeholder_followup = active_prompt_for(&h, &cid);
+    h.handle_provider_response_finished(provider_text_response(
+        &placeholder_followup,
+        agent_id.clone(),
+        "plural placeholders acknowledged",
+    ))
+    .expect("finish plural placeholder followup");
+    for (source, output) in [(&source_b, "b-output"), (&source_a, "a-output")] {
+        h.handle_extension_event_inner(
+            &crate::test_connection_id("conn-plural-wait-correlation"),
+            Event::ToolResultReported(final_tool_result(
+                source.as_str(),
+                "plural_wait_source",
+                output,
+            )),
+        )
+        .expect("complete plural background source");
+    }
+    let source_a_ref = h
+        .wait_tool_call_ref(&source_a)
+        .expect("source a call reference");
+    let source_b_ref = h
+        .wait_tool_call_ref(&source_b)
+        .expect("source b call reference");
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records");
+    let source_a_terminal = records
+        .iter()
+        .find_map(|record| {
+            matches!(&record.event, Event::ToolBackgroundResult(result)
+                if result.call_id == source_a)
+            .then_some(record.observation_id)
+        })
+        .expect("source a terminal");
+    let source_b_terminal = records
+        .iter()
+        .find_map(|record| {
+            matches!(&record.event, Event::ToolBackgroundResult(result)
+                if result.call_id == source_b)
+            .then_some(record.observation_id)
+        })
+        .expect("source b terminal");
+
+    let wait_call_id = ToolCallId::from("plural-durable-wait");
+    let completion_prompt = active_prompt_for(&h, &cid);
+    let completion_prompt = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == completion_prompt => {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("coalesced background completion prompt");
+    h.handle_provider_response_finished(provider_tool_response(
+        &completion_prompt,
+        wait_call_id.as_str(),
+        "wait",
+        CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text(source_a.to_string()),
+                CborValue::Text(source_b.to_string()),
+            ]),
+        )]),
+    ))
+    .expect("dispatch plural wait");
+
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records");
+    let (wait_observation, wait_call) = records
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentToolWaitObserved(observed)
+                if observed.mode
+                    == (tau_proto::ToolWaitMode::ExactAll {
+                        targets: vec![source_a_ref, source_b_ref],
+                    }) =>
+            {
+                Some((record.observation_id, observed.wait_call))
+            }
+            _ => None,
+        })
+        .expect("plural wait observation");
+    let settled = records
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentToolWaitSettled(settled) if settled.wait_call == wait_call => Some(settled),
+            _ => None,
+        })
+        .expect("plural wait settlement");
+    assert_eq!(settled.wait_observation, wait_observation);
+    assert!(matches!(
+        &settled.outcome,
+        tau_proto::ToolWaitOutcome::CompletionsDelivered { sources }
+            if sources == &vec![
+                tau_proto::WaitDeliveredSource {
+                    source_call: source_a_ref,
+                    source_terminal: source_a_terminal,
+                    source_phase: tau_proto::ToolSourcePhase::Background,
+                    envelope: tau_proto::ToolOutputEnvelope::Identity,
+                },
+                tau_proto::WaitDeliveredSource {
+                    source_call: source_b_ref,
+                    source_terminal: source_b_terminal,
+                    source_phase: tau_proto::ToolSourcePhase::Background,
+                    envelope: tau_proto::ToolOutputEnvelope::Identity,
+                },
+            ]
+    ));
+
+    h.shutdown().expect("flush accepted trace records");
+    let mut trace = tau_session_inspect::prepare_agent_trace(
+        &state.join("agents"),
+        &crate::parse_agent_id(&agent_id),
+        tau_session_inspect::DescendantSelection::RootOnly,
+        tau_session_inspect::AgentTraceFormat::AgentToolsJsonl(
+            tau_session_inspect::AgentTraceMode::Full,
+        ),
+    )
+    .expect("prepare compact trace");
+    let mut trace_bytes = Vec::new();
+    trace.copy_to(&mut trace_bytes).expect("read compact trace");
+    let trace_records = String::from_utf8(trace_bytes)
+        .expect("UTF-8 trace")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("trace record"))
+        .filter(|record| {
+            record["relationship"] == "wait_settlement"
+                && record["wait_call"]["declaration"] == wait_call.declaration.to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(trace_records.len(), 2);
+    assert_eq!(
+        trace_records
+            .iter()
+            .map(|record| {
+                record["output_ref"]
+                    .as_str()
+                    .expect("output ref")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>(),
+        vec![source_a_terminal.to_string(), source_b_terminal.to_string(),]
+    );
+    assert!(
+        trace_records
+            .iter()
+            .all(|record| record.get("output").is_none())
+    );
 }
 
 /// Regression: restored background notices are owned by the agent whose

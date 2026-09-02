@@ -2184,6 +2184,93 @@ fn resume_repairs_only_missing_call_in_partial_parallel_round() {
     h.shutdown().expect("shutdown");
 }
 
+/// A cold restart after one plural member terminal drops the runtime set,
+/// repairs the unfinished wait and member as ordinary interrupted tools, and
+/// retains the completed member under its original owner.
+#[test]
+fn resume_drops_partial_plural_wait_and_preserves_completed_member() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_restored_tool_round(
+        &state,
+        &["plural-done", "plural-missing", "plural-wait"],
+        &["plural-done"],
+    );
+    {
+        let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+        let records = store.agent_events("main").expect("agent records");
+        let response = records
+            .iter()
+            .find(|record| matches!(record.event, Event::ProviderResponseFinished(_)))
+            .expect("tool declaration response");
+        let source_done = tau_proto::ToolCallRef {
+            declaration: response.observation_id,
+            item_index: 0,
+        };
+        let source_missing = tau_proto::ToolCallRef {
+            declaration: response.observation_id,
+            item_index: 1,
+        };
+        let wait_call = tau_proto::ToolCallRef {
+            declaration: response.observation_id,
+            item_index: 2,
+        };
+        let observed = store
+            .append_agent_event(
+                "main",
+                None,
+                Event::AgentToolWaitObserved(tau_proto::AgentToolWaitObserved {
+                    wait_call,
+                    mode: tau_proto::ToolWaitMode::ExactAll {
+                        targets: vec![source_done, source_missing],
+                    },
+                }),
+            )
+            .expect("plural wait observation");
+        store
+            .append_agent_event(
+                "main",
+                None,
+                Event::AgentToolWaitRegistered(tau_proto::AgentToolWaitRegistered {
+                    wait_observation: observed.observation_id,
+                    wait_call,
+                    mode: tau_proto::ToolWaitMode::ExactAll {
+                        targets: vec![source_done, source_missing],
+                    },
+                }),
+            )
+            .expect("plural wait registration");
+    }
+
+    let mut h = echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    assert!(provider_tool_errors(&h, "plural-done").is_empty());
+    assert_eq!(provider_tool_errors(&h, "plural-missing").len(), 1);
+    assert_eq!(provider_tool_errors(&h, "plural-wait").len(), 1);
+    assert!(!loaded_agent_events(&h, "s1").iter().any(|event| matches!(
+        event,
+        Event::AgentToolWaitSettled(settled)
+            if settled.wait_call.item_index == 2
+    )));
+
+    append_user_message_via_event(&mut h, "s1", "after plural restart");
+    let prompt_id = h.send_prompt_to_agent("s1");
+    let prompt = read_prompt_created(&h, &prompt_id);
+    assert!(matches!(
+        prompt_tool_result(&prompt, "plural-done").map(|result| result.status),
+        Some(ToolResultStatus::Success)
+    ));
+    assert!(matches!(
+        prompt_tool_result(&prompt, "plural-missing").map(|result| result.status),
+        Some(ToolResultStatus::Error { .. })
+    ));
+    assert!(matches!(
+        prompt_tool_result(&prompt, "plural-wait").map(|result| result.status),
+        Some(ToolResultStatus::Error { .. })
+    ));
+    h.shutdown().expect("shutdown");
+}
+
 /// Regression: the resume repair writes durable events. A later cold resume
 /// must see the already-closed tool round and avoid appending another synthetic
 /// error for the same call.

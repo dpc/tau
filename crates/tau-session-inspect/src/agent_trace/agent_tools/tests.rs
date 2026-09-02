@@ -573,6 +573,630 @@ fn cancellation_never_projects_a_shell_outcome() {
     assert!(source.get("shell_outcome").is_none());
 }
 
+/// A plural wait projects one payload-free relationship per source in request
+/// order while sharing the same wait call and terminal correlation.
+#[test]
+fn plural_wait_projects_one_ordered_relationship_per_source() {
+    let source_terminal = |call_id: &str| tau_proto::ToolResult {
+        presentation: Default::default(),
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new("test"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text(format!("payload-{call_id}")),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let facts = vec![
+        declaration("agent-a", 1, 0, "a"),
+        declaration("agent-a", 2, 1, "b"),
+        declaration("agent-a", 3, 2, "wait-all"),
+        fact(
+            "agent-a",
+            4,
+            3,
+            4,
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: call(1),
+                terminal: id(5),
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ),
+        fact(
+            "agent-a",
+            5,
+            4,
+            5,
+            Event::ProviderToolResult(source_terminal("a")),
+        ),
+        fact(
+            "agent-a",
+            6,
+            5,
+            6,
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: call(2),
+                terminal: id(7),
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ),
+        fact(
+            "agent-a",
+            7,
+            6,
+            7,
+            Event::ProviderToolResult(source_terminal("b")),
+        ),
+        fact(
+            "agent-a",
+            8,
+            7,
+            8,
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: call(3),
+                terminal: id(9),
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ),
+        fact(
+            "agent-a",
+            9,
+            8,
+            9,
+            Event::ProviderToolResult(source_terminal("wait-all")),
+        ),
+        fact(
+            "agent-a",
+            10,
+            9,
+            10,
+            Event::AgentToolWaitObserved(tau_proto::AgentToolWaitObserved {
+                wait_call: call(3),
+                mode: tau_proto::ToolWaitMode::ExactAll {
+                    targets: vec![call(2), call(1)],
+                },
+            }),
+        ),
+        fact(
+            "agent-a",
+            11,
+            10,
+            11,
+            Event::AgentToolWaitSettled(tau_proto::AgentToolWaitSettled {
+                wait_observation: id(10),
+                wait_call: call(3),
+                registration: None,
+                wait_terminal: id(9),
+                outcome: tau_proto::ToolWaitOutcome::CompletionsDelivered {
+                    sources: vec![
+                        tau_proto::WaitDeliveredSource {
+                            source_call: call(2),
+                            source_terminal: id(7),
+                            source_phase: tau_proto::ToolSourcePhase::Foreground,
+                            envelope: tau_proto::ToolOutputEnvelope::Identity,
+                        },
+                        tau_proto::WaitDeliveredSource {
+                            source_call: call(1),
+                            source_terminal: id(5),
+                            source_phase: tau_proto::ToolSourcePhase::Foreground,
+                            envelope: tau_proto::ToolOutputEnvelope::Identity,
+                        },
+                    ],
+                },
+            }),
+        ),
+    ];
+
+    let relationships = project_facts(facts, path_super_super::AgentTraceMode::Full)
+        .expect("plural projection")
+        .into_iter()
+        .map(|record| serde_json::to_value(record).expect("record JSON"))
+        .filter(|record| record["relationship"] == "wait_settlement")
+        .collect::<Vec<_>>();
+    assert_eq!(relationships.len(), 2);
+    assert_eq!(relationships[0]["source_call"], serde_json::json!(call(2)));
+    assert_eq!(relationships[0]["output_ref"], id(7).to_string());
+    assert_eq!(relationships[1]["source_call"], serde_json::json!(call(1)));
+    assert_eq!(relationships[1]["output_ref"], id(5).to_string());
+    assert!(relationships.iter().all(|relationship| {
+        relationship["wait_call"] == serde_json::json!(call(3))
+            && relationship["wait_terminal"] == id(9).to_string()
+            && relationship.get("output").is_none()
+    }));
+}
+
+/// A partial multi-agent selection degrades only the unavailable plural source,
+/// while keeping local source resolution, interval, and request ordering.
+#[test]
+fn plural_wait_partial_selection_degrades_each_source_independently() {
+    let source_terminal = |call_id: &str| tau_proto::ToolResult {
+        presentation: Default::default(),
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new("test"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text(format!("payload-{call_id}")),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let facts = vec![
+        declaration("agent-a", 1, 0, "local"),
+        fact(
+            "agent-a",
+            2,
+            1,
+            2,
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: call(1),
+                terminal: id(3),
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ),
+        fact(
+            "agent-a",
+            3,
+            2,
+            3,
+            Event::ProviderToolResult(source_terminal("local")),
+        ),
+        declaration("agent-b", 4, 0, "foreign"),
+        fact(
+            "agent-b",
+            5,
+            1,
+            5,
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: call(4),
+                terminal: id(6),
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ),
+        fact(
+            "agent-b",
+            6,
+            2,
+            6,
+            Event::ProviderToolResult(source_terminal("foreign")),
+        ),
+        declaration("agent-a", 7, 3, "wait-all"),
+        fact(
+            "agent-a",
+            8,
+            4,
+            8,
+            Event::AgentToolWaitObserved(tau_proto::AgentToolWaitObserved {
+                wait_call: call(7),
+                mode: tau_proto::ToolWaitMode::ExactAll {
+                    targets: vec![call(4), call(1)],
+                },
+            }),
+        ),
+        fact(
+            "agent-a",
+            15,
+            5,
+            8,
+            Event::AgentToolWaitRegistered(tau_proto::AgentToolWaitRegistered {
+                wait_observation: id(8),
+                wait_call: call(7),
+                mode: tau_proto::ToolWaitMode::ExactAll {
+                    targets: vec![call(4), call(1)],
+                },
+            }),
+        ),
+        fact(
+            "agent-a",
+            9,
+            6,
+            9,
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: call(7),
+                terminal: id(10),
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ),
+        fact(
+            "agent-a",
+            10,
+            7,
+            10,
+            Event::ProviderToolResult(source_terminal("wait-all")),
+        ),
+        fact(
+            "agent-a",
+            11,
+            8,
+            11,
+            Event::AgentToolWaitSettled(tau_proto::AgentToolWaitSettled {
+                wait_observation: id(8),
+                wait_call: call(7),
+                registration: Some(id(15)),
+                wait_terminal: id(10),
+                outcome: tau_proto::ToolWaitOutcome::CompletionsDelivered {
+                    sources: vec![
+                        tau_proto::WaitDeliveredSource {
+                            source_call: call(4),
+                            source_terminal: id(6),
+                            source_phase: tau_proto::ToolSourcePhase::Background,
+                            envelope: tau_proto::ToolOutputEnvelope::Identity,
+                        },
+                        tau_proto::WaitDeliveredSource {
+                            source_call: call(1),
+                            source_terminal: id(3),
+                            source_phase: tau_proto::ToolSourcePhase::Foreground,
+                            envelope: tau_proto::ToolOutputEnvelope::Identity,
+                        },
+                    ],
+                },
+            }),
+        ),
+    ];
+
+    let mut contradictory = facts.clone();
+    let Event::AgentToolWaitSettled(settlement) =
+        &mut contradictory.last_mut().expect("settlement fact").event
+    else {
+        panic!("settlement event");
+    };
+    let tau_proto::ToolWaitOutcome::CompletionsDelivered { sources } = &mut settlement.outcome
+    else {
+        panic!("plural outcome");
+    };
+    sources[1].source_phase = tau_proto::ToolSourcePhase::Background;
+    assert!(
+        project_facts(contradictory, path_super_super::AgentTraceMode::Lite).is_err(),
+        "a foreign sibling must not suppress validation of a contradictory local source",
+    );
+
+    let mut wrong_observation = facts.clone();
+    wrong_observation.push(declaration("agent-a", 12, 8, "other-wait"));
+    wrong_observation.push(fact(
+        "agent-a",
+        13,
+        9,
+        13,
+        Event::AgentToolWaitObserved(tau_proto::AgentToolWaitObserved {
+            wait_call: call(12),
+            mode: tau_proto::ToolWaitMode::ExactAll {
+                targets: vec![call(4), call(1)],
+            },
+        }),
+    ));
+    let settlement_index = wrong_observation.len() - 3;
+    let Event::AgentToolWaitSettled(settlement) = &mut wrong_observation[settlement_index].event
+    else {
+        panic!("settlement event");
+    };
+    settlement.wait_observation = id(13);
+    assert!(
+        project_facts(wrong_observation, path_super_super::AgentTraceMode::Lite).is_err(),
+        "partial target locality must not hide a wrong selected-local wait observation",
+    );
+
+    let mut wrong_registration = facts.clone();
+    wrong_registration.push(fact(
+        "agent-a",
+        14,
+        8,
+        14,
+        Event::AgentToolWaitRegistered(tau_proto::AgentToolWaitRegistered {
+            wait_observation: id(8),
+            wait_call: call(1),
+            mode: tau_proto::ToolWaitMode::ExactAll {
+                targets: vec![call(4), call(1)],
+            },
+        }),
+    ));
+    let settlement_index = wrong_registration.len() - 2;
+    let Event::AgentToolWaitSettled(settlement) = &mut wrong_registration[settlement_index].event
+    else {
+        panic!("settlement event");
+    };
+    settlement.registration = Some(id(14));
+    assert!(
+        project_facts(wrong_registration, path_super_super::AgentTraceMode::Lite).is_err(),
+        "partial target locality must not hide a wrong selected-local registration",
+    );
+
+    let records = project_facts(facts, path_super_super::AgentTraceMode::Lite)
+        .expect("partial plural projection")
+        .into_iter()
+        .map(|record| serde_json::to_value(record).expect("record JSON"))
+        .collect::<Vec<_>>();
+    let observation = records
+        .iter()
+        .find(|record| {
+            record["record_type"] == "relationship" && record["relationship"] == "wait_observation"
+        })
+        .expect("wait observation");
+    assert_eq!(observation["mode"], "exact_all_unresolved");
+    let registration = records
+        .iter()
+        .find(|record| record["relationship"] == "wait_registration")
+        .expect("wait registration");
+    assert_eq!(registration["outcome"], "settled");
+    let wait_call = records
+        .iter()
+        .find(|record| {
+            record["record_type"] == "call" && record["call"] == serde_json::json!(call(7))
+        })
+        .expect("wait call");
+    assert_ne!(wait_call["status"], "incomplete");
+    let relationships = records
+        .iter()
+        .filter(|record| record["relationship"] == "wait_settlement")
+        .collect::<Vec<_>>();
+    assert_eq!(relationships.len(), 2);
+    assert_eq!(relationships[0]["source_call"], serde_json::json!(call(4)));
+    assert_eq!(relationships[0]["source_resolution"], "source_not_selected");
+    assert!(relationships[0]["completion_to_delivery_us"].is_null());
+    assert_eq!(relationships[1]["source_call"], serde_json::json!(call(1)));
+    assert_eq!(relationships[1]["source_resolution"], "resolved");
+    assert_eq!(relationships[1]["completion_to_delivery_us"], 8);
+}
+
+/// A selected terminal belongs to the exact generation named by its terminal
+/// classification, not every later declaration that reuses the display ID.
+#[test]
+fn plural_wait_source_resolution_uses_stable_call_generation() {
+    let terminal = |call_id: &str| tau_proto::ToolResult {
+        presentation: Default::default(),
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new("test"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text(format!("payload-{call_id}")),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let facts = |include_old_classification| {
+        let mut facts = vec![declaration("agent-a", 1, 0, "reused")];
+        if include_old_classification {
+            facts.push(fact(
+                "agent-a",
+                2,
+                1,
+                2,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(1),
+                    terminal: id(3),
+                    cause: tau_proto::ToolTerminalCause::Completed,
+                }),
+            ));
+        }
+        facts.extend([
+            fact(
+                "agent-a",
+                3,
+                2,
+                3,
+                Event::ProviderToolResult(terminal("reused")),
+            ),
+            declaration("agent-a", 4, 3, "reused"),
+            declaration("agent-b", 5, 0, "foreign"),
+            fact(
+                "agent-b",
+                12,
+                1,
+                4,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(5),
+                    terminal: id(6),
+                    cause: tau_proto::ToolTerminalCause::Completed,
+                }),
+            ),
+            fact(
+                "agent-b",
+                6,
+                2,
+                5,
+                Event::ProviderToolResult(terminal("foreign")),
+            ),
+            declaration("agent-a", 7, 4, "wait-all"),
+            fact(
+                "agent-a",
+                8,
+                5,
+                6,
+                Event::AgentToolWaitObserved(tau_proto::AgentToolWaitObserved {
+                    wait_call: call(7),
+                    mode: tau_proto::ToolWaitMode::ExactAll {
+                        targets: vec![call(5), call(4)],
+                    },
+                }),
+            ),
+            fact(
+                "agent-a",
+                9,
+                6,
+                7,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(7),
+                    terminal: id(10),
+                    cause: tau_proto::ToolTerminalCause::Completed,
+                }),
+            ),
+            fact(
+                "agent-a",
+                10,
+                7,
+                8,
+                Event::ProviderToolResult(terminal("wait-all")),
+            ),
+            fact(
+                "agent-a",
+                11,
+                8,
+                9,
+                Event::AgentToolWaitSettled(tau_proto::AgentToolWaitSettled {
+                    wait_observation: id(8),
+                    wait_call: call(7),
+                    registration: None,
+                    wait_terminal: id(10),
+                    outcome: tau_proto::ToolWaitOutcome::CompletionsDelivered {
+                        sources: vec![
+                            tau_proto::WaitDeliveredSource {
+                                source_call: call(5),
+                                source_terminal: id(6),
+                                source_phase: tau_proto::ToolSourcePhase::Foreground,
+                                envelope: tau_proto::ToolOutputEnvelope::Identity,
+                            },
+                            tau_proto::WaitDeliveredSource {
+                                source_call: call(4),
+                                source_terminal: id(3),
+                                source_phase: tau_proto::ToolSourcePhase::Foreground,
+                                envelope: tau_proto::ToolOutputEnvelope::Identity,
+                            },
+                        ],
+                    },
+                }),
+            ),
+        ]);
+        facts
+    };
+
+    assert_projection_error(facts(true), "does not own call");
+
+    let records = project_facts(facts(false), path_super_super::AgentTraceMode::Lite)
+        .expect("omitted generation edge degrades")
+        .into_iter()
+        .map(|record| serde_json::to_value(record).expect("record JSON"))
+        .collect::<Vec<_>>();
+    let local_source = records
+        .iter()
+        .find(|record| {
+            record["relationship"] == "wait_settlement"
+                && record["source_call"] == serde_json::json!(call(4))
+        })
+        .expect("reused local source relationship");
+    assert_eq!(local_source["source_resolution"], "source_not_selected");
+    assert!(local_source["completion_to_delivery_us"].is_null());
+}
+
+/// The wait terminal itself also requires the classification edge for the
+/// current wait declaration rather than an older declaration with the same ID.
+#[test]
+fn wait_terminal_resolution_uses_stable_call_generation() {
+    assert_projection_error(
+        vec![
+            declaration("agent-a", 1, 0, "wait"),
+            fact(
+                "agent-a",
+                2,
+                1,
+                2,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(1),
+                    terminal: id(3),
+                    cause: tau_proto::ToolTerminalCause::Completed,
+                }),
+            ),
+            tool_error("agent-a", 3, 2, "wait"),
+            declaration("agent-a", 4, 3, "wait"),
+            declaration("agent-a", 5, 4, "source"),
+            fact(
+                "agent-a",
+                6,
+                5,
+                6,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(5),
+                    terminal: id(7),
+                    cause: tau_proto::ToolTerminalCause::ToolError,
+                }),
+            ),
+            tool_error("agent-a", 7, 6, "source"),
+            fact(
+                "agent-a",
+                8,
+                7,
+                8,
+                Event::AgentToolWaitObserved(tau_proto::AgentToolWaitObserved {
+                    wait_call: call(4),
+                    mode: tau_proto::ToolWaitMode::Exact { target: call(5) },
+                }),
+            ),
+            fact(
+                "agent-a",
+                9,
+                8,
+                9,
+                Event::AgentToolWaitSettled(tau_proto::AgentToolWaitSettled {
+                    wait_observation: id(8),
+                    wait_call: call(4),
+                    registration: None,
+                    wait_terminal: id(3),
+                    outcome: tau_proto::ToolWaitOutcome::CompletionDelivered {
+                        source_call: call(5),
+                        source_terminal: id(7),
+                        source_phase: tau_proto::ToolSourcePhase::Foreground,
+                        envelope: tau_proto::ToolOutputEnvelope::Identity,
+                    },
+                }),
+            ),
+        ],
+        "does not own call",
+    );
+}
+
+/// Activation correlation uses the source terminal's classified generation,
+/// not a later declaration that happens to reuse its display ID.
+#[test]
+fn activation_source_resolution_uses_stable_call_generation() {
+    let facts = |include_old_classification| {
+        let mut facts = vec![declaration("agent-a", 1, 0, "reused")];
+        if include_old_classification {
+            facts.push(fact(
+                "agent-a",
+                2,
+                1,
+                2,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(1),
+                    terminal: id(3),
+                    cause: tau_proto::ToolTerminalCause::ToolError,
+                }),
+            ));
+        }
+        facts.extend([
+            tool_error("agent-a", 3, 2, "reused"),
+            declaration("agent-a", 4, 3, "reused"),
+            fact(
+                "agent-a",
+                5,
+                4,
+                5,
+                Event::AgentActivationQueued(tau_proto::AgentActivationQueued {
+                    kind: tau_proto::ActivationKind::BackgroundCompletion,
+                    source_observation: Some(id(3)),
+                    source_call: Some(call(4)),
+                }),
+            ),
+        ]);
+        facts
+    };
+
+    assert_projection_error(facts(true), "does not own call");
+    let records = project_facts(facts(false), path_super_super::AgentTraceMode::Lite)
+        .expect("omitted classification edge degrades")
+        .into_iter()
+        .map(|record| serde_json::to_value(record).expect("record JSON"))
+        .collect::<Vec<_>>();
+    let activation = records
+        .iter()
+        .find(|record| record["record_type"] == "activation")
+        .expect("activation");
+    assert_eq!(activation["source_resolution"], "source_not_selected");
+    assert!(
+        activation
+            .get("completion_to_activation_queue_us")
+            .is_none()
+    );
+}
+
 /// Lookalike structured fields from a non-shell declaration must not acquire
 /// shell-specific semantics.
 #[test]
@@ -1516,6 +2140,42 @@ fn multiple_committed_terminal_classifications_are_rejected() {
             tool_error("agent-a", 5, 4, "source"),
         ],
         "multiple committed terminal classifications",
+    );
+}
+
+/// One canonical terminal observation cannot classify two declaration
+/// generations merely because they reuse the same provider-visible call ID.
+#[test]
+fn reused_id_terminal_cannot_classify_multiple_call_generations() {
+    assert_projection_error(
+        vec![
+            declaration("agent-a", 1, 0, "reused"),
+            declaration("agent-a", 2, 1, "reused"),
+            fact(
+                "agent-a",
+                3,
+                2,
+                3,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(1),
+                    terminal: id(5),
+                    cause: tau_proto::ToolTerminalCause::ToolError,
+                }),
+            ),
+            fact(
+                "agent-a",
+                4,
+                3,
+                4,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(2),
+                    terminal: id(5),
+                    cause: tau_proto::ToolTerminalCause::ToolError,
+                }),
+            ),
+            tool_error("agent-a", 5, 4, "reused"),
+        ],
+        "classified to multiple calls",
     );
 }
 

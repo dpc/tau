@@ -26,7 +26,7 @@ const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
 const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
 
 /// Generation of one completion queue entry for a potentially reused call ID.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct CompletionGeneration(
     /// Monotonic wrapping completion stamp.
     u64,
@@ -49,6 +49,29 @@ struct CompletionNode {
     generation: CompletionGeneration,
 }
 
+/// One generation-specific completion retained after its display call ID was
+/// reused while a plural wait owned the old generation.
+#[derive(Clone, Debug)]
+struct ReleasedCompletion {
+    /// Stable declaration occurrence for durable settlement.
+    call_ref: ToolCallRef,
+    /// Source tool name retained for wait display.
+    tool_name: ToolName,
+    /// Original completed source terminal.
+    completion: ExactAllCompletion,
+    /// Whether runtime policy owed this generation a completion notice.
+    restore_notice: bool,
+}
+
+/// One selected completion queue entry.
+#[derive(Clone, Debug)]
+struct CompletionSelection {
+    /// Provider-visible call ID.
+    call_id: ToolCallId,
+    /// Exact FIFO generation.
+    generation: CompletionGeneration,
+}
+
 /// Render the normalized input-wait timeout for tool display state.
 pub(super) fn wait_timeout_args(timeout: Duration) -> String {
     format!("{}m", timeout.as_secs() / 60)
@@ -61,6 +84,11 @@ pub(super) enum WaitTarget {
     Exact(
         /// Target display call ID.
         ToolCallId,
+    ),
+    /// Wait transactionally for every display call ID in request order.
+    ExactAll(
+        /// Distinct target display call IDs.
+        Vec<ToolCallId>,
     ),
     /// Wait for the oldest owned background completion.
     AnyBackground,
@@ -99,6 +127,16 @@ enum WaitCallState {
         /// Retained source error.
         ToolBackgroundError,
     ),
+    /// Foreground success retained after a plural reservation was released.
+    ReservedResult(
+        /// Retained source result.
+        ToolBackgroundResult,
+    ),
+    /// Foreground failure retained after a plural reservation was released.
+    ReservedError(
+        /// Retained source error.
+        ToolBackgroundError,
+    ),
     /// Terminal was delivered or deliberately retired.
     Consumed,
 }
@@ -132,6 +170,70 @@ struct InputWaitRequest {
     deadline: Instant,
 }
 
+/// One terminal retained inside an exact-all reservation.
+#[derive(Clone, Debug, PartialEq)]
+enum ExactAllCompletion {
+    /// Successful source terminal.
+    Result {
+        /// Original typed source payload.
+        output: CborValue,
+        /// Source terminal display.
+        display: Option<ToolUseState>,
+        /// Source terminal phase.
+        phase: tau_proto::ToolSourcePhase,
+        /// Canonical source terminal observation.
+        terminal: tau_proto::ObservationId,
+    },
+    /// Failed or cancelled source terminal.
+    Error {
+        /// Original source error message.
+        message: String,
+        /// Original typed source error details.
+        details: Option<CborValue>,
+        /// Source terminal display.
+        display: Option<ToolUseState>,
+        /// Source terminal phase.
+        phase: tau_proto::ToolSourcePhase,
+        /// Canonical source terminal observation.
+        terminal: tau_proto::ObservationId,
+    },
+}
+
+impl ExactAllCompletion {
+    fn terminal(&self) -> tau_proto::ObservationId {
+        match self {
+            Self::Result { terminal, .. } | Self::Error { terminal, .. } => *terminal,
+        }
+    }
+}
+
+/// One exact target reserved by a transactional plural wait.
+#[derive(Clone, Debug, PartialEq)]
+struct ExactAllMember {
+    /// Provider-visible call ID retained for the aggregate result.
+    call_id: ToolCallId,
+    /// Stable declaration occurrence that prevents ID reuse from retargeting.
+    call_ref: ToolCallRef,
+    /// Source tool name retained for UI display.
+    tool_name: ToolName,
+    /// Canonical terminal retained until every member completes.
+    completion: Option<ExactAllCompletion>,
+    /// Existing FIFO generation for a completed background member.
+    completion_generation: Option<CompletionGeneration>,
+    /// Whether interruption must restore a completion notice that reservation
+    /// prevented from reaching the provider.
+    restore_notice: bool,
+}
+
+/// Installed or terminal-publication-pending transactional plural wait.
+#[derive(Clone, Debug, PartialEq)]
+struct ExactAllWait {
+    /// Common wait invocation and durable identities.
+    request: WaitRequest,
+    /// Reserved members in provider request order.
+    members: Vec<ExactAllMember>,
+}
+
 /// First ordinary-arbitration event retained while a compaction claim is
 /// exclusive, for use only if canonical cancellation append rolls back.
 #[derive(Clone, Debug, PartialEq)]
@@ -160,6 +262,13 @@ enum ClaimedWait {
         /// First activation, completion, or timeout observed while claimed.
         wake: Option<ClaimedWaitWake>,
     },
+    /// Transactional plural exact wait retained in `exact_all_waits`.
+    ExactAll {
+        /// Claimed wait request.
+        request: WaitRequest,
+        /// First activation or member completion observed while claimed.
+        wake: Option<ClaimedWaitWake>,
+    },
     /// Bare background-completion wait.
     AnyBackground {
         /// Claimed wait request.
@@ -185,6 +294,7 @@ impl ClaimedWait {
                 request,
                 wake: _,
             }
+            | Self::ExactAll { request, wake: _ }
             | Self::AnyBackground { request, wake: _ } => request,
             Self::Input { wait, wake: _ } => &wait.request,
         }
@@ -221,9 +331,21 @@ pub(super) struct WaitReply {
     pub(super) wait_tool_name: ToolName,
     /// Result or error payload.
     pub(super) kind: WaitReplyKind,
-    /// Source completion whose passive prompt must be suppressed.
+    /// Source completions whose passive prompts must be suppressed.
+    pub(super) suppress_call_ids: Vec<ToolCallId>,
+    /// Singular source completion whose passive prompt must be suppressed.
     pub(super) suppress_call_id: Option<ToolCallId>,
-    /// Source completion whose passive prompt must be restored.
+    /// Source completions whose passive prompts must be restored.
+    pub(super) unsuppress_call_ids: Vec<ToolCallId>,
+    /// Reused-ID completion notices restored with exact or deliberately omitted
+    /// durable source correlation.
+    pub(super) unsuppress_notices: Vec<CompletionNotice>,
+    /// Source prompt suppressions released without requeueing an already
+    /// delivered notice.
+    pub(super) release_suppression_call_ids: Vec<ToolCallId>,
+    /// Exact released-generation notices removed after FIFO delivery.
+    pub(super) remove_pending_notices: Vec<CompletionNotice>,
+    /// Singular source completion whose passive prompt must be restored.
     pub(super) unsuppress_call_id: Option<ToolCallId>,
     /// Content-free causal settlement emitted after terminal publication.
     pub(super) settlement: Option<PendingWaitSettlement>,
@@ -238,6 +360,9 @@ pub(crate) struct PendingWaitSettlement {
     pub(crate) wait_call: ToolCallRef,
     /// Installed registration, absent for immediate outcomes.
     pub(crate) registration: Option<tau_proto::ObservationId>,
+    /// Exact preallocated canonical wait terminal authorized to commit this
+    /// settlement.
+    pub(crate) wait_terminal: Option<tau_proto::ObservationId>,
     /// Typed runtime outcome.
     pub(crate) outcome: tau_proto::ToolWaitOutcome,
 }
@@ -247,7 +372,9 @@ pub(crate) struct PendingWaitSettlement {
 pub(super) struct WaitStart {
     /// Immediate terminal reply, absent for an installed waiter.
     pub(super) reply: Option<WaitReply>,
-    /// Source completion prompt to suppress.
+    /// Source completion prompts to suppress.
+    pub(super) suppress_call_ids: Vec<ToolCallId>,
+    /// Singular source completion prompt to suppress.
     pub(super) suppress_call_id: Option<ToolCallId>,
     /// Registration emitted only after the waiter was actually installed.
     pub(super) registration: Option<(tau_proto::ObservationId, tau_proto::AgentToolWaitRegistered)>,
@@ -260,10 +387,25 @@ pub(super) struct WaitCancel {
     pub(super) replies: Vec<WaitReply>,
     /// Source prompts restored after waiter removal.
     pub(super) unsuppress_call_ids: Vec<ToolCallId>,
+    /// Reused-ID source prompts restored with generation-safe correlation.
+    pub(super) unsuppress_notices: Vec<CompletionNotice>,
+    /// Source prompt suppressions released without requeueing.
+    pub(super) release_suppression_call_ids: Vec<ToolCallId>,
     /// Source prompts suppressed by delivered cancellation.
     pub(super) suppress_call_ids: Vec<ToolCallId>,
     /// Cancelled wait calls awaiting their canonical terminal identity.
     pub(super) cancelled_waits: Vec<WaitRequest>,
+}
+
+/// One generic completion prompt plus its generation-safe durable correlation.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CompletionNotice {
+    /// Provider-visible display call ID used in the prompt text.
+    pub(super) call_id: ToolCallId,
+    /// Exact source declaration that owns this notice.
+    pub(super) source_call: ToolCallRef,
+    /// Exact source terminal that owns this notice.
+    pub(super) source_terminal: tau_proto::ObservationId,
 }
 
 /// Runtime wait state machine and bounded durable-correlation cache.
@@ -274,6 +416,13 @@ pub(super) struct WaitTracker {
     calls: HashMap<ToolCallId, WaitCallState>,
     /// Exact waiters by source display call ID.
     waiters: HashMap<ToolCallId, WaitRequest>,
+    /// Installed plural exact waits by wait call ID.
+    exact_all_waits: HashMap<ToolCallId, ExactAllWait>,
+    /// Plural exact reservation owner by source display call ID.
+    exact_all_reservations: HashMap<ToolCallRef, ToolCallId>,
+    /// Completed plural waits awaiting successful canonical wait-terminal
+    /// publication.
+    pending_exact_all_commits: HashMap<ToolCallId, ExactAllWait>,
     /// Bare waiters by owning agent.
     any_waiters: HashMap<AgentId, WaitRequest>,
     /// Activating-input waiters by owning agent.
@@ -296,6 +445,8 @@ pub(super) struct WaitTracker {
     completion_order_by_owner: HashMap<AgentId, VecDeque<CompletionNode>>,
     /// Exact live completion generation by display call ID.
     completed_membership: HashMap<ToolCallId, CompletionGeneration>,
+    /// Old generation completions retained across display-ID reuse rollback.
+    released_completions: HashMap<CompletionGeneration, ReleasedCompletion>,
     /// Next generation assigned to a completion queue node.
     next_completion_generation: CompletionGeneration,
     /// Completion queue nodes retired by lazy pruning or owner teardown in
@@ -321,6 +472,9 @@ impl WaitTracker {
             input_wait_timeout_bounds,
             calls: HashMap::new(),
             waiters: HashMap::new(),
+            exact_all_waits: HashMap::new(),
+            exact_all_reservations: HashMap::new(),
+            pending_exact_all_commits: HashMap::new(),
             any_waiters: HashMap::new(),
             input_waiters: HashMap::new(),
             claimed_waits: HashMap::new(),
@@ -330,6 +484,7 @@ impl WaitTracker {
             terminal_observations: HashMap::new(),
             completion_order_by_owner: HashMap::new(),
             completed_membership: HashMap::new(),
+            released_completions: HashMap::new(),
             next_completion_generation: CompletionGeneration(0),
             #[cfg(test)]
             completion_nodes_retired: 0,
@@ -348,6 +503,11 @@ impl WaitTracker {
         self.waiters
             .values()
             .map(|wait| wait.owner.clone())
+            .chain(
+                self.exact_all_waits
+                    .values()
+                    .map(|wait| wait.request.owner.clone()),
+            )
             .chain(self.any_waiters.keys().cloned())
             .chain(self.input_waiters.keys().cloned())
             .chain(self.claimed_waits.keys().cloned())
@@ -357,9 +517,13 @@ impl WaitTracker {
     /// Return the highest-precedence installed wait mode for one owner.
     pub(super) fn installed_wait_kind(&self, owner: &AgentId) -> Option<InstalledWaitKind> {
         if self.waiters.values().any(|wait| &wait.owner == owner)
+            || self
+                .exact_all_waits
+                .values()
+                .any(|wait| &wait.request.owner == owner)
             || matches!(
                 self.claimed_waits.get(owner),
-                Some(ClaimedWait::Exact { .. })
+                Some(ClaimedWait::Exact { .. } | ClaimedWait::ExactAll { .. })
             )
         {
             return Some(InstalledWaitKind::ExactTool);
@@ -388,6 +552,13 @@ impl WaitTracker {
         let exact_target = self.waiters.iter().find_map(|(target, wait)| {
             (&wait.owner == owner && &wait.call_id == call_id).then(|| target.clone())
         });
+        let exact_all_wait = self
+            .exact_all_waits
+            .iter()
+            .find_map(|(wait_call_id, wait)| {
+                (&wait.request.owner == owner && &wait.request.call_id == call_id)
+                    .then(|| (wait_call_id.clone(), wait.request.clone()))
+            });
         let claimed = if let Some(target) = exact_target {
             self.waiters
                 .remove(&target)
@@ -396,6 +567,11 @@ impl WaitTracker {
                     request,
                     wake: None,
                 })
+        } else if let Some((_wait_call_id, request)) = exact_all_wait {
+            Some(ClaimedWait::ExactAll {
+                request,
+                wake: None,
+            })
         } else if self
             .any_waiters
             .get(owner)
@@ -440,6 +616,7 @@ impl WaitTracker {
             self.claimed_waits.insert(owner.clone(), claimed);
             return Vec::new();
         }
+        let exact_all = matches!(claimed, ClaimedWait::ExactAll { .. });
         let wake = match claimed {
             ClaimedWait::Exact {
                 target,
@@ -449,6 +626,7 @@ impl WaitTracker {
                 self.waiters.insert(target, request);
                 wake
             }
+            ClaimedWait::ExactAll { request: _, wake } => wake,
             ClaimedWait::AnyBackground { request, wake } => {
                 self.any_waiters.insert(owner.clone(), request);
                 wake
@@ -463,9 +641,14 @@ impl WaitTracker {
                 self.activate_waits_for(owner, activation)
             }
             Some(ClaimedWaitWake::Completion(target)) => {
-                self.settle_restored_completion(owner, &target)
+                if exact_all {
+                    self.try_settle_exact_all(call_id).into_iter().collect()
+                } else {
+                    self.settle_restored_completion(owner, &target)
+                }
             }
             Some(ClaimedWaitWake::Timeout) => self.settle_restored_timeout(owner),
+            None if exact_all => self.try_settle_exact_all(call_id).into_iter().collect(),
             None => self.expire_input_waits(Instant::now()),
         }
     }
@@ -548,6 +731,272 @@ impl WaitTracker {
         )
     }
 
+    fn try_settle_exact_all(&mut self, wait_call_id: &ToolCallId) -> Option<WaitReply> {
+        if self.claimed_waits.values().any(|claimed| {
+            matches!(
+                claimed,
+                ClaimedWait::ExactAll { request, .. } if &request.call_id == wait_call_id
+            )
+        }) {
+            return None;
+        }
+        let wait = self.exact_all_waits.get(wait_call_id)?;
+        if wait
+            .members
+            .iter()
+            .any(|member| member.completion.is_none())
+        {
+            return None;
+        }
+        let wait = self
+            .exact_all_waits
+            .remove(wait_call_id)
+            .expect("checked exact-all wait exists");
+        let mut result_members = Vec::with_capacity(wait.members.len());
+        let mut sources = Vec::with_capacity(wait.members.len());
+        for member in &wait.members {
+            let completion = member
+                .completion
+                .as_ref()
+                .expect("all exact-all members completed");
+            let (result, terminal, phase) = match completion {
+                ExactAllCompletion::Result {
+                    output,
+                    display: _,
+                    phase,
+                    terminal,
+                } => (
+                    CborValue::Map(vec![
+                        original_tool_call_id_entry(&member.call_id),
+                        (
+                            CborValue::Text("outcome".to_owned()),
+                            CborValue::Text("result".to_owned()),
+                        ),
+                        (CborValue::Text("output".to_owned()), output.clone()),
+                    ]),
+                    *terminal,
+                    *phase,
+                ),
+                ExactAllCompletion::Error {
+                    message,
+                    details,
+                    display: _,
+                    phase,
+                    terminal,
+                } => (
+                    CborValue::Map(vec![
+                        original_tool_call_id_entry(&member.call_id),
+                        (
+                            CborValue::Text("outcome".to_owned()),
+                            CborValue::Text("error".to_owned()),
+                        ),
+                        (
+                            CborValue::Text("message".to_owned()),
+                            CborValue::Text(message.clone()),
+                        ),
+                        (
+                            CborValue::Text("details".to_owned()),
+                            details.clone().unwrap_or(CborValue::Null),
+                        ),
+                    ]),
+                    *terminal,
+                    *phase,
+                ),
+            };
+            result_members.push(result);
+            sources.push(tau_proto::WaitDeliveredSource {
+                source_call: member.call_ref,
+                source_terminal: terminal,
+                source_phase: phase,
+                envelope: tau_proto::ToolOutputEnvelope::Identity,
+            });
+        }
+        let reply = wait_result_reply(
+            wait.request.call_id.clone(),
+            wait.request.tool_name.clone(),
+            None,
+            CborValue::Map(vec![(
+                CborValue::Text("results".to_owned()),
+                CborValue::Array(result_members),
+            )]),
+            None,
+        )
+        .with_settlement(
+            &wait.request,
+            tau_proto::ToolWaitOutcome::CompletionsDelivered { sources },
+        );
+        self.pending_exact_all_commits
+            .insert(wait_call_id.clone(), wait);
+        Some(reply)
+    }
+
+    /// Consume every member only after the plural wait terminal commits.
+    pub(super) fn commit_exact_all_wait(
+        &mut self,
+        wait_call_id: &ToolCallId,
+    ) -> (Vec<ToolCallId>, Vec<WaitReply>) {
+        let Some(wait) = self.pending_exact_all_commits.remove(wait_call_id) else {
+            return (Vec::new(), Vec::new());
+        };
+        let owner = wait.request.owner.clone();
+        let mut consumed = Vec::new();
+        for member in &wait.members {
+            if self.exact_all_reservations.get(&member.call_ref) == Some(wait_call_id) {
+                self.exact_all_reservations.remove(&member.call_ref);
+            }
+            if self.call_refs.get(&member.call_id) == Some(&member.call_ref) {
+                self.remove_completed(&member.call_id);
+                self.record_terminal_state(member.call_id.clone(), WaitCallState::Consumed);
+                consumed.push(member.call_id.clone());
+            } else if let Some(generation) = member.completion_generation {
+                self.released_completions.remove(&generation);
+            }
+        }
+        let replies = self.finish_any_waiter_if_no_candidates(&owner);
+        (consumed, replies)
+    }
+
+    fn release_exact_all_wait(&mut self, wait_call_id: &ToolCallId) -> Option<ExactAllWait> {
+        let wait = self.exact_all_waits.remove(wait_call_id)?;
+        for member in &wait.members {
+            if self.exact_all_reservations.get(&member.call_ref) == Some(wait_call_id) {
+                self.exact_all_reservations.remove(&member.call_ref);
+            }
+            if self.call_refs.get(&member.call_id) != Some(&member.call_ref) {
+                if let Some(completion) = member.completion.clone() {
+                    let generation = member.completion_generation.unwrap_or_else(|| {
+                        let generation = self.next_completion_generation;
+                        self.next_completion_generation =
+                            self.next_completion_generation.wrapping_successor();
+                        self.completion_order_by_owner
+                            .entry(wait.request.owner.clone())
+                            .or_default()
+                            .push_back(CompletionNode {
+                                call_id: member.call_id.clone(),
+                                generation,
+                            });
+                        generation
+                    });
+                    self.released_completions.insert(
+                        generation,
+                        ReleasedCompletion {
+                            call_ref: member.call_ref,
+                            tool_name: member.tool_name.clone(),
+                            completion,
+                            restore_notice: member.restore_notice,
+                        },
+                    );
+                }
+                continue;
+            }
+            match member.completion.as_ref() {
+                Some(ExactAllCompletion::Result {
+                    output,
+                    display,
+                    phase: tau_proto::ToolSourcePhase::Foreground,
+                    terminal: _,
+                }) => {
+                    self.calls.insert(
+                        member.call_id.clone(),
+                        WaitCallState::ReservedResult(ToolBackgroundResult {
+                            call_id: member.call_id.clone(),
+                            tool_name: member.tool_name.clone(),
+                            tool_type: ToolType::Function,
+                            result: output.clone(),
+                            display: display.clone(),
+                            originator: tau_proto::PromptOriginator::User,
+                        }),
+                    );
+                }
+                Some(ExactAllCompletion::Error {
+                    message,
+                    details,
+                    display,
+                    phase: tau_proto::ToolSourcePhase::Foreground,
+                    terminal: _,
+                }) => {
+                    self.calls.insert(
+                        member.call_id.clone(),
+                        WaitCallState::ReservedError(ToolBackgroundError {
+                            call_id: member.call_id.clone(),
+                            tool_name: member.tool_name.clone(),
+                            tool_type: ToolType::Function,
+                            message: message.clone(),
+                            details: details.clone(),
+                            display: display.clone(),
+                            originator: tau_proto::PromptOriginator::User,
+                        }),
+                    );
+                }
+                Some(
+                    ExactAllCompletion::Result {
+                        phase: tau_proto::ToolSourcePhase::Background,
+                        ..
+                    }
+                    | ExactAllCompletion::Error {
+                        phase: tau_proto::ToolSourcePhase::Background,
+                        ..
+                    },
+                )
+                | None => {}
+            }
+        }
+        Some(wait)
+    }
+
+    fn exact_all_notice_release_actions(
+        wait: &ExactAllWait,
+    ) -> (Vec<CompletionNotice>, Vec<ToolCallId>) {
+        let mut restore = Vec::new();
+        let mut release = Vec::new();
+        for member in &wait.members {
+            if member.restore_notice
+                && let Some(completion) = &member.completion
+            {
+                restore.push(CompletionNotice {
+                    call_id: member.call_id.clone(),
+                    source_call: member.call_ref,
+                    source_terminal: completion.terminal(),
+                });
+            } else {
+                release.push(member.call_id.clone());
+            }
+        }
+        (restore, release)
+    }
+
+    fn record_exact_all_completion(
+        &mut self,
+        call_id: &ToolCallId,
+        completion: ExactAllCompletion,
+    ) -> Option<WaitReply> {
+        let current_ref = self.call_refs.get(call_id).copied()?;
+        let wait_call_id = self.exact_all_reservations.get(&current_ref)?.clone();
+        let wait = self.exact_all_waits.get_mut(&wait_call_id)?;
+        let member = wait
+            .members
+            .iter_mut()
+            .find(|member| member.call_id == *call_id && member.call_ref == current_ref)?;
+        if member.completion.is_none() {
+            member.completion = Some(completion);
+            member.completion_generation = self.completed_membership.get(call_id).copied();
+        }
+        if let Some(ClaimedWait::ExactAll { wake, .. }) =
+            self.claimed_waits.get_mut(&wait.request.owner)
+        {
+            if wait
+                .members
+                .iter()
+                .all(|member| member.completion.is_some())
+                && wake.is_none()
+            {
+                *wake = Some(ClaimedWaitWake::Completion(call_id.clone()));
+            }
+            return None;
+        }
+        self.try_settle_exact_all(&wait_call_id)
+    }
+
     /// Start tracking a non-wait call and clear stale state for a reused
     /// display ID.
     pub(super) fn record_tool_invoke(
@@ -628,6 +1077,7 @@ impl WaitTracker {
         };
         match target {
             WaitTarget::Exact(target) => self.start_exact_wait(target, wait),
+            WaitTarget::ExactAll(targets) => self.start_exact_all_wait(targets, wait),
             WaitTarget::AnyBackground => self.start_any_wait(owner.clone(), wait),
             WaitTarget::AnyInput(timeout) => {
                 let Some(deadline) = now.checked_add(timeout) else {
@@ -666,7 +1116,12 @@ impl WaitTracker {
             );
             return WaitStart::reply(reply);
         }
-        if self.waiters.contains_key(&target) {
+        if self.waiters.contains_key(&target)
+            || self
+                .call_refs
+                .get(&target)
+                .is_some_and(|call_ref| self.exact_all_reservations.contains_key(call_ref))
+        {
             let reply = wait_error_reply(
                 wait.call_id.clone(),
                 wait.tool_name.clone(),
@@ -747,6 +1202,7 @@ impl WaitTracker {
                     tau_proto::ToolSourcePhase::Background,
                     tau_proto::ToolOutputEnvelope::Identity,
                 );
+                let reply = reply.with_release_suppression(target.clone());
                 WaitStart::reply_with_suppress(reply, target)
             }
             Some(WaitCallState::BackgroundError(error)) => {
@@ -767,7 +1223,46 @@ impl WaitTracker {
                     tau_proto::ToolSourcePhase::Background,
                     tau_proto::ToolOutputEnvelope::Identity,
                 );
+                let reply = reply.with_release_suppression(target.clone());
                 WaitStart::reply_with_suppress(reply, target)
+            }
+            Some(WaitCallState::ReservedResult(result)) => {
+                self.record_terminal_state(target.clone(), WaitCallState::Consumed);
+                let source_tool_name = Some(result.tool_name.clone());
+                let reply = wait_result_reply(
+                    wait.call_id.clone(),
+                    wait.tool_name.clone(),
+                    source_tool_name,
+                    result.result,
+                    result.display,
+                );
+                let reply = self.attach_completion_settlement(
+                    reply,
+                    &wait,
+                    &target,
+                    tau_proto::ToolSourcePhase::Foreground,
+                    tau_proto::ToolOutputEnvelope::Identity,
+                );
+                WaitStart::reply(reply)
+            }
+            Some(WaitCallState::ReservedError(error)) => {
+                self.record_terminal_state(target.clone(), WaitCallState::Consumed);
+                let source_tool_name = Some(error.tool_name.clone());
+                let reply = wait_error_reply(
+                    wait.call_id.clone(),
+                    wait.tool_name.clone(),
+                    error.message,
+                    error.details,
+                )
+                .with_source_display(source_tool_name, error.display);
+                let reply = self.attach_completion_settlement(
+                    reply,
+                    &wait,
+                    &target,
+                    tau_proto::ToolSourcePhase::Foreground,
+                    tau_proto::ToolOutputEnvelope::Identity,
+                );
+                WaitStart::reply(reply)
             }
             Some(WaitCallState::Consumed) => {
                 let source_tool_name = self.call_tool_names.get(&target).cloned();
@@ -804,14 +1299,363 @@ impl WaitTracker {
         }
     }
 
+    fn start_exact_all_wait(
+        &mut self,
+        targets: Vec<ToolCallId>,
+        mut wait: WaitRequest,
+    ) -> WaitStart {
+        let mut members = Vec::with_capacity(targets.len());
+        for target in &targets {
+            if !self.call_is_owned_by(target, &wait.owner) {
+                return WaitStart::reply(
+                    wait_error_reply(
+                        wait.call_id.clone(),
+                        wait.tool_name.clone(),
+                        format!("unknown tool call: `{target}`"),
+                        None,
+                    )
+                    .with_settlement(
+                        &wait,
+                        tau_proto::ToolWaitOutcome::Rejected {
+                            reason: tau_proto::WaitRejectionReason::UnknownTarget,
+                        },
+                    ),
+                );
+            }
+            let Some(call_ref) = self.call_refs.get(target).copied() else {
+                return WaitStart::reply(
+                    wait_error_reply(
+                        wait.call_id.clone(),
+                        wait.tool_name.clone(),
+                        format!("unknown tool call: `{target}`"),
+                        None,
+                    )
+                    .with_settlement(
+                        &wait,
+                        tau_proto::ToolWaitOutcome::Rejected {
+                            reason: tau_proto::WaitRejectionReason::UnknownTarget,
+                        },
+                    ),
+                );
+            };
+            if self.waiters.contains_key(target)
+                || self.exact_all_reservations.contains_key(&call_ref)
+            {
+                return WaitStart::reply(
+                    wait_error_reply(
+                        wait.call_id.clone(),
+                        wait.tool_name.clone(),
+                        "existing wait for a requested tool already in progress".to_owned(),
+                        None,
+                    )
+                    .with_settlement(
+                        &wait,
+                        tau_proto::ToolWaitOutcome::Rejected {
+                            reason: tau_proto::WaitRejectionReason::DuplicateExactWait,
+                        },
+                    ),
+                );
+            }
+            let Some(state) = self.calls.get(target) else {
+                return WaitStart::reply(
+                    wait_error_reply(
+                        wait.call_id.clone(),
+                        wait.tool_name.clone(),
+                        format!("unknown tool call: `{target}`"),
+                        None,
+                    )
+                    .with_settlement(
+                        &wait,
+                        tau_proto::ToolWaitOutcome::Rejected {
+                            reason: tau_proto::WaitRejectionReason::UnknownTarget,
+                        },
+                    ),
+                );
+            };
+            let completion = match state {
+                WaitCallState::Pending | WaitCallState::Backgrounded => None,
+                WaitCallState::NormalReturned => {
+                    return WaitStart::reply(
+                        wait_error_reply(
+                            wait.call_id.clone(),
+                            wait.tool_name.clone(),
+                            format!("Tool call {target} returned normally, not backgrounded"),
+                            None,
+                        )
+                        .with_source_display(self.call_tool_names.get(target).cloned(), None)
+                        .with_settlement(
+                            &wait,
+                            tau_proto::ToolWaitOutcome::Rejected {
+                                reason:
+                                    tau_proto::WaitRejectionReason::TargetReturnedForegroundBeforeWait,
+                            },
+                        ),
+                    );
+                }
+                WaitCallState::Consumed => {
+                    return WaitStart::reply(
+                        wait_error_reply(
+                            wait.call_id.clone(),
+                            wait.tool_name.clone(),
+                            format!("result for tool call `{target}` already consumed"),
+                            None,
+                        )
+                        .with_source_display(self.call_tool_names.get(target).cloned(), None)
+                        .with_settlement(
+                            &wait,
+                            tau_proto::ToolWaitOutcome::Rejected {
+                                reason: tau_proto::WaitRejectionReason::ResultAlreadyConsumed,
+                            },
+                        ),
+                    );
+                }
+                WaitCallState::BackgroundResult(result) => {
+                    let Some(terminal) = self.terminal_observations.get(target).copied() else {
+                        return WaitStart::reply(wait_error_reply(
+                            wait.call_id.clone(),
+                            wait.tool_name.clone(),
+                            format!("tool call `{target}` terminal correlation is unavailable"),
+                            None,
+                        ));
+                    };
+                    Some(ExactAllCompletion::Result {
+                        output: result.result.clone(),
+                        display: result.display.clone(),
+                        phase: tau_proto::ToolSourcePhase::Background,
+                        terminal,
+                    })
+                }
+                WaitCallState::BackgroundError(error) => {
+                    let Some(terminal) = self.terminal_observations.get(target).copied() else {
+                        return WaitStart::reply(wait_error_reply(
+                            wait.call_id.clone(),
+                            wait.tool_name.clone(),
+                            format!("tool call `{target}` terminal correlation is unavailable"),
+                            None,
+                        ));
+                    };
+                    Some(ExactAllCompletion::Error {
+                        message: error.message.clone(),
+                        details: error.details.clone(),
+                        display: error.display.clone(),
+                        phase: tau_proto::ToolSourcePhase::Background,
+                        terminal,
+                    })
+                }
+                WaitCallState::ReservedResult(result) => {
+                    let Some(terminal) = self.terminal_observations.get(target).copied() else {
+                        return WaitStart::reply(wait_error_reply(
+                            wait.call_id.clone(),
+                            wait.tool_name.clone(),
+                            format!("tool call `{target}` terminal correlation is unavailable"),
+                            None,
+                        ));
+                    };
+                    Some(ExactAllCompletion::Result {
+                        output: result.result.clone(),
+                        display: result.display.clone(),
+                        phase: tau_proto::ToolSourcePhase::Foreground,
+                        terminal,
+                    })
+                }
+                WaitCallState::ReservedError(error) => {
+                    let Some(terminal) = self.terminal_observations.get(target).copied() else {
+                        return WaitStart::reply(wait_error_reply(
+                            wait.call_id.clone(),
+                            wait.tool_name.clone(),
+                            format!("tool call `{target}` terminal correlation is unavailable"),
+                            None,
+                        ));
+                    };
+                    Some(ExactAllCompletion::Error {
+                        message: error.message.clone(),
+                        details: error.details.clone(),
+                        display: error.display.clone(),
+                        phase: tau_proto::ToolSourcePhase::Foreground,
+                        terminal,
+                    })
+                }
+            };
+            members.push(ExactAllMember {
+                call_id: target.clone(),
+                call_ref,
+                tool_name: self
+                    .call_tool_names
+                    .get(target)
+                    .cloned()
+                    .unwrap_or_else(|| ToolName::new("tool")),
+                completion,
+                completion_generation: self.completed_membership.get(target).copied(),
+                restore_notice: false,
+            });
+        }
+
+        let all_complete = members.iter().all(|member| member.completion.is_some());
+        let target_refs = members.iter().map(|member| member.call_ref).collect();
+        let mut start = if all_complete {
+            WaitStart::default()
+        } else {
+            self.registered_start(
+                &mut wait,
+                tau_proto::ToolWaitMode::ExactAll {
+                    targets: target_refs,
+                },
+            )
+        };
+        let wait_call_id = wait.call_id.clone();
+        for member in &members {
+            self.exact_all_reservations
+                .insert(member.call_ref, wait_call_id.clone());
+        }
+        self.exact_all_waits.insert(
+            wait_call_id.clone(),
+            ExactAllWait {
+                request: wait,
+                members,
+            },
+        );
+        start.suppress_call_ids = targets;
+        if let Some(reply) = self.try_settle_exact_all(&wait_call_id) {
+            start.reply = Some(reply);
+        }
+        start
+    }
+
     /// Return whether the runtime call belongs to the given agent.
     pub(super) fn call_is_owned_by(&self, call_id: &ToolCallId, owner: &AgentId) -> bool {
         self.call_owners.get(call_id) == Some(owner)
     }
 
+    /// Return whether one current declaration occurrence is reserved by a
+    /// plural exact wait.
+    pub(super) fn exact_all_reserves_call_ref(
+        &self,
+        call_id: &ToolCallId,
+        call_ref: ToolCallRef,
+    ) -> bool {
+        self.exact_all_waits
+            .values()
+            .chain(self.pending_exact_all_commits.values())
+            .any(|wait| {
+                wait.members
+                    .iter()
+                    .any(|member| &member.call_id == call_id && member.call_ref == call_ref)
+            })
+    }
+    /// Return whether a plural exact wait can reserve every target without
+    /// mutation.
+    ///
+    /// The harness uses this same stable-generation preflight before allowing
+    /// queued activating input to interrupt a newly declared wait. Invalid,
+    /// consumed, foreground, or already-reserved sets must reach the ordinary
+    /// wait path and reject atomically instead of being masked by interruption.
+    pub(super) fn exact_all_preflight_succeeds(
+        &self,
+        targets: &[ToolCallId],
+        owner: &AgentId,
+    ) -> bool {
+        targets.iter().all(|target| {
+            self.call_is_owned_by(target, owner)
+                && self.call_refs.contains_key(target)
+                && !self.waiters.contains_key(target)
+                && self
+                    .call_refs
+                    .get(target)
+                    .is_none_or(|call_ref| !self.exact_all_reservations.contains_key(call_ref))
+                && self.calls.get(target).is_some_and(|state| match state {
+                    WaitCallState::Pending | WaitCallState::Backgrounded => true,
+                    WaitCallState::BackgroundResult(_)
+                    | WaitCallState::BackgroundError(_)
+                    | WaitCallState::ReservedResult(_)
+                    | WaitCallState::ReservedError(_) => {
+                        self.terminal_observations.contains_key(target)
+                    }
+                    WaitCallState::NormalReturned | WaitCallState::Consumed => false,
+                })
+        })
+    }
+
+    fn exact_all_reservation_for_current(&self, call_id: &ToolCallId) -> Option<&ToolCallId> {
+        self.call_refs
+            .get(call_id)
+            .and_then(|call_ref| self.exact_all_reservations.get(call_ref))
+    }
+
+    /// Record that registration removed one not-yet-delivered completion notice
+    /// for a reserved member.
+    pub(super) fn record_exact_all_notice_suppressed(
+        &mut self,
+        wait_call_id: &ToolCallId,
+        target: &ToolCallId,
+        removed_pending_notice: bool,
+    ) {
+        if !removed_pending_notice {
+            return;
+        }
+        if let Some(member) = self
+            .exact_all_waits
+            .get_mut(wait_call_id)
+            .into_iter()
+            .flat_map(|wait| wait.members.iter_mut())
+            .find(|member| &member.call_id == target)
+        {
+            member.restore_notice = true;
+        }
+    }
+
+    /// Record that a queue-capable background completion notice was blocked by
+    /// this member's active plural reservation.
+    pub(super) fn record_exact_all_notice_blocked(&mut self, target: &ToolCallId) {
+        let Some(call_ref) = self.call_refs.get(target).copied() else {
+            return;
+        };
+        let Some(wait_call_id) = self.exact_all_reservations.get(&call_ref).cloned() else {
+            return;
+        };
+        if let Some(member) = self
+            .exact_all_waits
+            .get_mut(&wait_call_id)
+            .into_iter()
+            .chain(self.pending_exact_all_commits.get_mut(&wait_call_id))
+            .flat_map(|wait| wait.members.iter_mut())
+            .find(|member| member.call_ref == call_ref)
+        {
+            member.restore_notice = true;
+        }
+    }
+
     /// Return whether an owned call has one unconsumed completion.
     pub(super) fn completed_call_is_owned_by(&self, call_id: &ToolCallId, owner: &AgentId) -> bool {
         self.call_is_owned_by(call_id, owner) && self.is_completed(call_id)
+    }
+
+    /// Return the exact current-generation completion identity when it is
+    /// waitable by this owner.
+    pub(super) fn completed_call_identity_if_owned(
+        &self,
+        call_id: &ToolCallId,
+        owner: &AgentId,
+    ) -> Option<(ToolCallRef, tau_proto::ObservationId)> {
+        self.completed_call_is_owned_by(call_id, owner)
+            .then(|| {
+                self.call_refs
+                    .get(call_id)
+                    .copied()
+                    .zip(self.terminal_observations.get(call_id).copied())
+            })
+            .flatten()
+    }
+
+    /// Return the exact oldest FIFO completion identity without consuming it.
+    pub(super) fn oldest_completed_identity_for_owner(
+        &mut self,
+        owner: &AgentId,
+    ) -> Option<(ToolCallRef, tau_proto::ObservationId)> {
+        let selection = self.oldest_completion_for_owner(owner)?;
+        if let Some(released) = self.released_completions.get(&selection.generation) {
+            return Some((released.call_ref, released.completion.terminal()));
+        }
+        self.completed_call_identity_if_owned(&selection.call_id, owner)
     }
 
     /// Consume one completed call after an owning control flow delivered its
@@ -840,8 +1684,8 @@ impl WaitTracker {
             );
             return WaitStart::reply(reply);
         }
-        if let Some(target) = self.oldest_completed_for_owner(&owner) {
-            return self.consume_completed_for_any(target, wait);
+        if let Some(selection) = self.oldest_completion_for_owner(&owner) {
+            return self.consume_completed_for_any(selection, wait);
         }
         if self.has_running_background_for_owner(&owner) {
             let mut wait = wait;
@@ -955,6 +1799,10 @@ impl WaitTracker {
                             request: _,
                             wake: _,
                         }
+                        | ClaimedWait::ExactAll {
+                            request: _,
+                            wake: _,
+                        }
                         | ClaimedWait::AnyBackground {
                             request: _,
                             wake: _,
@@ -993,7 +1841,68 @@ impl WaitTracker {
             .collect()
     }
 
-    fn consume_completed_for_any(&mut self, target: ToolCallId, wait: WaitRequest) -> WaitStart {
+    fn consume_completed_for_any(
+        &mut self,
+        selection: CompletionSelection,
+        wait: WaitRequest,
+    ) -> WaitStart {
+        let target = selection.call_id;
+        if let Some(released) = self.released_completions.remove(&selection.generation) {
+            let source_call = released.call_ref;
+            let restore_notice = released.restore_notice;
+            let (reply, terminal, phase) = match released.completion {
+                ExactAllCompletion::Result {
+                    output,
+                    display,
+                    phase,
+                    terminal,
+                } => (
+                    wait_result_reply(
+                        wait.call_id.clone(),
+                        wait.tool_name.clone(),
+                        Some(released.tool_name),
+                        result_with_original_tool_call_id(&target, output),
+                        display,
+                    ),
+                    terminal,
+                    phase,
+                ),
+                ExactAllCompletion::Error {
+                    message,
+                    details,
+                    display,
+                    phase,
+                    terminal,
+                } => (
+                    wait_error_reply(
+                        wait.call_id.clone(),
+                        wait.tool_name.clone(),
+                        message,
+                        details_with_original_tool_call_id(&target, details),
+                    )
+                    .with_source_display(Some(released.tool_name), display),
+                    terminal,
+                    phase,
+                ),
+            };
+            let mut reply = reply.with_settlement(
+                &wait,
+                tau_proto::ToolWaitOutcome::CompletionDelivered {
+                    source_call,
+                    source_terminal: terminal,
+                    source_phase: phase,
+                    envelope: tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader,
+                },
+            );
+            if restore_notice {
+                reply.remove_pending_notices.push(CompletionNotice {
+                    call_id: target,
+                    source_call,
+                    source_terminal: terminal,
+                });
+            }
+            return WaitStart::reply(reply);
+        }
         let Some(state) = self.calls.remove(&target) else {
             let reply = wait_error_reply(
                 wait.call_id.clone(),
@@ -1090,6 +1999,20 @@ impl WaitTracker {
             self.calls.insert(call_id, WaitCallState::Backgrounded);
             return Vec::new();
         }
+        if let Some(terminal) = terminal
+            && self.exact_all_reservation_for_current(&call_id).is_some()
+        {
+            let completion = ExactAllCompletion::Result {
+                output: result.result.clone(),
+                display: result.display.clone(),
+                phase: tau_proto::ToolSourcePhase::Foreground,
+                terminal,
+            };
+            return self
+                .record_exact_all_completion(&call_id, completion)
+                .into_iter()
+                .collect();
+        }
         if let Some(wait) = self.waiters.remove(&call_id) {
             self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
             let source_tool_name = Some(result.tool_name.clone());
@@ -1133,6 +2056,21 @@ impl WaitTracker {
         if self.is_consumed(&call_id) {
             return Vec::new();
         }
+        if let Some(terminal) = terminal
+            && self.exact_all_reservation_for_current(&call_id).is_some()
+        {
+            let completion = ExactAllCompletion::Error {
+                message: error.message.clone(),
+                details: error.details.clone(),
+                display: error.display.clone(),
+                phase: tau_proto::ToolSourcePhase::Foreground,
+                terminal,
+            };
+            return self
+                .record_exact_all_completion(&call_id, completion)
+                .into_iter()
+                .collect();
+        }
         if let Some(wait) = self.waiters.remove(&call_id) {
             self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
             let source_tool_name = Some(error.tool_name.clone());
@@ -1175,6 +2113,24 @@ impl WaitTracker {
         self.call_owners.insert(call_id.clone(), owner.clone());
         if self.is_consumed(&call_id) {
             return Vec::new();
+        }
+        if self.exact_all_reservation_for_current(&call_id).is_some() {
+            let Some(terminal) = terminal else {
+                return Vec::new();
+            };
+            let completion = ExactAllCompletion::Result {
+                output: result.result.clone(),
+                display: result.display.clone(),
+                phase: tau_proto::ToolSourcePhase::Background,
+                terminal,
+            };
+            self.calls
+                .insert(call_id.clone(), WaitCallState::BackgroundResult(result));
+            self.push_completed(call_id.clone());
+            return self
+                .record_exact_all_completion(&call_id, completion)
+                .into_iter()
+                .collect();
         }
         if let Some(wait) = self.waiters.remove(&call_id) {
             self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
@@ -1246,6 +2202,25 @@ impl WaitTracker {
         if self.is_consumed(&call_id) {
             return Vec::new();
         }
+        if self.exact_all_reservation_for_current(&call_id).is_some() {
+            let Some(terminal) = terminal else {
+                return Vec::new();
+            };
+            let completion = ExactAllCompletion::Error {
+                message: error.message.clone(),
+                details: error.details.clone(),
+                display: error.display.clone(),
+                phase: tau_proto::ToolSourcePhase::Background,
+                terminal,
+            };
+            self.calls
+                .insert(call_id.clone(), WaitCallState::BackgroundError(error));
+            self.push_completed(call_id.clone());
+            return self
+                .record_exact_all_completion(&call_id, completion)
+                .into_iter()
+                .collect();
+        }
         if let Some(wait) = self.waiters.remove(&call_id) {
             self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
             self.remove_completed(&call_id);
@@ -1311,7 +2286,7 @@ impl WaitTracker {
                 request: _,
                 wake: _,
             } => true,
-            ClaimedWait::Input { wait: _, wake: _ } => false,
+            ClaimedWait::ExactAll { .. } | ClaimedWait::Input { wait: _, wake: _ } => false,
         };
         if matches {
             match claimed {
@@ -1320,6 +2295,7 @@ impl WaitTracker {
                     request: _,
                     wake,
                 }
+                | ClaimedWait::ExactAll { request: _, wake }
                 | ClaimedWait::AnyBackground { request: _, wake } => {
                     if wake.is_none() {
                         *wake = Some(ClaimedWaitWake::Completion(call_id.clone()));
@@ -1398,23 +2374,27 @@ impl WaitTracker {
                 .claimed_waits
                 .remove(&owner)
                 .expect("selected claimed wait exists");
-            if let ClaimedWait::Exact {
-                target,
-                request: _,
-                wake: _,
-            } = &claimed
-            {
-                cancelled.unsuppress_call_ids.push(target.clone());
-            }
-            cancelled.cancelled_waits.push(match claimed {
+            let request = match claimed {
                 ClaimedWait::Exact {
-                    target: _,
+                    target,
                     request,
                     wake: _,
+                } => {
+                    cancelled.unsuppress_call_ids.push(target);
+                    request
                 }
-                | ClaimedWait::AnyBackground { request, wake: _ } => request,
+                ClaimedWait::ExactAll { request, wake: _ } => {
+                    if let Some(wait) = self.release_exact_all_wait(&request.call_id) {
+                        let (restore, release) = Self::exact_all_notice_release_actions(&wait);
+                        cancelled.unsuppress_notices.extend(restore);
+                        cancelled.release_suppression_call_ids.extend(release);
+                    }
+                    request
+                }
+                ClaimedWait::AnyBackground { request, wake: _ } => request,
                 ClaimedWait::Input { wait, wake: _ } => wait.request,
-            });
+            };
+            cancelled.cancelled_waits.push(request);
         }
         let input_waiters = std::mem::take(&mut self.input_waiters);
         for (owner, wait) in input_waiters {
@@ -1467,10 +2447,76 @@ impl WaitTracker {
             }
         }
 
+        let exact_all_wait_ids: Vec<ToolCallId> = self.exact_all_waits.keys().cloned().collect();
+        let mut exact_all_member_cancelled = HashSet::new();
+        for wait_call_id in exact_all_wait_ids {
+            if call_ids.contains(&wait_call_id) {
+                if let Some(wait) = self.release_exact_all_wait(&wait_call_id) {
+                    let (restore, release) = Self::exact_all_notice_release_actions(&wait);
+                    cancelled.unsuppress_notices.extend(restore);
+                    cancelled.release_suppression_call_ids.extend(release);
+                    cancelled.cancelled_waits.push(wait.request);
+                }
+                continue;
+            }
+            let member_ids: Vec<ToolCallId> = self
+                .exact_all_waits
+                .get(&wait_call_id)
+                .into_iter()
+                .flat_map(|wait| wait.members.iter())
+                .filter(|member| call_ids.contains(&member.call_id))
+                .map(|member| member.call_id.clone())
+                .collect();
+            for member_id in member_ids {
+                let Some(member_terminal) = terminal.and_then(|(terminal_call, terminal)| {
+                    (terminal_call == &member_id).then_some(terminal)
+                }) else {
+                    continue;
+                };
+                exact_all_member_cancelled.insert(member_id.clone());
+                if let Some(reply) = self.record_exact_all_completion(
+                    &member_id,
+                    ExactAllCompletion::Error {
+                        message: format!("Tool call `{member_id}` was cancelled"),
+                        details: None,
+                        display: None,
+                        phase: if self.is_backgrounded(&member_id) {
+                            tau_proto::ToolSourcePhase::Background
+                        } else {
+                            tau_proto::ToolSourcePhase::Foreground
+                        },
+                        terminal: member_terminal,
+                    },
+                ) {
+                    cancelled.replies.push(reply);
+                }
+            }
+        }
+
         for call_id in call_ids {
             if exact_consumed_cancelled.contains(call_id) {
                 self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
                 self.remove_completed(call_id);
+            } else if exact_all_member_cancelled.contains(call_id) {
+                if self.is_backgrounded(call_id) {
+                    self.calls.insert(
+                        call_id.clone(),
+                        WaitCallState::BackgroundError(ToolBackgroundError {
+                            call_id: call_id.clone(),
+                            tool_name: self
+                                .call_tool_names
+                                .get(call_id)
+                                .cloned()
+                                .unwrap_or_else(|| ToolName::new("cancelled")),
+                            tool_type: ToolType::Function,
+                            message: "Tool call canceled".to_owned(),
+                            details: None,
+                            originator: tau_proto::PromptOriginator::User,
+                            display: None,
+                        }),
+                    );
+                    self.push_completed(call_id.clone());
+                }
             } else if self.is_backgrounded(call_id) {
                 self.calls.insert(
                     call_id.clone(),
@@ -1502,11 +2548,12 @@ impl WaitTracker {
                 cancelled.cancelled_waits.push(wait);
                 continue;
             }
-            if let Some(target) = self.oldest_completed_for_owner(&owner) {
-                let start = self.consume_completed_for_any(target, wait);
+            if let Some(selection) = self.oldest_completion_for_owner(&owner) {
+                let start = self.consume_completed_for_any(selection, wait);
                 if let Some(call_id) = start.suppress_call_id {
                     cancelled.suppress_call_ids.push(call_id);
                 }
+                cancelled.suppress_call_ids.extend(start.suppress_call_ids);
                 cancelled.replies.extend(start.reply);
             } else if self.has_running_background_for_owner(&owner) {
                 self.any_waiters.insert(owner, wait);
@@ -1564,6 +2611,28 @@ impl WaitTracker {
                     .map(|wait| self.interrupted_exact_wait_reply(target, wait, activation))
             })
             .collect();
+        let exact_all_wait_ids: Vec<ToolCallId> = self
+            .exact_all_waits
+            .iter()
+            .filter(|(_, wait)| &wait.request.owner == owner)
+            .map(|(wait_call_id, _)| wait_call_id.clone())
+            .collect();
+        for wait_call_id in exact_all_wait_ids {
+            if let Some(wait) = self.release_exact_all_wait(&wait_call_id) {
+                let mut reply = wait_interrupted_all_reply(
+                    wait.request.call_id.clone(),
+                    wait.request.tool_name.clone(),
+                )
+                .with_settlement(
+                    &wait.request,
+                    tau_proto::ToolWaitOutcome::InterruptedByActivation { activation },
+                );
+                let (restore, release) = Self::exact_all_notice_release_actions(&wait);
+                reply.unsuppress_notices = restore;
+                reply.release_suppression_call_ids = release;
+                replies.push(reply);
+            }
+        }
         if let Some(wait) = self.any_waiters.remove(owner) {
             let reply = wait_interrupted_any_reply(wait.call_id.clone(), wait.tool_name.clone())
                 .with_settlement(
@@ -1588,6 +2657,7 @@ impl WaitTracker {
                     request: _,
                     wake,
                 }
+                | ClaimedWait::ExactAll { request: _, wake }
                 | ClaimedWait::AnyBackground { request: _, wake }
                 | ClaimedWait::Input { wait: _, wake } => {
                     if wake.is_none() {
@@ -1655,6 +2725,33 @@ impl WaitTracker {
                 .values()
                 .filter_map(|wait| (&wait.owner == owner).then_some(wait.call_id.clone())),
         );
+        let exact_all_wait_ids: Vec<_> = self
+            .exact_all_waits
+            .iter()
+            .filter(|(_, wait)| &wait.request.owner == owner)
+            .map(|(wait_call_id, _)| wait_call_id.clone())
+            .collect();
+        for wait_call_id in exact_all_wait_ids {
+            if let Some(wait) = self.release_exact_all_wait(&wait_call_id) {
+                call_ids.push(wait.request.call_id);
+            }
+        }
+        let pending_exact_all_wait_ids: Vec<_> = self
+            .pending_exact_all_commits
+            .iter()
+            .filter(|(_, wait)| &wait.request.owner == owner)
+            .map(|(wait_call_id, _)| wait_call_id.clone())
+            .collect();
+        for wait_call_id in pending_exact_all_wait_ids {
+            if let Some(wait) = self.pending_exact_all_commits.remove(&wait_call_id) {
+                for member in &wait.members {
+                    if self.exact_all_reservations.get(&member.call_ref) == Some(&wait_call_id) {
+                        self.exact_all_reservations.remove(&member.call_ref);
+                    }
+                }
+                call_ids.push(wait.request.call_id);
+            }
+        }
         if let Some(wait) = self.any_waiters.remove(owner) {
             call_ids.push(wait.call_id);
         }
@@ -1677,6 +2774,9 @@ impl WaitTracker {
             self.terminal_order.retain(|terminal| terminal != call_id);
         }
         if let Some(_queue) = self.completion_order_by_owner.remove(owner) {
+            for node in &_queue {
+                self.released_completions.remove(&node.generation);
+            }
             #[cfg(test)]
             {
                 self.completion_nodes_retired += _queue.len();
@@ -1712,23 +2812,59 @@ impl WaitTracker {
     /// Return the oldest unconsumed background completion owned by an agent,
     /// lazily pruning tombstones only from that owner's FIFO front.
     pub(super) fn oldest_completed_for_owner(&mut self, owner: &AgentId) -> Option<ToolCallId> {
+        self.oldest_completion_for_owner(owner)
+            .map(|selection| selection.call_id)
+    }
+
+    fn oldest_completion_for_owner(&mut self, owner: &AgentId) -> Option<CompletionSelection> {
         loop {
-            let node = self
-                .completion_order_by_owner
-                .get(owner)
-                .and_then(|queue| queue.front())
-                .cloned()?;
-            let live = self.completed_membership.get(&node.call_id) == Some(&node.generation)
-                && self.call_owners.get(&node.call_id) == Some(owner)
-                && self.is_completed(&node.call_id);
-            if live {
-                return Some(node.call_id);
+            let queue = self.completion_order_by_owner.get(owner)?;
+            let mut first_stale = None;
+            let mut selected = None;
+            for (index, node) in queue.iter().enumerate() {
+                let live_current = self.completed_membership.get(&node.call_id)
+                    == Some(&node.generation)
+                    && self.call_owners.get(&node.call_id) == Some(owner)
+                    && self.is_completed(&node.call_id);
+                let reserved_generation = self
+                    .exact_all_waits
+                    .values()
+                    .chain(self.pending_exact_all_commits.values())
+                    .any(|wait| {
+                        wait.members.iter().any(|member| {
+                            member.call_id == node.call_id
+                                && member.completion_generation == Some(node.generation)
+                        })
+                    });
+                let live = live_current
+                    || reserved_generation
+                    || self.released_completions.contains_key(&node.generation);
+                if !live {
+                    first_stale.get_or_insert(index);
+                    continue;
+                }
+                if self.released_completions.contains_key(&node.generation)
+                    || self
+                        .exact_all_reservation_for_current(&node.call_id)
+                        .is_none()
+                        && !reserved_generation
+                {
+                    selected = Some(CompletionSelection {
+                        call_id: node.call_id.clone(),
+                        generation: node.generation,
+                    });
+                    break;
+                }
             }
+            if let Some(selected) = selected {
+                return Some(selected);
+            }
+            let stale_index = first_stale?;
             let queue = self
                 .completion_order_by_owner
                 .get_mut(owner)
-                .expect("front node came from this owner");
-            queue.pop_front();
+                .expect("scanned queue came from this owner");
+            queue.remove(stale_index);
             #[cfg(test)]
             {
                 self.completion_nodes_retired += 1;
@@ -1866,6 +3002,7 @@ impl WaitReply {
                     wait_observation,
                     wait_call,
                     registration: wait.registration,
+                    wait_terminal: None,
                     outcome,
                 });
         self
@@ -1900,6 +3037,11 @@ impl WaitReply {
         self.unsuppress_call_id = Some(call_id);
         self
     }
+
+    fn with_release_suppression(mut self, call_id: ToolCallId) -> Self {
+        self.release_suppression_call_ids.push(call_id);
+        self
+    }
 }
 
 impl WaitStart {
@@ -1907,6 +3049,7 @@ impl WaitStart {
     pub(super) fn reply(reply: WaitReply) -> Self {
         Self {
             reply: Some(reply),
+            suppress_call_ids: Vec::new(),
             suppress_call_id: None,
             registration: None,
         }
@@ -1915,6 +3058,7 @@ impl WaitStart {
     fn reply_with_suppress(reply: WaitReply, call_id: ToolCallId) -> Self {
         Self {
             reply: Some(reply),
+            suppress_call_ids: Vec::new(),
             suppress_call_id: Some(call_id),
             registration: None,
         }
@@ -1940,7 +3084,12 @@ fn wait_result_reply(
                 "ok".to_owned(),
             )),
         },
+        suppress_call_ids: Vec::new(),
         suppress_call_id: None,
+        unsuppress_call_ids: Vec::new(),
+        unsuppress_notices: Vec::new(),
+        release_suppression_call_ids: Vec::new(),
+        remove_pending_notices: Vec::new(),
         unsuppress_call_id: None,
         settlement: None,
     }
@@ -2006,7 +3155,12 @@ pub(super) fn wait_error_reply(
             details,
             display: None,
         },
+        suppress_call_ids: Vec::new(),
         suppress_call_id: None,
+        unsuppress_call_ids: Vec::new(),
+        unsuppress_notices: Vec::new(),
+        release_suppression_call_ids: Vec::new(),
+        remove_pending_notices: Vec::new(),
         unsuppress_call_id: None,
         settlement: None,
     }
@@ -2023,6 +3177,20 @@ pub(super) fn wait_interrupted_reply(
         wait_tool_name,
         source_tool_name,
         interrupted_wait_result(InterruptedWaitMode::Exact),
+        None,
+    )
+}
+
+/// Construct a plural exact-wait activation interruption reply.
+pub(super) fn wait_interrupted_all_reply(
+    wait_call_id: ToolCallId,
+    wait_tool_name: ToolName,
+) -> WaitReply {
+    wait_result_reply(
+        wait_call_id,
+        wait_tool_name,
+        None,
+        interrupted_wait_result(InterruptedWaitMode::ExactAll),
         None,
     )
 }
@@ -2045,6 +3213,8 @@ pub(super) fn wait_interrupted_any_reply(
 enum InterruptedWaitMode {
     /// Wait for one explicit background tool call.
     Exact,
+    /// Wait transactionally for an explicit set of tool calls.
+    ExactAll,
     /// Wait for the next background completion owned by the conversation.
     AnyBackground,
 }
@@ -2054,6 +3224,7 @@ impl InterruptedWaitMode {
     fn as_header_value(&self) -> &'static str {
         match self {
             Self::Exact => "exact",
+            Self::ExactAll => "exact_all",
             Self::AnyBackground => "any_background",
         }
     }
@@ -2103,8 +3274,8 @@ fn original_tool_call_id_entry(original_call_id: &ToolCallId) -> (CborValue, Cbo
     )
 }
 
-/// Parse mutually exclusive exact, bare-background, or activating-input
-/// arguments.
+/// Parse mutually exclusive exact, plural exact, bare-background, or
+/// activating-input arguments.
 #[cfg(test)]
 pub(super) fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
     parse_wait_args_with_bounds(arguments, WaitTimeoutBounds::built_in())
@@ -2119,9 +3290,11 @@ pub(super) fn parse_wait_args_with_bounds(
         return Err("arguments must be an object".to_owned());
     };
     let mut tool_call_id_value = None;
+    let mut tool_call_ids_value = None;
     let mut timeout_minutes_value = None;
     let mut legacy_any_input = false;
     let mut tool_call_id_count = 0_u8;
+    let mut tool_call_ids_count = 0_u8;
     let mut timeout_minutes_count = 0_u8;
     for (k, v) in entries {
         let CborValue::Text(name) = k else { continue };
@@ -2129,6 +3302,10 @@ pub(super) fn parse_wait_args_with_bounds(
             "tool_call_id" => {
                 tool_call_id_count = tool_call_id_count.saturating_add(1);
                 tool_call_id_value.get_or_insert(v);
+            }
+            "tool_call_ids" => {
+                tool_call_ids_count = tool_call_ids_count.saturating_add(1);
+                tool_call_ids_value.get_or_insert(v);
             }
             "timeout_minutes" => {
                 timeout_minutes_count = timeout_minutes_count.saturating_add(1);
@@ -2144,14 +3321,29 @@ pub(super) fn parse_wait_args_with_bounds(
                 .to_owned(),
         );
     }
-    if tool_call_id_value.is_some() && timeout_minutes_value.is_some() {
+    let selected_modes = usize::from(tool_call_id_value.is_some())
+        + usize::from(tool_call_ids_value.is_some())
+        + usize::from(timeout_minutes_value.is_some());
+    if tool_call_id_value.is_some()
+        && timeout_minutes_value.is_some()
+        && tool_call_ids_value.is_none()
+    {
         return Err("`tool_call_id` and `timeout_minutes` are mutually exclusive".to_owned());
+    }
+    if 1 < selected_modes {
+        return Err(
+            "`tool_call_id`, `tool_call_ids`, and `timeout_minutes` are mutually exclusive"
+                .to_owned(),
+        );
     }
     if 1 < tool_call_id_count {
         return Err("`tool_call_id` must not be repeated".to_owned());
     }
     if 1 < timeout_minutes_count {
         return Err("`timeout_minutes` must not be repeated".to_owned());
+    }
+    if 1 < tool_call_ids_count {
+        return Err("`tool_call_ids` must not be repeated".to_owned());
     }
     if let Some(value) = tool_call_id_value {
         return match value {
@@ -2161,6 +3353,37 @@ pub(super) fn parse_wait_args_with_bounds(
             CborValue::Text(text) => Ok(WaitTarget::Exact(text.trim().to_owned().into())),
             _ => Err("`tool_call_id` must be a string".to_owned()),
         };
+    }
+    if let Some(value) = tool_call_ids_value {
+        let CborValue::Array(values) = value else {
+            return Err("`tool_call_ids` must be an array".to_owned());
+        };
+        if values.is_empty() {
+            return Err("`tool_call_ids` must contain at least one entry".to_owned());
+        }
+        if values.len() > tau_proto::MAX_WAIT_ALL_MEMBERS {
+            return Err(format!(
+                "`tool_call_ids` must contain at most {} entries",
+                tau_proto::MAX_WAIT_ALL_MEMBERS
+            ));
+        }
+        let mut seen = HashSet::with_capacity(values.len());
+        let mut targets = Vec::with_capacity(values.len());
+        for value in values {
+            let CborValue::Text(text) = value else {
+                return Err("every `tool_call_ids` entry must be a string".to_owned());
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("`tool_call_ids` entries must not be empty".to_owned());
+            }
+            let target = ToolCallId::from(text.to_owned());
+            if !seen.insert(target.clone()) {
+                return Err("`tool_call_ids` must not contain duplicates".to_owned());
+            }
+            targets.push(target);
+        }
+        return Ok(WaitTarget::ExactAll(targets));
     }
     match timeout_minutes_value {
         Some(CborValue::Integer(value)) => {
@@ -2241,7 +3464,12 @@ fn wait_timed_out_reply(
                 "timeout".to_owned(),
             )),
         },
+        suppress_call_ids: Vec::new(),
         suppress_call_id: None,
+        unsuppress_call_ids: Vec::new(),
+        unsuppress_notices: Vec::new(),
+        release_suppression_call_ids: Vec::new(),
+        remove_pending_notices: Vec::new(),
         unsuppress_call_id: None,
         settlement: None,
     }

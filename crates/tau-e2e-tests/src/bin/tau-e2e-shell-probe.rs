@@ -23,7 +23,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let start = monotonic_ns()?;
-    std::thread::sleep(Duration::from_secs(3));
+    let ordinal = ident
+        .strip_prefix("parallel-")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or("invalid probe identity")?;
+    std::thread::sleep(Duration::from_millis(3_500 - ordinal * 100));
     let end = monotonic_ns()?;
     println!(
         "id={ident} start_ns={start} end_ns={end} elapsed_ms={:.3}",

@@ -12,10 +12,17 @@ case advertises parallel calls, while the violating-response control retains
 one-call guidance and still requires lossless aggregation. Each fixed command
 uses the preflight-resolved Cargo-built helper path, synchronizes through private cwd marker
 files retained for the fixture lifetime, and records monotonic timestamps around
-a three-second sleep. Four exact `wait` calls collect the real background results. The oracle
+a three-second sleep. One bounded plural exact `wait` call collects the real
+background results in request order after the commands finish in reverse order. The oracle
 requires all requests and starts before the first placeholder, exact
 call/wait/result correlation without extras, common overlap, and a makespan
 below six seconds. It does not alter runtime scheduling.
+
+One separate closed mixed-result scenario emits a fixed successful core-shell
+`shell --version` call, a fixed failing relative `workdir` call, and one bounded
+plural exact wait in the same provider terminal. Its continuation requires one
+aggregate containing the success and error members in request order without
+fail-fast behavior.
 
 Deterministic harness acceptance uses a test-only supervised provider subprocess
 inside `tau-e2e-tests`. It is launched by exact path as a required custom

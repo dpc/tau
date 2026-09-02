@@ -73,9 +73,10 @@ use self::ui_runtime::{
 };
 use self::ui_runtime::{PendingActionInvocation, UiShellRouteId};
 use crate::agent::{
-    ActivationDispatchState, Agent, AgentTurnState, FinalStatusChallenge, FinalStatusInput,
-    InferenceCheckpointOwner, InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger,
-    LoopTurnSignature, PendingCancel, PendingMessageWake, PendingMessageWakeSource, PendingPrompt,
+    ActivationDispatchState, Agent, AgentTurnState, BackgroundCompletionCorrelation,
+    FinalStatusChallenge, FinalStatusInput, InferenceCheckpointOwner, InitialPromptCorrelation,
+    LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel, PendingMessageWake,
+    PendingMessageWakeSource, PendingPrompt,
 };
 use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};

@@ -194,7 +194,7 @@ When every stronger sort component is equal, the approved family order is
 
 Only explicitly linked, nondecreasing endpoint pairs emit qualified intervals: `declaration_to_dispatch_us`, `dispatch_to_backgrounded_us`, `backgrounded_to_terminal_us`, `dispatch_to_terminal_us`, `active_wait_us`, `completion_to_delivery_us`, `activation_to_wait_terminal_us`, and `completion_to_activation_queue_us`. There is no unqualified `duration_us`.
 
-Wait relationships report registration as `immediate`, `active`, or `unresolved`, and outcome as `completion_delivered`, `interrupted_by_activation`, `input_available`, `timed_out`, `rejected`, `cancelled`, `lifecycle_aborted`, or `incomplete`. Missing referenced observations remain explicit as `source_not_selected`, `unresolved`, or `incomplete`; the projector never reconstructs them from adjacency, timestamps, IDs, or prose.
+Wait relationships report registration as `immediate`, `active`, or `unresolved`, and outcome as `completion_delivered`, `interrupted_by_activation`, `input_available`, `timed_out`, `rejected`, `cancelled`, `lifecycle_aborted`, or `incomplete`. A successful plural exact wait emits one `completion_delivered` relationship per source in request order; those records share the wait call and terminal and copy no source payload. Missing referenced observations remain explicit as `source_not_selected`, `unresolved`, or `incomplete`; the projector never reconstructs them from adjacency, timestamps, IDs, or prose.
 
 A canonical terminal owns normalized output exactly once. Lite mode emits its exact `output_bytes` and `output_lines` plus bounded output; full mode emits complete `output` (or TOON `output_base64` where required). A completion-delivering wait emits only `output_ref` and `envelope`, never copied payload or counts. JSONL and TOON preserve the same identities, lifecycle, wait outcomes, relationships, and ownership; only payload representation differs.
 
@@ -340,7 +340,8 @@ agent journal and `source_not_selected` when it is unavailable to that
 journal-local relationship. The latter includes selected endpoints in another
 agent journal. Such relationships never produce elapsed intervals or transfer
 terminal status/output ownership. Exact-wait targets outside the relationship's
-journal project as `exact_unresolved`.
+journal project as `exact_unresolved`; plural exact targets do so as
+`exact_all_unresolved`.
 
 `ToolCallRef` always serializes as
 `{"declaration":"<32-lowercase-hex>","item_index":<u32>}`. Observation references
@@ -431,9 +432,12 @@ tool_call: record_type, agent_id, call, journal_seq, status,
 wait: record_type, agent_id, wait_call, journal_seq, optional observed_at_us, mode,
       registration, outcome, optional terminal_journal_seq/terminal_at_us,
       exact mode: target_call
+      exact_all mode: target_calls
       activating_input mode: effective_timeout_minutes
       completion_delivered: source_call, source_terminal, source_phase, envelope,
                             optional completion_to_delivery_us
+      completions_delivered: ordered sources array of source_call,
+                             source_terminal, source_phase, and envelope
       interrupted_by_activation/input_available: activation,
                                                  optional activation_kind/
                                                           activation_to_wait_terminal_us

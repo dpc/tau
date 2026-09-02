@@ -428,6 +428,8 @@ pub(crate) struct PendingPrompt {
     /// Exact activation observation allocated when this prompt entered the
     /// queue.
     pub(crate) activation_observation: Option<tau_proto::ObservationId>,
+    /// Runtime-only generation identity for one background completion notice.
+    pub(crate) background_completion: Option<BackgroundCompletionCorrelation>,
     /// Runtime-only immutable delivery deadlines, absent for immediate classes.
     pub(crate) delivery_schedule: Option<DeliverySchedule>,
     /// Correlation retained until this accepted initial prompt materializes.
@@ -436,6 +438,17 @@ pub(crate) struct PendingPrompt {
     pub(crate) self_compaction_terminal: Option<tau_proto::SelfCompactionTerminal>,
     /// Runtime-only owner for the accepted side-agent startup prompt.
     pub(crate) start_operation_id: Option<tau_proto::StartOperationId>,
+}
+
+/// Stable runtime identity carried by one background-completion prompt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BackgroundCompletionCorrelation {
+    /// Provider-visible display call ID used in prompt text.
+    pub(crate) call_id: tau_proto::ToolCallId,
+    /// Exact source declaration when durable correlation is available.
+    pub(crate) source_call: Option<tau_proto::ToolCallRef>,
+    /// Exact source terminal when durable correlation is available.
+    pub(crate) source_terminal: Option<tau_proto::ObservationId>,
 }
 
 /// Correlation for an accepted initial prompt before provider materialization.
@@ -485,6 +498,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            background_completion: None,
             delivery_schedule: None,
             initial_prompt_correlation: None,
             self_compaction_terminal: None,
@@ -519,6 +533,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            background_completion: None,
             delivery_schedule: None,
             initial_prompt_correlation: None,
             self_compaction_terminal: None,

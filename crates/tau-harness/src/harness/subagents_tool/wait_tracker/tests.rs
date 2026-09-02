@@ -22,6 +22,18 @@ fn wait_args_exact(call_id: &str) -> CborValue {
     )])
 }
 
+fn wait_args_all(call_ids: &[&str]) -> CborValue {
+    CborValue::Map(vec![(
+        CborValue::Text("tool_call_ids".to_owned()),
+        CborValue::Array(
+            call_ids
+                .iter()
+                .map(|call_id| CborValue::Text((*call_id).to_owned()))
+                .collect(),
+        ),
+    )])
+}
+
 fn wait_args_input(minutes: i64) -> CborValue {
     CborValue::Map(vec![(
         CborValue::Text("timeout_minutes".to_owned()),
@@ -136,6 +148,26 @@ fn start_wait_exact(
         &wait_args_exact(target_call_id),
         observation(),
     )
+}
+
+fn start_wait_all(
+    tracker: &mut WaitTracker,
+    owner: &AgentId,
+    wait_call_id: &str,
+    target_call_ids: &[&str],
+) -> WaitStart {
+    tracker.handle_wait_invoke(
+        owner,
+        wait_call_id.into(),
+        wait_tool_name(),
+        &wait_args_all(target_call_ids),
+        observation(),
+    )
+}
+
+fn track_call(tracker: &mut WaitTracker, owner: &AgentId, call_id: &str, reference: ToolCallRef) {
+    tracker.reset_call_ref(call_id.into(), reference);
+    tracker.record_tool_invoke(call_id.into(), slow_tool_name(), owner.clone());
 }
 
 fn start_wait_input(tracker: &mut WaitTracker, owner: &AgentId, call_id: &str) -> WaitStart {
@@ -665,6 +697,7 @@ fn immediate_completion_settlement_keeps_fixed_durable_endpoints() {
             wait_observation,
             wait_call: call_ref(2, 0),
             registration: None,
+            wait_terminal: None,
             outcome: tau_proto::ToolWaitOutcome::CompletionDelivered {
                 source_call: call_ref(1, 0),
                 source_terminal: terminal,
@@ -709,6 +742,7 @@ fn registered_and_unavailable_completion_settlements_are_explicit() {
             wait_observation: actual_observation,
             wait_call: actual_wait,
             registration: Some(actual_registration),
+            wait_terminal: _,
             outcome: tau_proto::ToolWaitOutcome::CompletionDelivered {
                 source_call,
                 source_terminal,
@@ -2273,4 +2307,1371 @@ fn timeout_advice_is_additive_and_model_visible() {
         CborValue::Text("advice".to_owned()),
         CborValue::Text("prefer an event-driven wake".to_owned())
     )));
+}
+
+/// Plural parsing enforces the approved bounded distinct-array interface
+/// without changing singular or timeout selection.
+#[test]
+fn wait_all_parser_enforces_bounds_duplicates_and_mutual_exclusion() {
+    assert_eq!(
+        parse_wait_args(&wait_args_all(&["a"])),
+        Ok(WaitTarget::ExactAll(vec![ToolCallId::from("a")]))
+    );
+    let maximum = (0..tau_proto::MAX_WAIT_ALL_MEMBERS)
+        .map(|index| format!("call-{index}"))
+        .collect::<Vec<_>>();
+    let maximum_refs = maximum.iter().map(String::as_str).collect::<Vec<_>>();
+    assert!(matches!(
+        parse_wait_args(&wait_args_all(&maximum_refs)),
+        Ok(WaitTarget::ExactAll(targets))
+            if targets.len() == tau_proto::MAX_WAIT_ALL_MEMBERS
+    ));
+    assert_eq!(
+        parse_wait_args(&wait_args_all(&[])),
+        Err("`tool_call_ids` must contain at least one entry".to_owned())
+    );
+    let over_maximum = (0..=tau_proto::MAX_WAIT_ALL_MEMBERS)
+        .map(|index| format!("call-{index}"))
+        .collect::<Vec<_>>();
+    let over_maximum_refs = over_maximum.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(
+        parse_wait_args(&wait_args_all(&over_maximum_refs)),
+        Err(format!(
+            "`tool_call_ids` must contain at most {} entries",
+            tau_proto::MAX_WAIT_ALL_MEMBERS
+        ))
+    );
+    assert_eq!(
+        parse_wait_args(&wait_args_all(&["a", "a"])),
+        Err("`tool_call_ids` must not contain duplicates".to_owned())
+    );
+    assert_eq!(
+        parse_wait_args(&wait_args_all(&[" "])),
+        Err("`tool_call_ids` entries must not be empty".to_owned())
+    );
+    assert_eq!(
+        parse_wait_args(&CborValue::Map(vec![(
+            CborValue::Text("tool_call_ids".to_owned()),
+            CborValue::Array(vec![CborValue::Integer(1.into())]),
+        )])),
+        Err("every `tool_call_ids` entry must be a string".to_owned())
+    );
+    assert_eq!(
+        parse_wait_args(&CborValue::Map(vec![
+            (
+                CborValue::Text("tool_call_id".to_owned()),
+                CborValue::Text("a".to_owned()),
+            ),
+            (
+                CborValue::Text("tool_call_ids".to_owned()),
+                CborValue::Array(vec![CborValue::Text("b".to_owned())]),
+            ),
+        ])),
+        Err(
+            "`tool_call_id`, `tool_call_ids`, and `timeout_minutes` are mutually exclusive"
+                .to_owned()
+        )
+    );
+    assert!(
+        parse_wait_args(&CborValue::Map(vec![
+            (
+                CborValue::Text("tool_call_ids".to_owned()),
+                CborValue::Array(vec![CborValue::Text("a".to_owned())]),
+            ),
+            (
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(7.into()),
+            ),
+        ]))
+        .is_err()
+    );
+    assert_eq!(
+        normalized_wait_timeout_minutes_inner(
+            &CborValue::Map(vec![(
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(1_000_000.into()),
+            )]),
+            WaitTimeoutBounds::built_in(),
+        ),
+        Ok(Some(1440))
+    );
+}
+
+/// An all-complete plural wait returns arbitrary member payloads in request
+/// order and delays every consumption until its wait terminal commits.
+#[test]
+fn wait_all_complete_results_are_ordered_typed_and_commit_atomically() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "a", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "b", call_ref(2, 0));
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    let terminal_a = tau_proto::ObservationId::from_bytes([11; 16]);
+    let terminal_b = tau_proto::ObservationId::from_bytes([12; 16]);
+    let typed_output = CborValue::Map(vec![(
+        CborValue::Text("nested".to_owned()),
+        CborValue::Array(vec![CborValue::Integer(7.into()), CborValue::Bool(true)]),
+    )]);
+    tracker.record_background_result(
+        ToolBackgroundResult {
+            result: typed_output.clone(),
+            ..background_result("a", "unused")
+        },
+        owner.clone(),
+        Some(terminal_a),
+    );
+    tracker.record_background_error(
+        background_error(
+            "b",
+            "failed",
+            Some(CborValue::Array(vec![CborValue::Text("detail".to_owned())])),
+        ),
+        owner.clone(),
+        Some(terminal_b),
+    );
+
+    let start = start_wait_all(&mut tracker, &owner, "wait-all", &["b", "a"]);
+    assert!(
+        start.registration.is_none(),
+        "all-complete waits are immediate"
+    );
+    assert_eq!(
+        start.suppress_call_ids,
+        vec![ToolCallId::from("b"), ToolCallId::from("a")]
+    );
+    let reply = start_reply(start);
+    let settlement = reply.settlement.clone().expect("plural settlement");
+    assert!(matches!(
+        settlement.outcome,
+        tau_proto::ToolWaitOutcome::CompletionsDelivered { ref sources }
+            if sources.iter().map(|source| source.source_call).collect::<Vec<_>>()
+                == vec![call_ref(2, 0), call_ref(1, 0)]
+    ));
+    let result = reply_result(reply);
+    let expected = CborValue::Map(vec![(
+        CborValue::Text("results".to_owned()),
+        CborValue::Array(vec![
+            CborValue::Map(vec![
+                original_tool_call_id_entry(&ToolCallId::from("b")),
+                (
+                    CborValue::Text("outcome".to_owned()),
+                    CborValue::Text("error".to_owned()),
+                ),
+                (
+                    CborValue::Text("message".to_owned()),
+                    CborValue::Text("failed".to_owned()),
+                ),
+                (
+                    CborValue::Text("details".to_owned()),
+                    CborValue::Array(vec![CborValue::Text("detail".to_owned())]),
+                ),
+            ]),
+            CborValue::Map(vec![
+                original_tool_call_id_entry(&ToolCallId::from("a")),
+                (
+                    CborValue::Text("outcome".to_owned()),
+                    CborValue::Text("result".to_owned()),
+                ),
+                (CborValue::Text("output".to_owned()), typed_output.clone()),
+            ]),
+        ]),
+    )]);
+    assert_eq!(result, expected);
+    let CborValue::Map(root) = &result else {
+        panic!("plural wait result must be a map");
+    };
+    let CborValue::Array(members) = &root[0].1 else {
+        panic!("plural wait results must be an array");
+    };
+    assert_eq!(
+        cbor_map_text(&members[0], "original_tool_call_id"),
+        Some("b")
+    );
+    assert_eq!(cbor_map_text(&members[0], "outcome"), Some("error"));
+    assert_eq!(
+        cbor_map_text(&members[1], "original_tool_call_id"),
+        Some("a")
+    );
+    assert_eq!(cbor_map_text(&members[1], "outcome"), Some("result"));
+    let CborValue::Map(a_member) = &members[1] else {
+        panic!("result member must be a map");
+    };
+    assert_eq!(a_member[2].1, typed_output);
+    assert!(tracker.is_completed(&ToolCallId::from("a")));
+    assert!(tracker.is_completed(&ToolCallId::from("b")));
+
+    let (consumed, replies) = tracker.commit_exact_all_wait(&ToolCallId::from("wait-all"));
+    assert_eq!(consumed, vec![ToolCallId::from("b"), ToolCallId::from("a")]);
+    assert!(replies.is_empty());
+    assert!(tracker.is_consumed(&ToolCallId::from("a")));
+    assert!(tracker.is_consumed(&ToolCallId::from("b")));
+}
+
+/// A mixed completed/running set reserves the completed member without
+/// consuming it, registers once, and settles only when the running member ends.
+#[test]
+fn wait_all_mixed_completed_and_running_members_register_once() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "ready", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "running", call_ref(2, 0));
+    tracker.record_tool_result(
+        &background_placeholder("ready"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("running"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_background_result(
+        background_result("ready", "ready payload"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+
+    let start = start_wait_all(&mut tracker, &owner, "wait-all", &["running", "ready"]);
+    assert!(start.reply.is_none());
+    assert!(start.registration.is_some());
+    assert!(tracker.is_completed(&ToolCallId::from("ready")));
+    let replies = tracker.record_background_result(
+        background_result("running", "running payload"),
+        owner,
+        observation(),
+    );
+    assert_eq!(replies.len(), 1);
+    let CborValue::Map(root) = reply_result(replies.into_iter().next().expect("plural reply"))
+    else {
+        panic!("plural result must be a map");
+    };
+    let CborValue::Array(members) = &root[0].1 else {
+        panic!("plural members must be an array");
+    };
+    assert_eq!(
+        members
+            .iter()
+            .map(|member| cbor_map_text(member, ORIGINAL_TOOL_CALL_ID_HEADER))
+            .collect::<Vec<_>>(),
+        vec![Some("running"), Some("ready")]
+    );
+}
+
+/// A running plural wait settles only at the final member, regardless of
+/// completion order, and never lets a bare waiter steal a reserved member.
+#[test]
+fn wait_all_running_members_settle_on_final_completion_and_outrank_bare_wait() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    for (index, call_id) in ["a", "b", "c"].into_iter().enumerate() {
+        track_call(
+            &mut tracker,
+            &owner,
+            call_id,
+            call_ref(u8::try_from(index + 1).expect("small index"), 0),
+        );
+        tracker.record_tool_result(
+            &background_placeholder(call_id),
+            owner.clone(),
+            observation(),
+        );
+    }
+    tracker.retain_call_ref("wait-all".into(), call_ref(9, 0));
+    tracker.retain_call_ref("wait-any".into(), call_ref(10, 0));
+    let start = start_wait_all(&mut tracker, &owner, "wait-all", &["a", "b"]);
+    assert!(start.reply.is_none());
+    assert!(start.registration.is_some());
+    assert_eq!(
+        start.suppress_call_ids,
+        vec![ToolCallId::from("a"), ToolCallId::from("b")]
+    );
+    assert!(
+        start_wait_any(&mut tracker, &owner, "wait-any")
+            .reply
+            .is_none()
+    );
+
+    assert!(
+        tracker
+            .record_background_result(
+                background_result("b", "second request member first"),
+                owner.clone(),
+                observation(),
+            )
+            .is_empty()
+    );
+    let bare = tracker.record_background_result(
+        background_result("c", "unreserved"),
+        owner.clone(),
+        observation(),
+    );
+    assert_eq!(bare.len(), 1);
+    assert_eq!(
+        cbor_map_text(
+            &reply_result(bare.into_iter().next().expect("bare reply")),
+            ORIGINAL_TOOL_CALL_ID_HEADER,
+        ),
+        Some("c")
+    );
+    let replies = tracker.record_background_result(
+        background_result("a", "first request member last"),
+        owner,
+        observation(),
+    );
+    assert_eq!(replies.len(), 1);
+    let result = reply_result(replies.into_iter().next().expect("plural reply"));
+    let CborValue::Map(root) = result else {
+        panic!("plural result must be a map");
+    };
+    let CborValue::Array(members) = &root[0].1 else {
+        panic!("plural results must be an array");
+    };
+    assert_eq!(
+        cbor_map_text(&members[0], "original_tool_call_id"),
+        Some("a")
+    );
+    assert_eq!(
+        cbor_map_text(&members[1], "original_tool_call_id"),
+        Some("b")
+    );
+}
+
+/// Interruption restores only notices that reservation actually prevented from
+/// reaching the provider; already-delivered and never-produced notices are only
+/// unsuppressed.
+#[test]
+fn wait_all_interruption_restores_only_undelivered_notices() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    for (index, call_id) in ["a", "b", "c"].into_iter().enumerate() {
+        track_call(
+            &mut tracker,
+            &owner,
+            call_id,
+            call_ref(u8::try_from(index + 1).expect("small index"), 0),
+        );
+        tracker.record_tool_result(
+            &background_placeholder(call_id),
+            owner.clone(),
+            observation(),
+        );
+    }
+    tracker.record_background_result(
+        background_result("a", "already delivered"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(9, 0));
+    let start = start_wait_all(&mut tracker, &owner, "wait-all", &["a", "b", "c"]);
+    assert!(start.reply.is_none());
+    tracker.record_exact_all_notice_suppressed(
+        &ToolCallId::from("wait-all"),
+        &ToolCallId::from("a"),
+        false,
+    );
+    tracker.record_background_result(
+        background_result("b", "suppressed while reserved"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_exact_all_notice_blocked(&ToolCallId::from("b"));
+
+    let reply = tracker
+        .activate_waits_for(&owner, observation().expect("observation"))
+        .pop()
+        .expect("plural interruption");
+    assert_eq!(
+        reply
+            .unsuppress_notices
+            .iter()
+            .map(|notice| notice.call_id.clone())
+            .collect::<Vec<_>>(),
+        vec![ToolCallId::from("b")]
+    );
+    assert_eq!(
+        reply.release_suppression_call_ids,
+        vec![ToolCallId::from("a"), ToolCallId::from("c")]
+    );
+}
+
+/// A background completion whose caller selected DoNotQueue does not acquire a
+/// synthetic notice-restoration obligation merely because it was reserved.
+#[test]
+fn wait_all_do_not_queue_completion_restores_no_notice() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    for (index, call_id) in ["a", "b"].into_iter().enumerate() {
+        track_call(
+            &mut tracker,
+            &owner,
+            call_id,
+            call_ref(u8::try_from(index + 1).expect("small index"), 0),
+        );
+        tracker.record_tool_result(
+            &background_placeholder(call_id),
+            owner.clone(),
+            observation(),
+        );
+    }
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["a", "b"])
+            .reply
+            .is_none()
+    );
+    tracker.record_background_result(
+        background_result("a", "do not queue"),
+        owner.clone(),
+        observation(),
+    );
+    let reply = tracker
+        .activate_waits_for(&owner, observation().expect("observation"))
+        .pop()
+        .expect("plural interruption");
+    assert!(reply.unsuppress_call_ids.is_empty());
+    assert_eq!(
+        reply.release_suppression_call_ids,
+        vec![ToolCallId::from("a"), ToolCallId::from("b")]
+    );
+}
+
+/// When a plural wait consumes the last background candidates, a competing
+/// bare waiter receives the ordinary no-candidate terminal instead of remaining
+/// installed forever.
+#[test]
+fn wait_all_commit_finishes_stranded_bare_waiter() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "a", call_ref(1, 0));
+    tracker.record_tool_result(&background_placeholder("a"), owner.clone(), observation());
+    tracker.retain_call_ref("wait-all".into(), call_ref(2, 0));
+    tracker.retain_call_ref("wait-any".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["a"])
+            .reply
+            .is_none()
+    );
+    assert!(
+        start_wait_any(&mut tracker, &owner, "wait-any")
+            .reply
+            .is_none()
+    );
+    assert_eq!(
+        tracker
+            .record_background_result(background_result("a", "plural wins"), owner, observation(),)
+            .len(),
+        1
+    );
+
+    let (consumed, replies) = tracker.commit_exact_all_wait(&ToolCallId::from("wait-all"));
+    assert_eq!(consumed, vec![ToolCallId::from("a")]);
+    assert_eq!(replies.len(), 1);
+    assert!(matches!(replies[0].kind, WaitReplyKind::Error { .. }));
+}
+
+/// Failed plural preflight leaves every valid member and completion FIFO
+/// untouched, then activation interruption releases all successful
+/// reservations.
+#[test]
+fn wait_all_preflight_and_interruption_are_atomic() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "a", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "b", call_ref(2, 0));
+    tracker.retain_call_ref("invalid-wait".into(), call_ref(3, 0));
+    tracker.retain_call_ref("active-wait".into(), call_ref(4, 0));
+    tracker.record_background_result(
+        background_result("a", "ready"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_terminal_state("b".into(), WaitCallState::Consumed);
+
+    assert!(
+        !tracker
+            .exact_all_preflight_succeeds(&[ToolCallId::from("a"), ToolCallId::from("b")], &owner,),
+        "queued activating input must not mask an invalid plural preflight",
+    );
+    let invalid = start_wait_all(&mut tracker, &owner, "invalid-wait", &["a", "b"]);
+    assert!(invalid.registration.is_none());
+    assert!(invalid.suppress_call_id.is_none());
+    assert!(invalid.suppress_call_ids.is_empty());
+    assert!(matches!(
+        start_reply(invalid).kind,
+        WaitReplyKind::Error { .. }
+    ));
+    assert!(tracker.exact_all_reservations.is_empty());
+    assert_eq!(
+        tracker.oldest_completed_for_owner(&owner),
+        Some(ToolCallId::from("a"))
+    );
+
+    track_call(&mut tracker, &owner, "b", call_ref(5, 0));
+    tracker.record_tool_result(&background_placeholder("b"), owner.clone(), observation());
+    assert!(
+        tracker
+            .exact_all_preflight_succeeds(&[ToolCallId::from("a"), ToolCallId::from("b")], &owner,)
+    );
+    let active = start_wait_all(&mut tracker, &owner, "active-wait", &["a", "b"]);
+    assert!(active.reply.is_none());
+    tracker.record_exact_all_notice_suppressed(
+        &ToolCallId::from("active-wait"),
+        &ToolCallId::from("a"),
+        true,
+    );
+    let activation = tau_proto::ObservationId::from_bytes([33; 16]);
+    let replies = tracker.activate_waits_for(&owner, activation);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(
+        reply_result(replies[0].clone()),
+        CborValue::Text(
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact_all\n\nNew input is queued; retry the wait to consume its target result."
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        replies[0]
+            .unsuppress_notices
+            .iter()
+            .map(|notice| notice.call_id.clone())
+            .collect::<Vec<_>>(),
+        vec![ToolCallId::from("a")]
+    );
+    assert_eq!(
+        replies[0].release_suppression_call_ids,
+        vec![ToolCallId::from("b")]
+    );
+    assert!(tracker.exact_all_reservations.is_empty());
+    assert_eq!(
+        tracker.oldest_completed_for_owner(&owner),
+        Some(ToolCallId::from("a"))
+    );
+}
+
+/// Every state-level plural preflight rejection leaves a valid completed member
+/// in its original FIFO and installs no partial reservation.
+#[test]
+fn wait_all_preflight_rejects_invalid_state_matrix_without_mutation() {
+    fn base() -> (WaitTracker, AgentId) {
+        let owner = conv("main");
+        let mut tracker = WaitTracker::default();
+        track_call(&mut tracker, &owner, "a", call_ref(1, 0));
+        tracker.record_tool_result(&background_placeholder("a"), owner.clone(), observation());
+        tracker.record_background_result(
+            background_result("a", "ready"),
+            owner.clone(),
+            observation(),
+        );
+        tracker.retain_call_ref("wait-all".into(), call_ref(9, 0));
+        (tracker, owner)
+    }
+
+    fn assert_atomic_rejection(mut tracker: WaitTracker, owner: &AgentId, target: &str) {
+        let start = start_wait_all(&mut tracker, owner, "wait-all", &["a", target]);
+        assert!(start.registration.is_none());
+        assert!(start.suppress_call_id.is_none());
+        assert!(start.suppress_call_ids.is_empty());
+        assert!(matches!(
+            start_reply(start).kind,
+            WaitReplyKind::Error { .. }
+        ));
+        assert!(tracker.exact_all_reservations.is_empty());
+        assert_eq!(
+            tracker.oldest_completed_for_owner(owner),
+            Some(ToolCallId::from("a"))
+        );
+    }
+
+    let (tracker, owner) = base();
+    assert_atomic_rejection(tracker, &owner, "unknown");
+
+    let (mut tracker, owner) = base();
+    track_call(&mut tracker, &conv("other"), "b", call_ref(2, 0));
+    assert_atomic_rejection(tracker, &owner, "b");
+
+    let (mut tracker, owner) = base();
+    track_call(&mut tracker, &owner, "b", call_ref(2, 0));
+    tracker.record_terminal_state("b".into(), WaitCallState::Consumed);
+    assert_atomic_rejection(tracker, &owner, "b");
+
+    let (mut tracker, owner) = base();
+    track_call(&mut tracker, &owner, "b", call_ref(2, 0));
+    tracker.record_terminal_state("b".into(), WaitCallState::NormalReturned);
+    assert_atomic_rejection(tracker, &owner, "b");
+
+    let (mut tracker, owner) = base();
+    track_call(&mut tracker, &owner, "b", call_ref(2, 0));
+    tracker.retain_call_ref("wait-b".into(), call_ref(3, 0));
+    assert!(
+        start_wait_exact(&mut tracker, &owner, "wait-b", "b")
+            .reply
+            .is_none()
+    );
+    assert_atomic_rejection(tracker, &owner, "b");
+
+    let (mut tracker, owner) = base();
+    track_call(&mut tracker, &owner, "b", call_ref(2, 0));
+    track_call(&mut tracker, &owner, "c", call_ref(3, 0));
+    tracker.retain_call_ref("first-set".into(), call_ref(4, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "first-set", &["b", "c"])
+            .reply
+            .is_none()
+    );
+    let rejected = start_wait_all(&mut tracker, &owner, "wait-all", &["a", "b"]);
+    assert!(rejected.registration.is_none());
+    assert!(rejected.suppress_call_id.is_none());
+    assert!(rejected.suppress_call_ids.is_empty());
+    assert!(matches!(
+        start_reply(rejected).kind,
+        WaitReplyKind::Error { .. }
+    ));
+    assert_eq!(tracker.exact_all_reservations.len(), 2);
+    assert!(!tracker.exact_all_reservations.contains_key(&call_ref(1, 0)));
+    assert_eq!(
+        tracker.oldest_completed_for_owner(&owner),
+        Some(ToolCallId::from("a"))
+    );
+}
+
+/// Reusing a display ID after its reserved generation completes cannot replace
+/// that member's payload or cause plural commit to consume the new generation.
+#[test]
+fn wait_all_binds_members_to_stable_call_generations() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("other"),
+        owner.clone(),
+        observation(),
+    );
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["reused", "other"])
+            .reply
+            .is_none()
+    );
+    assert!(
+        tracker
+            .record_background_result(
+                background_result("reused", "old generation"),
+                owner.clone(),
+                observation(),
+            )
+            .is_empty()
+    );
+
+    tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+    tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+    let replies = tracker.record_background_result(
+        background_result("other", "other generation"),
+        owner,
+        observation(),
+    );
+    let result = reply_result(replies.into_iter().next().expect("plural reply"));
+    let CborValue::Map(root) = result else {
+        panic!("plural result must be a map");
+    };
+    let CborValue::Array(members) = &root[0].1 else {
+        panic!("plural results must be an array");
+    };
+    let CborValue::Map(reused_member) = &members[0] else {
+        panic!("plural member must be a map");
+    };
+    assert_eq!(
+        reused_member[2].1,
+        CborValue::Text("old generation".to_owned())
+    );
+
+    let (consumed, replies) = tracker.commit_exact_all_wait(&ToolCallId::from("wait-all"));
+    assert_eq!(
+        consumed,
+        vec![ToolCallId::from("other")],
+        "old generation commit may consume matching siblings but not the reused display ID"
+    );
+    assert!(replies.is_empty());
+    assert_eq!(
+        tracker.call_ref(&ToolCallId::from("reused")),
+        Some(call_ref(9, 0))
+    );
+    assert_eq!(
+        tracker.calls.get(&ToolCallId::from("reused")),
+        Some(&WaitCallState::Pending)
+    );
+}
+
+/// Reusing a display ID after an old completed generation was reserved cannot
+/// make interruption lose that generation. A later bare wait consumes the old
+/// payload while the new pending declaration remains intact.
+#[test]
+fn wait_all_reuse_then_interruption_restores_old_generation() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("other"),
+        owner.clone(),
+        observation(),
+    );
+    let old_terminal = tau_proto::ObservationId::from_bytes([71; 16]);
+    tracker.record_background_result(
+        background_result("reused", "old generation"),
+        owner.clone(),
+        Some(old_terminal),
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    tracker.retain_call_ref("wait-any".into(), call_ref(4, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["reused", "other"])
+            .reply
+            .is_none()
+    );
+    tracker.record_exact_all_notice_suppressed(
+        &ToolCallId::from("wait-all"),
+        &ToolCallId::from("reused"),
+        true,
+    );
+
+    tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+    tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+    assert_eq!(
+        tracker
+            .activate_waits_for(&owner, observation().expect("observation"))
+            .len(),
+        1
+    );
+    assert_eq!(
+        tracker.oldest_completed_for_owner(&owner),
+        Some(ToolCallId::from("reused"))
+    );
+
+    let reply = start_reply(start_wait_any(&mut tracker, &owner, "wait-any"));
+    assert!(reply.suppress_call_id.is_none());
+    assert!(reply.suppress_call_ids.is_empty());
+    assert_eq!(
+        reply.remove_pending_notices,
+        vec![CompletionNotice {
+            call_id: ToolCallId::from("reused"),
+            source_call: call_ref(1, 0),
+            source_terminal: old_terminal,
+        }]
+    );
+    assert_eq!(
+        cbor_map_text(&reply_result(reply.clone()), ORIGINAL_TOOL_CALL_ID_HEADER),
+        Some("reused")
+    );
+    let CborValue::Map(result) = reply_result(reply) else {
+        panic!("released generation result must be wrapped");
+    };
+    assert_eq!(
+        result
+            .iter()
+            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
+            .map(|(_, value)| value),
+        Some(&CborValue::Text("old generation".to_owned()))
+    );
+    assert_eq!(
+        tracker.call_ref(&ToolCallId::from("reused")),
+        Some(call_ref(9, 0))
+    );
+    assert_eq!(
+        tracker.calls.get(&ToolCallId::from("reused")),
+        Some(&WaitCallState::Pending)
+    );
+}
+
+/// An old plural reservation never captures a reused generation's foreground
+/// terminal or blocks a new exact waiter for that generation.
+#[test]
+fn wait_all_old_reservation_does_not_capture_reused_foreground_generation() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("other"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_background_result(
+        background_result("reused", "old generation"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["reused", "other"])
+            .reply
+            .is_none()
+    );
+
+    tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+    tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+    tracker.retain_call_ref("wait-new".into(), call_ref(10, 0));
+    assert!(
+        start_wait_exact(&mut tracker, &owner, "wait-new", "reused")
+            .reply
+            .is_none(),
+        "old generation reservation must not block a new exact waiter"
+    );
+    let replies = tracker.record_tool_result(
+        &foreground_result("reused", "new foreground"),
+        owner.clone(),
+        observation(),
+    );
+    assert_eq!(replies.len(), 1);
+    assert_eq!(
+        reply_result(replies.into_iter().next().expect("new exact reply")),
+        CborValue::Text("new foreground".to_owned())
+    );
+    assert!(
+        tracker
+            .exact_all_waits
+            .get(&ToolCallId::from("wait-all"))
+            .is_some_and(|wait| {
+                matches!(
+                    &wait.members[0].completion,
+                    Some(ExactAllCompletion::Result { output, .. })
+                        if output == &CborValue::Text("old generation".to_owned())
+                )
+            })
+    );
+}
+
+/// A reused generation's background terminal remains an independent FIFO
+/// completion while the old generation stays reserved; rollback exposes old
+/// then new in their original completion order.
+#[test]
+fn wait_all_old_reservation_does_not_capture_reused_background_generation() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("other"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_background_result(
+        background_result("reused", "old generation"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["reused", "other"])
+            .reply
+            .is_none()
+    );
+
+    tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+    tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    assert!(
+        tracker
+            .record_background_result(
+                background_result("reused", "new generation"),
+                owner.clone(),
+                observation(),
+            )
+            .is_empty()
+    );
+    assert_eq!(
+        tracker
+            .activate_waits_for(&owner, observation().expect("observation"))
+            .len(),
+        1
+    );
+
+    tracker.retain_call_ref("wait-old".into(), call_ref(10, 0));
+    let old = start_reply(start_wait_any(&mut tracker, &owner, "wait-old"));
+    assert!(
+        old.suppress_call_id.is_none(),
+        "old-generation delivery must not suppress the reused generation's notice"
+    );
+    assert_eq!(
+        old.remove_pending_notices.len(),
+        0,
+        "a generation without a notice obligation removes no notice"
+    );
+    let CborValue::Map(old_result) = reply_result(old) else {
+        panic!("old result wrapper");
+    };
+    assert_eq!(
+        old_result
+            .iter()
+            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
+            .map(|(_, value)| value),
+        Some(&CborValue::Text("old generation".to_owned()))
+    );
+    tracker.retain_call_ref("wait-new".into(), call_ref(11, 0));
+    let new = start_reply(start_wait_any(&mut tracker, &owner, "wait-new"));
+    let CborValue::Map(new_result) = reply_result(new) else {
+        panic!("new result wrapper");
+    };
+    assert_eq!(
+        new_result
+            .iter()
+            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
+            .map(|(_, value)| value),
+        Some(&CborValue::Text("new generation".to_owned()))
+    );
+}
+
+/// Consuming the current generation through an exact wait leaves the older
+/// released generation independently waitable without synthesizing a shared
+/// notice action.
+#[test]
+fn exact_current_generation_restores_released_generation_notice() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("other"),
+        owner.clone(),
+        observation(),
+    );
+    let old_terminal = tau_proto::ObservationId::from_bytes([73; 16]);
+    tracker.record_background_result(
+        background_result("reused", "old generation"),
+        owner.clone(),
+        Some(old_terminal),
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["reused", "other"])
+            .reply
+            .is_none()
+    );
+    tracker.record_exact_all_notice_suppressed(
+        &ToolCallId::from("wait-all"),
+        &ToolCallId::from("reused"),
+        true,
+    );
+    tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+    tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+    assert_eq!(
+        tracker
+            .activate_waits_for(&owner, observation().expect("observation"))
+            .len(),
+        1
+    );
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_background_result(
+        background_result("reused", "current generation"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.retain_call_ref("wait-exact".into(), call_ref(10, 0));
+
+    let start = start_wait_exact(&mut tracker, &owner, "wait-exact", "reused");
+    assert_eq!(start.suppress_call_id, Some(ToolCallId::from("reused")));
+    let reply = start_reply(start);
+    assert!(reply.unsuppress_call_id.is_none());
+    assert!(reply.unsuppress_notices.is_empty());
+    assert_eq!(
+        tracker.oldest_completed_for_owner(&owner),
+        Some(ToolCallId::from("reused"))
+    );
+}
+
+/// Plural commit consumes only current generations and leaves an older released
+/// generation independently waitable.
+#[test]
+fn wait_all_current_generation_restores_released_generation_notice() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("other"),
+        owner.clone(),
+        observation(),
+    );
+    let old_terminal = tau_proto::ObservationId::from_bytes([72; 16]);
+    tracker.record_background_result(
+        background_result("reused", "old generation"),
+        owner.clone(),
+        Some(old_terminal),
+    );
+    tracker.retain_call_ref("old-wait".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "old-wait", &["reused", "other"])
+            .reply
+            .is_none()
+    );
+    tracker.record_exact_all_notice_suppressed(
+        &ToolCallId::from("old-wait"),
+        &ToolCallId::from("reused"),
+        true,
+    );
+    tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+    tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+    assert_eq!(
+        tracker
+            .activate_waits_for(&owner, observation().expect("observation"))
+            .len(),
+        1
+    );
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_background_result(
+        background_result("reused", "current generation"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_background_result(
+        background_result("other", "other result"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.retain_call_ref("current-wait".into(), call_ref(10, 0));
+    let _reply = start_reply(start_wait_all(
+        &mut tracker,
+        &owner,
+        "current-wait",
+        &["reused", "other"],
+    ));
+
+    let (consumed, replies) = tracker.commit_exact_all_wait(&ToolCallId::from("current-wait"));
+    assert_eq!(
+        consumed,
+        vec![ToolCallId::from("reused"), ToolCallId::from("other")]
+    );
+    assert!(replies.is_empty());
+    assert_eq!(
+        tracker.oldest_completed_for_owner(&owner),
+        Some(ToolCallId::from("reused"))
+    );
+}
+
+/// A released generation completed under DoNotQueue policy carries no notice
+/// obligation into later singular or plural current-generation consumption.
+#[test]
+fn current_generation_waits_do_not_restore_notice_for_do_not_queue_release() {
+    for plural in [false, true] {
+        let owner = conv("main");
+        let mut tracker = WaitTracker::default();
+        track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+        track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+        tracker.record_tool_result(
+            &background_placeholder("reused"),
+            owner.clone(),
+            observation(),
+        );
+        tracker.record_tool_result(
+            &background_placeholder("other"),
+            owner.clone(),
+            observation(),
+        );
+        tracker.record_background_result(
+            background_result("reused", "old generation"),
+            owner.clone(),
+            Some(tau_proto::ObservationId::from_bytes([74; 16])),
+        );
+        tracker.retain_call_ref("old-wait".into(), call_ref(3, 0));
+        assert!(
+            start_wait_all(&mut tracker, &owner, "old-wait", &["reused", "other"])
+                .reply
+                .is_none()
+        );
+        tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+        tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+        assert_eq!(
+            tracker
+                .activate_waits_for(&owner, observation().expect("observation"))
+                .len(),
+            1
+        );
+        tracker.record_tool_result(
+            &background_placeholder("reused"),
+            owner.clone(),
+            observation(),
+        );
+        tracker.record_background_result(
+            background_result("reused", "current generation"),
+            owner.clone(),
+            observation(),
+        );
+
+        if plural {
+            tracker.record_background_result(
+                background_result("other", "other result"),
+                owner.clone(),
+                observation(),
+            );
+            tracker.retain_call_ref("current-wait".into(), call_ref(10, 0));
+            let _reply = start_reply(start_wait_all(
+                &mut tracker,
+                &owner,
+                "current-wait",
+                &["reused", "other"],
+            ));
+            let (_consumed, _replies) =
+                tracker.commit_exact_all_wait(&ToolCallId::from("current-wait"));
+        } else {
+            tracker.retain_call_ref("current-wait".into(), call_ref(10, 0));
+            let reply = start_reply(start_wait_exact(
+                &mut tracker,
+                &owner,
+                "current-wait",
+                "reused",
+            ));
+            assert!(reply.unsuppress_notices.is_empty());
+            assert!(reply.unsuppress_call_id.is_none());
+        }
+    }
+}
+
+/// Multiple released generations retain distinct FIFO notice identities and
+/// each bare delivery removes only its own exact pending notice.
+#[test]
+fn multiple_released_notice_generations_keep_exact_fifo_correlation() {
+    let owner = conv("main");
+    let call_id = ToolCallId::from("reused");
+    let first_generation = CompletionGeneration(1);
+    let second_generation = CompletionGeneration(2);
+    let mut tracker = WaitTracker::default();
+    tracker.completion_order_by_owner.insert(
+        owner.clone(),
+        VecDeque::from([
+            CompletionNode {
+                call_id: call_id.clone(),
+                generation: first_generation,
+            },
+            CompletionNode {
+                call_id: call_id.clone(),
+                generation: second_generation,
+            },
+        ]),
+    );
+    for (generation, call_ref, terminal) in [
+        (
+            first_generation,
+            call_ref(1, 0),
+            tau_proto::ObservationId::from_bytes([75; 16]),
+        ),
+        (
+            second_generation,
+            call_ref(2, 0),
+            tau_proto::ObservationId::from_bytes([76; 16]),
+        ),
+    ] {
+        tracker.released_completions.insert(
+            generation,
+            ReleasedCompletion {
+                call_ref,
+                tool_name: slow_tool_name(),
+                completion: ExactAllCompletion::Result {
+                    output: CborValue::Null,
+                    display: None,
+                    phase: tau_proto::ToolSourcePhase::Background,
+                    terminal,
+                },
+                restore_notice: true,
+            },
+        );
+    }
+
+    for (index, (expected_call, expected_terminal)) in [
+        (
+            call_ref(1, 0),
+            tau_proto::ObservationId::from_bytes([75; 16]),
+        ),
+        (
+            call_ref(2, 0),
+            tau_proto::ObservationId::from_bytes([76; 16]),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let wait_id = format!("wait-{index}");
+        tracker.retain_call_ref(wait_id.clone().into(), call_ref(10 + index as u8, 0));
+        let reply = start_reply(start_wait_any(&mut tracker, &owner, &wait_id));
+        assert_eq!(
+            reply.remove_pending_notices,
+            vec![CompletionNotice {
+                call_id: call_id.clone(),
+                source_call: expected_call,
+                source_terminal: expected_terminal,
+            }]
+        );
+    }
+}
+
+/// Member cancellation becomes an ordered error member, while cancellation of
+/// the plural wait itself releases every reservation without consuming sources.
+#[test]
+fn wait_all_cancellation_preserves_member_and_group_atomicity() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    for (index, call_id) in ["a", "b"].into_iter().enumerate() {
+        track_call(
+            &mut tracker,
+            &owner,
+            call_id,
+            call_ref(u8::try_from(index + 1).expect("small index"), 0),
+        );
+    }
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["a", "b"])
+            .reply
+            .is_none()
+    );
+    let cancelled_a = ToolCallId::from("a");
+    let terminal_a = tau_proto::ObservationId::from_bytes([44; 16]);
+    let first = tracker.record_tool_cancelled(
+        &HashSet::from([cancelled_a.clone()]),
+        Some((&cancelled_a, terminal_a)),
+    );
+    assert!(
+        first.replies.is_empty(),
+        "member cancellation does not fail fast"
+    );
+    let replies =
+        tracker.record_tool_result(&foreground_result("b", "ok"), owner.clone(), observation());
+    let result = reply_result(replies.into_iter().next().expect("plural reply"));
+    let CborValue::Map(root) = result else {
+        panic!("plural result must be a map");
+    };
+    let CborValue::Array(members) = &root[0].1 else {
+        panic!("plural results must be an array");
+    };
+    assert_eq!(cbor_map_text(&members[0], "outcome"), Some("error"));
+    assert_eq!(
+        cbor_map_text(&members[0], "message"),
+        Some("Tool call `a` was cancelled")
+    );
+    let CborValue::Map(cancelled_member) = &members[0] else {
+        panic!("cancelled member must be a map");
+    };
+    assert_eq!(
+        cancelled_member
+            .iter()
+            .find(|(key, _)| key == &CborValue::Text("details".to_owned()))
+            .map(|(_, value)| value),
+        Some(&CborValue::Null)
+    );
+    assert_eq!(cbor_map_text(&members[1], "outcome"), Some("result"));
+    let CborValue::Map(ok_member) = &members[1] else {
+        panic!("successful member must be a map");
+    };
+    assert_eq!(
+        ok_member
+            .iter()
+            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
+            .map(|(_, value)| value),
+        Some(&CborValue::Text("ok".to_owned()))
+    );
+
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "source", call_ref(5, 0));
+    tracker.retain_call_ref("cancelled-wait".into(), call_ref(6, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "cancelled-wait", &["source"],)
+            .reply
+            .is_none()
+    );
+    let cancelled_wait = ToolCallId::from("cancelled-wait");
+    let cancellation = tracker.record_tool_cancelled(
+        &HashSet::from([cancelled_wait.clone()]),
+        Some((
+            &cancelled_wait,
+            tau_proto::ObservationId::from_bytes([45; 16]),
+        )),
+    );
+    assert_eq!(cancellation.cancelled_waits.len(), 1);
+    assert!(cancellation.unsuppress_call_ids.is_empty());
+    assert_eq!(
+        cancellation.release_suppression_call_ids,
+        vec![ToolCallId::from("source")]
+    );
+    assert!(tracker.exact_all_reservations.is_empty());
+    assert_eq!(
+        tracker.calls.get(&ToolCallId::from("source")),
+        Some(&WaitCallState::Pending)
+    );
+}
+
+/// Manual-compaction claim defers a plural terminal until rollback and owner
+/// teardown drops both active and terminal-publication-pending reservations.
+#[test]
+fn wait_all_compaction_claim_and_owner_teardown_preserve_runtime_boundaries() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "a", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "b", call_ref(2, 0));
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["a", "b"])
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &ToolCallId::from("wait-all")));
+    assert!(
+        tracker
+            .record_tool_result(&foreground_result("a", "a"), owner.clone(), observation())
+            .is_empty()
+    );
+    assert!(
+        tracker
+            .record_tool_result(&foreground_result("b", "b"), owner.clone(), observation())
+            .is_empty()
+    );
+    let replies = tracker.rollback_manual_compaction_claim(&owner, &ToolCallId::from("wait-all"));
+    assert_eq!(replies.len(), 1);
+    assert!(tracker.pending_exact_all_commits.contains_key("wait-all"));
+
+    let retired = tracker.discard_owner(&owner);
+    assert!(retired.contains(&ToolCallId::from("wait-all")));
+    assert!(tracker.exact_all_reservations.is_empty());
+    assert!(tracker.pending_exact_all_commits.is_empty());
 }

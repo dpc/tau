@@ -505,6 +505,16 @@ fn validate_wait_mode(
             )));
         }
     }
+    if let ToolWaitMode::ExactAll { targets } = mode {
+        for target in targets {
+            require_declared(agent_id, *target, calls, "exact-all wait target")?;
+            if *target == wait_call {
+                return Err(projection_error(format!(
+                    "agent `{agent_id}` exact-all wait targets itself"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -586,6 +596,25 @@ fn validate_wait_settlement(
                 }
             }
         }
+        ToolWaitOutcome::CompletionsDelivered { sources } => {
+            for source in sources {
+                require_declared(agent_id, source.source_call, calls, "wait source")?;
+                if let Some(terminal) = by_id.get(&source.source_terminal).copied() {
+                    let FactKind::CanonicalTerminal { call_id, phase } = &terminal.kind else {
+                        return Err(projection_error(format!(
+                            "agent `{agent_id}` wait source terminal is not canonical"
+                        )));
+                    };
+                    if calls.get(&source.source_call) != Some(call_id)
+                        || phase.is_some_and(|phase| phase != source.source_phase)
+                    {
+                        return Err(projection_error(format!(
+                            "agent `{agent_id}` wait source terminal contradicts its call or phase"
+                        )));
+                    }
+                }
+            }
+        }
         ToolWaitOutcome::InterruptedByActivation { activation }
         | ToolWaitOutcome::InputAvailable { activation } => {
             if let Some(activation) = by_id.get(activation).copied()
@@ -621,6 +650,12 @@ fn wait_mode_allows_outcome(
                 ..
             },
         ) => target == source_call && *envelope == Envelope::Identity,
+        (Mode::ExactAll { targets }, Outcome::CompletionsDelivered { sources }) => {
+            targets.len() == sources.len()
+                && targets.iter().zip(sources).all(|(target, source)| {
+                    target == &source.source_call && source.envelope == Envelope::Identity
+                })
+        }
         (
             Mode::NextBackground,
             Outcome::CompletionDelivered {
@@ -632,15 +667,21 @@ fn wait_mode_allows_outcome(
             *source_phase == ToolSourcePhase::Background
                 && *envelope == Envelope::OriginalToolCallIdHeader
         }
-        (Mode::Exact { .. } | Mode::NextBackground, Outcome::InterruptedByActivation { .. })
+        (
+            Mode::Exact { .. } | Mode::ExactAll { .. } | Mode::NextBackground,
+            Outcome::InterruptedByActivation { .. },
+        )
         | (Mode::ActivatingInput { .. }, Outcome::InputAvailable { .. }) => true,
         (Mode::ActivatingInput { .. }, Outcome::TimedOut)
         | (
-            Mode::Exact { .. } | Mode::NextBackground | Mode::ActivatingInput { .. },
+            Mode::Exact { .. }
+            | Mode::ExactAll { .. }
+            | Mode::NextBackground
+            | Mode::ActivatingInput { .. },
             Outcome::Cancelled | Outcome::LifecycleAborted,
         ) => registered,
         (
-            Mode::Exact { .. },
+            Mode::Exact { .. } | Mode::ExactAll { .. },
             Outcome::Rejected {
                 reason:
                     Reject::DuplicateExactWait
@@ -662,6 +703,12 @@ fn wait_mode_allows_outcome(
         )
         | (
             Mode::ExactUnresolved,
+            Outcome::Rejected {
+                reason: Reject::UnknownTarget,
+            },
+        )
+        | (
+            Mode::ExactAllUnresolved,
             Outcome::Rejected {
                 reason: Reject::UnknownTarget,
             },
@@ -1148,8 +1195,18 @@ fn add_wait_mode(row: &mut Map<String, Value>, mode: &ToolWaitMode) {
                 serde_json::to_value(target).expect("call serializes"),
             );
         }
+        ToolWaitMode::ExactAll { targets } => {
+            row.insert("mode".into(), json!("exact_all"));
+            row.insert(
+                "target_calls".into(),
+                serde_json::to_value(targets).expect("calls serialize"),
+            );
+        }
         ToolWaitMode::ExactUnresolved => {
             row.insert("mode".into(), json!("exact_unresolved"));
+        }
+        ToolWaitMode::ExactAllUnresolved => {
+            row.insert("mode".into(), json!("exact_all_unresolved"));
         }
         ToolWaitMode::NextBackground => {
             row.insert("mode".into(), json!("next_background"));
@@ -1195,6 +1252,13 @@ fn add_wait_outcome(
             row.insert(
                 "envelope".into(),
                 serde_json::to_value(envelope).expect("envelope serializes"),
+            );
+        }
+        ToolWaitOutcome::CompletionsDelivered { sources } => {
+            row.insert("outcome".into(), json!("completions_delivered"));
+            row.insert(
+                "sources".into(),
+                serde_json::to_value(sources).expect("sources serialize"),
             );
         }
         ToolWaitOutcome::InterruptedByActivation { activation }

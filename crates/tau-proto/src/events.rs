@@ -12,6 +12,7 @@
 //! Provider streaming, retry, and recovery update payloads are specified by
 //! `SPEC-tau-proto-provider-updates`.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::num::{NonZeroU8, NonZeroU32};
 
@@ -5367,8 +5368,17 @@ pub enum ToolWaitMode {
         /// Exact target call.
         target: ToolCallRef,
     },
+    /// Wait transactionally for a bounded ordered set of exact declared calls.
+    ExactAll {
+        /// Exact target calls in provider request order.
+        #[serde(deserialize_with = "deserialize_wait_all_targets")]
+        targets: Vec<ToolCallRef>,
+    },
     /// Exact target syntax was valid but no declared target call resolved.
     ExactUnresolved,
+    /// Plural exact syntax was valid but the complete target set did not
+    /// resolve.
+    ExactAllUnresolved,
     /// Wait for the next retained background completion.
     NextBackground,
     /// Wait for activating input up to the effective runtime timeout.
@@ -5471,6 +5481,69 @@ pub enum ToolOutputEnvelope {
     OriginalToolCallIdHeader,
 }
 
+/// Maximum number of exact calls in one transactional plural wait.
+pub const MAX_WAIT_ALL_MEMBERS: usize = 64;
+
+/// One source completion delivered by a transactional plural wait.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WaitDeliveredSource {
+    /// Exact source call.
+    pub source_call: ToolCallRef,
+    /// Canonical source terminal observation.
+    pub source_terminal: ObservationId,
+    /// Source terminal phase.
+    pub source_phase: ToolSourcePhase,
+    /// Wait envelope applied around source-owned output.
+    pub envelope: ToolOutputEnvelope,
+}
+
+fn validate_wait_all_len<E>(len: usize) -> Result<(), E>
+where
+    E: path_serde_de::Error,
+{
+    if !(1..=MAX_WAIT_ALL_MEMBERS).contains(&len) {
+        return Err(E::custom(format!(
+            "plural wait members must contain 1..={MAX_WAIT_ALL_MEMBERS} entries"
+        )));
+    }
+    Ok(())
+}
+
+fn deserialize_wait_all_targets<'de, D>(deserializer: D) -> Result<Vec<ToolCallRef>, D::Error>
+where
+    D: path_serde_de::Deserializer<'de>,
+{
+    let targets = Vec::<ToolCallRef>::deserialize(deserializer)?;
+    validate_wait_all_len::<D::Error>(targets.len())?;
+    let mut seen = HashSet::with_capacity(targets.len());
+    if targets.iter().any(|target| !seen.insert(*target)) {
+        return Err(path_serde_de::Error::custom(
+            "plural wait targets must be distinct",
+        ));
+    }
+    Ok(targets)
+}
+
+fn deserialize_wait_all_sources<'de, D>(
+    deserializer: D,
+) -> Result<Vec<WaitDeliveredSource>, D::Error>
+where
+    D: path_serde_de::Deserializer<'de>,
+{
+    let sources = Vec::<WaitDeliveredSource>::deserialize(deserializer)?;
+    validate_wait_all_len::<D::Error>(sources.len())?;
+    let mut seen = HashSet::with_capacity(sources.len());
+    if sources
+        .iter()
+        .any(|source| !seen.insert(source.source_call))
+    {
+        return Err(path_serde_de::Error::custom(
+            "plural wait delivered sources must be distinct",
+        ));
+    }
+    Ok(sources)
+}
+
 /// Structured reason that a wait invocation was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5507,6 +5580,12 @@ pub enum ToolWaitOutcome {
         source_phase: ToolSourcePhase,
         /// Wait envelope applied around source-owned output.
         envelope: ToolOutputEnvelope,
+    },
+    /// A bounded ordered set of source completions was delivered atomically.
+    CompletionsDelivered {
+        /// Delivered sources in provider request order.
+        #[serde(deserialize_with = "deserialize_wait_all_sources")]
+        sources: Vec<WaitDeliveredSource>,
     },
     /// Unrelated activating input interrupted the wait.
     InterruptedByActivation {

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
@@ -21,6 +22,7 @@ use daemon_support::*;
 const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DUMMY_TOOL: &str = env!("CARGO_BIN_EXE_tau-e2e-test-dummy");
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
+const SHELL_PROBE: &str = env!("CARGO_BIN_EXE_tau-e2e-shell-probe");
 const RESTORE_NOTICE: &str = concat!(
     "Previous session was interrupted and restored. Less than 1 minute has passed ",
     "since the last recorded session event, and the state of the world might have changed. ",
@@ -74,6 +76,92 @@ fn deterministic_output_length_continues_once_with_exact_replay()
     )?;
     assert_output_length_durable_sequence(&snapshot, ANSWER);
     assert_eq!(fixture.trace()?.matches(" matched ").count(), 2);
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Proves one provider terminal can install a plural wait before successful and
+/// failing core-shell siblings, then receive one successful mixed aggregate.
+#[test]
+fn deterministic_wait_all_returns_mixed_result_and_error_members()
+-> Result<(), Box<dyn std::error::Error>> {
+    const USER: &str = "join one successful and one failing harness tool";
+    const RESPONSE: &str = "mixed plural wait completed";
+    let wait_call_id = tau_proto::ToolCallId::from("mixed-wait-all");
+    let success_call_id = tau_proto::ToolCallId::from("mixed-shell-success");
+    let error_call_id = tau_proto::ToolCallId::from("mixed-workdir-error");
+    let probe_executable = PathBuf::from(SHELL_PROBE).canonicalize()?;
+    let scenario = ScenarioV2::new(
+        "wait-all-mixed",
+        vec![ScenarioLaneV2 {
+            ctx_id: "wait-all-mixed".to_owned(),
+            actions: vec![
+                ScenarioActionV2::WaitAllMixedCalls {
+                    user_text: USER.to_owned(),
+                    wait_call_id: wait_call_id.clone(),
+                    success_call_id: success_call_id.clone(),
+                    error_call_id: error_call_id.clone(),
+                    probe_executable,
+                },
+                ScenarioActionV2::WaitAllMixedResult {
+                    user_text: USER.to_owned(),
+                    wait_call_id: wait_call_id.clone(),
+                    success_call_id: success_call_id.clone(),
+                    error_call_id: error_call_id.clone(),
+                    response: RESPONSE.to_owned(),
+                },
+            ],
+        }],
+    );
+    let fixture = DeterministicFixture::new_wait_all_mixed(
+        "deterministic_wait_all_returns_mixed_result_and_error_members",
+        &scenario,
+        FAKE_PROVIDER,
+    )?;
+    let outcome = fixture.run_turn(USER)?;
+    assert_eq!(outcome.response, RESPONSE);
+
+    let events = fixture.published_trace_events()?;
+    let aggregate = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ProviderToolResult(result) if result.call_id == wait_call_id => {
+                Some(&result.result)
+            }
+            _ => None,
+        })
+        .expect("plural wait result");
+    let CborValue::Map(root) = aggregate else {
+        panic!("plural wait result must be a map");
+    };
+    let CborValue::Array(members) = &root[0].1 else {
+        panic!("plural wait results must be an array");
+    };
+    assert_eq!(members.len(), 2);
+    assert!(matches!(
+        &members[0],
+        CborValue::Map(entries)
+            if entries.contains(&(
+                CborValue::Text("original_tool_call_id".to_owned()),
+                CborValue::Text(success_call_id.to_string()),
+            ))
+                && entries.contains(&(
+                    CborValue::Text("outcome".to_owned()),
+                    CborValue::Text("result".to_owned()),
+                ))
+    ));
+    assert!(matches!(
+        &members[1],
+        CborValue::Map(entries)
+            if entries.contains(&(
+                CborValue::Text("original_tool_call_id".to_owned()),
+                CborValue::Text(error_call_id.to_string()),
+            ))
+                && entries.contains(&(
+                    CborValue::Text("outcome".to_owned()),
+                    CborValue::Text("error".to_owned()),
+                ))
+    ));
     fixture.assert_consumed()?;
     Ok(())
 }

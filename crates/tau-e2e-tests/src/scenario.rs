@@ -464,7 +464,7 @@ pub enum ScenarioActionV2 {
         /// Preflight-resolved absolute probe executable.
         probe_executable: std::path::PathBuf,
     },
-    /// Collect the four real background shell completions through exact waits.
+    /// Collect four real background shell completions through one plural wait.
     CoreShellParallelWaits {
         /// Exact latest user text retained in the continuation.
         user_text: String,
@@ -472,8 +472,8 @@ pub enum ScenarioActionV2 {
         advertise_parallel: bool,
         /// Exact background shell call identities.
         call_ids: [ToolCallId; 4],
-        /// Exact provider-authored wait call identities.
-        wait_call_ids: [ToolCallId; 4],
+        /// Exact provider-authored plural wait call identity.
+        wait_call_id: ToolCallId,
     },
     /// Accept all four correlated shell results and finish with an exact
     /// marker.
@@ -484,8 +484,36 @@ pub enum ScenarioActionV2 {
         advertise_parallel: bool,
         /// Exact four provider-authored call identities.
         call_ids: [ToolCallId; 4],
-        /// Exact four provider-authored wait call identities.
-        wait_call_ids: [ToolCallId; 4],
+        /// Exact provider-authored plural wait call identity.
+        wait_call_id: ToolCallId,
+        /// Complete assistant marker.
+        response: String,
+    },
+    /// Emit successful shell and failing workdir calls before one plural wait
+    /// in the same provider terminal.
+    WaitAllMixedCalls {
+        /// Exact latest user text.
+        user_text: String,
+        /// Provider-authored plural wait call identity.
+        wait_call_id: ToolCallId,
+        /// Provider-authored successful shell call identity.
+        success_call_id: ToolCallId,
+        /// Provider-authored failing shell call identity.
+        error_call_id: ToolCallId,
+        /// Preflight-resolved absolute shell probe executable.
+        probe_executable: std::path::PathBuf,
+    },
+    /// Accept the successful plural aggregate containing one result and one
+    /// error member, then finish with an exact marker.
+    WaitAllMixedResult {
+        /// Exact latest user text retained in the continuation.
+        user_text: String,
+        /// Provider-authored plural wait call identity.
+        wait_call_id: ToolCallId,
+        /// Provider-authored successful shell call identity.
+        success_call_id: ToolCallId,
+        /// Provider-authored failing workdir call identity.
+        error_call_id: ToolCallId,
         /// Complete assistant marker.
         response: String,
     },

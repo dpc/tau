@@ -299,6 +299,30 @@ fn wait_spec_documents_completion_retention_and_optional_non_consuming_input_mod
             .contains("silently clamps this to configured effective bounds")
     );
     assert!(parameters["properties"].get("any_input").is_none());
+    assert_eq!(
+        parameters["properties"]["tool_call_ids"]["type"],
+        serde_json::json!("array")
+    );
+    assert_eq!(
+        parameters["properties"]["tool_call_ids"]["minItems"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        parameters["properties"]["tool_call_ids"]["maxItems"],
+        serde_json::json!(tau_proto::MAX_WAIT_ALL_MEMBERS)
+    );
+    assert_eq!(
+        parameters["properties"]["tool_call_ids"]["uniqueItems"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        parameters["properties"]["tool_call_ids"]["items"]["type"],
+        serde_json::json!("string")
+    );
+    assert_eq!(
+        parameters["properties"]["tool_call_ids"]["items"]["minLength"],
+        serde_json::json!(1)
+    );
     assert!(parameters.get("required").is_none());
     let description = spec.description.expect("wait description");
     assert!(description.contains("`wait({\"timeout_minutes\":N})`"));
@@ -312,10 +336,12 @@ fn wait_spec_documents_completion_retention_and_optional_non_consuming_input_mod
     );
     assert!(description.contains("otherwise it returns an error"));
     assert!(description.contains("`wait({\"tool_call_id\":\"ID\"})`"));
+    assert!(description.contains("`wait({\"tool_call_ids\":[\"A\",\"B\"]})`"));
     assert!(description.contains("notifications leave results queued until `wait` consumes them"));
     assert!(description.contains("`wait_outcome: interrupted`"));
     assert!(description.contains("`wait_reason: activating_input`"));
     assert!(description.contains("`wait_mode: exact` or `any_background`"));
+    assert!(description.contains("`wait_mode: exact_all`"));
     assert!(description.contains("interruption consumes no background result"));
     assert!(description.contains("only while it is pending"));
 }
@@ -964,6 +990,32 @@ fn wait_initial_display_uses_tracked_target_tool_name() {
 
     assert_eq!(display.args, "shell");
     assert_eq!(display.status, ToolUseStatus::InProgress);
+}
+
+/// Plural wait display keeps request order, resolves tracked tool names, and
+/// leaves unknown-but-valid call IDs visible.
+#[test]
+fn wait_initial_display_shows_plural_targets_in_request_order() {
+    let mut state = BuiltinState::default();
+    state.record_tool_started("call-a".into(), ToolName::new("shell"));
+    state.record_tool_started("call-b".into(), ToolName::new("workdir"));
+    let display = state
+        .initial_display(&AgentToolCall {
+            call_ref: None,
+            id: "wait-call".into(),
+            name: ToolName::new(WAIT_TOOL_NAME),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("tool_call_ids".to_owned()),
+                CborValue::Array(vec![
+                    CborValue::Text("call-b".to_owned()),
+                    CborValue::Text("call-unknown".to_owned()),
+                    CborValue::Text("call-a".to_owned()),
+                ]),
+            )]),
+        })
+        .expect("plural wait display");
+    assert_eq!(display.args, "workdir, call-unknown, shell");
 }
 
 /// Activating-input waits expose their effective bounded timeout through the

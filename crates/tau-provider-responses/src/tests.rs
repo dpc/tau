@@ -131,6 +131,38 @@ fn responses_tool_result_preserves_typed_wait_interruption_fixture() {
     );
 }
 
+/// Responses replay must preserve the plural wait interruption mode byte for
+/// byte in its function-call output.
+#[test]
+fn responses_tool_result_preserves_exact_all_wait_interruption_fixture() {
+    let interruption = "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact_all\n\nNew input is queued; retry the wait to consume its target result.";
+    let result = tau_proto::ToolResultItem {
+        presentation: Default::default(),
+        call_id: tau_proto::ToolCallId::new("wait-all-call"),
+        tool_type: ToolType::Function,
+        status: ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+            interruption.to_owned(),
+        )),
+        provider_content: Vec::new(),
+    };
+
+    let lowered = lower_item(&ContextItem::ToolResult(result))
+        .expect("lower plural wait result")
+        .expect("function tool result is emitted");
+    let ResponsesInputItem::Json(lowered) = lowered else {
+        panic!("tool result must use JSON input");
+    };
+    assert_eq!(
+        lowered,
+        serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "wait-all-call",
+            "output": interruption,
+        })
+    );
+}
+
 /// Real attempt entry points emit typed build and outbound failures, while
 /// cancellation and disabled capture policy emit no diagnostic record.
 #[test]

@@ -846,6 +846,78 @@ fn manual_compaction_request_events_round_trip() {
     );
 }
 
+/// Plural wait durable DTOs preserve ordered distinct stable references and
+/// reject records outside the approved one-through-64 bound.
+#[test]
+fn plural_wait_durable_dtos_are_ordered_and_bounded() {
+    let call = |byte: u8| ToolCallRef {
+        declaration: ObservationId::from_bytes([byte; 16]),
+        item_index: u32::from(byte),
+    };
+    let mode = ToolWaitMode::ExactAll {
+        targets: vec![call(1), call(2)],
+    };
+    let encoded = encode_message_to_vec(&mode).expect("encode plural wait mode");
+    assert_eq!(
+        decode_message_from_slice::<ToolWaitMode>(&encoded).expect("decode plural wait mode"),
+        mode
+    );
+    let outcome = ToolWaitOutcome::CompletionsDelivered {
+        sources: vec![
+            WaitDeliveredSource {
+                source_call: call(2),
+                source_terminal: ObservationId::from_bytes([12; 16]),
+                source_phase: ToolSourcePhase::Background,
+                envelope: ToolOutputEnvelope::Identity,
+            },
+            WaitDeliveredSource {
+                source_call: call(1),
+                source_terminal: ObservationId::from_bytes([11; 16]),
+                source_phase: ToolSourcePhase::Foreground,
+                envelope: ToolOutputEnvelope::Identity,
+            },
+        ],
+    };
+    let encoded = encode_message_to_vec(&outcome).expect("encode plural wait outcome");
+    assert_eq!(
+        decode_message_from_slice::<ToolWaitOutcome>(&encoded).expect("decode plural wait outcome"),
+        outcome
+    );
+
+    let empty = serde_json::json!({"exact_all":{"targets":[]}});
+    assert!(serde_json::from_value::<ToolWaitMode>(empty).is_err());
+    let over_limit = serde_json::json!({
+        "exact_all": {
+            "targets": (0..=MAX_WAIT_ALL_MEMBERS)
+                .map(|index| call(u8::try_from(index).expect("bound fits u8")))
+                .collect::<Vec<_>>()
+        }
+    });
+    assert!(serde_json::from_value::<ToolWaitMode>(over_limit).is_err());
+    let duplicate_targets = serde_json::json!({
+        "exact_all": {"targets": [call(1), call(1)]}
+    });
+    assert!(serde_json::from_value::<ToolWaitMode>(duplicate_targets).is_err());
+    let duplicate_sources = serde_json::json!({
+        "kind": "completions_delivered",
+        "sources": [
+            {
+                "source_call": call(1),
+                "source_terminal": ObservationId::from_bytes([11; 16]),
+                "source_phase": "background",
+                "envelope": "identity"
+            },
+            {
+                "source_call": call(1),
+                "source_terminal": ObservationId::from_bytes([12; 16]),
+                "source_phase": "foreground",
+                "envelope": "identity"
+            }
+        ]
+    });
+    assert!(serde_json::from_value::<ToolWaitOutcome>(duplicate_sources).is_err());
+}
+
 fn agent_id(value: &str) -> AgentId {
     AgentId::parse(value).expect("test agent id")
 }

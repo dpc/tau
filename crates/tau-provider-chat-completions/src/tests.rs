@@ -2516,6 +2516,20 @@ fn tool_result_text_preserves_typed_wait_interruption_fixture() {
     );
 }
 
+/// Chat Completions replay must preserve the plural wait interruption mode
+/// without parsing or rewriting the trusted control headers.
+#[test]
+fn tool_result_text_preserves_exact_all_wait_interruption_fixture() {
+    let interruption = "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact_all\n\nNew input is queued; retry the wait to consume its target result.";
+    let output =
+        tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(interruption.to_owned()));
+
+    assert_eq!(
+        tool_result_text(ToolResultStatus::Success, &output),
+        interruption
+    );
+}
+
 #[test]
 fn reasoning_content_is_persisted_and_replayed_with_tool_call() {
     // Local reasoning Chat Completions servers may require the assistant's

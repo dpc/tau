@@ -27,13 +27,13 @@ use tau_proto::{
     ToolBackgroundResult, ToolCallId, ToolCallRef, ToolError, ToolName, ToolResult, ToolResultKind,
     ToolType,
 };
-pub(crate) use wait_tracker::{InstalledWaitKind, PendingWaitSettlement};
 use wait_tracker::{
-    WaitReply, WaitReplyKind, WaitRequest, WaitTarget, WaitTracker,
+    CompletionNotice, WaitReply, WaitReplyKind, WaitRequest, WaitTarget, WaitTracker,
     normalized_wait_timeout_minutes_inner, parse_wait_args_with_bounds, wait_error_reply,
     wait_input_available_reply, wait_interrupted_any_reply, wait_interrupted_reply,
     wait_timeout_args,
 };
+pub(crate) use wait_tracker::{InstalledWaitKind, PendingWaitSettlement};
 
 /// Runtime barrier that delays topology pruning until every lifecycle append
 /// reaches a terminal commit or failure outcome.
@@ -507,6 +507,16 @@ impl Harness {
 
     /// Retain the exact provider declaration before runtime dispatch.
     pub(crate) fn record_wait_tool_call_ref(&mut self, call_id: ToolCallId, call_ref: ToolCallRef) {
+        if let Some(previous_ref) = self.wait_tool_call_ref(&call_id)
+            && previous_ref != call_ref
+            && self
+                .agent_runtime
+                .subagents
+                .wait_tracker
+                .exact_all_reserves_call_ref(&call_id, previous_ref)
+        {
+            self.release_background_completion_prompt_suppression(&call_id);
+        }
         self.agent_runtime
             .subagents
             .wait_tracker
@@ -611,6 +621,15 @@ impl Harness {
         self.publish_wait_replies(replies);
     }
 
+    /// Record that runtime prompt policy would have queued a reserved plural
+    /// member's completion notice.
+    pub(crate) fn record_wait_exact_all_notice_blocked(&mut self, call_id: &ToolCallId) {
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .record_exact_all_notice_blocked(call_id);
+    }
+
     /// Consume a terminal that a harness-owned control continuation delivered
     /// directly instead of retaining it for `wait`.
     pub(crate) fn consume_wait_background_completion(&mut self, call_id: &ToolCallId) {
@@ -619,6 +638,49 @@ impl Harness {
             .wait_tracker
             .consume_completed_call(call_id);
         self.synchronize_work_waits();
+    }
+
+    /// Commit plural wait consumption after its canonical wait terminal
+    /// successfully publishes.
+    pub(crate) fn commit_exact_all_wait_terminal(&mut self, wait_call_id: &ToolCallId) {
+        let (consumed, replies) = self
+            .agent_runtime
+            .subagents
+            .wait_tracker
+            .commit_exact_all_wait(wait_call_id);
+        for call_id in consumed {
+            self.tool_routing
+                .tool_runtime
+                .suppressed_background_completion_prompts
+                .remove(&call_id);
+            self.tool_routing
+                .tool_runtime
+                .background_completion_targets
+                .remove(&call_id);
+        }
+        self.synchronize_work_waits();
+        self.publish_wait_replies(replies);
+    }
+
+    fn unsuppress_background_completion_notice(&mut self, notice: CompletionNotice) {
+        self.tool_routing
+            .tool_runtime
+            .suppressed_background_completion_prompts
+            .remove(&notice.call_id);
+        if let Some(cid) = self
+            .tool_routing
+            .tool_runtime
+            .background_completion_targets
+            .get(&notice.call_id)
+            .cloned()
+        {
+            self.queue_background_completion_prompt_with_source(
+                &cid,
+                &notice.call_id,
+                Some(notice.source_terminal),
+                Some(notice.source_call),
+            );
+        }
     }
 
     /// Report retained completion state for deterministic harness regressions.
@@ -1041,8 +1103,14 @@ impl Harness {
             .wait_tracker
             .record_tool_cancelled(call_ids, terminal);
         self.synchronize_work_waits();
+        for call_id in cancelled.release_suppression_call_ids {
+            self.release_background_completion_prompt_suppression(&call_id);
+        }
         for call_id in cancelled.unsuppress_call_ids {
             self.unsuppress_background_completion_prompt(call_id);
+        }
+        for notice in cancelled.unsuppress_notices {
+            self.unsuppress_background_completion_notice(notice);
         }
         for call_id in cancelled.suppress_call_ids {
             self.suppress_background_completion_prompt(call_id);
@@ -2816,6 +2884,20 @@ impl Harness {
                 .map_or(tau_proto::ToolWaitMode::ExactUnresolved, |target| {
                     tau_proto::ToolWaitMode::Exact { target }
                 }),
+            Ok(WaitTarget::ExactAll(targets)) => targets
+                .iter()
+                .map(|target| {
+                    self.agent_runtime
+                        .subagents
+                        .wait_tracker
+                        .call_is_owned_by(target, agent_id)
+                        .then(|| self.agent_runtime.subagents.wait_tracker.call_ref(target))
+                        .flatten()
+                })
+                .collect::<Option<Vec<_>>>()
+                .map_or(tau_proto::ToolWaitMode::ExactAllUnresolved, |targets| {
+                    tau_proto::ToolWaitMode::ExactAll { targets }
+                }),
             Ok(WaitTarget::AnyBackground) => tau_proto::ToolWaitMode::NextBackground,
             Ok(WaitTarget::AnyInput(timeout)) => tau_proto::ToolWaitMode::ActivatingInput {
                 effective_timeout_minutes: u16::try_from(timeout.as_secs() / 60)
@@ -2833,35 +2915,58 @@ impl Harness {
                 }),
             );
         }
-        let consumable_completion = match &parsed {
+        let consumable_completions: HashSet<(ToolCallRef, tau_proto::ObservationId)> = match &parsed
+        {
             Ok(WaitTarget::Exact(target)) => self
                 .agent_runtime
                 .subagents
                 .wait_tracker
-                .completed_call_is_owned_by(target, agent_id)
-                .then(|| target.clone()),
+                .completed_call_identity_if_owned(target, agent_id)
+                .into_iter()
+                .collect(),
+            Ok(WaitTarget::ExactAll(targets)) => targets
+                .iter()
+                .filter_map(|target| {
+                    self.agent_runtime
+                        .subagents
+                        .wait_tracker
+                        .completed_call_identity_if_owned(target, agent_id)
+                })
+                .collect(),
             Ok(WaitTarget::AnyBackground) => self
                 .agent_runtime
                 .subagents
                 .wait_tracker
-                .oldest_completed_for_owner(agent_id),
-            Ok(WaitTarget::AnyInput(_)) | Err(_) => None,
+                .oldest_completed_identity_for_owner(agent_id)
+                .into_iter()
+                .collect(),
+            Ok(WaitTarget::AnyInput(_)) | Err(_) => HashSet::new(),
         };
         let prospective_kind = match &parsed {
-            Ok(WaitTarget::Exact(_)) => DeliveryDeadlineKind::WaitTool,
+            Ok(WaitTarget::Exact(_) | WaitTarget::ExactAll(_)) => DeliveryDeadlineKind::WaitTool,
             Ok(WaitTarget::AnyBackground | WaitTarget::AnyInput(_)) => {
                 DeliveryDeadlineKind::WaitAny
             }
             Err(_) => self.notification_deadline_kind_for(agent_id),
         };
-        if self.has_pending_wait_preempting_prompt(
-            agent_id,
-            consumable_completion.as_ref(),
-            prospective_kind,
-        ) {
+        let wait_can_be_preempted = match &parsed {
+            Ok(WaitTarget::ExactAll(targets)) => self
+                .agent_runtime
+                .subagents
+                .wait_tracker
+                .exact_all_preflight_succeeds(targets, agent_id),
+            _ => true,
+        };
+        if wait_can_be_preempted
+            && self.has_pending_wait_preempting_prompt(
+                agent_id,
+                &consumable_completions,
+                prospective_kind,
+            )
+        {
             let activation = self.pending_wait_preempting_activation(
                 agent_id,
-                consumable_completion.as_ref(),
+                &consumable_completions,
                 prospective_kind,
             );
             let wait = WaitRequest {
@@ -2889,6 +2994,9 @@ impl Harness {
                     }
                 }
                 Ok(WaitTarget::Exact(_)) | Ok(WaitTarget::AnyBackground) => {
+                    tau_proto::ToolWaitOutcome::InterruptedByActivation { activation }
+                }
+                Ok(WaitTarget::ExactAll(_)) => {
                     tau_proto::ToolWaitOutcome::InterruptedByActivation { activation }
                 }
                 Err(_) => tau_proto::ToolWaitOutcome::Rejected {
@@ -2921,6 +3029,23 @@ impl Harness {
                 Ok(WaitTarget::AnyBackground) => {
                     wait_interrupted_any_reply(call_id, visible_tool_name)
                 }
+                Ok(WaitTarget::ExactAll(targets)) => {
+                    if targets.iter().all(|target| {
+                        self.agent_runtime
+                            .subagents
+                            .wait_tracker
+                            .call_is_owned_by(target, agent_id)
+                    }) {
+                        wait_tracker::wait_interrupted_all_reply(call_id, visible_tool_name)
+                    } else {
+                        wait_error_reply(
+                            call_id,
+                            visible_tool_name,
+                            "unknown tool call in `tool_call_ids`".to_owned(),
+                            None,
+                        )
+                    }
+                }
                 Ok(WaitTarget::AnyInput(timeout)) => wait_input_available_reply(
                     call_id,
                     visible_tool_name,
@@ -2940,7 +3065,7 @@ impl Harness {
             .wait_tracker
             .handle_wait_invoke_at(
                 agent_id,
-                call_id,
+                call_id.clone(),
                 visible_tool_name,
                 &call.arguments,
                 now,
@@ -2957,14 +3082,21 @@ impl Harness {
         if let Some(target) = start.suppress_call_id {
             self.suppress_background_completion_prompt(target);
         }
+        for target in start.suppress_call_ids {
+            let removed_pending_notice = self.suppress_background_completion_prompt(target.clone());
+            self.agent_runtime
+                .subagents
+                .wait_tracker
+                .record_exact_all_notice_suppressed(&call_id, &target, removed_pending_notice);
+        }
         self.publish_wait_replies(start.reply.into_iter().collect());
         Ok(())
     }
 
-    fn has_pending_wait_preempting_prompt(
+    pub(crate) fn has_pending_wait_preempting_prompt(
         &self,
         agent_id: &AgentId,
-        consumable_completion: Option<&ToolCallId>,
+        consumable_completions: &HashSet<(ToolCallRef, tau_proto::ObservationId)>,
         deadline_kind: crate::agent::DeliveryDeadlineKind,
     ) -> bool {
         if self.has_wait_preempting_message_wake_for_kind(agent_id, deadline_kind) {
@@ -2987,18 +3119,24 @@ impl Harness {
                                 schedule.is_ready_at(deadline_kind, Instant::now())
                             })
                             && (!prompt.is_activating_background_completion()
-                                || consumable_completion.is_none_or(|call_id| {
-                                    prompt.text
-                                        != crate::harness::background_completion_prompt(call_id)
-                                }))
+                                || prompt.background_completion.as_ref().is_none_or(
+                                    |correlation| {
+                                        correlation
+                                            .source_call
+                                            .zip(correlation.source_terminal)
+                                            .is_none_or(|identity| {
+                                                !consumable_completions.contains(&identity)
+                                            })
+                                    },
+                                ))
                     })
             })
     }
 
-    fn pending_wait_preempting_activation(
+    pub(crate) fn pending_wait_preempting_activation(
         &self,
         agent_id: &AgentId,
-        consumable_completion: Option<&ToolCallId>,
+        consumable_completions: &HashSet<(ToolCallRef, tau_proto::ObservationId)>,
         deadline_kind: crate::agent::DeliveryDeadlineKind,
     ) -> Option<tau_proto::ObservationId> {
         let agent = self.agent_runtime.agent_registry.agents.get(agent_id)?;
@@ -3010,9 +3148,17 @@ impl Harness {
                             schedule.is_ready_at(deadline_kind, Instant::now())
                         })
                         && (!prompt.is_activating_background_completion()
-                            || consumable_completion.is_none_or(|call_id| {
-                                prompt.text != crate::harness::background_completion_prompt(call_id)
-                            })))
+                            || prompt
+                                .background_completion
+                                .as_ref()
+                                .is_none_or(|correlation| {
+                                    correlation
+                                        .source_call
+                                        .zip(correlation.source_terminal)
+                                        .is_none_or(|identity| {
+                                            !consumable_completions.contains(&identity)
+                                        })
+                                })))
                     .then_some(prompt.activation_observation)
                     .flatten()
                 })
@@ -3259,8 +3405,27 @@ impl Harness {
                     );
                 }
             }
+            for call_id in reply.unsuppress_call_ids.clone() {
+                self.unsuppress_background_completion_prompt(call_id);
+            }
+            for notice in reply.unsuppress_notices.clone() {
+                self.unsuppress_background_completion_notice(notice);
+            }
+            for call_id in &reply.release_suppression_call_ids {
+                self.release_background_completion_prompt_suppression(call_id);
+            }
+            for notice in &reply.remove_pending_notices {
+                self.remove_pending_background_completion_notice(
+                    &notice.call_id,
+                    Some(notice.source_call),
+                    Some(notice.source_terminal),
+                );
+            }
             if let Some(call_id) = reply.unsuppress_call_id.clone() {
                 self.unsuppress_background_completion_prompt(call_id);
+            }
+            for call_id in reply.suppress_call_ids.clone() {
+                self.suppress_background_completion_prompt(call_id);
             }
             if let Some(call_id) = reply.suppress_call_id.clone() {
                 self.suppress_background_completion_prompt(call_id);
@@ -3289,35 +3454,37 @@ impl Harness {
             };
             let wait_terminal = transcript_owner
                 .and_then(|owner| self.observe_tool_terminal(owner, &wait_call_id, cause));
-            if wait_terminal.is_some()
-                && let Some(settlement) = reply.settlement
+            if let Some(wait_terminal) = wait_terminal
+                && let Some(mut settlement) = reply.settlement
             {
+                settlement.wait_terminal = Some(wait_terminal);
                 self.tool_routing
                     .tool_runtime
                     .pending_wait_settlements
                     .insert(wait_call_id.clone(), settlement);
             }
             match reply.kind {
-                WaitReplyKind::Result { result, display } => self.publish_terminal_tool_result(
-                    transcript_owner,
-                    None,
-                    ToolResult {
-                        presentation: Default::default(),
-                        call_id: reply.wait_call_id,
-                        tool_name: reply.wait_tool_name,
-                        tool_type: ToolType::Function,
-                        result,
-                        provider_content: Vec::new(),
-                        kind: ToolResultKind::Final,
-                        display,
-                        originator: tau_proto::PromptOriginator::User,
-                    },
-                ),
+                WaitReplyKind::Result { result, display } => self
+                    .publish_harness_owned_terminal_tool_result(
+                        transcript_owner,
+                        None,
+                        ToolResult {
+                            presentation: Default::default(),
+                            call_id: reply.wait_call_id,
+                            tool_name: reply.wait_tool_name,
+                            tool_type: ToolType::Function,
+                            result,
+                            provider_content: Vec::new(),
+                            kind: ToolResultKind::Final,
+                            display,
+                            originator: tau_proto::PromptOriginator::User,
+                        },
+                    ),
                 WaitReplyKind::Error {
                     message,
                     details,
                     display,
-                } => self.publish_terminal_tool_error(
+                } => self.publish_harness_owned_terminal_tool_error(
                     transcript_owner,
                     None,
                     ToolError {

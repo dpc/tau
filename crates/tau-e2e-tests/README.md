@@ -78,7 +78,8 @@ terminal emit four fixed production `shell` calls. The same closed four-call
 terminal also runs while the route advertises one-call guidance, proving a
 violating provider response remains losslessly aggregated. A bounded filesystem start
 barrier and monotonic interval records prove common overlap and a sub-six-second
-makespan; four exact `wait` calls collect the real background completions.
+makespan; one bounded plural exact `wait` collects the real background
+completions in request order.
 
 Output-length acceptance uses one closed Chat Completions-shaped pair. The live
 case proves a reasoning-only `Length` response creates exactly one successor,

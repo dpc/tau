@@ -54,9 +54,11 @@ only promises that input is available.
 
 Input-wait notification is distinct from background-result arbitration. Exact
 and bare waits consume a matching already-completed result before its queued
-completion prompt can preempt them. A different unsuppressed completion prompt
-is ordinary activating input and interrupts them in either queue/register order;
-an exact or bare waiter that consumed/suppressed the completion produces no
+completion prompt can preempt them. Plural exact waits reserve every requested
+target and suppress each member's undelivered completion prompt until the whole
+set settles or the reservation is released. A different unsuppressed completion
+prompt is ordinary activating input and interrupts background waits in either
+queue/register order; a wait that consumed or reserved the completion produces no
 prompt to wake an input waiter.
 
 Delivery readiness wins equality with an activating-input timeout. Exact tool
@@ -68,11 +70,70 @@ interrupts the wait once with the typed activating-input result.
 An interrupted background wait remains a successful scheduling result with the
 exact provider-visible headers `tau_internal: true`, `wait_outcome: interrupted`,
 `wait_reason: activating_input`, and `wait_mode: exact` or
-`wait_mode: any_background`, followed by exactly one blank line and optional
-concise harness-authored prose. Header names and values are LF-separated closed
-ASCII tokens. The result contains no activating payload or redundant target ID,
-consumes no target completion, and leaves that completion directly consumable
-once by a later wait.
+`wait_mode: exact_all` or `wait_mode: any_background`, followed by exactly one
+blank line and optional concise harness-authored prose. Header names and values
+are LF-separated closed ASCII tokens. The result contains no activating payload
+or redundant target ID. Singular interruption consumes no target completion.
+Plural interruption atomically releases every target reservation, consumes no
+member, preserves completed-member FIFO order, and restores only undelivered
+completion notices that the reservation suppressed. Each notice remains bound to
+its exact source `ToolCallRef` and canonical terminal. Reused display IDs do not
+coalesce notice obligations: suppression, restoration, and FIFO consumption affect
+only the matching generation's queued notice.
+
+## Plural exact waits
+
+`wait({"tool_call_ids":[...]})` selects a distinct transactional wait-all mode.
+The array contains one through 64 nonempty valid `ToolCallId` strings, contains
+no duplicates, and is mutually exclusive with `tool_call_id` and
+`timeout_minutes`. A one-member array retains plural result and durable
+correlation shapes. Singular exact, bare background, and activating-input waits
+retain their existing interfaces.
+
+The event loop resolves the complete request-order list to exact stable
+declaration occurrences before changing runtime state. An unknown or
+foreign-owned ID produces the same error. A malformed, duplicate, unknown,
+foreign, consumed, foreground-returned, already-reserved, or otherwise
+unwaitable member rejects the whole invocation without consuming output,
+reserving a member, moving a completion FIFO node, or suppressing a notice.
+Successful preflight reserves every member atomically, so later display-ID reuse
+cannot retarget the installed set. Exact and plural reservations outrank bare
+waits.
+
+Already-completed background members remain retained while reserved. Pending
+members may reach their canonical result, error, or cancellation terminal in
+foreground or background. A member error never fails fast. The wait settles only
+after every member has a canonical terminal and returns this successful native
+CBOR envelope in request order:
+
+```text
+results:
+  - original_tool_call_id: <member ID>
+    outcome: result
+    output: <original typed CBOR>
+  - original_tool_call_id: <member ID>
+    outcome: error
+    message: <original message>
+    details: <original typed details or null>
+```
+
+Member payloads remain nested unchanged. Cancellation uses the error member
+shape and retains its message and details. Invalid invocation, ownership,
+reservation, and wait-operation failures remain tool errors. The runtime consumes
+all member outputs atomically only after the wait terminal publishes
+successfully. If that terminal append rejects, the harness retains and retries
+the exact preallocated terminal; a later terminal for a reused display ID cannot
+commit the pending plural settlement or clear the newer generation's notice
+ownership.
+
+An unrelated trigger-ready activation interrupts the plural wait; member
+completion does not. Event-loop order decides the final-member, activation,
+cancellation, and manual-compaction races once. Wait-call cancellation and a
+manual-compaction claim preserve set atomicity; rollback restores every
+reservation, FIFO position, and only still-undelivered suppressed notice.
+Unload, rollover, shutdown, and cold restart drop the runtime reservation. Cold
+restart does not recreate the wait and uses ordinary interrupted-tool repair,
+while every member terminal remains recoverable by its original owner.
 
 The foreground wait keeps `AgentTurnState::ToolsRunning`; it introduces no
 suspended lifecycle state, watcher idle notification, or idle/running watch

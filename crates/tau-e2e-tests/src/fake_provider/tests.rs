@@ -331,33 +331,33 @@ fn parallel_shell_scenario_rejects_malformed_authority() {
     );
 
     let mut wait_duplicate = valid.clone();
-    let ScenarioActionV2::CoreShellParallelWaits { wait_call_ids, .. } =
+    let ScenarioActionV2::CoreShellParallelWaits { wait_call_id, .. } =
         &mut wait_duplicate.lanes[0].actions[1]
     else {
         panic!("parallel waits");
     };
-    wait_call_ids[1] = wait_call_ids[0].clone();
-    let duplicated_wait_ids = wait_call_ids.clone();
-    let ScenarioActionV2::CoreShellParallelResult { wait_call_ids, .. } =
+    *wait_call_id = "parallel-shell-1".into();
+    let duplicated_wait_id = wait_call_id.clone();
+    let ScenarioActionV2::CoreShellParallelResult { wait_call_id, .. } =
         &mut wait_duplicate.lanes[0].actions[2]
     else {
         panic!("parallel result");
     };
-    *wait_call_ids = duplicated_wait_ids;
+    *wait_call_id = duplicated_wait_id;
     assert!(
         validation::validate_v2(&wait_duplicate)
             .expect_err("duplicate wait id")
             .to_string()
-            .contains("unique ids")
+            .contains("unique id")
     );
 
     let mut result_mismatch = valid;
-    let ScenarioActionV2::CoreShellParallelResult { wait_call_ids, .. } =
+    let ScenarioActionV2::CoreShellParallelResult { wait_call_id, .. } =
         &mut result_mismatch.lanes[0].actions[2]
     else {
         panic!("parallel result");
     };
-    wait_call_ids[0] = "wrong-wait".into();
+    *wait_call_id = "wrong-wait".into();
     assert!(
         validation::validate_v2(&result_mismatch)
             .expect_err("result correlation")
@@ -368,7 +368,7 @@ fn parallel_shell_scenario_rejects_malformed_authority() {
 
 fn parallel_shell_scenario(probe_executable: PathBuf, advertise_parallel: bool) -> ScenarioV2 {
     let call_ids = std::array::from_fn(|index| format!("parallel-shell-{}", index + 1).into());
-    let wait_call_ids = std::array::from_fn(|index| format!("parallel-wait-{}", index + 1).into());
+    let wait_call_id = ToolCallId::from("parallel-wait-all");
     ScenarioV2::new(
         "parallel-shell",
         vec![ScenarioLaneV2 {
@@ -384,18 +384,93 @@ fn parallel_shell_scenario(probe_executable: PathBuf, advertise_parallel: bool) 
                     user_text: "parallel".to_owned(),
                     advertise_parallel,
                     call_ids: call_ids.clone(),
-                    wait_call_ids: wait_call_ids.clone(),
+                    wait_call_id: wait_call_id.clone(),
                 },
                 ScenarioActionV2::CoreShellParallelResult {
                     user_text: "parallel".to_owned(),
                     advertise_parallel,
                     call_ids,
-                    wait_call_ids,
+                    wait_call_id,
                     response: "done".to_owned(),
                 },
             ],
         }],
     )
+}
+
+fn mixed_wait_all_scenario(probe_executable: PathBuf) -> ScenarioV2 {
+    let wait_call_id = ToolCallId::from("mixed-wait-all");
+    let success_call_id = ToolCallId::from("mixed-shell-success");
+    let error_call_id = ToolCallId::from("mixed-workdir-error");
+    ScenarioV2::new(
+        "mixed-wait-all",
+        vec![ScenarioLaneV2 {
+            ctx_id: "mixed-wait-all".to_owned(),
+            actions: vec![
+                ScenarioActionV2::WaitAllMixedCalls {
+                    user_text: "mixed".to_owned(),
+                    wait_call_id: wait_call_id.clone(),
+                    success_call_id: success_call_id.clone(),
+                    error_call_id: error_call_id.clone(),
+                    probe_executable,
+                },
+                ScenarioActionV2::WaitAllMixedResult {
+                    user_text: "mixed".to_owned(),
+                    wait_call_id,
+                    success_call_id,
+                    error_call_id,
+                    response: "done".to_owned(),
+                },
+            ],
+        }],
+    )
+}
+
+/// Keeps the mixed plural-wait grammar closed around one correlated pair,
+/// absolute helper authority, and three distinct bounded provider call IDs.
+#[test]
+fn mixed_wait_all_scenario_requires_one_correlated_closed_pair() {
+    let valid = mixed_wait_all_scenario(PathBuf::from("/fixture/tau-e2e-shell-probe"));
+    validation::validate_v2(&valid).expect("closed mixed wait-all scenario is valid");
+
+    let mut mismatched = valid.clone();
+    let ScenarioActionV2::WaitAllMixedResult {
+        success_call_id, ..
+    } = &mut mismatched.lanes[0].actions[1]
+    else {
+        panic!("mixed result action");
+    };
+    *success_call_id = "wrong-success".into();
+    assert!(validation::validate_v2(&mismatched).is_err());
+
+    let mut duplicate = valid.clone();
+    let ScenarioActionV2::WaitAllMixedCalls {
+        error_call_id,
+        success_call_id,
+        ..
+    } = &mut duplicate.lanes[0].actions[0]
+    else {
+        panic!("mixed calls action");
+    };
+    *error_call_id = success_call_id.clone();
+    let duplicated_error_id = error_call_id.clone();
+    let ScenarioActionV2::WaitAllMixedResult { error_call_id, .. } =
+        &mut duplicate.lanes[0].actions[1]
+    else {
+        panic!("mixed result action");
+    };
+    *error_call_id = duplicated_error_id;
+    assert!(validation::validate_v2(&duplicate).is_err());
+
+    let relative = mixed_wait_all_scenario(PathBuf::from("tau-e2e-shell-probe"));
+    assert!(validation::validate_v2(&relative).is_err());
+
+    let mut extra = valid;
+    extra.lanes[0].actions.push(ScenarioActionV2::Text {
+        user_text: "extra".to_owned(),
+        response: "extra".to_owned(),
+    });
+    assert!(validation::validate_v2(&extra).is_err());
 }
 
 /// Rejects a typed-image sequence whose call and result identities differ so

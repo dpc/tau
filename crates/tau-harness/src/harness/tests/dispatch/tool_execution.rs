@@ -6871,6 +6871,7 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
                     item_index: 0,
                 },
                 registration: None,
+                wait_terminal: Some(observation),
                 outcome: tau_proto::ToolWaitOutcome::TimedOut,
             },
         );
@@ -6890,6 +6891,63 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
             .tool_runtime
             .pending_cancellation_observations
             .contains_key(&call_id)
+    );
+    assert!(
+        !harness
+            .tool_routing
+            .tool_runtime
+            .pending_wait_settlements
+            .contains_key(&call_id)
+    );
+}
+
+/// A later terminal that reuses the same display call ID cannot consume a wait
+/// settlement reserved for a different preallocated canonical terminal.
+#[test]
+fn wait_settlement_commit_requires_exact_terminal_observation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(td.path()).expect("harness");
+    let call_id = ToolCallId::from("reused-wait");
+    let expected = tau_proto::ObservationId::from_bytes([31; 16]);
+    let other = tau_proto::ObservationId::from_bytes([32; 16]);
+    harness
+        .tool_routing
+        .tool_runtime
+        .pending_wait_settlements
+        .insert(
+            call_id.clone(),
+            path_crate_harness::subagents_tool::PendingWaitSettlement {
+                wait_observation: tau_proto::ObservationId::from_bytes([30; 16]),
+                wait_call: tau_proto::ToolCallRef {
+                    declaration: tau_proto::ObservationId::from_bytes([29; 16]),
+                    item_index: 0,
+                },
+                registration: None,
+                wait_terminal: Some(expected),
+                outcome: tau_proto::ToolWaitOutcome::TimedOut,
+            },
+        );
+
+    assert!(
+        harness
+            .tool_routing
+            .tool_runtime
+            .take_wait_settlement_for_terminal(&call_id, other)
+            .is_none()
+    );
+    assert!(
+        harness
+            .tool_routing
+            .tool_runtime
+            .pending_wait_settlements
+            .contains_key(&call_id)
+    );
+    assert!(
+        harness
+            .tool_routing
+            .tool_runtime
+            .take_wait_settlement_for_terminal(&call_id, expected)
+            .is_some()
     );
     assert!(
         !harness

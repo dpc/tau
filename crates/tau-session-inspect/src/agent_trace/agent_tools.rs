@@ -714,7 +714,7 @@ fn project_facts(
         .min()
         .unwrap_or_else(|| UnixMicros::new(0));
     let mut records = project_keyed_facts(facts, mode)?;
-    records.sort_unstable_by(|a, b| {
+    records.sort_by(|a, b| {
         (
             a.recorded_at,
             &a.agent_id,
@@ -823,7 +823,7 @@ fn project_keyed_facts(
         .iter()
         .filter_map(|fact| match &fact.event {
             Event::AgentToolWaitSettled(e)
-                if settlement_is_fully_local(fact, e, &by_id, &calls) =>
+                if settlement_has_validatable_control_endpoints(fact, e, &by_id, &calls) =>
             {
                 Some((e.wait_call, e))
             }
@@ -834,18 +834,17 @@ fn project_keyed_facts(
         .iter()
         .filter_map(|fact| match &fact.event {
             Event::AgentToolWaitObserved(e)
-                if call_is_selected_local(fact, e.wait_call, &calls)
-                    && wait_mode_is_fully_local(fact, &e.mode, &calls) =>
+                if call_is_selected_local(fact, e.wait_call, &calls) =>
             {
                 Some(e.wait_call)
             }
             Event::AgentToolWaitRegistered(e)
-                if wait_registration_event_is_fully_local(fact, e, &by_id, &calls) =>
+                if wait_registration_has_local_control(fact, e, &by_id, &calls) =>
             {
                 Some(e.wait_call)
             }
             Event::AgentToolWaitSettled(e)
-                if settlement_is_fully_local(fact, e, &by_id, &calls) =>
+                if settlement_has_validatable_control_endpoints(fact, e, &by_id, &calls) =>
             {
                 Some(e.wait_call)
             }
@@ -858,6 +857,7 @@ fn project_keyed_facts(
                 && matches!(
                     settled.outcome,
                     tau_proto::ToolWaitOutcome::CompletionDelivered { .. }
+                        | tau_proto::ToolWaitOutcome::CompletionsDelivered { .. }
                 ) =>
         {
             Some(settled.wait_call)
@@ -946,6 +946,7 @@ fn project_keyed_facts(
                             !matches!(
                                 settlement.outcome,
                                 tau_proto::ToolWaitOutcome::CompletionDelivered { .. }
+                                    | tau_proto::ToolWaitOutcome::CompletionsDelivered { .. }
                             )
                         });
                     if classification_fully_local
@@ -982,7 +983,7 @@ fn project_keyed_facts(
         .iter()
         .filter_map(|fact| match &fact.event {
             Event::AgentToolWaitSettled(settled)
-                if settlement_is_fully_local(fact, settled, &by_id, &calls) =>
+                if settlement_has_validatable_control_endpoints(fact, settled, &by_id, &calls) =>
             {
                 settled
                     .registration
@@ -1020,17 +1021,17 @@ fn project_keyed_facts(
             Event::AgentActivationQueued(e) => {
                 let source_is_fully_local = e.source_observation.is_some_and(|id| {
                     observation_is_selected_local(fact, id, &by_id)
-                        && e.source_call
-                            .is_none_or(|call| call_is_selected_local(fact, call, &calls))
+                        && e.source_call.is_none_or(|call| {
+                            call_is_selected_local(fact, call, &calls)
+                                && terminal_ref_is_resolved(fact, call, id, &by_id, &calls)
+                        })
                 });
                 let mut completion_to_activation_queue_us = None;
-                if let (Some(source_id), Some(source_call)) = (e.source_observation, e.source_call)
+                if let (Some(source_id), Some(_source_call)) = (e.source_observation, e.source_call)
                     && source_is_fully_local
                     && let Some(source) = by_id
                         .get(&source_id)
                         .filter(|source| source.agent_id == fact.agent_id)
-                    && let Some((_, _, declared)) = calls.get(&source_call)
-                    && canonical_terminal_call_id(&source.event) == Some(&declared.call_id)
                 {
                     interval(&mut completion_to_activation_queue_us, source, fact);
                 }
@@ -1082,9 +1083,9 @@ fn project_keyed_facts(
                 );
             }
             Event::AgentToolWaitRegistered(e) => {
-                let is_fully_local =
-                    wait_registration_event_is_fully_local(fact, e, &by_id, &calls);
-                let outcome = if is_fully_local
+                let has_local_control =
+                    wait_registration_has_local_control(fact, e, &by_id, &calls);
+                let outcome = if has_local_control
                     && settled_registrations.contains(&(fact.agent_id.clone(), fact.id))
                 {
                     RegistrationOutcome::Settled
@@ -1110,8 +1111,15 @@ fn project_keyed_facts(
                 );
             }
             Event::AgentToolWaitSettled(e) => {
-                let is_fully_local = settlement_is_fully_local(fact, e, &by_id, &calls);
-                let registration = match (is_fully_local, e.registration) {
+                let common_endpoints_local = if matches!(
+                    e.outcome,
+                    tau_proto::ToolWaitOutcome::CompletionsDelivered { .. }
+                ) {
+                    settlement_common_endpoints_are_local(fact, e, &by_id, &calls)
+                } else {
+                    settlement_is_fully_local(fact, e, &by_id, &calls)
+                };
+                let registration = match (common_endpoints_local, e.registration) {
                     (false, Some(_)) => RegistrationState::Unresolved,
                     (false, None) => RegistrationState::Immediate,
                     (true, None) => RegistrationState::Immediate,
@@ -1124,34 +1132,47 @@ fn project_keyed_facts(
                     }
                     (true, Some(_)) => RegistrationState::Unresolved,
                 };
-                let terminal_resolution = match (is_fully_local, by_id.get(&e.wait_terminal)) {
-                    (false, _) => Resolution::SourceNotSelected,
-                    (true, Some(terminal)) if terminal.agent_id == fact.agent_id => {
-                        Resolution::Resolved
-                    }
-                    (true, Some(_) | None) => Resolution::SourceNotSelected,
-                };
-                let (outcome, active_wait_us) = wait_relationship(e, &by_id, fact, !is_fully_local);
-                push_event_record(
-                    &mut records,
-                    fact,
-                    RecordRank::Relationship,
-                    Record::Relationship(RelationshipRecord::WaitSettlement(
-                        WaitSettlementRecord {
-                            record_type: "relationship",
-                            relationship: "wait_settlement",
-                            observation_id: fact.id,
-                            wait_observation: e.wait_observation,
-                            wait_call: e.wait_call,
-                            registration,
-                            registration_ref: e.registration,
-                            wait_terminal: e.wait_terminal,
-                            wait_terminal_resolution: terminal_resolution,
-                            outcome,
-                            active_wait_us,
-                        },
-                    )),
-                );
+                let terminal_resolution =
+                    match (common_endpoints_local, by_id.get(&e.wait_terminal)) {
+                        (false, _) => Resolution::SourceNotSelected,
+                        (true, Some(terminal))
+                            if terminal.agent_id == fact.agent_id
+                                && terminal_ref_is_resolved(
+                                    fact,
+                                    e.wait_call,
+                                    e.wait_terminal,
+                                    &by_id,
+                                    &calls,
+                                ) =>
+                        {
+                            Resolution::Resolved
+                        }
+                        (true, Some(_) | None) => Resolution::SourceNotSelected,
+                    };
+                for (outcome, active_wait_us) in
+                    wait_relationships(e, &by_id, &calls, fact, !common_endpoints_local)
+                {
+                    push_event_record(
+                        &mut records,
+                        fact,
+                        RecordRank::Relationship,
+                        Record::Relationship(RelationshipRecord::WaitSettlement(
+                            WaitSettlementRecord {
+                                record_type: "relationship",
+                                relationship: "wait_settlement",
+                                observation_id: fact.id,
+                                wait_observation: e.wait_observation,
+                                wait_call: e.wait_call,
+                                registration,
+                                registration_ref: e.registration,
+                                wait_terminal: e.wait_terminal,
+                                wait_terminal_resolution: terminal_resolution,
+                                outcome,
+                                active_wait_us,
+                            },
+                        )),
+                    );
+                }
             }
             Event::AgentToolCancellationRequested(e) => {
                 push_event_record(
@@ -1204,6 +1225,7 @@ fn validate_observation_integrity(
     let mut registrations = HashMap::new();
     let mut settlements = HashSet::new();
     let mut committed_classifications = HashSet::new();
+    let mut committed_terminal_owners = HashMap::new();
     for fact in facts {
         match &fact.event {
             Event::AgentActivationQueued(e)
@@ -1224,6 +1246,7 @@ fn validate_observation_integrity(
                         "activation source `{source_id}` does not own call {source_call:?}"
                     ));
                 }
+                validate_terminal_generation_ref(fact, source_call, source_id, by_id, calls)?;
             }
             Event::AgentToolDispatchObserved(e)
                 if call_is_selected_local(fact, e.call, calls) && !dispatches.insert(e.call) =>
@@ -1243,7 +1266,6 @@ fn validate_observation_integrity(
             }
             Event::AgentToolWaitObserved(e)
                 if call_is_selected_local(fact, e.wait_call, calls)
-                    && wait_mode_is_fully_local(fact, &e.mode, calls)
                     && !wait_observations.insert(e.wait_call) =>
             {
                 return projection_error(format!(
@@ -1252,7 +1274,9 @@ fn validate_observation_integrity(
                 ));
             }
             Event::AgentToolWaitRegistered(e) => {
-                if !wait_registration_event_is_fully_local(fact, e, by_id, calls) {
+                if !call_is_selected_local(fact, e.wait_call, calls)
+                    || !observation_is_selected_local(fact, e.wait_observation, by_id)
+                {
                     continue;
                 }
                 validate_wait_observation_ref(
@@ -1268,7 +1292,7 @@ fn validate_observation_integrity(
                 }
             }
             Event::AgentToolWaitSettled(e) => {
-                if !settlement_endpoints_are_local(fact, e, by_id, calls) {
+                if !settlement_has_validatable_control_endpoints(fact, e, by_id, calls) {
                     continue;
                 }
                 validate_wait_observation_ref(
@@ -1318,6 +1342,13 @@ fn validate_observation_integrity(
                             e.wait_terminal, e.wait_call
                         ));
                     }
+                    validate_terminal_generation_ref(
+                        fact,
+                        e.wait_call,
+                        e.wait_terminal,
+                        by_id,
+                        calls,
+                    )?;
                 }
                 validate_wait_outcome(fact, e, by_id, calls)?;
             }
@@ -1325,13 +1356,21 @@ fn validate_observation_integrity(
                 if !classification_is_fully_local(fact, e, by_id, calls) {
                     continue;
                 }
-                if classification_terminal_committed(fact, e, by_id, calls)
-                    && !committed_classifications.insert(e.call)
-                {
-                    return projection_error(format!(
-                        "multiple committed terminal classifications for {:?}",
-                        e.call
-                    ));
+                if classification_terminal_committed(fact, e, by_id, calls) {
+                    if !committed_classifications.insert(e.call) {
+                        return projection_error(format!(
+                            "multiple committed terminal classifications for {:?}",
+                            e.call
+                        ));
+                    }
+                    if let Some(previous) = committed_terminal_owners.insert(e.terminal, e.call)
+                        && previous != e.call
+                    {
+                        return projection_error(format!(
+                            "terminal `{}` is classified to multiple calls",
+                            e.terminal
+                        ));
+                    }
                 }
                 if let Some(terminal) = by_id
                     .get(&e.terminal)
@@ -1399,6 +1438,9 @@ fn wait_mode_is_fully_local(
 ) -> bool {
     match mode {
         tau_proto::ToolWaitMode::Exact { target } => call_is_selected_local(fact, *target, calls),
+        tau_proto::ToolWaitMode::ExactAll { targets } => targets
+            .iter()
+            .all(|target| call_is_selected_local(fact, *target, calls)),
         _ => true,
     }
 }
@@ -1453,21 +1495,14 @@ fn wait_registration_is_fully_local(
     })
 }
 
-fn wait_registration_event_is_fully_local(
+fn wait_registration_has_local_control(
     fact: &Fact,
     registration: &tau_proto::AgentToolWaitRegistered,
     by_id: &HashMap<ObservationId, &Fact>,
     calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
 ) -> bool {
     call_is_selected_local(fact, registration.wait_call, calls)
-        && wait_mode_is_fully_local(fact, &registration.mode, calls)
-        && wait_observation_is_fully_local(
-            fact,
-            registration.wait_observation,
-            registration.wait_call,
-            by_id,
-            calls,
-        )
+        && observation_is_selected_local(fact, registration.wait_observation, by_id)
 }
 
 fn settlement_is_fully_local(
@@ -1516,12 +1551,52 @@ fn settlement_endpoints_are_local(
                 call_is_selected_local(fact, *source_call, calls)
                     && observation_is_selected_local(fact, *source_terminal, by_id)
             }
+            tau_proto::ToolWaitOutcome::CompletionsDelivered { sources } => {
+                sources.iter().all(|source| {
+                    call_is_selected_local(fact, source.source_call, calls)
+                        && observation_is_selected_local(fact, source.source_terminal, by_id)
+                })
+            }
             tau_proto::ToolWaitOutcome::InterruptedByActivation { activation }
             | tau_proto::ToolWaitOutcome::InputAvailable { activation } => {
                 observation_is_selected_local(fact, *activation, by_id)
             }
             _ => true,
         }
+}
+
+fn settlement_common_endpoints_are_local(
+    fact: &Fact,
+    settlement: &tau_proto::AgentToolWaitSettled,
+    by_id: &HashMap<ObservationId, &Fact>,
+    calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
+) -> bool {
+    call_is_selected_local(fact, settlement.wait_call, calls)
+        && wait_observation_common_is_local(fact, settlement.wait_observation, by_id, calls)
+        && settlement.registration.is_none_or(|id| {
+            wait_registration_common_is_local(fact, id, settlement.wait_observation, by_id, calls)
+        })
+        && observation_is_selected_local(fact, settlement.wait_terminal, by_id)
+}
+
+fn wait_observation_common_is_local(
+    fact: &Fact,
+    observation: ObservationId,
+    by_id: &HashMap<ObservationId, &Fact>,
+    _calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
+) -> bool {
+    observation_is_selected_local(fact, observation, by_id)
+}
+
+fn wait_registration_common_is_local(
+    fact: &Fact,
+    registration: ObservationId,
+    wait_observation: ObservationId,
+    by_id: &HashMap<ObservationId, &Fact>,
+    _calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
+) -> bool {
+    observation_is_selected_local(fact, registration, by_id)
+        && observation_is_selected_local(fact, wait_observation, by_id)
 }
 
 fn classification_is_fully_local(
@@ -1553,6 +1628,14 @@ fn projected_wait_mode(
         {
             tau_proto::ToolWaitMode::ExactUnresolved
         }
+        tau_proto::ToolWaitMode::ExactAll { targets }
+            if !call_is_selected_local(fact, wait_call, calls)
+                || targets
+                    .iter()
+                    .any(|target| !call_is_selected_local(fact, *target, calls)) =>
+        {
+            tau_proto::ToolWaitMode::ExactAllUnresolved
+        }
         _ => mode.clone(),
     }
 }
@@ -1563,7 +1646,7 @@ fn validate_wait_outcome(
     by_id: &HashMap<ObservationId, &Fact>,
     calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
 ) -> Result<(), InspectError> {
-    if !settlement_endpoints_are_local(settlement_fact, settlement, by_id, calls) {
+    if !settlement_has_validatable_control_endpoints(settlement_fact, settlement, by_id, calls) {
         return Ok(());
     }
     let observed_mode = by_id
@@ -1583,6 +1666,13 @@ fn validate_wait_outcome(
             source_phase,
             ..
         } => {
+            validate_terminal_generation_ref(
+                settlement_fact,
+                *source_call,
+                *source_terminal,
+                by_id,
+                calls,
+            )?;
             if let Some(terminal) = by_id
                 .get(source_terminal)
                 .filter(|terminal| terminal.agent_id == settlement_fact.agent_id)
@@ -1595,7 +1685,10 @@ fn validate_wait_outcome(
                     "wait source terminal `{source_terminal}` does not own call {source_call:?}"
                 ));
             }
-            if let Some(terminal) = by_id.get(source_terminal) {
+            if let Some(terminal) = by_id
+                .get(source_terminal)
+                .filter(|terminal| terminal.agent_id == settlement_fact.agent_id)
+            {
                 let phase_matches = match source_phase {
                     tau_proto::ToolSourcePhase::Foreground => matches!(
                         terminal.event,
@@ -1614,6 +1707,57 @@ fn validate_wait_outcome(
                     return projection_error(
                         "wait source phase contradicts canonical terminal family".to_owned(),
                     );
+                }
+            }
+        }
+        tau_proto::ToolWaitOutcome::CompletionsDelivered { sources } => {
+            for source in sources {
+                validate_terminal_generation_ref(
+                    settlement_fact,
+                    source.source_call,
+                    source.source_terminal,
+                    by_id,
+                    calls,
+                )?;
+                if let Some(terminal) = by_id
+                    .get(&source.source_terminal)
+                    .filter(|terminal| terminal.agent_id == settlement_fact.agent_id)
+                    && let Some((_, _, declared)) =
+                        calls
+                            .get(&source.source_call)
+                            .filter(|(declaration, _, _)| {
+                                declaration.agent_id == settlement_fact.agent_id
+                            })
+                    && canonical_terminal_call_id(&terminal.event) != Some(&declared.call_id)
+                {
+                    return projection_error(format!(
+                        "wait source terminal `{}` does not own call {:?}",
+                        source.source_terminal, source.source_call
+                    ));
+                }
+                if let Some(terminal) = by_id
+                    .get(&source.source_terminal)
+                    .filter(|terminal| terminal.agent_id == settlement_fact.agent_id)
+                {
+                    let phase_matches = match source.source_phase {
+                        tau_proto::ToolSourcePhase::Foreground => matches!(
+                            terminal.event,
+                            Event::ProviderToolResult(_)
+                                | Event::ProviderToolError(_)
+                                | Event::ToolCancelled(_)
+                        ),
+                        tau_proto::ToolSourcePhase::Background => matches!(
+                            terminal.event,
+                            Event::ToolBackgroundResult(_)
+                                | Event::ToolBackgroundError(_)
+                                | Event::ToolCancelled(_)
+                        ),
+                    };
+                    if !phase_matches {
+                        return projection_error(
+                            "wait source phase contradicts canonical terminal family".to_owned(),
+                        );
+                    }
                 }
             }
         }
@@ -1651,6 +1795,13 @@ fn wait_mode_allows_outcome(
                 ..
             },
         ) => target == source_call && *envelope == tau_proto::ToolOutputEnvelope::Identity,
+        (Mode::ExactAll { targets }, Outcome::CompletionsDelivered { sources }) => {
+            targets.len() == sources.len()
+                && targets.iter().zip(sources).all(|(target, source)| {
+                    target == &source.source_call
+                        && source.envelope == tau_proto::ToolOutputEnvelope::Identity
+                })
+        }
         (
             Mode::NextBackground,
             Outcome::CompletionDelivered {
@@ -1662,15 +1813,21 @@ fn wait_mode_allows_outcome(
             *source_phase == tau_proto::ToolSourcePhase::Background
                 && *envelope == tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader
         }
-        (Mode::Exact { .. } | Mode::NextBackground, Outcome::InterruptedByActivation { .. })
+        (
+            Mode::Exact { .. } | Mode::ExactAll { .. } | Mode::NextBackground,
+            Outcome::InterruptedByActivation { .. },
+        )
         | (Mode::ActivatingInput { .. }, Outcome::InputAvailable { .. }) => true,
         (Mode::ActivatingInput { .. }, Outcome::TimedOut)
         | (
-            Mode::Exact { .. } | Mode::NextBackground | Mode::ActivatingInput { .. },
+            Mode::Exact { .. }
+            | Mode::ExactAll { .. }
+            | Mode::NextBackground
+            | Mode::ActivatingInput { .. },
             Outcome::Cancelled | Outcome::LifecycleAborted,
         ) => registered,
         (
-            Mode::Exact { .. },
+            Mode::Exact { .. } | Mode::ExactAll { .. },
             Outcome::Rejected {
                 reason:
                     Reject::DuplicateExactWait
@@ -1697,6 +1854,12 @@ fn wait_mode_allows_outcome(
             },
         )
         | (
+            Mode::ExactAllUnresolved,
+            Outcome::Rejected {
+                reason: Reject::UnknownTarget,
+            },
+        )
+        | (
             Mode::InvalidArguments,
             Outcome::Rejected {
                 reason: Reject::InvalidArguments,
@@ -1718,7 +1881,7 @@ fn validate_selected_settlement_consistency(
     by_id: &HashMap<ObservationId, &Fact>,
     calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
 ) -> Result<(), InspectError> {
-    if !settlement_endpoints_are_local(fact, settlement, by_id, calls) {
+    if !settlement_has_validatable_control_endpoints(fact, settlement, by_id, calls) {
         return Ok(());
     }
     let observed = by_id
@@ -1770,6 +1933,22 @@ fn validate_selected_settlement_consistency(
     Ok(())
 }
 
+fn settlement_has_validatable_control_endpoints(
+    fact: &Fact,
+    settlement: &tau_proto::AgentToolWaitSettled,
+    by_id: &HashMap<ObservationId, &Fact>,
+    calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
+) -> bool {
+    if matches!(
+        settlement.outcome,
+        tau_proto::ToolWaitOutcome::CompletionsDelivered { .. }
+    ) {
+        settlement_common_endpoints_are_local(fact, settlement, by_id, calls)
+    } else {
+        settlement_endpoints_are_local(fact, settlement, by_id, calls)
+    }
+}
+
 /// Reject a selected wait-observation reference that resolves to another call
 /// or event family while allowing an omitted selected-cut endpoint.
 fn validate_wait_observation_ref(
@@ -1796,17 +1975,7 @@ fn validate_wait_observation_ref(
             "wait observation `{observation}` contradicts wait call {wait_call:?}"
         ));
     };
-    if !wait_mode_is_fully_local(dependent, &value.mode, calls)
-        || expected_mode.is_some_and(|mode| !wait_mode_is_fully_local(dependent, mode, calls))
-    {
-        return Ok(());
-    }
-    if !matches!(
-        &observed.event,
-        Event::AgentToolWaitObserved(value)
-            if value.wait_call == wait_call
-                && expected_mode.is_none_or(|mode| mode == &value.mode)
-    ) {
+    if value.wait_call != wait_call || expected_mode.is_some_and(|mode| mode != &value.mode) {
         return projection_error(format!(
             "wait observation `{observation}` contradicts wait call {wait_call:?}"
         ));
@@ -1825,6 +1994,60 @@ fn canonical_terminal_call_id(event: &Event) -> Option<&tau_proto::ToolCallId> {
         Event::ToolCancelled(e) => Some(&e.call_id),
         _ => None,
     }
+}
+
+/// Validate a selected terminal's stable-generation ownership through its
+/// classification edge. A missing classification may be outside the selected
+/// cut, but a selected classification for another generation is contradictory.
+fn validate_terminal_generation_ref(
+    dependent: &Fact,
+    call: ToolCallRef,
+    terminal: ObservationId,
+    by_id: &HashMap<ObservationId, &Fact>,
+    calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
+) -> Result<(), InspectError> {
+    if !call_is_selected_local(dependent, call, calls)
+        || !observation_is_selected_local(dependent, terminal, by_id)
+    {
+        return Ok(());
+    }
+    let contradicts = by_id.values().any(|classification_fact| {
+        if classification_fact.agent_id != dependent.agent_id {
+            return false;
+        }
+        let Event::AgentToolTerminalClassified(classification) = &classification_fact.event else {
+            return false;
+        };
+        classification.terminal == terminal
+            && classification.call != call
+            && classification_is_fully_local(classification_fact, classification, by_id, calls)
+    });
+    if contradicts {
+        return projection_error(format!("terminal `{terminal}` does not own call {call:?}"));
+    }
+    Ok(())
+}
+
+/// Return whether the selected canonical terminal is bound to this exact call
+/// generation by a fully local committed classification.
+fn terminal_ref_is_resolved(
+    owner: &Fact,
+    call: ToolCallRef,
+    terminal: ObservationId,
+    by_id: &HashMap<ObservationId, &Fact>,
+    calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
+) -> bool {
+    by_id.values().any(|classification_fact| {
+        if classification_fact.agent_id != owner.agent_id {
+            return false;
+        }
+        let Event::AgentToolTerminalClassified(classification) = &classification_fact.event else {
+            return false;
+        };
+        classification.call == call
+            && classification.terminal == terminal
+            && classification_terminal_committed(classification_fact, classification, by_id, calls)
+    })
 }
 
 fn classification_terminal_committed(
@@ -1856,39 +2079,86 @@ fn terminal_status(cause: &tau_proto::ToolTerminalCause) -> CallStatus {
 fn interval(slot: &mut Option<u64>, first: &Fact, second: &Fact) {
     *slot = second.at.get().checked_sub(first.at.get());
 }
-fn wait_relationship(
+fn wait_relationships(
     e: &tau_proto::AgentToolWaitSettled,
     by_id: &HashMap<ObservationId, &Fact>,
+    calls: &HashMap<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>,
     settled: &Fact,
     has_foreign_endpoint: bool,
-) -> (WaitOutcomeRecord, Option<u64>) {
+) -> Vec<(WaitOutcomeRecord, Option<u64>)> {
     use tau_proto::ToolWaitOutcome::*;
-    let outcome = match &e.outcome {
+    let outcomes = match &e.outcome {
         CompletionDelivered {
             source_call,
             source_terminal,
             source_phase,
             envelope,
         } => {
-            let (source_resolution, completion_to_delivery_us) =
-                match (has_foreign_endpoint, by_id.get(source_terminal)) {
-                    (true, _) => (Resolution::SourceNotSelected, None),
-                    (false, Some(source)) if source.agent_id == settled.agent_id => {
-                        let mut interval_us = None;
-                        interval(&mut interval_us, source, settled);
-                        (Resolution::Resolved, interval_us)
-                    }
-                    (false, Some(_) | None) => (Resolution::SourceNotSelected, None),
-                };
-            WaitOutcomeRecord::CompletionDelivered {
+            let (source_resolution, completion_to_delivery_us) = match (
+                has_foreign_endpoint || !call_is_selected_local(settled, *source_call, calls),
+                by_id.get(source_terminal),
+            ) {
+                (true, _) => (Resolution::SourceNotSelected, None),
+                (false, Some(source))
+                    if source.agent_id == settled.agent_id
+                        && terminal_ref_is_resolved(
+                            settled,
+                            *source_call,
+                            *source_terminal,
+                            by_id,
+                            calls,
+                        ) =>
+                {
+                    let mut interval_us = None;
+                    interval(&mut interval_us, source, settled);
+                    (Resolution::Resolved, interval_us)
+                }
+                (false, Some(_) | None) => (Resolution::SourceNotSelected, None),
+            };
+            vec![WaitOutcomeRecord::CompletionDelivered {
                 source_call: *source_call,
                 source_phase: *source_phase,
                 output_ref: *source_terminal,
                 envelope: *envelope,
                 source_resolution,
                 completion_to_delivery_us,
-            }
+            }]
         }
+        CompletionsDelivered { sources } => sources
+            .iter()
+            .map(|source| {
+                let (source_resolution, completion_to_delivery_us) = match (
+                    has_foreign_endpoint
+                        || !call_is_selected_local(settled, source.source_call, calls),
+                    by_id.get(&source.source_terminal),
+                ) {
+                    (true, _) => (Resolution::SourceNotSelected, None),
+                    (false, Some(source_fact))
+                        if source_fact.agent_id == settled.agent_id
+                            && terminal_ref_is_resolved(
+                                settled,
+                                source.source_call,
+                                source.source_terminal,
+                                by_id,
+                                calls,
+                            ) =>
+                    {
+                        let mut interval_us = None;
+                        interval(&mut interval_us, source_fact, settled);
+                        (Resolution::Resolved, interval_us)
+                    }
+                    (false, Some(_) | None) => (Resolution::SourceNotSelected, None),
+                };
+                WaitOutcomeRecord::CompletionDelivered {
+                    source_call: source.source_call,
+                    source_phase: source.source_phase,
+                    output_ref: source.source_terminal,
+                    envelope: source.envelope,
+                    source_resolution,
+                    completion_to_delivery_us,
+                }
+            })
+            .collect(),
         InterruptedByActivation { activation } | InputAvailable { activation } => {
             let (source_resolution, activation_to_wait_terminal_us) =
                 match (has_foreign_endpoint, by_id.get(activation)) {
@@ -1906,23 +2176,23 @@ fn wait_relationship(
                     (false, Some(_) | None) => (Resolution::SourceNotSelected, None),
                 };
             if matches!(&e.outcome, InterruptedByActivation { .. }) {
-                WaitOutcomeRecord::InterruptedByActivation {
+                vec![WaitOutcomeRecord::InterruptedByActivation {
                     activation_ref: *activation,
                     source_resolution,
                     activation_to_wait_terminal_us,
-                }
+                }]
             } else {
-                WaitOutcomeRecord::InputAvailable {
+                vec![WaitOutcomeRecord::InputAvailable {
                     activation_ref: *activation,
                     source_resolution,
                     activation_to_wait_terminal_us,
-                }
+                }]
             }
         }
-        TimedOut => WaitOutcomeRecord::TimedOut,
-        Rejected { reason } => WaitOutcomeRecord::Rejected { reason: *reason },
-        Cancelled => WaitOutcomeRecord::Cancelled,
-        LifecycleAborted => WaitOutcomeRecord::LifecycleAborted,
+        TimedOut => vec![WaitOutcomeRecord::TimedOut],
+        Rejected { reason } => vec![WaitOutcomeRecord::Rejected { reason: *reason }],
+        Cancelled => vec![WaitOutcomeRecord::Cancelled],
+        LifecycleAborted => vec![WaitOutcomeRecord::LifecycleAborted],
     };
     let mut active_wait_us = None;
     if !has_foreign_endpoint
@@ -1933,7 +2203,10 @@ fn wait_relationship(
     {
         interval(&mut active_wait_us, registration, settled);
     }
-    (outcome, active_wait_us)
+    outcomes
+        .into_iter()
+        .map(|outcome| (outcome, active_wait_us))
+        .collect()
 }
 fn add_owned_output(value: &mut CallProjection, event: &Event, mode: super::AgentTraceMode) {
     let rendered = match event {

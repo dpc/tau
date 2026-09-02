@@ -215,6 +215,19 @@ impl BuiltinState {
         wait_target_call_id(arguments)
             .and_then(|call_id| self.in_progress_tool_names.get(call_id))
             .map(ToString::to_string)
+            .or_else(|| {
+                wait_target_call_ids(arguments).map(|call_ids| {
+                    call_ids
+                        .into_iter()
+                        .map(|call_id| {
+                            self.in_progress_tool_names
+                                .get(call_id)
+                                .map_or_else(|| call_id.to_owned(), ToString::to_string)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+            })
             .unwrap_or_default()
     }
 }
@@ -1254,6 +1267,19 @@ fn wait_target_call_id(arguments: &CborValue) -> Option<&str> {
     }
 }
 
+fn wait_target_call_ids(arguments: &CborValue) -> Option<Vec<&str>> {
+    let CborValue::Array(values) = cbor_map_field(arguments, "tool_call_ids")? else {
+        return None;
+    };
+    values
+        .iter()
+        .map(|value| match value {
+            CborValue::Text(id) if !id.trim().is_empty() => Some(id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn normalized_skill_query_terms(raw_query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut current = String::new();
@@ -1992,7 +2018,7 @@ fn cancel_tool_spec() -> ToolSpec {
 }
 
 fn wait_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for completion of a background tool call owned by this conversation with `tool_call_id`, for the oldest unconsumed completed background result in this conversation with `wait({})`, or until activating input addressed to this agent is available with `wait({\"timeout_minutes\":N})`. If no background result is complete and an owned background call is running, `wait({})` waits for its next completion; otherwise it returns an error. Use `wait({\"tool_call_id\":\"ID\"})` when targeting a specific call. Input waits accept positive integer minutes, silently clamp to the configured `harness.yaml` effective bounds (one through 1,440 minutes by default), and do not consume a background result or the input; the actual input arrives separately in the next model round. When waiting for any background call, the result includes an `original_tool_call_id` header identifying the completed call. Activating input can instead return a successful result with `wait_outcome: interrupted`, `wait_reason: activating_input`, and `wait_mode: exact` or `any_background`; that interruption consumes no background result. Already-finished matching results and already-queued activating input return immediately. Tau will notify you via marked internal messages when background calls complete; those notifications leave results queued until `wait` consumes them. `wait` suppresses or removes a completion notice only while it is pending; an already-delivered notice remains visible.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. When set, wait for this conversation's specific background tool call."},"timeout_minutes":{"type":"integer","minimum":1,"description":"Wait up to this many minutes for activating input addressed to this agent. The harness silently clamps this to configured effective bounds. Mutually exclusive with tool_call_id."}},"additionalProperties":false})), format: None, tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)], enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for one background tool call with `wait({\"tool_call_id\":\"ID\"})`, transactionally wait for all calls in request order with `wait({\"tool_call_ids\":[\"A\",\"B\"]})`, wait for the oldest unconsumed completed background result with `wait({})`, or wait for activating input with `wait({\"timeout_minutes\":N})`. `tool_call_ids` accepts 1 through 64 distinct nonempty IDs and is mutually exclusive with the other modes. A plural wait succeeds only after every member terminates, preserves typed member payloads in a `results` array, and represents member failures or cancellations as error members rather than failing fast. If no background result is complete and an owned background call is running, bare wait remains pending; otherwise it returns an error. Input waits accept positive integer minutes and silently clamp to the configured bounds (one through 1,440 minutes by default); they do not consume input or background output. Activating input can return a successful interruption with `wait_outcome: interrupted`, `wait_reason: activating_input`, and `wait_mode: exact` or `any_background`; plural interruption uses `wait_mode: exact_all`. The interruption consumes no background result or reserved completion. Already-finished matching results and already-queued activating input return immediately. Completion notifications leave results queued until `wait` consumes them; a wait suppresses or removes a completion notice only while it is pending, and plural rollback restores only undelivered notices.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. Wait for this conversation's specific background tool call."},"tool_call_ids":{"type":"array","minItems":1,"maxItems":tau_proto::MAX_WAIT_ALL_MEMBERS,"uniqueItems":true,"items":{"type":"string","minLength":1},"description":"Optional. Wait transactionally for all listed background tool calls in request order."},"timeout_minutes":{"type":"integer","minimum":1,"description":"Wait up to this many minutes for activating input addressed to this agent. The harness silently clamps this to configured effective bounds."}},"additionalProperties":false})), format: None, tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)], enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn compact_tool_spec() -> ToolSpec {

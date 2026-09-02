@@ -257,6 +257,55 @@ fn wait_mode_outcome_matrix_matches_runtime_semantics() {
     ));
 }
 
+/// Performance JSONL preserves exact-all target and delivered-source request
+/// order rather than reducing plural correlation to an unordered set.
+#[test]
+fn plural_wait_performance_fields_preserve_request_order() {
+    let targets = vec![call(2), call(1)];
+    let sources = vec![
+        tau_proto::WaitDeliveredSource {
+            source_call: call(2),
+            source_terminal: id(4),
+            source_phase: ToolSourcePhase::Background,
+            envelope: tau_proto::ToolOutputEnvelope::Identity,
+        },
+        tau_proto::WaitDeliveredSource {
+            source_call: call(1),
+            source_terminal: id(3),
+            source_phase: ToolSourcePhase::Foreground,
+            envelope: tau_proto::ToolOutputEnvelope::Identity,
+        },
+    ];
+    let mut row = Map::new();
+    add_wait_mode(
+        &mut row,
+        &ToolWaitMode::ExactAll {
+            targets: targets.clone(),
+        },
+    );
+    add_wait_outcome(
+        &mut row,
+        &settlement(
+            false,
+            ToolWaitOutcome::CompletionsDelivered {
+                sources: sources.clone(),
+            },
+        ),
+        &HashMap::new(),
+    )
+    .expect("plural outcome");
+    assert_eq!(row["mode"], json!("exact_all"));
+    assert_eq!(
+        row["target_calls"],
+        serde_json::to_value(targets).expect("targets serialize")
+    );
+    assert_eq!(row["outcome"], json!("completions_delivered"));
+    assert_eq!(
+        row["sources"],
+        serde_json::to_value(sources).expect("sources serialize")
+    );
+}
+
 /// Matched outer-turn boundaries expose only durable identifiers, status,
 /// decision presence, and qualified timing.
 #[test]
