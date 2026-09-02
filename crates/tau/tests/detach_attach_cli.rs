@@ -894,7 +894,7 @@ fn wait_for_owned_fixture_members(pgid: u32, first_extension_pid: &str) -> Vec<P
         if identities
             .iter()
             .any(|identity| identity.pid == first_extension_pid)
-            && helper_count >= 2
+            && 1 < helper_count
         {
             return identities;
         }
