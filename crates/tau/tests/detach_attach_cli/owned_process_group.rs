@@ -563,6 +563,7 @@ fn watchdog_cleanup(
     on_initialized()?;
 
     let mut tracked = Vec::new();
+    let mut track_committed = false;
     let mut disarmed = false;
     let mut root_only = false;
     loop {
@@ -584,7 +585,10 @@ fn watchdog_cleanup(
             disarmed = true;
         } else if line == "root-only" {
             root_only = true;
-        } else if let Some(identities) = line.strip_prefix("track ") {
+        } else if let Some(identities) = line
+            .strip_prefix("track ")
+            .or_else(|| (line == "track").then_some(""))
+        {
             let parsed = identities
                 .split_ascii_whitespace()
                 .map(|identity| {
@@ -594,6 +598,7 @@ fn watchdog_cleanup(
                 .collect::<Option<Vec<_>>>();
             if let Some(parsed) = parsed {
                 tracked = parsed;
+                track_committed = true;
             }
         }
     }
@@ -646,7 +651,7 @@ fn watchdog_cleanup(
     }
 
     let require_group_absence = signaled_group && wait.group_exit;
-    let require_identity_absence = wait.tracked_exit && (signaled_group || root_only);
+    let require_identity_absence = wait.tracked_exit && track_committed;
     if require_group_absence || require_identity_absence {
         on_identity_wait_started()?;
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -923,6 +928,135 @@ pub(crate) fn watchdog_waits_for_root_only_tracked_identity(temp_root: &Path) ->
     })();
     let cleanup = canary.cleanup();
     cleanup?;
+    result
+}
+
+/// A committed tracked identity remains a completion barrier after the exact
+/// leader disappears and revokes numeric process-group authority.
+#[test]
+fn watchdog_waits_for_committed_tracked_identity_after_leader_loss() {
+    let root = tempfile::tempdir().expect("leader-loss watchdog temporary root");
+    assert!(
+        watchdog_leader_loss_retains_tracked_identity_wait(root.path())
+            .expect("run leader-loss tracked-identity watchdog canary"),
+        "leader loss canceled the committed tracked-identity completion barrier"
+    );
+}
+
+/// Forces exact leader loss after initialization and proves the watchdog cannot
+/// complete until a separately owned committed identity disappears.
+fn watchdog_leader_loss_retains_tracked_identity_wait(temp_root: &Path) -> io::Result<bool> {
+    let mut leader = BoundedCanary::spawn()?;
+    let mut tracked = BoundedCanary::spawn()?;
+    let result = (|| {
+        let pgid = leader.pgid();
+        let leader_start = process_start_time(pgid)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "leader identity"))?;
+        let tracked_pid = tracked.pgid();
+        let tracked_start = process_start_time(tracked_pid)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "tracked identity"))?;
+        let control =
+            format!("leader {pgid}:{leader_start}\ntrack {tracked_pid}:{tracked_start}\n");
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+
+        std::thread::scope(|scope| -> io::Result<bool> {
+            let leader = &mut leader;
+            scope.spawn(move || {
+                let result = watchdog_cleanup(
+                    pgid,
+                    temp_root,
+                    io::Cursor::new(control.into_bytes()),
+                    WatchdogWait {
+                        group_exit: true,
+                        tracked_exit: true,
+                    },
+                    || leader.cleanup(),
+                    |_| {
+                        Err(io::Error::other(
+                            "leader loss restored numeric process-group authority",
+                        ))
+                    },
+                    || {
+                        entered_tx.send(()).map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "leader-loss wait barrier receiver closed",
+                            )
+                        })?;
+                        release_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .map_err(|error| {
+                                io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    format!("leader-loss wait barrier was not released: {error}"),
+                                )
+                            })
+                    },
+                );
+                let _ = done_tx.send(result);
+            });
+
+            let entered = entered_rx.recv_timeout(Duration::from_secs(2));
+            if let Err(error) = entered {
+                tracked.cleanup()?;
+                let watchdog_result =
+                    done_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(|done_error| {
+                            io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "leader-loss watchdog neither waited nor completed: \
+                                 entered={error}; done={done_error}"
+                                ),
+                            )
+                        })?;
+                watchdog_result?;
+                return Ok(false);
+            }
+
+            let tracked_identity_present = process_start_time(tracked_pid) == Some(tracked_start);
+            let early_result = match done_rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "leader-loss watchdog result sender disconnected",
+                ))),
+            };
+            let tracked_cleanup = tracked.cleanup();
+            let release = release_tx.send(()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "leader-loss watchdog wait callback closed",
+                )
+            });
+            let returned_early = early_result.is_some();
+            let watchdog_result = match early_result {
+                Some(result) => result,
+                None => done_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "leader-loss watchdog did not finish after tracked exit: {error}"
+                            ),
+                        )
+                    })?,
+            };
+            tracked_cleanup?;
+            release?;
+            watchdog_result?;
+            Ok(tracked_identity_present && !returned_early && !temp_root.exists())
+        })
+    })();
+    let leader_cleanup = leader.cleanup();
+    let tracked_cleanup = tracked.cleanup();
+    leader_cleanup?;
+    tracked_cleanup?;
     result
 }
 
