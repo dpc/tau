@@ -108,6 +108,16 @@ struct SpyBackend {
     body_reads: RefCell<usize>,
 }
 
+/// Backend spy that records exact identity bytes at public trait seams.
+struct ExactIdentityBackend {
+    /// Provider message returned for metadata and body fetches.
+    message: BackendMessage,
+    /// Exact account, folder, and UID arguments passed to metadata fetches.
+    metadata_calls: RefCell<Vec<(String, String, String)>>,
+    /// Exact account, folder, and UID arguments passed to body fetches.
+    body_calls: RefCell<Vec<(String, String, String)>>,
+}
+
 #[derive(Default)]
 struct OAuthBackend {
     primed: RefCell<Vec<(String, String, Option<Duration>)>>,
@@ -257,6 +267,65 @@ impl EmailBackend for SpyBackend {
 
     fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, EmailSendFailure> {
         Ok("spy-message-id".to_owned())
+    }
+}
+
+impl EmailBackend for ExactIdentityBackend {
+    fn list_folders(&self, _account: &str) -> Result<Vec<BackendFolder>, String> {
+        Ok(Vec::new())
+    }
+
+    fn list_messages(&self, _account: &str, _folder: &str) -> Result<Vec<BackendMessage>, String> {
+        Ok(Vec::new())
+    }
+
+    fn message_metadata(
+        &self,
+        account: &str,
+        folder: &str,
+        uid: &str,
+    ) -> Result<BackendMessage, String> {
+        self.metadata_calls.borrow_mut().push((
+            account.to_owned(),
+            folder.to_owned(),
+            uid.to_owned(),
+        ));
+        Ok(self.message.clone())
+    }
+
+    fn read_message(
+        &self,
+        account: &str,
+        folder: &str,
+        uid: &str,
+    ) -> Result<BackendMessage, String> {
+        self.body_calls
+            .borrow_mut()
+            .push((account.to_owned(), folder.to_owned(), uid.to_owned()));
+        Ok(self.message.clone())
+    }
+
+    fn update_message_flags(
+        &mut self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+        _mutation: MessageFlagMutation,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn move_message_to_trash(
+        &mut self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+    ) -> Result<String, String> {
+        Ok("Trash".to_owned())
+    }
+
+    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, EmailSendFailure> {
+        Ok("exact-message-id".to_owned())
     }
 }
 
@@ -1955,6 +2024,32 @@ fn folder_id_round_trip_routes_exact_provider_bytes() {
     assert_eq!(listed_uids(&result), ["exact-provider-folder"]);
 }
 
+/// List-provider rows have no command-target UID validation seam, so migration
+/// must continue displaying exact raw fixture/provider UID text.
+#[test]
+fn list_provider_rows_do_not_gain_uid_validation() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let messages = engine
+        .backend
+        .messages
+        .get_mut(&("work".to_owned(), "INBOX".to_owned()))
+        .expect("INBOX messages");
+    messages.truncate(1);
+    let message = messages.first_mut().expect("first INBOX message");
+    message.uid = "fixture/raw-uid".to_owned();
+
+    let result = engine.dispatch(EmailCommand::ListByUid {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        limit: 10,
+        cursor: None,
+    });
+
+    assert_eq!(cbor_text_field(&result, "status"), Some("ok"));
+    assert_eq!(listed_uids(&result), ["fixture/raw-uid"]);
+}
+
 #[test]
 fn empty_list_render_uses_no_matches_payload() {
     let temp = tempfile::TempDir::new().expect("tempdir");
@@ -3117,6 +3212,131 @@ fn allowed_read_rejects_body_fetch_uidvalidity_mismatch() {
     );
     assert_eq!(*engine.backend.body_reads.borrow(), 1);
     assert!(!format!("{result:?}").contains("stale body"));
+}
+
+/// A staged target must preserve raw caller bytes at the public backend seam
+/// while body consistency remains tied to exact provider metadata identity.
+#[test]
+fn staged_identity_preserves_leading_zero_uid_across_backend_calls() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let message = BackendMessage {
+        uid: "1".to_owned(),
+        uidvalidity: "uv1".to_owned(),
+        date: "2026-05-24T00:01:00Z".to_owned(),
+        from: "Teammate <team@company.com>".to_owned(),
+        to: vec!["alice@company.com".to_owned()],
+        cc: Vec::new(),
+        subject: "deploy notes".to_owned(),
+        source_truncated: false,
+        body_text: "safe body".to_owned(),
+        flags: Vec::new(),
+        has_attachments: false,
+        attachments: Vec::new(),
+        message_id: None,
+        auth_results: vec![trusted_dkim_pass("company.com")],
+    };
+    let mut engine = Engine {
+        config: cfg().validate().expect("valid config"),
+        state: StateStore::open(temp.path().join("email-state")).expect("state"),
+        backend: ExactIdentityBackend {
+            message,
+            metadata_calls: RefCell::new(Vec::new()),
+            body_calls: RefCell::new(Vec::new()),
+        },
+    };
+
+    let result = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "0001".to_owned(),
+    });
+
+    assert_eq!(cbor_text_field(&result, "status"), Some("ok"));
+    let exact_args = vec![("work".to_owned(), "INBOX".to_owned(), "0001".to_owned())];
+    assert_eq!(*engine.backend.metadata_calls.borrow(), exact_args);
+    assert_eq!(*engine.backend.body_calls.borrow(), exact_args);
+}
+
+/// Schema-0 approval persistence must retain a leading-zero target across
+/// reload, and exact approval matching must not alias it to canonical digits.
+#[test]
+fn staged_identity_keeps_leading_zero_approval_exact_across_reload() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let state_path = temp.path().join("email-state");
+    let message = BackendMessage {
+        uid: "0001".to_owned(),
+        uidvalidity: "uv1".to_owned(),
+        date: "2026-05-24T00:01:00Z".to_owned(),
+        from: "Mallory <mallory@evil.test>".to_owned(),
+        to: vec!["alice@company.com".to_owned()],
+        cc: Vec::new(),
+        subject: "secret subject".to_owned(),
+        source_truncated: false,
+        body_text: "secret body".to_owned(),
+        flags: Vec::new(),
+        has_attachments: false,
+        attachments: Vec::new(),
+        message_id: Some("leading-zero@example.test".to_owned()),
+        auth_results: Vec::new(),
+    };
+    let mut engine = Engine {
+        config: cfg().validate().expect("valid config"),
+        state: StateStore::open(state_path.clone()).expect("state"),
+        backend: ExactIdentityBackend {
+            message,
+            metadata_calls: RefCell::new(Vec::new()),
+            body_calls: RefCell::new(Vec::new()),
+        },
+    };
+
+    let requested = engine.dispatch(EmailCommand::RequestFull {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "0001".to_owned(),
+    });
+    assert_eq!(
+        cbor_text_field(&requested, "status"),
+        Some("approval_required")
+    );
+    let pending = engine
+        .state
+        .list_pending_incoming()
+        .expect("pending approval");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].schema, STATE_SCHEMA);
+    assert_eq!(pending[0].uid, "0001");
+    assert_eq!(pending[0].uidvalidity, "uv1");
+    let approval_id = pending[0].id.clone();
+
+    engine.state = StateStore::open(state_path.clone()).expect("reloaded pending state");
+    let reloaded = engine
+        .state
+        .list_pending_incoming()
+        .expect("reloaded pending approval");
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded[0].uid, "0001");
+    engine
+        .state
+        .approve_incoming(&approval_id)
+        .expect("approve exact target");
+    engine.state = StateStore::open(state_path).expect("reloaded approved state");
+
+    let exact = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "0001".to_owned(),
+    });
+    assert_eq!(cbor_text_field(&exact, "status"), Some("ok"));
+
+    let canonicalized = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "1".to_owned(),
+    });
+    assert_eq!(
+        cbor_text_field(&canonicalized, "status"),
+        Some(ACCESS_PREVIEW)
+    );
 }
 
 #[test]

@@ -24,7 +24,9 @@ use crate::google_oauth::{
 };
 use crate::storage::{FsStorage, SharedStorage, StorageCreateError, file_name};
 
+mod message_identity;
 mod real_backend;
+use message_identity::{ImapUid, MailboxName, MessageRef, MessageTarget};
 use real_backend::RealEmailBackend;
 
 const READ_BODY_MAX_BYTES: usize = 64 * 1024;
@@ -1889,7 +1891,21 @@ impl StateStore {
         }
     }
 
-    fn incoming_approved_exact(&self, target: &IncomingTarget, metadata: &BackendMessage) -> bool {
+    fn incoming_approved_exact(&self, target: &MessageRef, metadata: &BackendMessage) -> bool {
+        self.list_incoming_approvals("approved")
+            .is_ok_and(|approvals| {
+                approvals.iter().any(|approval| {
+                    incoming_approval_matches_message_ref(approval, target)
+                        && incoming_approval_matches_message_metadata(approval, metadata)
+                })
+            })
+    }
+
+    fn incoming_approved_exact_raw(
+        &self,
+        target: &IncomingTarget,
+        metadata: &BackendMessage,
+    ) -> bool {
         self.list_incoming_approvals("approved")
             .is_ok_and(|approvals| {
                 approvals.iter().any(|approval| {
@@ -1899,7 +1915,21 @@ impl StateStore {
             })
     }
 
-    fn incoming_denied_exact(&self, target: &IncomingTarget, metadata: &BackendMessage) -> bool {
+    fn incoming_denied_exact(&self, target: &MessageRef, metadata: &BackendMessage) -> bool {
+        self.list_incoming_approvals("denied")
+            .is_ok_and(|approvals| {
+                approvals.iter().any(|approval| {
+                    incoming_approval_matches_message_ref(approval, target)
+                        && incoming_approval_matches_message_metadata(approval, metadata)
+                })
+            })
+    }
+
+    fn incoming_denied_exact_raw(
+        &self,
+        target: &IncomingTarget,
+        metadata: &BackendMessage,
+    ) -> bool {
         self.list_incoming_approvals("denied")
             .is_ok_and(|approvals| {
                 approvals.iter().any(|approval| {
@@ -2237,6 +2267,18 @@ fn incoming_approval_matches_target_tuple(
         && approval.folder == safe_model_line(&target.folder, MAX_HEADER_VALUE_CHARS)
         && approval.uid == safe_model_line(&target.uid, MAX_HEADER_VALUE_CHARS)
         && approval.uidvalidity == safe_model_line(&target.uidvalidity, MAX_HEADER_VALUE_CHARS)
+}
+
+fn incoming_approval_matches_message_ref(
+    approval: &IncomingApproval,
+    message_ref: &MessageRef,
+) -> bool {
+    let target = message_ref.target();
+    approval.account == safe_model_line(target.account().as_ref(), MAX_HEADER_VALUE_CHARS)
+        && approval.folder == safe_model_line(target.mailbox().raw(), MAX_HEADER_VALUE_CHARS)
+        && approval.uid == safe_model_line(target.uid().raw(), MAX_HEADER_VALUE_CHARS)
+        && approval.uidvalidity
+            == safe_model_line(message_ref.uidvalidity().raw(), MAX_HEADER_VALUE_CHARS)
 }
 
 fn incoming_approval_matches_message_metadata(
@@ -3414,17 +3456,10 @@ fn list_token(value: &str, max_chars: usize) -> String {
 }
 
 fn is_single_uid(uid: &str) -> bool {
-    uid.parse::<u32>()
-        .is_ok_and(|value| 0 < value && uid.bytes().all(|byte| byte.is_ascii_digit()))
+    ImapUid::parse_value(uid).is_ok()
 }
 
-type IncomingAccessTarget = (
-    String,
-    BackendMessage,
-    IncomingTarget,
-    &'static str,
-    PolicyDecision,
-);
+type IncomingAccessTarget = (MessageRef, BackendMessage, &'static str, PolicyDecision);
 
 struct Engine<B> {
     config: ValidatedConfig,
@@ -3799,7 +3834,7 @@ impl<B: EmailBackend> Engine<B> {
                     uid: message.uid.clone(),
                     uidvalidity: message.uidvalidity.clone(),
                 };
-                let (access, _decision) = self.incoming_effective_access(&target, &message);
+                let (access, _decision) = self.incoming_effective_access_raw(&target, &message);
                 CborValue::Text(format_list_message_line(message, access))
             })
             .collect();
@@ -3848,8 +3883,12 @@ impl<B: EmailBackend> Engine<B> {
         folder: &str,
         uid: &str,
     ) -> Result<IncomingAccessTarget, CborValue> {
-        let account_id = self.validate_message_target(command, account_id, folder, uid)?;
-        let metadata = match self.backend.message_metadata(&account_id, folder, uid) {
+        let target = self.validate_message_target(command, account_id, folder, uid)?;
+        let metadata = match self.backend.message_metadata(
+            target.account().as_ref(),
+            target.mailbox().raw(),
+            target.uid().raw(),
+        ) {
             Ok(message) => message,
             Err(message) if message.contains("not implemented") => {
                 return Err(error_envelope(Some(command), "internal_error", &message));
@@ -3871,22 +3910,21 @@ impl<B: EmailBackend> Engine<B> {
                 ));
             }
         };
-        let target = IncomingTarget {
-            account: account_id.clone(),
-            folder: folder.to_owned(),
-            uid: uid.to_owned(),
-            uidvalidity: metadata.uidvalidity.clone(),
-        };
-        let (access, decision) = self.incoming_effective_access(&target, &metadata);
-        Ok((account_id, metadata, target, access, decision))
+        let message_ref = MessageRef::from_metadata(target, metadata.uidvalidity.clone());
+        let (access, decision) = self.incoming_effective_access(&message_ref, &metadata);
+        Ok((message_ref, metadata, access, decision))
     }
 
     fn read(&self, account_id: &str, folder: &str, uid: &str) -> CborValue {
-        let (account_id, metadata, _target, access, decision) =
+        let (message_ref, metadata, access, decision) =
             match self.incoming_access_target("read", account_id, folder, uid) {
                 Ok(target) => target,
                 Err(error) => return error,
             };
+        let target = message_ref.target();
+        let account_id = target.account().as_ref();
+        let folder = target.mailbox().raw();
+        let uid = target.uid().raw();
         if access == ACCESS_NONE {
             return error_envelope_with_details(
                 Some("read"),
@@ -3899,7 +3937,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            OpaqueFolderId::encode(&account_id, folder).as_str(),
+                            OpaqueFolderId::encode(account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -3923,7 +3961,7 @@ impl<B: EmailBackend> Engine<B> {
             );
         }
         if access == ACCESS_FULL {
-            let msg = match self.backend.read_message(&account_id, folder, uid) {
+            let msg = match self.backend.read_message(account_id, folder, uid) {
                 Ok(message) => message,
                 Err(message)
                     if backend_error_code(&message, "network_error") == "message_not_found" =>
@@ -3934,7 +3972,7 @@ impl<B: EmailBackend> Engine<B> {
                     return backend_error_envelope(Some("read"), "network_error", &message);
                 }
             };
-            if msg.uid != metadata.uid || msg.uidvalidity != metadata.uidvalidity {
+            if !message_ref.metadata_matches_body(&metadata.uid, &msg.uid, &msg.uidvalidity) {
                 return error_envelope(Some("read"), "message_not_found", "message not found");
             }
             let simplified = simplify_email_content(&msg.body_text);
@@ -3956,7 +3994,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            OpaqueFolderId::encode(&account_id, folder).as_str(),
+                            OpaqueFolderId::encode(account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4005,7 +4043,7 @@ impl<B: EmailBackend> Engine<B> {
                 ]),
             );
         }
-        let preview_message = match self.backend.read_message(&account_id, folder, uid) {
+        let preview_message = match self.backend.read_message(account_id, folder, uid) {
             Ok(message) => message,
             Err(message)
                 if backend_error_code(&message, "network_error") == "message_not_found" =>
@@ -4016,9 +4054,11 @@ impl<B: EmailBackend> Engine<B> {
                 return backend_error_envelope(Some("read"), "network_error", &message);
             }
         };
-        if preview_message.uid != metadata.uid
-            || preview_message.uidvalidity != metadata.uidvalidity
-        {
+        if !message_ref.metadata_matches_body(
+            &metadata.uid,
+            &preview_message.uid,
+            &preview_message.uidvalidity,
+        ) {
             return error_envelope(Some("read"), "message_not_found", "message not found");
         }
         let preview = unapproved_email_preview(&preview_message.body_text);
@@ -4033,7 +4073,7 @@ impl<B: EmailBackend> Engine<B> {
                 (
                     "folder",
                     CborValue::Text(safe_model_line(
-                        OpaqueFolderId::encode(&account_id, folder).as_str(),
+                        OpaqueFolderId::encode(account_id, folder).as_str(),
                         MAX_HEADER_VALUE_CHARS,
                     )),
                 ),
@@ -4067,11 +4107,15 @@ impl<B: EmailBackend> Engine<B> {
     }
 
     fn request_access(&self, account_id: &str, folder: &str, uid: &str) -> CborValue {
-        let (account_id, metadata, target, access, decision) =
+        let (message_ref, metadata, access, decision) =
             match self.incoming_access_target("request_access", account_id, folder, uid) {
                 Ok(target) => target,
                 Err(error) => return error,
             };
+        let target = message_ref.target();
+        let account_id = target.account().as_ref();
+        let folder = target.mailbox().raw();
+        let uid = target.uid().raw();
         if access == ACCESS_FULL {
             return ok_envelope(
                 "request_access",
@@ -4080,7 +4124,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            OpaqueFolderId::encode(&account_id, folder).as_str(),
+                            OpaqueFolderId::encode(account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4096,10 +4140,10 @@ impl<B: EmailBackend> Engine<B> {
             id: String::new(),
             kind: "incoming_read".to_owned(),
             status: "pending".to_owned(),
-            account: safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS),
+            account: safe_model_line(account_id, MAX_HEADER_VALUE_CHARS),
             folder: safe_model_line(folder, MAX_HEADER_VALUE_CHARS),
             uid: safe_model_line(uid, MAX_HEADER_VALUE_CHARS),
-            uidvalidity: safe_model_line(&target.uidvalidity, MAX_HEADER_VALUE_CHARS),
+            uidvalidity: safe_model_line(message_ref.uidvalidity().raw(), MAX_HEADER_VALUE_CHARS),
             from: incoming_approval_from(&metadata),
             date: safe_model_line(&metadata.date, MAX_HEADER_VALUE_CHARS),
             message_id: incoming_approval_message_id(&metadata),
@@ -4115,7 +4159,7 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            OpaqueFolderId::encode(&account_id, folder).as_str(),
+                            OpaqueFolderId::encode(account_id, folder).as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4138,27 +4182,21 @@ impl<B: EmailBackend> Engine<B> {
         account_id: &str,
         folder: &str,
         uid: &str,
-    ) -> Result<String, CborValue> {
+    ) -> Result<MessageTarget, CborValue> {
         let account_id = self.resolve_account_id(command, account_id)?;
         let account = self.account(command, account_id)?;
-        if let Err(message) = validate_mailbox_name(folder) {
-            return Err(error_envelope(Some(command), "invalid_input", &message));
-        }
-        if !account.folders.allows(folder) {
+        let mailbox = MailboxName::parse_exact(folder)
+            .map_err(|message| error_envelope(Some(command), "invalid_input", &message))?;
+        if !account.folders.allows(mailbox.raw()) {
             return Err(error_envelope(
                 Some(command),
                 "folder_not_allowed",
                 "folder is not whitelisted for this account",
             ));
         }
-        if !is_single_uid(uid) {
-            return Err(error_envelope(
-                Some(command),
-                "invalid_input",
-                "uid must be a positive integer",
-            ));
-        }
-        Ok(account_id.to_owned())
+        let uid = ImapUid::parse_exact(uid)
+            .map_err(|message| error_envelope(Some(command), "invalid_input", &message))?;
+        Ok(MessageTarget::new(account.id.clone(), mailbox, uid))
     }
 
     fn manage_message(
@@ -4169,14 +4207,16 @@ impl<B: EmailBackend> Engine<B> {
         uid: &str,
     ) -> CborValue {
         let command_name = command.command_name();
-        let account_id = match self.validate_message_target(command_name, account_id, folder, uid) {
-            Ok(account_id) => account_id,
+        let target = match self.validate_message_target(command_name, account_id, folder, uid) {
+            Ok(target) => target,
             Err(error) => return error,
         };
-        match self
-            .backend
-            .update_message_flags(&account_id, folder, uid, command.mutation())
-        {
+        match self.backend.update_message_flags(
+            target.account().as_ref(),
+            target.mailbox().raw(),
+            target.uid().raw(),
+            command.mutation(),
+        ) {
             Ok(()) => ok_envelope(
                 command_name,
                 command.status_name(),
@@ -4184,7 +4224,11 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            OpaqueFolderId::encode(&account_id, folder).as_str(),
+                            OpaqueFolderId::encode(
+                                target.account().as_ref(),
+                                target.mailbox().raw(),
+                            )
+                            .as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4203,11 +4247,15 @@ impl<B: EmailBackend> Engine<B> {
 
     fn trash(&mut self, account_id: &str, folder: &str, uid: &str) -> CborValue {
         let command = "trash";
-        let account_id = match self.validate_message_target(command, account_id, folder, uid) {
-            Ok(account_id) => account_id,
+        let target = match self.validate_message_target(command, account_id, folder, uid) {
+            Ok(target) => target,
             Err(error) => return error,
         };
-        match self.backend.move_message_to_trash(&account_id, folder, uid) {
+        match self.backend.move_message_to_trash(
+            target.account().as_ref(),
+            target.mailbox().raw(),
+            target.uid().raw(),
+        ) {
             Ok(_trash_folder) => ok_envelope(
                 command,
                 "moved_to_trash",
@@ -4215,7 +4263,11 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "folder",
                         CborValue::Text(safe_model_line(
-                            OpaqueFolderId::encode(&account_id, folder).as_str(),
+                            OpaqueFolderId::encode(
+                                target.account().as_ref(),
+                                target.mailbox().raw(),
+                            )
+                            .as_str(),
                             MAX_HEADER_VALUE_CHARS,
                         )),
                     ),
@@ -4986,7 +5038,7 @@ impl<B: EmailBackend> Engine<B> {
 
     fn incoming_effective_access(
         &self,
-        target: &IncomingTarget,
+        target: &MessageRef,
         message: &BackendMessage,
     ) -> (&'static str, PolicyDecision) {
         let decision = self.incoming_decision(message);
@@ -4997,6 +5049,27 @@ impl<B: EmailBackend> Engine<B> {
             );
         }
         if self.state.incoming_denied_exact(target, message) {
+            return (ACCESS_NONE, PolicyDecision::denied("user denied"));
+        }
+        if decision.allowed {
+            return (ACCESS_FULL, decision);
+        }
+        (ACCESS_PREVIEW, decision)
+    }
+
+    fn incoming_effective_access_raw(
+        &self,
+        target: &IncomingTarget,
+        message: &BackendMessage,
+    ) -> (&'static str, PolicyDecision) {
+        let decision = self.incoming_decision(message);
+        if self.state.incoming_approved_exact_raw(target, message) {
+            return (
+                ACCESS_FULL,
+                PolicyDecision::allowed(Some("approval".to_owned())),
+            );
+        }
+        if self.state.incoming_denied_exact_raw(target, message) {
             return (ACCESS_NONE, PolicyDecision::denied("user denied"));
         }
         if decision.allowed {

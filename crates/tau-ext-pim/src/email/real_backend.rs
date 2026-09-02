@@ -36,7 +36,7 @@ use tokio_rustls::client::TlsStream;
 use super::{
     AuthMethod, AuthenticationResultsEvidence, BackendAttachment, BackendFolder, BackendMessage,
     BackendMessagePage, EmailAccountId, EmailBackend, EmailOauth2Provider, EmailSendFailure,
-    MessageFlagMutation, OutgoingMessage, READ_BODY_MAX_BYTES, StateStore, TlsMode,
+    ImapUid, MessageFlagMutation, OutgoingMessage, READ_BODY_MAX_BYTES, StateStore, TlsMode,
     ValidatedAuthConfig, ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig, recent_cutoff,
 };
 use crate::google_oauth::{
@@ -1169,10 +1169,9 @@ async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>,
 }
 
 fn validated_uid_arg(uid: &str) -> Result<u32, String> {
-    uid.parse::<u32>()
-        .ok()
-        .filter(|value| 0 < *value && uid.bytes().all(|byte| byte.is_ascii_digit()))
-        .ok_or_else(|| "invalid_input: uid must be a positive integer".to_owned())
+    ImapUid::parse_value(uid)
+        .map(|value| value.get())
+        .map_err(|message| format!("invalid_input: {message}"))
 }
 
 fn xoauth2_payload(login: &str, access_token: &str) -> String {
