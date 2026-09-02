@@ -43,6 +43,32 @@ Tau follows the XDG directories:
     Tau version, and the daemon's current active `session_id`; `:session new`
     updates this field after the daemon switches sessions successfully.
 
+## Runtime discovery from supervised components
+
+Shell tools run through a supervised configured component. By default,
+`tau_runtime_socket_access: hidden` gives that component an intentionally empty,
+read-only `${XDG_RUNTIME_DIR}/tau/harnesses` mount. Consequently, `tau session
+list --json` run there can correctly return `[]` while host-side listeners are
+live. Perform daemon discovery from the host, outside the supervised extension
+namespace. Set `tau_runtime_socket_access: legacy` only for a trusted component
+that genuinely needs ambient harness discovery; do not change the default.
+See the [extension configuration](../../../docs/extensions.md#runtime-socket-discovery)
+and [configured-extension boundary](../../../SECURITY.md) for the policy.
+
+Use this content-free check before treating a missing runtime pair as unlink or
+resume failure:
+
+```bash
+printf 'XDG_RUNTIME_DIR=%s\n' "$XDG_RUNTIME_DIR"
+readlink /proc/self/ns/mnt
+findmnt -T "$XDG_RUNTIME_DIR/tau/harnesses"
+find "$XDG_RUNTIME_DIR/tau/harnesses" -maxdepth 1 -printf '%y %f\n'
+ss -xlpn | grep '/tau/harnesses/'
+```
+
+`ss` pathname strings together with an empty read-only bind mount mean namespace
+masking, not proof that a listener was unlinked.
+
 ## Event logs are usually the first place to look
 
 For session misbehavior, inspect `~/.local/state/tau/sessions/<session_id>/events.jsonl` early. It is append-only JSONL meant for post-mortems and may include transient observations absent from durable replay. It is useful for missing UI updates, streaming, tool progress, connection churn, ordering, and short-lived states, but it is deliberately incomplete.

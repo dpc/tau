@@ -48,10 +48,14 @@ The recursive read-only mount operation requires Linux 5.12 or later.
 Tau never weakens a restricted mount to accommodate an older kernel:
 `mount_setattr` failure fails supervised extension startup closed.
 
-Tau also presents an empty read-only view of the harness runtime socket
-directory to every supervised component by default. A trusted component that
-must discover or connect to Tau harnesses can explicitly restore the historical
-ambient view:
+## Runtime socket discovery
+
+Tau presents an empty read-only view of the harness runtime socket directory to
+every supervised component by default. Thus, `tau session list --json` inside a
+supervised shell can correctly return `[]` even when host-side harness listeners
+are live. Run discovery outside the supervised extension namespace. A trusted
+component that genuinely must discover or connect to Tau harnesses can explicitly
+restore the historical ambient view:
 
 ```yaml
 extensions:
@@ -61,6 +65,9 @@ extensions:
 
 This opt-out affects runtime socket discovery only. It does not weaken state or
 secret masking.
+
+For a content-free mount-namespace diagnostic, see the
+[debugging self-knowledge](../crates/tau-skills/self-knowledge/tau-self-knowledge-debugging.md#runtime-discovery-from-supervised-components).
 
 ## Rostra
 
