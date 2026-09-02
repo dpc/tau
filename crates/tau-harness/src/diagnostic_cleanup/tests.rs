@@ -5,7 +5,10 @@ use std::{fs as path_std_fs, io as path_std_io};
 use fs2::FileExt as _;
 use tempfile::TempDir;
 
-use super::{cleanup_diagnostics_with, spawn_diagnostic_cleanup_for_test};
+use super::{
+    cleanup_diagnostics_with, cleanup_diagnostics_with_lock, spawn_diagnostic_cleanup_for_test,
+    try_acquire_diagnostic_cleanup_lock,
+};
 
 /// Ensures the startup entry point launches only for durable configured
 /// retention and protects the session being opened.
@@ -161,6 +164,70 @@ fn cleanup_keeps_recent_diagnostic_jsonl() {
     );
 
     assert!(session.join("events.jsonl").exists());
+}
+
+/// Ensures a session removed after enumeration silently skips lock acquisition
+/// without recreating it or preventing cleanup of an independent session.
+#[test]
+fn cleanup_skips_session_that_vanishes_after_enumeration() {
+    let temp = TempDir::new().expect("temp state");
+    let sessions = temp.path().join("sessions");
+    let vanished = sessions.join("vanished");
+    let retained = sessions.join("retained");
+    for session in [&vanished, &retained] {
+        std::fs::create_dir_all(session).expect("session dir");
+        std::fs::write(session.join("events.jsonl"), b"debug").expect("debug JSONL");
+    }
+    let mut removed_vanished = false;
+
+    cleanup_diagnostics_with_lock(
+        &sessions,
+        Duration::ZERO,
+        SystemTime::now() + Duration::from_secs(1),
+        &[],
+        &mut |path| std::fs::remove_file(path),
+        |session_dir| {
+            let vanishes_before_lock = session_dir == vanished && !removed_vanished;
+            if vanishes_before_lock {
+                std::fs::remove_dir_all(&vanished).expect("remove enumerated session");
+                removed_vanished = true;
+            }
+            match try_acquire_diagnostic_cleanup_lock(session_dir) {
+                Ok(lock) => {
+                    if vanishes_before_lock {
+                        assert!(lock.is_none(), "vanished session must silently skip");
+                    }
+                    Ok(lock)
+                }
+                Err(error) if vanishes_before_lock => {
+                    panic!("vanished session lock acquisition: {error}");
+                }
+                Err(error) => Err(error),
+            }
+        },
+    );
+
+    assert!(removed_vanished);
+    assert!(!vanished.exists());
+    assert!(!retained.join("events.jsonl").exists());
+}
+
+/// Ensures an existing session with a dangling lock path remains an acquisition
+/// error instead of being mistaken for a session that vanished after
+/// enumeration.
+#[cfg(unix)]
+#[test]
+fn dangling_session_lock_remains_an_acquisition_error() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().expect("temp state");
+    let session = temp.path().join("session");
+    std::fs::create_dir_all(&session).expect("session dir");
+    symlink("missing-parent/lock", session.join("lock")).expect("dangling lock symlink");
+
+    let error = try_acquire_diagnostic_cleanup_lock(&session).expect_err("dangling lock fails");
+
+    assert_eq!(error.kind(), path_std_io::ErrorKind::NotFound);
 }
 
 /// Ensures the shared cutoff removes JSONL and compressed captures at the exact

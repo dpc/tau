@@ -79,6 +79,26 @@ fn cleanup_diagnostics_with(
     protected_sessions: &[tau_proto::SessionId],
     mut remove_file: impl FnMut(&Path) -> io::Result<()>,
 ) {
+    cleanup_diagnostics_with_lock(
+        sessions_dir,
+        retention,
+        now,
+        protected_sessions,
+        &mut remove_file,
+        try_acquire_diagnostic_cleanup_lock,
+    );
+}
+
+/// Run cleanup with injectable time, removal, and lock acquisition for
+/// deterministic fault tests.
+fn cleanup_diagnostics_with_lock(
+    sessions_dir: &Path,
+    retention: Duration,
+    now: SystemTime,
+    protected_sessions: &[tau_proto::SessionId],
+    remove_file: &mut impl FnMut(&Path) -> io::Result<()>,
+    mut acquire_lock: impl FnMut(&Path) -> io::Result<Option<std::fs::File>>,
+) {
     let entries = match fs::read_dir(sessions_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return,
@@ -125,27 +145,40 @@ fn cleanup_diagnostics_with(
         {
             continue;
         }
-        let _session_lock =
-            match crate::session_cleanup::try_acquire_cleanup_lock(&entry.path().join("lock")) {
-                Ok(Some(lock)) => lock,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "tau_harness::diagnostic_cleanup",
-                        path = %entry.path().display(),
-                        %error,
-                        "failed to acquire session lock for diagnostic cleanup"
-                    );
-                    continue;
-                }
-            };
+        let _session_lock = match acquire_lock(&entry.path()) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    target: "tau_harness::diagnostic_cleanup",
+                    path = %entry.path().display(),
+                    %error,
+                    "failed to acquire session lock for diagnostic cleanup"
+                );
+                continue;
+            }
+        };
         cleanup_candidate(
             &entry.path().join("events.jsonl"),
             retention,
             now,
-            &mut remove_file,
+            remove_file,
         );
-        cleanup_provider_captures(&entry.path(), retention, now, &mut remove_file);
+        cleanup_provider_captures(&entry.path(), retention, now, remove_file);
+    }
+}
+
+/// Acquire a cleanup lock or silently skip a session that vanished after
+/// enumeration.
+fn try_acquire_diagnostic_cleanup_lock(session_dir: &Path) -> io::Result<Option<std::fs::File>> {
+    match crate::session_cleanup::try_acquire_cleanup_lock(&session_dir.join("lock")) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(session_dir) {
+                Err(recheck_error) if recheck_error.kind() == io::ErrorKind::NotFound => Ok(None),
+                _ => Err(error),
+            }
+        }
+        result => result,
     }
 }
 
