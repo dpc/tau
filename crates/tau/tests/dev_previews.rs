@@ -282,11 +282,10 @@ fn make_tree_read_only(path: &Path) {
     }
 }
 
-/// Developer render commands must not create an agent store or change output
-/// when durable Tau state is recursively read-only.
+/// Proves one developer render command avoids agent-store writes and preserves
+/// output when durable Tau state is recursively read-only.
 #[cfg(unix)]
-#[test]
-fn previews_run_unflagged_without_writable_agent_store() {
+fn assert_preview_runs_unflagged_without_writable_agent_store(command: &str) {
     let home = TempDir::new().expect("temporary home");
     let state = home.path().join(".state");
     for directory in [
@@ -302,12 +301,12 @@ fn previews_run_unflagged_without_writable_agent_store() {
         std::fs::create_dir_all(home.path().join(directory)).expect("create preview root");
     }
 
-    let commands = ["print-prompt", "print-tools", "print-system-prompt"];
-    let baseline = commands.map(|command| {
-        let output = preview(&home, None, &["--role", "engineer", "dev", command]);
-        assert!(output.status.success(), "{command}: {:?}", output.stderr);
-        output.stdout
-    });
+    let baseline = preview(&home, None, &["--role", "engineer", "dev", command]);
+    assert!(
+        baseline.status.success(),
+        "{command}: {:?}",
+        baseline.stderr
+    );
     let agents = state.join("tau/agents");
     if agents.exists() {
         assert!(
@@ -322,36 +321,58 @@ fn previews_run_unflagged_without_writable_agent_store() {
     let state_before = state_tree_contents(&state);
     make_tree_read_only(&state);
 
-    for (command, expected) in commands.into_iter().zip(baseline) {
-        let unflagged = preview(&home, None, &["--role", "engineer", "dev", command]);
-        assert!(
-            unflagged.status.success(),
-            "{command} without --ephemeral: {:?}",
-            unflagged.stderr
-        );
-        assert_eq!(unflagged.stdout, expected, "{command} output changed");
+    let unflagged = preview(&home, None, &["--role", "engineer", "dev", command]);
+    assert!(
+        unflagged.status.success(),
+        "{command} without --ephemeral: {:?}",
+        unflagged.stderr
+    );
+    assert_eq!(
+        unflagged.stdout, baseline.stdout,
+        "{command} output changed"
+    );
 
-        let explicit = preview(
-            &home,
-            None,
-            &["--ephemeral", "--role", "engineer", "dev", command],
-        );
-        assert!(
-            explicit.status.success(),
-            "{command} with --ephemeral: {:?}",
-            explicit.stderr
-        );
-        assert_eq!(
-            explicit.stdout, expected,
-            "{command} --ephemeral changed output"
-        );
-        assert_no_runtime_pairs(home.path());
-    }
+    let explicit = preview(
+        &home,
+        None,
+        &["--ephemeral", "--role", "engineer", "dev", command],
+    );
+    assert!(
+        explicit.status.success(),
+        "{command} with --ephemeral: {:?}",
+        explicit.stderr
+    );
+    assert_eq!(
+        explicit.stdout, baseline.stdout,
+        "{command} --ephemeral changed output"
+    );
+    assert_no_runtime_pairs(home.path());
     assert_eq!(
         state_tree_contents(&state),
         state_before,
         "diagnostic commands changed durable state"
     );
+}
+
+/// `print-prompt` must remain output-identical without writable durable state.
+#[cfg(unix)]
+#[test]
+fn print_prompt_runs_unflagged_without_writable_agent_store() {
+    assert_preview_runs_unflagged_without_writable_agent_store("print-prompt");
+}
+
+/// `print-tools` must remain output-identical without writable durable state.
+#[cfg(unix)]
+#[test]
+fn print_tools_runs_unflagged_without_writable_agent_store() {
+    assert_preview_runs_unflagged_without_writable_agent_store("print-tools");
+}
+
+/// `print-system-prompt` must remain output-identical without writable state.
+#[cfg(unix)]
+#[test]
+fn print_system_prompt_runs_unflagged_without_writable_agent_store() {
+    assert_preview_runs_unflagged_without_writable_agent_store("print-system-prompt");
 }
 
 /// Render previews do not create durable session/agent artifacts or leak
