@@ -221,16 +221,44 @@ impl TestEnvironment {
 
     /// Configures a first child whose inherited stderr stays open while the
     /// harness starts a second generation of the same extension.
-    fn configure_respawn_stderr_overlap(&self) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    fn configure_respawn_stderr_overlap(
+        &self,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
         let script = self.temp.path().join("respawn-stderr-overlap");
         let first_started = self.temp.path().join("respawn-first-started");
         let release_protocol = self.temp.path().join("respawn-release-protocol");
         let release_old = self.temp.path().join("respawn-release-old-stderr");
         let second_started = self.temp.path().join("respawn-second-started");
         let old_written = self.temp.path().join("respawn-old-written");
+        let second_pid_staged = self.temp.path().join("respawn-second-pid-staged");
+        let release_second_pid = self.temp.path().join("respawn-release-second-pid");
+        let current_dir = std::env::current_dir().expect("test current directory");
+        let mv = std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+            .map(|directory| directory.join("mv"))
+            .map(|candidate| {
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    current_dir.join(candidate)
+                }
+            })
+            .find(|candidate| {
+                candidate.metadata().is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .expect("find absolute mv executable");
         std::fs::write(
             &script,
-            "#!/bin/sh\n\
+             "#!/bin/sh\n\
              if [ ! -e \"$2\" ]; then\n\
                printf '%s' \"$$\" > \"$2\"\n\
                (while [ ! -e \"$3\" ]; do sleep 0.01; done; printf 'stdout-protocol-private') 2>/dev/null &\n\
@@ -238,7 +266,11 @@ impl TestEnvironment {
                exec \"$1\" component ext-std-notifications\n\
              fi\n\
              printf 'new-start\\n' >&2\n\
-             printf '%s' \"$$\" > \"$5\"\n\
+             pid_tmp=\"$5.pending.$$\"\n\
+             printf '%s' \"$$\" > \"$pid_tmp\"\n\
+             : > \"$7\"\n\
+             while [ ! -e \"$8\" ]; do sleep 0.01; done\n\
+             \"$9\" \"$pid_tmp\" \"$5\"\n\
              exec \"$1\" component ext-std-notifications\n",
         )
         .expect("write respawn overlap wrapper");
@@ -261,6 +293,15 @@ impl TestEnvironment {
                 .expect("UTF-8 marker path")
                 .to_owned(),
             old_written.to_str().expect("UTF-8 marker path").to_owned(),
+            second_pid_staged
+                .to_str()
+                .expect("UTF-8 marker path")
+                .to_owned(),
+            release_second_pid
+                .to_str()
+                .expect("UTF-8 marker path")
+                .to_owned(),
+            mv.to_str().expect("UTF-8 mv path").to_owned(),
         ])
         .expect("serialize respawn overlap command");
         std::fs::write(
@@ -276,6 +317,8 @@ impl TestEnvironment {
             release_old,
             second_started,
             old_written,
+            second_pid_staged,
+            release_second_pid,
         )
     }
 
@@ -421,8 +464,15 @@ fn fixed_session_stderr_mirror_does_not_reinterpret_empty_tau_log() {
 #[test]
 fn fixed_session_stderr_mirror_attributes_real_respawn_overlap() {
     let environment = TestEnvironment::new();
-    let (first_pid_path, release_protocol, release_old, second_started, old_written) =
-        environment.configure_respawn_stderr_overlap();
+    let (
+        first_pid_path,
+        release_protocol,
+        release_old,
+        second_started,
+        old_written,
+        second_pid_staged,
+        release_second_pid,
+    ) = environment.configure_respawn_stderr_overlap();
     let session_id = "stderr-respawn-overlap";
     let mut command = environment.command();
     command.args([
@@ -462,6 +512,18 @@ fn fixed_session_stderr_mirror_attributes_real_respawn_overlap() {
         .expect("terminate first extension generation");
     std::fs::write(&release_protocol, b"release").expect("release old protocol pipe");
     let deadline = Instant::now() + Duration::from_secs(10);
+    while !second_pid_staged.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "replacement PID publication did not stage"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !second_started.exists(),
+        "replacement PID became visible before final atomic publication"
+    );
+    std::fs::write(&release_second_pid, b"release").expect("release replacement PID publication");
     while !second_started.exists() {
         assert!(
             Instant::now() < deadline,
