@@ -4,8 +4,9 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::thread::Builder;
 use std::time::{Duration, Instant};
 
 use rustix_v1::io::Errno;
@@ -36,10 +37,56 @@ pub(crate) struct OwnedProcessGroup {
     finalized: bool,
 }
 
+/// Provisionally owns every raw process and control endpoint during setup.
+///
+/// This guard exists before any further fallible or panicking operation, so a
+/// failed watchdog-reader thread spawn cannot strand either child.
+struct ProvisionalOwnedProcessGroup {
+    pgid: u32,
+    arm: Option<UnixStream>,
+    liveness: Option<UnixStream>,
+    child: Option<Child>,
+    watchdog: Option<Child>,
+}
+
+impl ProvisionalOwnedProcessGroup {
+    /// Performs exact bounded cleanup unless ownership was transferred.
+    fn cleanup(&mut self) {
+        drop(self.arm.take());
+        drop(self.liveness.take());
+        if let Some(mut child) = self.child.take() {
+            reap_or_kill_spawn_failure(&mut child, self.pgid);
+        }
+        if let Some(mut watchdog) = self.watchdog.take() {
+            reap_or_kill_watchdog(&mut watchdog);
+        }
+    }
+}
+
+impl Drop for ProvisionalOwnedProcessGroup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 impl OwnedProcessGroup {
     /// Starts a fully specified command in a dedicated process group, then arms
     /// an external watchdog that kills only that group if this process dies.
     pub(crate) fn spawn_piped_stderr(command: &Command, temp_root: &Path) -> io::Result<Self> {
+        Self::spawn_piped_stderr_with_reader(command, temp_root, |watchdog_stdout, ready, _, _| {
+            Builder::new()
+                .name("owned-process-watchdog-reader".into())
+                .spawn(move || read_watchdog_readiness(watchdog_stdout, ready))
+                .map(|_| ())
+        })
+    }
+
+    /// Starts the group with an injectable readiness-reader spawn operation.
+    fn spawn_piped_stderr_with_reader(
+        command: &Command,
+        temp_root: &Path,
+        spawn_reader: impl FnOnce(ChildStdout, mpsc::Sender<io::Result<()>>, u32, u32) -> io::Result<()>,
+    ) -> io::Result<Self> {
         let program = command.get_program().to_owned();
         let args = command.get_args().map(OsString::from).collect::<Vec<_>>();
         let environment = command
@@ -48,7 +95,7 @@ impl OwnedProcessGroup {
             .collect::<Vec<_>>();
         let current_dir = command.get_current_dir().map(Path::to_owned);
         let watchdog_exe = std::env::current_exe()?;
-        let (mut arm_writer, arm_reader) = UnixStream::pair()?;
+        let (arm_writer, arm_reader) = UnixStream::pair()?;
         let (liveness_writer, liveness_reader) = UnixStream::pair()?;
 
         let mut launcher = Command::new("/bin/sh");
@@ -77,6 +124,24 @@ impl OwnedProcessGroup {
         }
         let child = launcher.spawn()?;
         let pgid = child.id();
+        let mut provisional = ProvisionalOwnedProcessGroup {
+            pgid,
+            arm: Some(arm_writer),
+            liveness: Some(liveness_writer),
+            child: Some(child),
+            watchdog: None,
+        };
+        let leader_start_time = process_start_time(pgid).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "blocked launcher leader identity disappeared during setup",
+            )
+        })?;
+        provisional
+            .liveness
+            .as_mut()
+            .expect("provisional liveness endpoint remains owned")
+            .write_all(format!("leader {pgid}:{leader_start_time}\n").as_bytes())?;
 
         let mut watchdog = Command::new(watchdog_exe);
         watchdog
@@ -91,52 +156,25 @@ impl OwnedProcessGroup {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .process_group(0);
-        let mut watchdog = match watchdog.spawn() {
-            Ok(watchdog) => watchdog,
-            Err(error) => {
-                drop(arm_writer);
-                let mut child = child;
-                reap_or_kill_spawn_failure(&mut child, pgid);
-                return Err(error);
-            }
-        };
-        let watchdog_stdout = watchdog.stdout.take().expect("capture watchdog readiness");
+        provisional.watchdog = Some(watchdog.spawn()?);
+        let watchdog_stdout = provisional
+            .watchdog
+            .as_mut()
+            .expect("provisional watchdog remains owned")
+            .stdout
+            .take()
+            .expect("capture watchdog readiness");
         let (watchdog_ready_tx, watchdog_ready_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(watchdog_stdout);
-            loop {
-                let mut line = Vec::new();
-                match reader.read_until(b'\n', &mut line) {
-                    Ok(0) => break,
-                    Ok(_) if line == b"WATCHDOG_READY\n" => {
-                        let _ = watchdog_ready_tx.send(Ok(()));
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = watchdog_ready_tx.send(Err(error));
-                        return;
-                    }
-                }
-            }
-            let mut sink = Vec::new();
-            let _ = reader.read_to_end(&mut sink);
-        });
+        let watchdog_pid = provisional
+            .watchdog
+            .as_ref()
+            .expect("provisional watchdog remains owned")
+            .id();
+        spawn_reader(watchdog_stdout, watchdog_ready_tx, pgid, watchdog_pid)?;
         match watchdog_ready_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                drop(arm_writer);
-                drop(liveness_writer);
-                let mut child = child;
-                reap_or_kill_spawn_failure(&mut child, pgid);
-                reap_or_kill_watchdog(&mut watchdog);
-                return Err(error);
-            }
+            Ok(Err(error)) => return Err(error),
             Err(error) => {
-                drop(arm_writer);
-                drop(liveness_writer);
-                let mut child = child;
-                reap_or_kill_spawn_failure(&mut child, pgid);
-                reap_or_kill_watchdog(&mut watchdog);
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!("watchdog did not initialize before launcher arm: {error}"),
@@ -144,24 +182,20 @@ impl OwnedProcessGroup {
             }
         }
 
-        if let Err(error) = arm_writer.write_all(b"arm\n") {
-            drop(arm_writer);
-            drop(liveness_writer);
-            let mut child = child;
-            let mut watchdog = watchdog;
-            reap_or_kill_spawn_failure(&mut child, pgid);
-            reap_or_kill_watchdog(&mut watchdog);
-            return Err(error);
-        }
-        drop(arm_writer);
+        provisional
+            .arm
+            .as_mut()
+            .expect("provisional launcher arm remains owned")
+            .write_all(b"arm\n")?;
+        drop(provisional.arm.take());
 
         Ok(Self {
             pgid,
             temp_root: temp_root.to_owned(),
-            child: Some(child),
+            child: provisional.child.take(),
             child_status: None,
-            liveness: Some(liveness_writer),
-            watchdog: Some(watchdog),
+            liveness: provisional.liveness.take(),
+            watchdog: provisional.watchdog.take(),
             group_cleaned: false,
             watchdog_root_only: false,
             finalized: false,
@@ -405,6 +439,27 @@ fn reap_or_kill_watchdog(watchdog: &mut Child) {
     let _ = wait_child_until(watchdog, Instant::now() + Duration::from_secs(2));
 }
 
+/// Drains watchdog stdout after publishing its single readiness event.
+fn read_watchdog_readiness(watchdog_stdout: ChildStdout, ready: mpsc::Sender<io::Result<()>>) {
+    let mut reader = BufReader::new(watchdog_stdout);
+    loop {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) if line == b"WATCHDOG_READY\n" => {
+                let _ = ready.send(Ok(()));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                let _ = ready.send(Err(error));
+                return;
+            }
+        }
+    }
+    let mut sink = Vec::new();
+    let _ = reader.read_to_end(&mut sink);
+}
+
 /// Reaps the watchdog within either its disarm or delegated-cleanup deadline,
 /// escalating only its exact PID when needed.
 fn reap_watchdog_bounded(watchdog: &mut Child, delegated_cleanup: bool) -> io::Result<()> {
@@ -453,18 +508,17 @@ pub(crate) fn run_watchdog_worker_from_env() {
     let temp_root =
         std::env::var_os("TAU_OWNED_PROCESS_GROUP_WATCHDOG_ROOT").expect("watchdog temporary root");
     let pgid = pgid.parse::<u32>().expect("watchdog numeric PGID");
-    let leader = rustix_pid(pgid).expect("watchdog valid leader PID");
-    let leader_pidfd = pidfd_open(leader, PidfdFlags::empty()).expect("open watchdog leader pidfd");
-    println!("WATCHDOG_READY");
-    io::stdout().flush().expect("flush watchdog readiness");
     watchdog_cleanup(
         pgid,
         Path::new(&temp_root),
-        &leader_pidfd,
         io::stdin().lock(),
         WatchdogWait {
             group_exit: true,
             tracked_exit: true,
+        },
+        || {
+            println!("WATCHDOG_READY");
+            io::stdout().flush()
         },
         |_| Ok(()),
         || Ok(()),
@@ -485,12 +539,29 @@ struct WatchdogWait {
 fn watchdog_cleanup(
     pgid: u32,
     temp_root: &Path,
-    leader_pidfd: &OwnedFd,
     mut input: impl io::BufRead,
     wait: WatchdogWait,
+    mut on_initialized: impl FnMut() -> io::Result<()>,
     mut on_leader_stopped: impl FnMut(u32) -> io::Result<()>,
     mut on_identity_wait_started: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
+    let Some((leader_pid, leader_start_time)) = read_initial_leader_frame(&mut input)? else {
+        return remove_owned_root(temp_root);
+    };
+    if leader_pid != pgid {
+        return remove_owned_root(temp_root);
+    }
+    let Some(leader) = rustix_pid(leader_pid).ok() else {
+        return remove_owned_root(temp_root);
+    };
+    let Ok(leader_pidfd) = pidfd_open(leader, PidfdFlags::empty()) else {
+        return remove_owned_root(temp_root);
+    };
+    if process_start_time(leader_pid) != Some(leader_start_time) {
+        return remove_owned_root(temp_root);
+    }
+    on_initialized()?;
+
     let mut tracked = Vec::new();
     let mut disarmed = false;
     let mut root_only = false;
@@ -532,20 +603,16 @@ fn watchdog_cleanup(
 
     let mut signaled_group = false;
     if !root_only {
-        let anchor = tracked
-            .iter()
-            .find_map(|&(pid, start_time)| (pid == pgid).then_some(start_time));
-        let anchor_matches =
-            anchor.is_none_or(|start_time| process_start_time(pgid) == Some(start_time));
+        let anchor_matches = process_start_time(pgid) == Some(leader_start_time);
         if anchor_matches {
-            match pidfd_send_signal(leader_pidfd, Signal::STOP) {
+            match pidfd_send_signal(&leader_pidfd, Signal::STOP) {
                 Ok(()) => {
                     let stop_deadline = Instant::now() + Duration::from_secs(2);
                     loop {
                         match process_state_and_start_time(pgid) {
                             Some((state, start_time))
                                 if matches!(state, "T" | "t")
-                                    && anchor.is_none_or(|anchor| anchor == start_time) =>
+                                    && leader_start_time == start_time =>
                             {
                                 on_leader_stopped(pgid)?;
                                 match signal_group(pgid, Signal::KILL) {
@@ -554,10 +621,8 @@ fn watchdog_cleanup(
                                 }
                                 break;
                             }
-                            Some((_, start_time))
-                                if anchor.is_some_and(|anchor| anchor != start_time) =>
-                            {
-                                let _ = pidfd_send_signal(leader_pidfd, Signal::CONT);
+                            Some((_, start_time)) if leader_start_time != start_time => {
+                                let _ = pidfd_send_signal(&leader_pidfd, Signal::CONT);
                                 break;
                             }
                             None => break,
@@ -565,7 +630,7 @@ fn watchdog_cleanup(
                                 std::thread::yield_now();
                             }
                             Some(_) => {
-                                let _ = pidfd_send_signal(leader_pidfd, Signal::CONT);
+                                let _ = pidfd_send_signal(&leader_pidfd, Signal::CONT);
                                 return Err(io::Error::new(
                                     io::ErrorKind::TimedOut,
                                     format!("owned group leader {pgid} did not enter SIGSTOP"),
@@ -614,6 +679,31 @@ fn watchdog_cleanup(
         }
     }
 
+    remove_owned_root(temp_root)
+}
+
+/// Accepts only one complete initial blocked-leader identity commitment.
+fn read_initial_leader_frame(input: &mut impl io::BufRead) -> io::Result<Option<(u32, u64)>> {
+    let mut frame = Vec::new();
+    let read = input.read_until(b'\n', &mut frame)?;
+    if read == 0 || !frame.ends_with(b"\n") {
+        return Ok(None);
+    }
+    frame.pop();
+    let Ok(line) = std::str::from_utf8(&frame) else {
+        return Ok(None);
+    };
+    let Some(identity) = line.strip_prefix("leader ") else {
+        return Ok(None);
+    };
+    let Some((pid, start_time)) = identity.split_once(':') else {
+        return Ok(None);
+    };
+    Ok(pid.parse::<u32>().ok().zip(start_time.parse::<u64>().ok()))
+}
+
+/// Removes the exact owned root, treating prior cleanup as success.
+fn remove_owned_root(temp_root: &Path) -> io::Result<()> {
     match std::fs::remove_dir_all(temp_root) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -628,20 +718,18 @@ pub(crate) fn watchdog_rejects_mismatched_anchor(temp_root: &Path) -> io::Result
     let mut canary = BoundedCanary::spawn()?;
     let result = (|| {
         let pgid = canary.pgid();
-        let leader = rustix_pid(pgid)?;
         let start_time = process_start_time(pgid)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "canary identity"))?;
-        let leader_pidfd = pidfd_open(leader, PidfdFlags::empty())?;
-        let control = format!("track {pgid}:{}\n", start_time.saturating_add(1));
+        let control = format!("leader {pgid}:{}\n", start_time.saturating_add(1));
         watchdog_cleanup(
             pgid,
             temp_root,
-            &leader_pidfd,
             io::Cursor::new(control.into_bytes()),
             WatchdogWait {
                 group_exit: false,
                 tracked_exit: false,
             },
+            || Ok(()),
             |_| Ok(()),
             || Ok(()),
         )?;
@@ -658,21 +746,19 @@ pub(crate) fn watchdog_confirms_matching_anchor_stopped(temp_root: &Path) -> io:
     let mut canary = BoundedCanary::spawn()?;
     let result = (|| {
         let pgid = canary.pgid();
-        let leader = rustix_pid(pgid)?;
         let start_time = process_start_time(pgid)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "canary identity"))?;
-        let leader_pidfd = pidfd_open(leader, PidfdFlags::empty())?;
-        let control = format!("track {pgid}:{start_time}\n");
+        let control = format!("leader {pgid}:{start_time}\n");
         let mut observed_stopped_match = false;
         watchdog_cleanup(
             pgid,
             temp_root,
-            &leader_pidfd,
             io::Cursor::new(control.into_bytes()),
             WatchdogWait {
                 group_exit: false,
                 tracked_exit: false,
             },
+            || Ok(()),
             |stopped_pid| {
                 observed_stopped_match = process_state_and_start_time(stopped_pid).is_some_and(
                     |(state, observed_start)| {
@@ -701,17 +787,77 @@ pub(crate) fn child_reap_poll_survives_transient_none() -> io::Result<bool> {
     Ok(result.is_some() && polls == 2)
 }
 
+/// Proves a readiness-reader spawn failure unwinds through provisional
+/// ownership and boundedly reaps both raw children.
+pub(crate) fn reader_spawn_failure_reaps_provisional_children(
+    command: &Command,
+    temp_root: &Path,
+) -> io::Result<bool> {
+    let mut identities = None;
+    let result = OwnedProcessGroup::spawn_piped_stderr_with_reader(
+        command,
+        temp_root,
+        |_, _, pgid, watchdog_pid| {
+            identities = Some((
+                (pgid, process_start_time(pgid)),
+                (watchdog_pid, process_start_time(watchdog_pid)),
+            ));
+            Err(io::Error::other("injected watchdog reader spawn failure"))
+        },
+    );
+    if result.is_ok() {
+        return Ok(false);
+    }
+    let Some(((pgid, Some(pgid_start)), (watchdog_pid, Some(watchdog_start)))) = identities else {
+        return Ok(false);
+    };
+    let gone = poll_until(Instant::now() + Duration::from_secs(2), || {
+        let pgid_gone = process_start_time(pgid) != Some(pgid_start);
+        let watchdog_gone = process_start_time(watchdog_pid) != Some(watchdog_start);
+        Ok((pgid_gone && watchdog_gone).then_some(()))
+    })?
+    .is_some();
+    Ok(gone && !group_exists(pgid)?)
+}
+
+/// Proves EOF during the initial identity commitment grants no numeric PGID
+/// authority, even when that number currently names a live unrelated group.
+pub(crate) fn watchdog_rejects_incomplete_initial_identity(temp_root: &Path) -> io::Result<bool> {
+    let mut canary = BoundedCanary::spawn()?;
+    let result = (|| {
+        let pgid = canary.pgid();
+        watchdog_cleanup(
+            pgid,
+            temp_root,
+            io::Cursor::new(format!("leader {pgid}:").into_bytes()),
+            WatchdogWait {
+                group_exit: true,
+                tracked_exit: true,
+            },
+            || Err(io::Error::other("incomplete identity initialized watchdog")),
+            |_| {
+                Err(io::Error::other(
+                    "incomplete identity signaled numeric group",
+                ))
+            },
+            || Err(io::Error::other("incomplete identity entered numeric wait")),
+        )?;
+        Ok(canary.is_running()? && !temp_root.exists())
+    })();
+    let cleanup = canary.cleanup();
+    cleanup?;
+    result
+}
+
 /// Proves root-only cleanup waits for exact tracked identity disappearance
 /// without signaling or querying the now-stale numeric process group.
 pub(crate) fn watchdog_waits_for_root_only_tracked_identity(temp_root: &Path) -> io::Result<bool> {
     let mut canary = BoundedCanary::spawn()?;
     let result = (|| {
         let pgid = canary.pgid();
-        let leader = rustix_pid(pgid)?;
         let start_time = process_start_time(pgid)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "canary identity"))?;
-        let leader_pidfd = pidfd_open(leader, PidfdFlags::empty())?;
-        let control = format!("track {pgid}:{start_time}\nroot-only\n");
+        let control = format!("leader {pgid}:{start_time}\ntrack {pgid}:{start_time}\nroot-only\n");
         let (entered_tx, entered_rx) = mpsc::sync_channel(0);
         let (done_tx, done_rx) = mpsc::sync_channel(1);
 
@@ -720,12 +866,12 @@ pub(crate) fn watchdog_waits_for_root_only_tracked_identity(temp_root: &Path) ->
                 let result = watchdog_cleanup(
                     pgid,
                     temp_root,
-                    &leader_pidfd,
                     io::Cursor::new(control.into_bytes()),
                     WatchdogWait {
                         group_exit: true,
                         tracked_exit: true,
                     },
+                    || Ok(()),
                     |_| Ok(()),
                     || {
                         entered_tx.send(()).map_err(|_| {

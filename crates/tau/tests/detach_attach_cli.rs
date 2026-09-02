@@ -1,11 +1,12 @@
 use std::fs::{File, Permissions};
-use std::io::{BufRead as _, BufReader, Read as _, Write};
+use std::io::{self, BufRead as _, BufReader, Read as _, Write};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::thread::Builder;
 use std::time::{Duration, Instant};
 
 use rustix_openpty::rustix::termios::Winsize;
@@ -16,7 +17,8 @@ mod owned_process_group;
 
 use owned_process_group::{
     OwnedProcessGroup, child_reap_poll_survives_transient_none, group_exists,
-    run_watchdog_worker_from_env, watchdog_confirms_matching_anchor_stopped,
+    reader_spawn_failure_reaps_provisional_children, run_watchdog_worker_from_env,
+    watchdog_confirms_matching_anchor_stopped, watchdog_rejects_incomplete_initial_identity,
     watchdog_rejects_mismatched_anchor, watchdog_waits_for_root_only_tracked_identity,
 };
 
@@ -539,13 +541,16 @@ fn owned_process_group_cleanup_worker() {
     let mut server = OwnedProcessGroup::spawn_piped_stderr(&command, environment.temp.path())
         .expect("spawn guarded cleanup worker server");
     let stderr = server.take_stderr().expect("capture cleanup worker stderr");
-    std::thread::spawn(move || {
-        let mut stderr = stderr;
-        let mut sink = Vec::new();
-        stderr
-            .read_to_end(&mut sink)
-            .expect("drain cleanup worker stderr");
-    });
+    Builder::new()
+        .name("owned-process-worker-stderr".into())
+        .spawn(move || {
+            let mut stderr = stderr;
+            let mut sink = Vec::new();
+            stderr
+                .read_to_end(&mut sink)
+                .expect("drain cleanup worker stderr");
+        })
+        .expect("spawn cleanup worker stderr reader");
     let metadata = environment.wait_for_metadata();
     let socket = metadata.with_extension("sock");
     let first_pid =
@@ -665,6 +670,32 @@ fn owned_process_group_retries_transient_child_reap_poll() {
     );
 }
 
+/// A fallible readiness-reader spawn occurs only after provisional RAII owns
+/// both raw children, so injected failure cannot strand either process.
+#[test]
+fn owned_process_group_reader_spawn_failure_reaps_provisional_children() {
+    let root = tempfile::tempdir().expect("reader-spawn failure temporary root");
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "exec sleep 30"]);
+    assert!(
+        reader_spawn_failure_reaps_provisional_children(&command, root.path())
+            .expect("run reader-spawn failure oracle"),
+        "provisional owner did not reap both children after reader spawn failure"
+    );
+}
+
+/// EOF in the initial leader frame never grants numeric authority over a live
+/// group that happens to use the supplied PGID.
+#[test]
+fn owned_process_group_rejects_incomplete_initial_identity() {
+    let root = tempfile::tempdir().expect("incomplete initial identity temporary root");
+    assert!(
+        watchdog_rejects_incomplete_initial_identity(root.path())
+            .expect("run incomplete initial identity oracle"),
+        "incomplete initial identity observed or signaled the numeric process group"
+    );
+}
+
 /// Root-only cleanup revokes numeric-PGID signaling but retains exact tracked
 /// identity observation until the process disappears.
 #[test]
@@ -709,6 +740,22 @@ fn owned_process_group_cleans_if_sigterm_follows_group_cleanup() {
     assert_owned_process_group_worker_cleanup("sigterm-after-group-cleanup");
 }
 
+/// A missing worker barrier fails at its local deadline, and the oracle's Drop
+/// guard still kills and reaps the exact blocked worker and drains stderr.
+#[test]
+fn owned_process_group_worker_barrier_timeout_cleans_raw_worker() {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "IFS= read -r release"]);
+    let worker = BoundedCleanupWorker::spawn(command).expect("spawn blocked barrier worker");
+    let identity = process_identity(worker.id()).expect("blocked barrier worker identity");
+    let error = worker
+        .recv_line_until(Instant::now(), "injected barrier")
+        .expect_err("missing worker barrier must time out");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    drop(worker);
+    assert_identity_gone(identity, "injected worker barrier timeout");
+}
+
 /// One PID and Linux start time, used to reject PID reuse in cleanup oracles.
 #[derive(Clone, Copy, Debug)]
 struct ProcessIdentity {
@@ -734,65 +781,229 @@ impl ProcessIdentity {
     }
 }
 
+/// One line or terminal condition from the worker's stdout reader.
+enum WorkerLine {
+    Line(String),
+    Eof,
+    Error(io::Error),
+}
+
+/// Owns a nested lifecycle worker and both pipe readers across every panic and
+/// early return.
+struct BoundedCleanupWorker {
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
+    stdout: mpsc::Receiver<WorkerLine>,
+    stderr: Option<mpsc::Receiver<(io::Result<usize>, Vec<u8>)>>,
+}
+
+impl BoundedCleanupWorker {
+    /// Spawns one worker and installs bounded ownership before reader setup.
+    fn spawn(mut command: Command) -> io::Result<Self> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn()?;
+        let mut owner = Self {
+            child: Some(child),
+            stdin: None,
+            stdout: mpsc::channel().1,
+            stderr: None,
+        };
+        owner.stdin = owner
+            .child
+            .as_mut()
+            .expect("worker remains provisionally owned")
+            .stdin
+            .take();
+        let stdout = owner
+            .child
+            .as_mut()
+            .expect("worker remains provisionally owned")
+            .stdout
+            .take()
+            .expect("capture cleanup worker stdout");
+        let stderr = owner
+            .child
+            .as_mut()
+            .expect("worker remains provisionally owned")
+            .stderr
+            .take()
+            .expect("capture cleanup worker stderr");
+
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        Builder::new()
+            .name("owned-process-oracle-stdout".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            let _ = stdout_tx.send(WorkerLine::Eof);
+                            break;
+                        }
+                        Ok(_) => {
+                            if stdout_tx.send(WorkerLine::Line(line)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = stdout_tx.send(WorkerLine::Error(error));
+                            break;
+                        }
+                    }
+                }
+            })?;
+        owner.stdout = stdout_rx;
+
+        let (stderr_tx, stderr_rx) = mpsc::channel();
+        Builder::new()
+            .name("owned-process-oracle-stderr".into())
+            .spawn(move || {
+                let mut stderr = stderr;
+                let mut bytes = Vec::new();
+                let result = stderr.read_to_end(&mut bytes);
+                let _ = stderr_tx.send((result, bytes));
+            })?;
+        owner.stderr = Some(stderr_rx);
+        Ok(owner)
+    }
+
+    /// Returns the direct worker PID while it remains owned.
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("worker remains owned").id()
+    }
+
+    /// Receives one whole line before the caller's local barrier deadline.
+    fn recv_line_until(&self, deadline: Instant, boundary: &str) -> io::Result<Option<String>> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.stdout.recv_timeout(remaining) {
+            Ok(WorkerLine::Line(line)) => Ok(Some(line)),
+            Ok(WorkerLine::Eof) => Ok(None),
+            Ok(WorkerLine::Error(error)) => Err(error),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("cleanup worker did not publish {boundary} before deadline"),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("cleanup worker {boundary} reader disconnected"),
+            )),
+        }
+    }
+
+    /// Closes the worker release pipe.
+    fn close_stdin(&mut self) {
+        drop(self.stdin.take());
+    }
+
+    /// Waits for the direct worker only within the caller's deadline.
+    fn wait_until(&mut self, deadline: Instant) -> io::Result<Option<ExitStatus>> {
+        let child = self.child.as_mut().expect("worker remains owned");
+        loop {
+            if let Some(status) = child.try_wait()? {
+                self.child.take();
+                return Ok(Some(status));
+            }
+            if deadline <= Instant::now() {
+                return Ok(None);
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Collects the complete stderr stream before the local deadline.
+    fn collect_stderr_until(&mut self, deadline: Instant) -> io::Result<Vec<u8>> {
+        let receiver = self
+            .stderr
+            .as_ref()
+            .expect("cleanup worker stderr remains owned");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (result, stderr) = receiver.recv_timeout(remaining).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("cleanup worker stderr did not close before deadline: {error}"),
+            )
+        })?;
+        self.stderr.take();
+        result?;
+        Ok(stderr)
+    }
+
+    /// Kills and reaps the exact worker, then gives both readers a bounded
+    /// opportunity to observe pipe closure.
+    fn cleanup(&mut self) {
+        self.close_stdin();
+        if let Some(child) = self.child.as_mut() {
+            let _ = signal_pid(child.id(), Signal::KILL);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        }
+        self.child.take();
+        let reader_deadline = Instant::now() + Duration::from_secs(2);
+        while self
+            .recv_line_until(reader_deadline, "stdout EOF")
+            .ok()
+            .flatten()
+            .is_some()
+        {}
+        if self.stderr.is_some() {
+            let _ = self.collect_stderr_until(reader_deadline);
+        }
+    }
+}
+
+impl Drop for BoundedCleanupWorker {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 /// Runs one exact nested worker and proves that all captured processes and
 /// resources disappear after the selected failure mode.
 fn assert_owned_process_group_worker_cleanup(mode: &str) {
-    let mut worker =
-        Command::new(std::env::current_exe().expect("current integration test binary"))
-            .args([
-                "--exact",
-                "owned_process_group_cleanup_worker",
-                "--nocapture",
-            ])
-            .env("TAU_OWNED_PROCESS_GROUP_WORKER", mode)
-            .env("CARGO_BIN_EXE_tau", env!("CARGO_BIN_EXE_tau"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn exact cleanup worker");
-    let stdout = worker.stdout.take().expect("capture cleanup worker stdout");
-    let mut worker_stderr = worker.stderr.take().expect("capture cleanup worker stderr");
-    let (stderr_tx, stderr_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut stderr = Vec::new();
-        let result = worker_stderr.read_to_end(&mut stderr);
-        let _ = stderr_tx.send((result, stderr));
-    });
-    let mut stdout = BufReader::new(stdout);
-    let mut readiness = String::new();
-    loop {
-        readiness.clear();
-        stdout
-            .read_line(&mut readiness)
-            .expect("read cleanup worker readiness");
-        if readiness.starts_with("READY\t") {
-            break;
-        }
-        if readiness.is_empty() {
-            let status = worker.wait().expect("reap unready cleanup worker");
-            let (read_result, stderr) = stderr_rx
-                .recv_timeout(Duration::from_secs(2))
+    let mut command =
+        Command::new(std::env::current_exe().expect("current integration test binary"));
+    command
+        .args([
+            "--exact",
+            "owned_process_group_cleanup_worker",
+            "--nocapture",
+        ])
+        .env("TAU_OWNED_PROCESS_GROUP_WORKER", mode)
+        .env("CARGO_BIN_EXE_tau", env!("CARGO_BIN_EXE_tau"));
+    let mut worker = BoundedCleanupWorker::spawn(command).expect("spawn exact cleanup worker");
+    let readiness_deadline = Instant::now() + Duration::from_secs(10);
+    let readiness = loop {
+        let Some(line) = worker
+            .recv_line_until(readiness_deadline, "READY")
+            .expect("read cleanup worker readiness before deadline")
+        else {
+            let stderr = worker
+                .collect_stderr_until(readiness_deadline)
                 .expect("collect unready cleanup worker stderr");
-            read_result.expect("read unready cleanup worker stderr");
             panic!(
-                "cleanup worker exited before readiness: {status}\n{}",
+                "cleanup worker exited before readiness\n{}",
                 String::from_utf8_lossy(&stderr)
             );
+        };
+        if line.starts_with("READY\t") {
+            break line;
         }
-    }
+    };
     let readiness = parse_cleanup_readiness(&readiness);
 
     if mode == "sigterm-after-group-cleanup" {
+        let boundary_deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let mut boundary = String::new();
-            stdout
-                .read_line(&mut boundary)
-                .expect("read cleanup-order boundary");
-            assert!(
-                !boundary.is_empty(),
-                "cleanup worker exited before group-cleaned boundary"
-            );
+            let boundary = worker
+                .recv_line_until(boundary_deadline, "GROUP_CLEANED")
+                .expect("read cleanup-order boundary before deadline")
+                .expect("cleanup worker exited before group-cleaned boundary");
             if boundary == "GROUP_CLEANED\n" {
                 break;
             }
@@ -801,27 +1012,27 @@ fn assert_owned_process_group_worker_cleanup(mode: &str) {
     if mode.starts_with("sigterm") {
         signal_pid(worker.id(), Signal::TERM).expect("SIGTERM cleanup worker");
     }
-    drop(worker.stdin.take());
+    worker.close_stdin();
 
-    let (eof_tx, eof_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut remainder = Vec::new();
-        let result = stdout.read_to_end(&mut remainder);
-        let _ = eof_tx.send((result, remainder));
-    });
-    let (read_result, remainder) = eof_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("worker and watchdog close readiness pipe before deadline");
-    read_result.expect("read cleanup worker output through EOF");
-    let status = worker.wait().expect("reap cleanup worker");
-    let (stderr_result, worker_stderr) = stderr_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("collect cleanup worker stderr");
-    stderr_result.expect("read cleanup worker stderr");
+    let completion_deadline = Instant::now() + Duration::from_secs(10);
+    let mut remainder = String::new();
+    while let Some(line) = worker
+        .recv_line_until(completion_deadline, "stdout EOF")
+        .expect("worker and watchdog close readiness pipe before deadline")
+    {
+        remainder.push_str(&line);
+    }
+    let status = worker
+        .wait_until(completion_deadline)
+        .expect("poll cleanup worker status")
+        .expect("reap cleanup worker before deadline");
+    let worker_stderr = worker
+        .collect_stderr_until(Instant::now() + Duration::from_secs(2))
+        .expect("collect cleanup worker stderr before deadline");
     assert!(
         !status.success(),
         "{mode} cleanup worker unexpectedly succeeded.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&remainder),
+        remainder,
         String::from_utf8_lossy(&worker_stderr)
     );
     if mode.starts_with("sigterm") {
