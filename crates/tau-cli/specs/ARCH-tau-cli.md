@@ -189,7 +189,13 @@ that paused state when ordinary setup or resume fails so the UI cannot remain
 permanently muted. Foreground process-group restoration is the narrow exception:
 if Tau cannot confirm that it regained foreground ownership after settling the
 child, it must not resume raw input or redraw and must exit only the affected
-interactive attachment without terminal cleanup writes. Abort paths for
+interactive attachment without terminal cleanup writes. Before teardown, a
+non-ephemeral UI writes only a fixed restoration failure class and optional
+numeric errno to its private `ui.log`; failures without a syscall errno use the
+exact bounded value `restoration_errno=none`. Ephemeral mode retains its
+no-artifact sink behavior.
+The diagnostic does not enter protocol, replay, or semantic persistence.
+Abort paths for
 terminal-releasing shell actions should terminate the owned process group before
 Tau resumes raw-mode/redraw ownership. Redraw and input coordination assumes a
 single foreground reader thread; background renderer threads must not write

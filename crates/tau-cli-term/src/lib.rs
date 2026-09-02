@@ -21,6 +21,7 @@ mod tests;
 use std::io;
 use std::sync::{Arc, Mutex};
 
+pub use bounded_command::ForegroundRestorationDiagnostic;
 use bounded_command::{
     BoundedCommandError, ProcessOwnership, run_with_bounded_stdout,
     run_with_bounded_stdout_after_spawn, run_with_inherited_stdio,
@@ -221,23 +222,37 @@ pub enum ExternalProgramError {
     /// Ordinary command failure after terminal ownership was restored.
     Command(String),
     /// Fatal failure because Tau could not confirm foreground ownership.
-    ForegroundOwnershipUnconfirmed(String),
+    ForegroundOwnershipUnconfirmed {
+        /// Complete user-facing failure message retained for top-level
+        /// reporting.
+        message: String,
+        /// Bounded private diagnostic for the failed restoration syscall.
+        diagnostic: ForegroundRestorationDiagnostic,
+    },
 }
 
 impl ExternalProgramError {
     /// Returns whether the interactive attachment must exit without resuming.
     #[must_use]
     pub fn is_foreground_ownership_unconfirmed(&self) -> bool {
-        matches!(self, Self::ForegroundOwnershipUnconfirmed(_))
+        matches!(self, Self::ForegroundOwnershipUnconfirmed { .. })
+    }
+
+    /// Returns the bounded restoration diagnostic for an ownership fail-stop.
+    #[must_use]
+    pub fn foreground_restoration_diagnostic(&self) -> Option<ForegroundRestorationDiagnostic> {
+        match self {
+            Self::ForegroundOwnershipUnconfirmed { diagnostic, .. } => Some(*diagnostic),
+            Self::Command(_) => None,
+        }
     }
 }
 
 impl std::fmt::Display for ExternalProgramError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Command(error) | Self::ForegroundOwnershipUnconfirmed(error) => {
-                formatter.write_str(error)
-            }
+            Self::Command(error) => formatter.write_str(error),
+            Self::ForegroundOwnershipUnconfirmed { message, .. } => formatter.write_str(message),
         }
     }
 }
@@ -246,10 +261,12 @@ impl std::error::Error for ExternalProgramError {}
 
 impl From<BoundedCommandError> for ExternalProgramError {
     fn from(error: BoundedCommandError) -> Self {
-        if error.is_foreground_ownership_unconfirmed() {
-            Self::ForegroundOwnershipUnconfirmed(error.to_string())
-        } else {
-            Self::Command(error.to_string())
+        match error.foreground_restoration_diagnostic() {
+            Some(diagnostic) => Self::ForegroundOwnershipUnconfirmed {
+                message: error.to_string(),
+                diagnostic,
+            },
+            None => Self::Command(error.to_string()),
         }
     }
 }
@@ -264,10 +281,18 @@ impl From<String> for ExternalProgramError {
 /// fail-stop.
 #[must_use]
 pub fn is_foreground_ownership_unconfirmed(error: &io::Error) -> bool {
+    foreground_restoration_diagnostic(error).is_some()
+}
+
+/// Returns the bounded restoration diagnostic from an input I/O fail-stop.
+#[must_use]
+pub fn foreground_restoration_diagnostic(
+    error: &io::Error,
+) -> Option<ForegroundRestorationDiagnostic> {
     error
         .get_ref()
         .and_then(|source| source.downcast_ref::<BoundedCommandError>())
-        .is_some_and(BoundedCommandError::is_foreground_ownership_unconfirmed)
+        .and_then(BoundedCommandError::foreground_restoration_diagnostic)
 }
 
 /// Higher-level terminal prompt with completion support.

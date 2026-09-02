@@ -184,9 +184,13 @@ fn picker_foreground_restoration_failure_is_fatal() {
         |_| None,
         |_| {
             Err(
-                tau_cli_term::ExternalProgramError::ForegroundOwnershipUnconfirmed(
-                    "persistent restore failure".to_owned(),
-                ),
+                tau_cli_term::ExternalProgramError::ForegroundOwnershipUnconfirmed {
+                    message: "persistent restore failure".to_owned(),
+                    diagnostic:
+                        tau_cli_term::ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(
+                            libc::EIO,
+                        ),
+                },
             )
         },
         || None,
@@ -196,7 +200,12 @@ fn picker_foreground_restoration_failure_is_fatal() {
 
     assert_eq!(
         result,
-        AgentPickerResolution::Fatal("persistent restore failure".to_owned())
+        AgentPickerResolution::Fatal {
+            message: "persistent restore failure".to_owned(),
+            diagnostic: tau_cli_term::ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(
+                libc::EIO,
+            ),
+        }
     );
 }
 

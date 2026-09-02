@@ -1505,9 +1505,14 @@ fn run_chat_session(
             agent_estimated_api_costs,
         },
     );
+    let mut foreground_restoration_diagnostic = None;
     let (exit, attachment_error) = match input_result {
         Ok(exit) => (exit, None),
-        Err(CliError::ForegroundOwnershipUnconfirmed(message)) => {
+        Err(CliError::ForegroundOwnershipUnconfirmed {
+            message,
+            diagnostic,
+        }) => {
+            foreground_restoration_diagnostic = Some(diagnostic);
             (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message))
         }
         Err(CliError::TerminalOutputFailed(message)) => {
@@ -1530,6 +1535,10 @@ fn run_chat_session(
     }
     let _ = debounce_thread.join();
 
+    if let Some(diagnostic) = foreground_restoration_diagnostic {
+        ui_logging.write_foreground_restoration_failure(diagnostic);
+    }
+
     let reason = shutdown_ui_connection(
         writer,
         shutdown,
@@ -1544,7 +1553,11 @@ fn run_chat_session(
 
     match (exit, attachment_error) {
         (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message)) => {
-            Err(CliError::ForegroundOwnershipUnconfirmed(message))
+            Err(CliError::ForegroundOwnershipUnconfirmed {
+                message,
+                diagnostic: foreground_restoration_diagnostic
+                    .expect("foreground fail-stop must retain a diagnostic"),
+            })
         }
         (InputLoopExit::TerminalOutputFailed, Some(message)) => {
             Err(CliError::TerminalOutputFailed(message))
@@ -2827,8 +2840,11 @@ impl<'a> TerminalInputSession<'a> {
     fn run(&mut self) -> Result<InputLoopExit, CliError> {
         loop {
             let event = self.term.get_next_event().map_err(|error| {
-                if tau_cli_term::is_foreground_ownership_unconfirmed(&error) {
-                    CliError::ForegroundOwnershipUnconfirmed(error.to_string())
+                if let Some(diagnostic) = tau_cli_term::foreground_restoration_diagnostic(&error) {
+                    CliError::ForegroundOwnershipUnconfirmed {
+                        message: error.to_string(),
+                        diagnostic,
+                    }
                 } else if tau_cli_term::is_output_failure(&error) {
                     CliError::TerminalOutputFailed(error.to_string())
                 } else {
@@ -3869,8 +3885,14 @@ impl<'a> TerminalInputSession<'a> {
                 self.output
                     .command_feedback(&format!("agent-picker: {message}"));
             }
-            AgentPickerResolution::Fatal(message) => {
-                return Err(CliError::ForegroundOwnershipUnconfirmed(message));
+            AgentPickerResolution::Fatal {
+                message,
+                diagnostic,
+            } => {
+                return Err(CliError::ForegroundOwnershipUnconfirmed {
+                    message,
+                    diagnostic,
+                });
             }
             AgentPickerResolution::Select(agent_id) => {
                 if self.selected_agent_id().as_ref() != Some(&agent_id) {
@@ -4060,7 +4082,12 @@ enum AgentPickerResolution {
     /// Preserve selection and draft while showing this notice.
     Notice(String),
     /// Exit the attachment because foreground ownership remains unconfirmed.
-    Fatal(String),
+    Fatal {
+        /// Complete user-facing failure message.
+        message: String,
+        /// Bounded private restoration diagnostic.
+        diagnostic: tau_cli_term::ForegroundRestorationDiagnostic,
+    },
     /// Switch to this freshly revalidated agent.
     Select(tau_proto::AgentId),
 }
@@ -4092,7 +4119,12 @@ fn resolve_agent_picker(
         Ok(Some(row)) => row,
         Ok(None) => return AgentPickerResolution::NoChange,
         Err(error) if error.is_foreground_ownership_unconfirmed() => {
-            return AgentPickerResolution::Fatal(error.to_string());
+            return AgentPickerResolution::Fatal {
+                message: error.to_string(),
+                diagnostic: error
+                    .foreground_restoration_diagnostic()
+                    .expect("foreground fail-stop must retain a diagnostic"),
+            };
         }
         Err(error) => return AgentPickerResolution::Notice(error.to_string()),
     };

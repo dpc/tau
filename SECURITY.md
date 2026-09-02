@@ -1197,7 +1197,14 @@ and revalidates the selected agent. Restoration failure preserves the primary
 picker outcome and the restoration error; Drop retries only as best-effort
 cleanup. When foreground ownership remains unconfirmed, Tau does not resume raw
 input, redraw, or terminal cleanup, disconnects only that UI attachment, and
-leaves an owned harness daemon running. Cancellation, ordinary subprocess/RPC
+leaves an owned harness daemon running. Checked restoration retries only `EINTR`,
+binds handoff and restoration to Tau's actual process group, rejects an initial
+foreground mismatch, accepts only that actual group as already restored, and
+otherwise retains the fail-stop. Before teardown, the private UI log records one fixed restoration
+class and optional numeric errno for non-ephemeral UIs; failures without a
+syscall errno use the exact bounded value `restoration_errno=none`. Ephemeral
+mode retains its no-artifact sink behavior. Neither field enters protocol, replay, or semantic
+persistence. Cancellation, ordinary subprocess/RPC
 errors after confirmed restoration, and stale selection are no-mutation outcomes.
 Focused safeguards cover bounded settlement and group cleanup, the high-level
 no-resume guard, attachment-fatal routing, and raw-terminal paused Drop/no-write

@@ -1983,7 +1983,10 @@ fn turn_stats_retain_only_scalar_projection_with_exact_legacy_rendering() {
 /// the process cannot confirm that it owns the terminal.
 #[test]
 fn foreground_ownership_failure_suppresses_top_level_terminal_report() {
-    let error = CliError::ForegroundOwnershipUnconfirmed("restore failed".to_owned());
+    let error = CliError::ForegroundOwnershipUnconfirmed {
+        message: "restore failed".to_owned(),
+        diagnostic: tau_cli_term::ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(libc::EIO),
+    };
 
     assert!(!error.should_report_to_terminal());
 }

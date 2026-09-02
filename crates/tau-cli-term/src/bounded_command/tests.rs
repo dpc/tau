@@ -1,7 +1,318 @@
 use std::sync::atomic::Ordering;
-use std::{cell as path_std_cell, process as path_std_process, time as path_std_time};
+use std::{
+    cell as path_std_cell, fs as path_std_fs, io as path_std_io, process as path_std_process,
+    time as path_std_time,
+};
+
+use nix::unistd::Pid;
 
 use super::*;
+
+/// Foreground handoff binds ownership to Tau's actual process group, rejects an
+/// initial mismatch before `tcsetpgrp`, and confirms only Tau after set
+/// failure.
+#[cfg(unix)]
+#[test]
+fn foreground_claim_injected_actual_tau_group_matrix() {
+    let tau_pgid = Pid::from_raw(4100);
+    let other_pgid = Pid::from_raw(4200);
+
+    let set_attempts = path_std_cell::Cell::new(0);
+    let claimed = claim_foreground_process_group_with(
+        tau_pgid,
+        || Err(path_nix_errno::Errno::ENOTTY),
+        || {
+            set_attempts.set(set_attempts.get() + 1);
+            Ok(())
+        },
+    )
+    .expect("no controlling terminal is a noninteractive no-handoff");
+    assert!(!claimed);
+    assert_eq!(
+        set_attempts.get(),
+        0,
+        "noninteractive detection must precede handoff"
+    );
+
+    let set_attempts = path_std_cell::Cell::new(0);
+    let error = claim_foreground_process_group_with(
+        tau_pgid,
+        || Err(path_nix_errno::Errno::EIO),
+        || {
+            set_attempts.set(set_attempts.get() + 1);
+            Ok(())
+        },
+    )
+    .expect_err("an unreadable initial foreground group must fail stop");
+    assert!(error.is_foreground_ownership_unconfirmed());
+    let diagnostic = error
+        .foreground_restoration_diagnostic()
+        .expect("initial query diagnostic");
+    assert_eq!(diagnostic.class(), "initial-foreground-unconfirmed");
+    assert_eq!(diagnostic.errno(), Some(path_nix_errno::Errno::EIO as i32));
+    assert_eq!(
+        set_attempts.get(),
+        0,
+        "failed initial query must precede handoff"
+    );
+
+    let set_attempts = path_std_cell::Cell::new(0);
+    let error = claim_foreground_process_group_with(
+        tau_pgid,
+        || Ok(other_pgid),
+        || {
+            set_attempts.set(set_attempts.get() + 1);
+            Ok(())
+        },
+    )
+    .expect_err("initial non-Tau foreground group must fail stop");
+    assert!(error.is_foreground_ownership_unconfirmed());
+    let diagnostic = error
+        .foreground_restoration_diagnostic()
+        .expect("initial mismatch diagnostic");
+    assert_eq!(diagnostic.class(), "initial-foreground-mismatch");
+    assert_eq!(diagnostic.errno(), None);
+    assert_eq!(set_attempts.get(), 0, "mismatch must precede handoff");
+
+    let get_attempts = path_std_cell::Cell::new(0);
+    let set_attempts = path_std_cell::Cell::new(0);
+    let error = claim_foreground_process_group_with(
+        tau_pgid,
+        || {
+            let attempt = get_attempts.get();
+            get_attempts.set(attempt + 1);
+            match attempt {
+                0 => Err(path_nix_errno::Errno::EINTR),
+                _ => Ok(tau_pgid),
+            }
+        },
+        || {
+            let attempt = set_attempts.get();
+            set_attempts.set(attempt + 1);
+            match attempt {
+                0 => Err(path_nix_errno::Errno::EINTR),
+                _ => Err(path_nix_errno::Errno::EPERM),
+            }
+        },
+    )
+    .expect_err("failed handoff remains an ordinary error only while Tau is foreground");
+    assert!(!error.is_foreground_ownership_unconfirmed());
+    assert_eq!(get_attempts.get(), 3);
+    assert_eq!(set_attempts.get(), 2);
+
+    let get_attempts = path_std_cell::Cell::new(0);
+    let error = claim_foreground_process_group_with(
+        tau_pgid,
+        || {
+            let attempt = get_attempts.get();
+            get_attempts.set(attempt + 1);
+            if attempt == 0 {
+                Ok(tau_pgid)
+            } else {
+                Ok(other_pgid)
+            }
+        },
+        || Err(path_nix_errno::Errno::EPERM),
+    )
+    .expect_err("changed non-Tau foreground group must fail stop");
+    assert!(error.is_foreground_ownership_unconfirmed());
+    let diagnostic = error
+        .foreground_restoration_diagnostic()
+        .expect("changed-foreground diagnostic");
+    assert_eq!(diagnostic.class(), "foreground-handoff-unconfirmed");
+    assert_eq!(
+        diagnostic.errno(),
+        Some(path_nix_errno::Errno::EPERM as i32)
+    );
+}
+
+/// Restoration retries only interrupted syscalls, accepts an already-restored
+/// foreground group, and retains the original non-EINTR `tcsetpgrp` errno.
+#[cfg(unix)]
+#[test]
+fn foreground_restoration_injected_job_control_matrix() {
+    let target = Pid::from_raw(4100);
+
+    let set_attempts = path_std_cell::Cell::new(0);
+    let get_attempts = path_std_cell::Cell::new(0);
+    restore_foreground_process_group_with(
+        target,
+        || {
+            let attempt = set_attempts.get();
+            set_attempts.set(attempt + 1);
+            if attempt < 2 {
+                Err(path_nix_errno::Errno::EINTR)
+            } else {
+                Ok(())
+            }
+        },
+        || {
+            get_attempts.set(get_attempts.get() + 1);
+            Ok(target)
+        },
+    )
+    .expect("EINTR retries should reach successful restoration");
+    assert_eq!(set_attempts.get(), 3);
+    assert_eq!(get_attempts.get(), 0);
+
+    let error = restore_foreground_process_group_with(
+        target,
+        || Err(path_nix_errno::Errno::ENOTTY),
+        || Err(path_nix_errno::Errno::ENOTTY),
+    )
+    .expect_err("lost controlling terminal must retain fail-stop");
+    assert_eq!(
+        error.diagnostic(),
+        ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(
+            path_nix_errno::Errno::ENOTTY as i32
+        )
+    );
+
+    let get_attempts = path_std_cell::Cell::new(0);
+    restore_foreground_process_group_with(
+        target,
+        || Err(path_nix_errno::Errno::EPERM),
+        || {
+            let attempt = get_attempts.get();
+            get_attempts.set(attempt + 1);
+            if attempt == 0 {
+                Err(path_nix_errno::Errno::EINTR)
+            } else {
+                Ok(target)
+            }
+        },
+    )
+    .expect("Tau already in the foreground confirms ownership");
+    assert_eq!(get_attempts.get(), 2);
+
+    let set_attempts = path_std_cell::Cell::new(0);
+    let error = restore_foreground_process_group_with(
+        target,
+        || {
+            set_attempts.set(set_attempts.get() + 1);
+            Err(path_nix_errno::Errno::EAGAIN)
+        },
+        || Ok(Pid::from_raw(4200)),
+    )
+    .expect_err("a different foreground group must retain fail-stop");
+    assert_eq!(set_attempts.get(), 1, "non-EINTR must not be retried");
+    assert_eq!(
+        error.diagnostic(),
+        ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(
+            path_nix_errno::Errno::EAGAIN as i32
+        )
+    );
+}
+
+/// A private PTY session exercises the same foreground process-group handoff
+/// and restoration used by fzf inside job-control hosts such as tmux.
+#[cfg(target_os = "linux")]
+#[test]
+fn pty_job_control_restores_external_foreground_owner() {
+    const CHILD_ENV: &str = "TAU_PTY_FOREGROUND_RESTORE_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        pty_job_control_restore_child();
+        return;
+    }
+
+    use std::os::unix::process::CommandExt as _;
+
+    let pty = nix::pty::openpty(None, None).expect("open private pty");
+    let slave = path_std_fs::File::from(pty.slave);
+    let mut child =
+        path_std_process::Command::new(std::env::current_exe().expect("current test executable"));
+    let test_name = format!(
+        "{}::pty_job_control_restores_external_foreground_owner",
+        module_path!()
+            .strip_prefix("tau_cli_term::")
+            .unwrap_or(module_path!())
+    );
+    child
+        .args(["--exact", &test_name, "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .stdin(path_std_process::Stdio::from(
+            slave.try_clone().expect("clone pty slave"),
+        ))
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::piped());
+    // SAFETY: the child-only hook invokes async-signal-safe session/tty syscalls
+    // against its already-installed PTY stdin before exec.
+    #[allow(unsafe_code)]
+    unsafe {
+        child.pre_exec(|| {
+            if nix::libc::setsid() == -1 {
+                return Err(path_std_io::Error::last_os_error());
+            }
+            if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                return Err(path_std_io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = child.spawn().expect("spawn PTY fixture");
+    let mut child_stderr = child.stderr.take().expect("PTY fixture stderr");
+    let deadline = path_std_time::Instant::now() + path_std_time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll PTY fixture") {
+            let mut stderr = String::new();
+            child_stderr
+                .read_to_string(&mut stderr)
+                .expect("read PTY fixture stderr");
+            assert!(
+                status.success(),
+                "PTY fixture failed with {status}: {stderr}"
+            );
+            break;
+        }
+        if deadline <= path_std_time::Instant::now() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("PTY foreground restoration fixture timed out");
+        }
+        std::thread::sleep(path_std_time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pty_job_control_restore_child() {
+    let tau_pgid = nix::unistd::getpgrp();
+    assert_eq!(
+        nix::unistd::tcgetpgrp(std::io::stdin().as_fd()).expect("initial foreground group"),
+        tau_pgid
+    );
+
+    let mut external = path_std_process::Command::new("sh");
+    external
+        .arg("-c")
+        .arg("read -r _")
+        .stdin(path_std_process::Stdio::piped());
+    configure_process_group(&mut external).expect("configure external process group");
+    let mut external = external.spawn().expect("spawn external foreground child");
+    let release_external = external.stdin.take().expect("external child stdin");
+    let external_pgid = Pid::from_raw(external.id() as i32);
+    let mut handle =
+        ProcessGroupHandle::claim_foreground(external.id()).expect("hand PTY to external child");
+    assert_eq!(
+        nix::unistd::tcgetpgrp(std::io::stdin().as_fd()).expect("external foreground group"),
+        external_pgid
+    );
+    drop(release_external);
+    let _ = external.wait().expect("wait external child");
+    handle
+        .restore_foreground()
+        .expect("restore Tau foreground group");
+    assert_eq!(
+        nix::unistd::tcgetpgrp(std::io::stdin().as_fd()).expect("restored foreground group"),
+        tau_pgid
+    );
+
+    restore_foreground_process_group_with(
+        tau_pgid,
+        || Err(path_nix_errno::Errno::EPERM),
+        || nix::unistd::tcgetpgrp(std::io::stdin().as_fd()),
+    )
+    .expect("already-restored Tau foreground group is confirmed");
+}
 
 /// Checked restoration preserves successful, nonzero, and waiter-error child
 /// outcomes while classifying persistent restoration failure as fail-stop.
@@ -36,7 +347,9 @@ fn restoration_failure_matrix_preserves_primary_outcomes() {
             |output| format!("command exited with {}", output.status),
             || {
                 restore_attempts.set(restore_attempts.get() + 1);
-                Err("could not restore Tau terminal foreground: persistent injection".to_owned())
+                Err(ForegroundRestorationError::tcsetpgrp_unconfirmed(
+                    path_nix_errno::Errno::EIO,
+                ))
             },
         )
         .expect_err("persistent restoration failure must fail stop");
@@ -52,7 +365,12 @@ fn restoration_failure_matrix_preserves_primary_outcomes() {
             primary.contains(expected_primary),
             "primary was {primary:?}"
         );
-        assert!(restoration.contains("persistent injection"));
+        assert_eq!(
+            restoration.diagnostic(),
+            ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(
+                path_nix_errno::Errno::EIO as i32
+            )
+        );
         assert_eq!(restore_attempts.get(), 1);
     }
 }
@@ -111,7 +429,10 @@ fn inherited_timeout_restoration_failure_kills_child_group() {
         panic!("wrong failure classification");
     };
     assert!(primary.contains("timeout"), "primary was {primary:?}");
-    assert!(restoration.contains("restore Tau terminal foreground"));
+    assert_eq!(
+        restoration.diagnostic(),
+        ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(path_nix_errno::Errno::EIO as i32)
+    );
     assert_eq!(
         FOREGROUND_RESTORE_ATTEMPTS.load(Ordering::SeqCst),
         2,
@@ -169,10 +490,9 @@ fn foreground_restore_failure_is_reported() {
         .expect_err("injected restore failure");
     FAIL_FOREGROUND_RESTORE.store(false, Ordering::SeqCst);
 
-    assert!(
-        error
-            .to_string()
-            .contains("restore Tau terminal foreground")
+    assert_eq!(
+        error.diagnostic(),
+        ForegroundRestorationDiagnostic::tcsetpgrp_unconfirmed(path_nix_errno::Errno::EIO as i32)
     );
     assert!(handle.parent_pgid.is_some(), "Drop fallback remains armed");
 }
@@ -202,11 +522,7 @@ fn bounded_command_propagates_foreground_restore_failure() {
     .expect_err("restore failure must replace otherwise successful output");
     FAIL_FOREGROUND_RESTORE.store(false, Ordering::SeqCst);
 
-    assert!(
-        error
-            .to_string()
-            .contains("restore Tau terminal foreground")
-    );
+    assert!(error.to_string().contains("tcsetpgrp-unconfirmed"));
 }
 
 /// Prevents external prompt/completion commands from allocating unbounded
@@ -413,7 +729,6 @@ fn process_group_setup_failure_kills_spawned_child() {
         .lock()
         .expect("foreground claim test lock");
     LAST_FAILED_FOREGROUND_CHILD_ID.store(0, Ordering::SeqCst);
-    FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID.store(0, Ordering::SeqCst);
     let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")

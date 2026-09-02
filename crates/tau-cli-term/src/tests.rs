@@ -1,6 +1,7 @@
 use std::{cell as path_std_cell, rc as path_std_rc, sync as path_std_sync, time as path_std_time};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use nix::errno::Errno;
 
 use super::*;
 use crate::completion::CompletionRuleKind;
@@ -19,7 +20,7 @@ fn ownership_failure_does_not_resume_external_terminal() {
     });
     let error = BoundedCommandError::ForegroundOwnershipUnconfirmed {
         primary: "command failure (injected waiter failure)".to_owned(),
-        restoration: "injected persistent restore failure".to_owned(),
+        restoration: bounded_command::ForegroundRestorationError::tcsetpgrp_unconfirmed(Errno::EIO),
     };
 
     let returned = preserve_pause_on_unconfirmed_foreground(guard, Err::<(), _>(error))
@@ -27,7 +28,7 @@ fn ownership_failure_does_not_resume_external_terminal() {
 
     assert!(returned.is_foreground_ownership_unconfirmed());
     assert!(returned.to_string().contains("injected waiter failure"));
-    assert!(returned.to_string().contains("persistent restore failure"));
+    assert!(returned.to_string().contains("tcsetpgrp-unconfirmed"));
     assert_eq!(resume_calls.get(), 0);
 }
 
@@ -69,7 +70,7 @@ fn picker_post_spawn_restoration_failure_does_not_resume() {
     assert!(error.is_foreground_ownership_unconfirmed());
     let message = error.to_string();
     assert!(message.contains("injected post-spawn setup failure"));
-    assert!(message.contains("restore Tau terminal foreground"));
+    assert!(message.contains("tcsetpgrp-unconfirmed"));
     assert_eq!(resume_calls.get(), 0);
 }
 

@@ -119,7 +119,12 @@ pub enum CliError {
     SessionNotFound(String),
     /// The attachment stopped because terminal foreground ownership is
     /// unconfirmed.
-    ForegroundOwnershipUnconfirmed(String),
+    ForegroundOwnershipUnconfirmed {
+        /// Complete failure message retained for non-terminal callers.
+        message: String,
+        /// Bounded private restoration diagnostic written by persistent UIs.
+        diagnostic: tau_cli_term::ForegroundRestorationDiagnostic,
+    },
     /// The attachment stopped after its first reported terminal output failure.
     TerminalOutputFailed(String),
 }
@@ -138,7 +143,7 @@ impl fmt::Display for CliError {
             Self::Participant(msg) => write!(f, "participant error: {msg}"),
             Self::PromptStdin(error) => error.fmt(f),
             Self::SessionNotFound(id) => write!(f, "session not found: `{id}`"),
-            Self::ForegroundOwnershipUnconfirmed(message) => f.write_str(message),
+            Self::ForegroundOwnershipUnconfirmed { message, .. } => f.write_str(message),
             Self::TerminalOutputFailed(message) => f.write_str(message),
         }
     }
@@ -149,7 +154,7 @@ impl CliError {
     fn should_report_to_terminal(&self) -> bool {
         !matches!(
             self,
-            Self::ForegroundOwnershipUnconfirmed(_) | Self::TerminalOutputFailed(_)
+            Self::ForegroundOwnershipUnconfirmed { .. } | Self::TerminalOutputFailed(_)
         )
     }
 }

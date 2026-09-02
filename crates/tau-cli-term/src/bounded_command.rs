@@ -30,15 +30,37 @@ const POST_EXIT_PIPE_CLOSE_TIMEOUT: std::time::Duration = path_std_time::Duratio
 #[cfg(test)]
 static FAIL_NEXT_FOREGROUND_CLAIM: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
-pub(super) static FAIL_FOREGROUND_RESTORE: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    /// Per-test-thread restoration failure injection.
+    static FAIL_FOREGROUND_RESTORE_LOCAL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+pub(super) static FAIL_FOREGROUND_RESTORE: ForegroundRestoreFailureInjection =
+    ForegroundRestoreFailureInjection;
 #[cfg(test)]
 static FOREGROUND_RESTORE_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_FAILED_FOREGROUND_CHILD_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 pub(super) static FOREGROUND_CLAIM_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Test-only foreground-restoration failure switch isolated per test thread.
+#[cfg(test)]
+pub(super) struct ForegroundRestoreFailureInjection;
+
+#[cfg(test)]
+impl ForegroundRestoreFailureInjection {
+    /// Sets restoration failure injection for the current test thread.
+    pub(super) fn store(&self, enabled: bool, _ordering: Ordering) {
+        FAIL_FOREGROUND_RESTORE_LOCAL.set(enabled);
+    }
+
+    /// Reads restoration failure injection for the current test thread.
+    fn load(&self, _ordering: Ordering) -> bool {
+        FAIL_FOREGROUND_RESTORE_LOCAL.get()
+    }
+}
 
 /// How much subprocess ownership the bounded runner should take on failures.
 ///
@@ -84,7 +106,7 @@ pub(crate) enum BoundedCommandError {
         /// Child outcome or command error observed before restoration.
         primary: String,
         /// Error returned by the checked foreground-restoration attempt.
-        restoration: String,
+        restoration: ForegroundRestorationError,
     },
 }
 
@@ -92,6 +114,18 @@ impl BoundedCommandError {
     /// Returns whether terminal input and redraw must remain paused.
     pub(crate) fn is_foreground_ownership_unconfirmed(&self) -> bool {
         matches!(self, Self::ForegroundOwnershipUnconfirmed { .. })
+    }
+
+    /// Returns the bounded restoration diagnostic for an ownership fail-stop.
+    pub(crate) fn foreground_restoration_diagnostic(
+        &self,
+    ) -> Option<ForegroundRestorationDiagnostic> {
+        match self {
+            Self::ForegroundOwnershipUnconfirmed { restoration, .. } => {
+                Some(restoration.diagnostic())
+            }
+            Self::Command(_) => None,
+        }
     }
 }
 
@@ -115,6 +149,103 @@ impl std::error::Error for BoundedCommandError {}
 impl From<String> for BoundedCommandError {
     fn from(error: String) -> Self {
         Self::Command(error)
+    }
+}
+
+/// Bounded private diagnostic for one terminal foreground-restoration failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForegroundRestorationDiagnostic {
+    /// Fixed failure class suitable for private operational logging.
+    class: &'static str,
+    /// Platform errno from the failed syscall, when one caused the failure.
+    errno: Option<i32>,
+}
+
+impl ForegroundRestorationDiagnostic {
+    /// Builds the fixed diagnostic for an unconfirmed `tcsetpgrp` failure.
+    #[must_use]
+    pub fn tcsetpgrp_unconfirmed(errno: i32) -> Self {
+        Self {
+            class: "tcsetpgrp-unconfirmed",
+            errno: Some(errno),
+        }
+    }
+
+    /// Returns the fixed restoration failure class.
+    #[must_use]
+    pub fn class(self) -> &'static str {
+        self.class
+    }
+
+    /// Returns the platform errno when the failure originated from a syscall.
+    #[must_use]
+    pub fn errno(self) -> Option<i32> {
+        self.errno
+    }
+}
+
+/// Checked terminal foreground-restoration failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ForegroundRestorationError {
+    /// Fixed private diagnostic class.
+    class: &'static str,
+    /// Platform error from the failed ownership syscall, when present.
+    errno: Option<path_nix_errno::Errno>,
+}
+
+impl ForegroundRestorationError {
+    /// Builds the bounded failure returned when `tcsetpgrp` remains
+    /// unconfirmed.
+    pub(crate) fn tcsetpgrp_unconfirmed(errno: path_nix_errno::Errno) -> Self {
+        Self {
+            class: "tcsetpgrp-unconfirmed",
+            errno: Some(errno),
+        }
+    }
+
+    /// Builds the failure returned when Tau was not initially in the
+    /// foreground.
+    fn initial_foreground_mismatch() -> Self {
+        Self {
+            class: "initial-foreground-mismatch",
+            errno: None,
+        }
+    }
+
+    /// Builds the failure returned when initial foreground ownership cannot be
+    /// read.
+    fn initial_foreground_unconfirmed(errno: path_nix_errno::Errno) -> Self {
+        Self {
+            class: "initial-foreground-unconfirmed",
+            errno: Some(errno),
+        }
+    }
+
+    /// Builds the failure returned when a failed handoff leaves ownership
+    /// unknown.
+    fn foreground_handoff_unconfirmed(errno: path_nix_errno::Errno) -> Self {
+        Self {
+            class: "foreground-handoff-unconfirmed",
+            errno: Some(errno),
+        }
+    }
+
+    /// Projects the bounded fields retained for private UI logging.
+    fn diagnostic(self) -> ForegroundRestorationDiagnostic {
+        ForegroundRestorationDiagnostic {
+            class: self.class,
+            errno: self.errno.map(|errno| errno as i32),
+        }
+    }
+}
+
+impl std::fmt::Display for ForegroundRestorationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.class)?;
+        if let Some(errno) = self.errno {
+            write!(formatter, ": {errno}")?;
+        }
+        Ok(())
     }
 }
 
@@ -173,7 +304,7 @@ pub(crate) fn run_with_bounded_stdout_after_spawn(
                 }
             };
             terminate_child(&mut child, child_pgid);
-            return Err(error.into());
+            return Err(error);
         }
     };
     if let Err(error) = after_spawn() {
@@ -544,7 +675,7 @@ fn run_with_inherited_stdio_after_spawn(
                 }
             };
             terminate_child(&mut child, child_pgid);
-            return Err(error.into());
+            return Err(error);
         }
     };
     if let Err(error) = after_spawn() {
@@ -591,7 +722,7 @@ fn settle_after_child<T>(
 fn settle_after_child_with_restore<T>(
     primary: Result<T, String>,
     describe_success: impl FnOnce(&T) -> String,
-    restore_foreground: impl FnOnce() -> Result<(), String>,
+    restore_foreground: impl FnOnce() -> Result<(), ForegroundRestorationError>,
 ) -> Result<T, BoundedCommandError> {
     let primary_description = match &primary {
         Ok(value) => describe_success(value),
@@ -727,7 +858,7 @@ struct ProcessGroupHandle {
 }
 
 impl ProcessGroupHandle {
-    fn new(ownership: ProcessOwnership, child_id: u32) -> Result<Self, String> {
+    fn new(ownership: ProcessOwnership, child_id: u32) -> Result<Self, BoundedCommandError> {
         match ownership {
             ProcessOwnership::ProcessGroup => Ok(Self {
                 child_pgid: process_group_id(child_id),
@@ -742,46 +873,47 @@ impl ProcessGroupHandle {
         self.child_pgid
     }
 
-    fn restore_foreground(&mut self) -> Result<(), String> {
+    fn restore_foreground(&mut self) -> Result<(), ForegroundRestorationError> {
         #[cfg(unix)]
         if let Some(parent_pgid) = self.parent_pgid {
             #[cfg(test)]
-            {
-                FOREGROUND_RESTORE_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-            }
-            #[cfg(test)]
             if FAIL_FOREGROUND_RESTORE.load(Ordering::SeqCst) {
-                return Err(
-                    "could not restore Tau terminal foreground: injected failure".to_owned(),
-                );
+                FOREGROUND_RESTORE_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+                return Err(ForegroundRestorationError::tcsetpgrp_unconfirmed(
+                    path_nix_errno::Errno::EIO,
+                ));
             }
-            set_foreground_process_group(parent_pgid)
-                .map_err(|error| format!("could not restore Tau terminal foreground: {error}"))?;
+            restore_foreground_process_group(parent_pgid)?;
             self.parent_pgid = None;
         }
         Ok(())
     }
 
     #[cfg(unix)]
-    fn claim_foreground(child_id: u32) -> Result<Self, String> {
-        let parent_pgid =
-            current_foreground_process_group().unwrap_or_else(|_| nix::unistd::getpgrp());
+    fn claim_foreground(child_id: u32) -> Result<Self, BoundedCommandError> {
+        let tau_pgid = nix::unistd::getpgrp();
         let child_pgid = ChildProcessGroupId::from_child_id(child_id);
-        set_foreground_process_group(child_pgid.as_nix_pid())
-            .map_err(|e| format!("could not hand terminal to prompt action: {e}"))?;
-        let _ = path_nix_sys::signal::killpg(
-            child_pgid.as_nix_pid(),
-            path_nix_sys_signal::Signal::SIGCONT,
-        );
+        let claimed_foreground = claim_foreground_process_group(tau_pgid, child_pgid.as_nix_pid())?;
+        if claimed_foreground {
+            let _ = path_nix_sys::signal::killpg(
+                child_pgid.as_nix_pid(),
+                path_nix_sys_signal::Signal::SIGCONT,
+            );
+        }
+        #[cfg(test)]
+        let claimed_foreground =
+            claimed_foreground || FAIL_FOREGROUND_RESTORE.load(Ordering::SeqCst);
         Ok(Self {
             child_pgid: Some(child_pgid),
-            parent_pgid: Some(parent_pgid),
+            parent_pgid: claimed_foreground.then_some(tau_pgid),
         })
     }
 
     #[cfg(not(unix))]
-    fn claim_foreground(_child_id: u32) -> Result<Self, String> {
-        Err("foreground process-group prompt actions are unsupported on this platform".to_owned())
+    fn claim_foreground(_child_id: u32) -> Result<Self, BoundedCommandError> {
+        Err(BoundedCommandError::Command(
+            "foreground process-group prompt actions are unsupported on this platform".to_owned(),
+        ))
     }
 }
 
@@ -793,45 +925,126 @@ impl Drop for ProcessGroupHandle {
 }
 
 #[cfg(unix)]
-fn current_foreground_process_group() -> nix::Result<nix::unistd::Pid> {
-    with_controlling_terminal(|fd| nix::unistd::tcgetpgrp(fd))
-}
-
-#[cfg(unix)]
-fn set_foreground_process_group(pgid: nix::unistd::Pid) -> nix::Result<()> {
-    #[cfg(test)]
-    {
-        let target = FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID.load(Ordering::SeqCst);
-        if target != 0
-            && pgid.as_raw() == target as i32
-            && FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID
-                .compare_exchange(target, 0, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        {
-            return Err(path_nix_errno::Errno::EIO);
-        }
-    }
-    // In non-interactive tests or redirected invocations there may be no
-    // controlling terminal; treat ENOTTY as a no-op so direct subprocess
-    // lifecycle checks can still run. Prefer /dev/tty for real prompt actions,
-    // but fall back to stdin for embeddings where stdin is the controlling tty.
-    match with_controlling_terminal(|fd| tcsetpgrp_blocking_sigtou(fd, pgid)) {
-        Ok(()) | Err(path_nix_errno::Errno::ENOTTY) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(unix)]
-fn with_controlling_terminal<T>(
-    f: impl FnOnce(path_std_os::fd::BorrowedFd<'_>) -> nix::Result<T>,
-) -> nix::Result<T> {
+fn claim_foreground_process_group(
+    tau_pgid: nix::unistd::Pid,
+    child_pgid: nix::unistd::Pid,
+) -> Result<bool, BoundedCommandError> {
     match path_std_fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
     {
-        Ok(tty) => f(tty.as_fd()),
-        Err(_) => f(std::io::stdin().as_fd()),
+        Ok(tty) => claim_foreground_process_group_with(
+            tau_pgid,
+            || nix::unistd::tcgetpgrp(tty.as_fd()),
+            || tcsetpgrp_blocking_sigtou(tty.as_fd(), child_pgid),
+        ),
+        Err(_) => claim_foreground_process_group_with(
+            tau_pgid,
+            || nix::unistd::tcgetpgrp(std::io::stdin().as_fd()),
+            || tcsetpgrp_blocking_sigtou(std::io::stdin().as_fd(), child_pgid),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn claim_foreground_process_group_with(
+    tau_pgid: nix::unistd::Pid,
+    mut get_foreground: impl FnMut() -> nix::Result<nix::unistd::Pid>,
+    mut set_child_foreground: impl FnMut() -> nix::Result<()>,
+) -> Result<bool, BoundedCommandError> {
+    loop {
+        match get_foreground() {
+            Ok(foreground) if foreground == tau_pgid => break,
+            Ok(_) => {
+                return Err(BoundedCommandError::ForegroundOwnershipUnconfirmed {
+                    primary: "prompt action foreground handoff".to_owned(),
+                    restoration: ForegroundRestorationError::initial_foreground_mismatch(),
+                });
+            }
+            Err(path_nix_errno::Errno::EINTR) => {}
+            Err(path_nix_errno::Errno::ENOTTY) => return Ok(false),
+            Err(error) => {
+                return Err(BoundedCommandError::ForegroundOwnershipUnconfirmed {
+                    primary: "prompt action foreground handoff".to_owned(),
+                    restoration: ForegroundRestorationError::initial_foreground_unconfirmed(error),
+                });
+            }
+        }
+    }
+
+    let set_error = loop {
+        match set_child_foreground() {
+            Ok(()) => return Ok(true),
+            Err(path_nix_errno::Errno::EINTR) => {}
+            Err(error) => break error,
+        }
+    };
+    let tau_still_foreground = loop {
+        match get_foreground() {
+            Ok(foreground) => break foreground == tau_pgid,
+            Err(path_nix_errno::Errno::EINTR) => {}
+            Err(_) => break false,
+        }
+    };
+    if tau_still_foreground {
+        Err(BoundedCommandError::Command(format!(
+            "could not hand terminal to prompt action: {set_error}"
+        )))
+    } else {
+        Err(BoundedCommandError::ForegroundOwnershipUnconfirmed {
+            primary: "prompt action foreground handoff".to_owned(),
+            restoration: ForegroundRestorationError::foreground_handoff_unconfirmed(set_error),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn restore_foreground_process_group(
+    pgid: nix::unistd::Pid,
+) -> Result<(), ForegroundRestorationError> {
+    match path_std_fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    {
+        Ok(tty) => restore_foreground_process_group_with(
+            pgid,
+            || tcsetpgrp_blocking_sigtou(tty.as_fd(), pgid),
+            || nix::unistd::tcgetpgrp(tty.as_fd()),
+        ),
+        Err(_) => restore_foreground_process_group_with(
+            pgid,
+            || tcsetpgrp_blocking_sigtou(std::io::stdin().as_fd(), pgid),
+            || nix::unistd::tcgetpgrp(std::io::stdin().as_fd()),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn restore_foreground_process_group_with(
+    pgid: nix::unistd::Pid,
+    mut set_foreground: impl FnMut() -> nix::Result<()>,
+    mut get_foreground: impl FnMut() -> nix::Result<nix::unistd::Pid>,
+) -> Result<(), ForegroundRestorationError> {
+    let set_error = loop {
+        match set_foreground() {
+            Ok(()) => return Ok(()),
+            Err(path_nix_errno::Errno::EINTR) => {}
+            Err(error) => break error,
+        }
+    };
+    let foreground = loop {
+        match get_foreground() {
+            Ok(foreground) => break Some(foreground),
+            Err(path_nix_errno::Errno::EINTR) => {}
+            Err(_) => break None,
+        }
+    };
+    if foreground == Some(pgid) {
+        Ok(())
+    } else {
+        Err(ForegroundRestorationError::tcsetpgrp_unconfirmed(set_error))
     }
 }
 
@@ -860,12 +1073,14 @@ fn tcsetpgrp_blocking_sigtou(
 fn claim_process_group_handle(
     ownership: ProcessOwnership,
     child_id: u32,
-) -> Result<ProcessGroupHandle, String> {
+) -> Result<ProcessGroupHandle, BoundedCommandError> {
     #[cfg(test)]
     if matches!(ownership, ProcessOwnership::ForegroundProcessGroup)
         && FAIL_NEXT_FOREGROUND_CLAIM.swap(false, Ordering::SeqCst)
     {
-        FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID.store(child_id, Ordering::SeqCst);
+        return Err(BoundedCommandError::Command(
+            "could not hand terminal to prompt action: injected failure".to_owned(),
+        ));
     }
     ProcessGroupHandle::new(ownership, child_id)
 }
