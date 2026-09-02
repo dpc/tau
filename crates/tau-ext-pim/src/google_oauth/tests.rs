@@ -1,6 +1,92 @@
+use std::any::TypeId;
+
 use super::*;
 use crate::calendar::CalendarAccountId;
 use crate::email::EmailAccountId;
+
+/// Every OAuth semantic value must redact its contents even when the value is
+/// otherwise authorized for explicit user-code display.
+#[test]
+fn debug_redacts_every_oauth_semantic_value() {
+    assert_eq!(
+        format!(
+            "{:?}",
+            AccessToken::from_validated_provider("access-secret".to_owned())
+        ),
+        "AccessToken(<redacted>)"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            RefreshToken::from_validated_provider("refresh-secret".to_owned())
+        ),
+        "RefreshToken(<redacted>)"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            DeviceCode::from_validated_provider("device-secret".to_owned())
+        ),
+        "DeviceCode(<redacted>)"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            UserCode::from_validated_provider("user-secret".to_owned())
+        ),
+        "UserCode(<redacted>)"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            AuthorizationCode::from_validated_redirect("authorization-secret".to_owned())
+        ),
+        "AuthorizationCode(<redacted>)"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            OauthState::from_generator("state-secret".to_owned())
+        ),
+        "OauthState(<redacted>)"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            PkceVerifier::from_generator("verifier-secret".to_owned())
+        ),
+        "PkceVerifier(<redacted>)"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            LoopbackRedirectUri::from_generator("redirect-secret".to_owned())
+        ),
+        "LoopbackRedirectUri(<redacted>)"
+    );
+}
+
+/// Each OAuth meaning must remain a distinct nominal class so an adapter
+/// cannot accidentally substitute one same-spelled string for another.
+#[test]
+fn oauth_semantic_values_are_non_interchangeable_types() {
+    let types = [
+        TypeId::of::<AccessToken>(),
+        TypeId::of::<RefreshToken>(),
+        TypeId::of::<DeviceCode>(),
+        TypeId::of::<UserCode>(),
+        TypeId::of::<AuthorizationCode>(),
+        TypeId::of::<OauthState>(),
+        TypeId::of::<PkceVerifier>(),
+        TypeId::of::<LoopbackRedirectUri>(),
+    ];
+    for (index, current) in types.iter().enumerate() {
+        assert!(
+            types[index + 1..].iter().all(|other| current != other),
+            "OAuth semantic types must remain distinct"
+        );
+    }
+}
 
 /// Ensures Google OAuth JSON parsing accepts Google's documented
 /// verification_uri spelling and keeps token values out of errors.
@@ -10,7 +96,7 @@ fn parses_device_authorization_response() {
         r#"{"device_code":"device","user_code":"ABCD-EFGH","verification_uri":"https://example.test","expires_in":900}"#,
     )
     .expect("device authorization response parses");
-    assert_eq!(start.device_code, "device");
+    assert_eq!(start.device_code.expose_for_provider(), "device");
     assert_eq!(start.interval_secs, 5);
 }
 
@@ -146,24 +232,24 @@ fn installed_app_token_body_contains_verifier_and_exact_redirect_uri() {
 fn parses_installed_app_redirect_url_against_stored_redirect() {
     let redirect = parse_installed_app_redirect_url(
         "http://127.0.0.1:54321/?state=expected&code=secret-code",
-        "http://127.0.0.1:54321/",
-        "expected",
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
+        &OauthState::from_generator("expected".to_owned()),
     )
     .expect("redirect parses");
-    assert_eq!(redirect.code, "secret-code");
+    assert_eq!(redirect.code.expose_for_provider(), "secret-code");
 
     let err = parse_installed_app_redirect_url(
         "https://evil.test/callback?state=expected&code=secret-code",
-        "http://127.0.0.1:54321/",
-        "expected",
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
+        &OauthState::from_generator("expected".to_owned()),
     )
     .expect_err("non-loopback rejected");
     assert!(!err.contains("secret-code"));
 
     let err = parse_installed_app_redirect_url(
         "http://127.0.0.1:54321/?state=wrong&code=secret-code",
-        "http://127.0.0.1:54321/",
-        "expected",
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
+        &OauthState::from_generator("expected".to_owned()),
     )
     .expect_err("wrong state rejected");
     assert!(!err.contains("wrong"));
@@ -185,7 +271,11 @@ fn parses_installed_app_redirect_url_against_stored_redirect() {
         ("http://127.0.0.1:54321/?code=secret-code", "missing state"),
         ("http://127.0.0.1:54321/?state=expected", "missing code"),
     ] {
-        let result = parse_installed_app_redirect_url(url, "http://127.0.0.1:54321/", "expected");
+        let result = parse_installed_app_redirect_url(
+            url,
+            &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
+            &OauthState::from_generator("expected".to_owned()),
+        );
         let err = match result {
             Ok(_) => panic!("{reason} should reject"),
             Err(err) => err,
@@ -197,8 +287,12 @@ fn parses_installed_app_redirect_url_against_stored_redirect() {
         "http://127.0.0.1:54321/?state=expected&code={}",
         "x".repeat(MAX_REDIRECT_URL_CHARS)
     );
-    let err = parse_installed_app_redirect_url(&oversized, "http://127.0.0.1:54321/", "expected")
-        .expect_err("oversized URL rejected");
+    let err = parse_installed_app_redirect_url(
+        &oversized,
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
+        &OauthState::from_generator("expected".to_owned()),
+    )
+    .expect_err("oversized URL rejected");
     assert!(!err.contains('x'));
 
     let err = validate_loopback_redirect_uri("http://127.0.0.1:54321/callback")
@@ -232,8 +326,12 @@ fn installed_app_redirect_rejects_duplicate_and_unsafe_query_parameters() {
             "unsafe code",
         ),
     ] {
-        let err = parse_installed_app_redirect_url(url, "http://127.0.0.1:54321/", "expected")
-            .expect_err(reason);
+        let err = parse_installed_app_redirect_url(
+            url,
+            &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
+            &OauthState::from_generator("expected".to_owned()),
+        )
+        .expect_err(reason);
         assert_eq!(err, expected_error, "{reason}");
         assert!(!err.contains("secret"), "{reason}: {err}");
         assert!(!err.contains("expected"), "{reason}: {err}");
@@ -247,8 +345,8 @@ fn installed_app_redirect_rejects_duplicate_and_unsafe_query_parameters() {
 fn installed_app_redirect_handles_access_denied() {
     let err = parse_installed_app_redirect_url(
         "http://127.0.0.1:54321/?state=expected&error=access_denied",
-        "http://127.0.0.1:54321/",
-        "expected",
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
+        &OauthState::from_generator("expected".to_owned()),
     )
     .expect_err("denial is reported");
     assert_eq!(err, "Google authorization was denied");
@@ -278,13 +376,17 @@ fn huge_expires_in_skips_cache_without_panicking() {
     let client: GoogleOauthClient<String> = GoogleOauthClient::new(BTreeMap::new());
     let account_id = "work".to_owned();
     client
-        .prime_access_token_cache(&account_id, "access-token".to_owned(), Some(u64::MAX))
+        .prime_access_token_cache(
+            &account_id,
+            AccessToken::from_validated_provider("access-token".to_owned()),
+            Some(u64::MAX),
+        )
         .expect("huge expiry is ignored");
-    assert_eq!(
+    assert!(
         client
             .cached_access_token(&account_id)
-            .expect("cache remains readable"),
-        None
+            .expect("cache remains readable")
+            .is_none()
     );
 }
 
@@ -297,15 +399,15 @@ fn huge_installed_app_lifetime_skips_cache_without_panicking() {
     client
         .prime_access_token_cache_with_lifetime(
             &account_id,
-            "access-token".to_owned(),
+            AccessToken::from_validated_provider("access-token".to_owned()),
             Some(Duration::from_secs(u64::MAX)),
         )
         .expect("huge lifetime is ignored");
-    assert_eq!(
+    assert!(
         client
             .cached_access_token(&account_id)
-            .expect("cache remains readable"),
-        None
+            .expect("cache remains readable")
+            .is_none()
     );
 }
 
@@ -319,34 +421,52 @@ fn access_token_caches_retain_feature_owned_account_identity() {
     let calendar: GoogleOauthClient<CalendarAccountId> = GoogleOauthClient::new(BTreeMap::new());
 
     email
-        .prime_access_token_cache(&email_id, "email-token".to_owned(), Some(3600))
+        .prime_access_token_cache(
+            &email_id,
+            AccessToken::from_validated_provider("email-token".to_owned()),
+            Some(3600),
+        )
         .expect("email cache prime");
     calendar
-        .prime_access_token_cache(&calendar_id, "calendar-token".to_owned(), Some(3600))
+        .prime_access_token_cache(
+            &calendar_id,
+            AccessToken::from_validated_provider("calendar-token".to_owned()),
+            Some(3600),
+        )
         .expect("calendar cache prime");
 
     assert_eq!(
-        email.cached_access_token(&email_id).expect("email cache"),
-        Some("email-token".to_owned())
+        email
+            .cached_access_token(&email_id)
+            .expect("email cache")
+            .as_ref()
+            .map(AccessToken::expose_for_provider),
+        Some("email-token")
     );
     assert_eq!(
         calendar
             .cached_access_token(&calendar_id)
-            .expect("calendar cache"),
-        Some("calendar-token".to_owned())
+            .expect("calendar cache")
+            .as_ref()
+            .map(AccessToken::expose_for_provider),
+        Some("calendar-token")
     );
 
     email
         .invalidate_access_token(&email_id)
         .expect("email invalidation");
-    assert_eq!(
-        email.cached_access_token(&email_id).expect("email cache"),
-        None
+    assert!(
+        email
+            .cached_access_token(&email_id)
+            .expect("email cache")
+            .is_none()
     );
     assert_eq!(
         calendar
             .cached_access_token(&calendar_id)
-            .expect("calendar cache"),
-        Some("calendar-token".to_owned())
+            .expect("calendar cache")
+            .as_ref()
+            .map(AccessToken::expose_for_provider),
+        Some("calendar-token")
     );
 }

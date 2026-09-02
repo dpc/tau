@@ -675,7 +675,7 @@ impl Engine {
         }
         let finished = self
             .google
-            .finish_device_auth(account, &pending.device_code)?;
+            .finish_device_auth(account, &pending.retained_device_code())?;
         self.state
             .save_google_refresh_token(account.id.as_ref(), &finished.refresh_token)?;
         self.state.clear_pending_google_auth(account.id.as_ref())?;
@@ -955,7 +955,7 @@ impl Engine {
                         let stored_refresh_token = self.google_refresh_token(account)?;
                         for calendar in self
                             .google
-                            .list_calendar_records(account, stored_refresh_token.as_deref())?
+                            .list_calendar_records(account, stored_refresh_token.as_ref())?
                         {
                             let flags = if calendar.read_only {
                                 "read_only"
@@ -1137,7 +1137,7 @@ impl Engine {
                 let stored_refresh_token = self.google_refresh_token(account)?;
                 BackendEvent::Google(self.google.read_event_record(
                     account,
-                    stored_refresh_token.as_deref(),
+                    stored_refresh_token.as_ref(),
                     &provider_calendar,
                     &event_id,
                 )?)
@@ -1606,7 +1606,7 @@ impl Engine {
             "create_event" => {
                 let event = self.google.create_event_classified(
                     account,
-                    stored_refresh_token.as_deref(),
+                    stored_refresh_token.as_ref(),
                     &calendar,
                     (&google_write_from_change(change), event_time),
                 )?;
@@ -1621,7 +1621,7 @@ impl Engine {
                 let etag = EventEtag::new(etag);
                 let event = self.google.update_event_classified(
                     account,
-                    stored_refresh_token.as_deref(),
+                    stored_refresh_token.as_ref(),
                     &calendar,
                     &event_id,
                     &etag,
@@ -1638,7 +1638,7 @@ impl Engine {
                 let etag = EventEtag::new(etag);
                 self.google.delete_event_classified(
                     account,
-                    stored_refresh_token.as_deref(),
+                    stored_refresh_token.as_ref(),
                     &calendar,
                     &event_id,
                     &etag,
@@ -1656,7 +1656,7 @@ impl Engine {
                 let etag = EventEtag::new(etag);
                 let event = self.google.respond_invite_classified(
                     account,
-                    stored_refresh_token.as_deref(),
+                    stored_refresh_token.as_ref(),
                     &calendar,
                     &event_id,
                     &etag,
@@ -1704,7 +1704,7 @@ impl Engine {
                 let stored_refresh_token = self.google_refresh_token(account)?;
                 let page = self.google.list_events_page(
                     account,
-                    stored_refresh_token.as_deref(),
+                    stored_refresh_token.as_ref(),
                     &calendar,
                     GoogleEventListQuery {
                         range,
@@ -1825,7 +1825,10 @@ impl Engine {
         }
     }
 
-    fn google_refresh_token(&self, account: &ValidatedAccount) -> Result<Option<String>, String> {
+    fn google_refresh_token(
+        &self,
+        account: &ValidatedAccount,
+    ) -> Result<Option<crate::google_oauth::RefreshToken>, String> {
         match &account.backend {
             Some(ValidatedBackendConfig::Google {
                 refresh_token_secret: Some(_),
@@ -1861,7 +1864,7 @@ fn format_google_auth_started(
         "Google Calendar authorization started for account {}.\nOpen this URL:\n{}\nEnter this code:\n{}\nThen run:\n:calendar auth google finish {}\nExpires in {} second(s). If authorization is still pending, wait at least {} second(s) before retrying finish.",
         safe_display_line(account_id),
         safe_display_line(&started.verification_uri),
-        safe_display_line(&started.user_code),
+        safe_display_line(started.user_code.expose_for_user_display()),
         safe_display_line(account_id),
         started.expires_in_secs,
         started.interval_secs

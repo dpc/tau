@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use super::*;
+use crate::google_oauth::{DeviceCode, RefreshToken, UserCode};
 
 #[cfg(unix)]
 fn file_mode(path: &Path) -> u32 {
@@ -276,13 +277,17 @@ fn google_auth_tokens_and_pending_requests_are_private() {
     let state = StateStore::open(temp.path().join("state")).expect("state");
 
     state
-        .save_google_refresh_token("work/account", "refresh-token")
+        .save_google_refresh_token(
+            "work/account",
+            &RefreshToken::from_validated_provider("refresh-token".to_owned()),
+        )
         .expect("save refresh token");
     assert_eq!(
         state
             .google_refresh_token("work/account")
             .expect("load refresh token")
-            .as_deref(),
+            .as_ref()
+            .map(RefreshToken::expose_for_persistence),
         Some("refresh-token")
     );
     let auth_path = state.google_auth_path("work/account");
@@ -297,8 +302,8 @@ fn google_auth_tokens_and_pending_requests_are_private() {
 
     let pending = GooglePendingAuth::new(
         "work/account",
-        "device-code",
-        "USER-CODE",
+        &DeviceCode::from_validated_provider("device-code".to_owned()),
+        &UserCode::from_validated_provider("USER-CODE".to_owned()),
         "https://example.test/device",
         600,
         5,

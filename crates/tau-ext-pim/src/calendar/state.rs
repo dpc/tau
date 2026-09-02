@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::google_oauth::{DeviceCode, RefreshToken, UserCode};
 #[cfg(test)]
 use crate::storage as path_crate_storage;
 use crate::storage::{SharedStorage, StorageCreateError, file_name};
@@ -179,11 +180,11 @@ pub(crate) struct GoogleStoredAuth {
 
 impl GoogleStoredAuth {
     /// Build a stored OAuth auth record.
-    pub(crate) fn new(account: &str, refresh_token: &str) -> Self {
+    pub(crate) fn new(account: &str, refresh_token: &RefreshToken) -> Self {
         Self {
             schema: GOOGLE_AUTH_SCHEMA,
             account: account.to_owned(),
-            refresh_token: refresh_token.to_owned(),
+            refresh_token: refresh_token.expose_for_persistence().to_owned(),
         }
     }
 }
@@ -211,8 +212,8 @@ impl GooglePendingAuth {
     /// Build a pending Google device authorization record.
     pub(crate) fn new(
         account: &str,
-        device_code: &str,
-        user_code: &str,
+        device_code: &DeviceCode,
+        user_code: &UserCode,
         verification_uri: &str,
         expires_in_secs: u64,
         interval_secs: u64,
@@ -220,8 +221,8 @@ impl GooglePendingAuth {
         Self {
             schema: GOOGLE_AUTH_PENDING_SCHEMA,
             account: account.to_owned(),
-            device_code: device_code.to_owned(),
-            user_code: user_code.to_owned(),
+            device_code: device_code.expose_for_persistence().to_owned(),
+            user_code: user_code.expose_for_persistence().to_owned(),
             verification_uri: verification_uri.to_owned(),
             expires_at_unix_ms: current_unix_millis()
                 .saturating_add(expires_in_secs.saturating_mul(1000)),
@@ -232,6 +233,11 @@ impl GooglePendingAuth {
     /// Return true when this pending authorization has expired.
     pub(crate) fn expired(&self) -> bool {
         self.expires_at_unix_ms <= current_unix_millis()
+    }
+
+    /// Project the validated raw device code into its private OAuth meaning.
+    pub(crate) fn retained_device_code(&self) -> DeviceCode {
+        DeviceCode::from_validated_persistence(self.device_code.clone())
     }
 }
 
@@ -324,7 +330,7 @@ impl StateStore {
     pub(crate) fn save_google_refresh_token(
         &self,
         account: &str,
-        refresh_token: &str,
+        refresh_token: &RefreshToken,
     ) -> Result<(), String> {
         let auth = GoogleStoredAuth::new(account, refresh_token);
         validate_google_stored_auth(&auth, Some(account))?;
@@ -332,7 +338,10 @@ impl StateStore {
     }
 
     /// Load a stored Google OAuth refresh token for one account.
-    pub(crate) fn google_refresh_token(&self, account: &str) -> Result<Option<String>, String> {
+    pub(crate) fn google_refresh_token(
+        &self,
+        account: &str,
+    ) -> Result<Option<RefreshToken>, String> {
         let path = self.google_auth_path(account);
         let Some(bytes) = self.read_file(&path)? else {
             return Ok(None);
@@ -340,7 +349,9 @@ impl StateStore {
         let auth: GoogleStoredAuth = serde_json::from_slice(&bytes)
             .map_err(|error| format!("failed to parse {path}: {error}"))?;
         validate_google_stored_auth(&auth, Some(account))?;
-        Ok(Some(auth.refresh_token))
+        Ok(Some(RefreshToken::from_validated_persistence(
+            auth.refresh_token,
+        )))
     }
 
     /// Store a pending Google device authorization request.

@@ -19,7 +19,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::google_oauth::{
-    GoogleInstalledAppAuthFinish, GoogleInstalledAppAuthStart, is_valid_pkce_verifier,
+    AuthorizationCode, GoogleInstalledAppAuthFinish, GoogleInstalledAppAuthStart,
+    LoopbackRedirectUri, OauthState, PkceVerifier, RefreshToken, is_valid_pkce_verifier,
     parse_installed_app_redirect_url, validate_loopback_redirect_uri,
 };
 use crate::storage::{FsStorage, SharedStorage, StorageCreateError, file_name};
@@ -1233,11 +1234,11 @@ impl std::fmt::Debug for EmailGoogleStoredAuth {
 
 impl EmailGoogleStoredAuth {
     /// Build a stored OAuth auth record.
-    pub(crate) fn new(account: &str, refresh_token: &str) -> Self {
+    pub(crate) fn new(account: &str, refresh_token: &RefreshToken) -> Self {
         Self {
             schema: GOOGLE_AUTH_SCHEMA,
             account: account.to_owned(),
-            refresh_token: refresh_token.to_owned(),
+            refresh_token: refresh_token.expose_for_persistence().to_owned(),
         }
     }
 }
@@ -1296,9 +1297,9 @@ impl EmailGooglePendingAuth {
     /// Build a pending Google installed-app authorization record.
     pub(crate) fn installed_app(
         account: &str,
-        state: &str,
-        pkce_verifier: &str,
-        redirect_uri: &str,
+        state: &OauthState,
+        pkce_verifier: &PkceVerifier,
+        redirect_uri: &LoopbackRedirectUri,
         pending_lifetime: Duration,
     ) -> Self {
         let created_at_unix_ms = current_unix_millis();
@@ -1306,9 +1307,9 @@ impl EmailGooglePendingAuth {
             schema: GOOGLE_AUTH_PENDING_SCHEMA,
             account: account.to_owned(),
             flow: EmailGooglePendingAuthFlow::InstalledApp {
-                state: state.to_owned(),
-                pkce_verifier: pkce_verifier.to_owned(),
-                redirect_uri: redirect_uri.to_owned(),
+                state: state.expose_for_persistence().to_owned(),
+                pkce_verifier: pkce_verifier.expose_for_persistence().to_owned(),
+                redirect_uri: redirect_uri.expose_for_persistence().to_owned(),
                 created_at_unix_ms,
                 expires_at_unix_ms: created_at_unix_ms
                     .saturating_add(pending_lifetime.as_secs().saturating_mul(1000)),
@@ -1322,7 +1323,7 @@ impl EmailGooglePendingAuth {
     }
 
     /// Return installed-app pending data.
-    pub(crate) fn installed_app_data(&self) -> InstalledAppPendingAuth<'_> {
+    pub(crate) fn installed_app_data(&self) -> InstalledAppPendingAuth {
         match &self.flow {
             EmailGooglePendingAuthFlow::InstalledApp {
                 state,
@@ -1330,9 +1331,9 @@ impl EmailGooglePendingAuth {
                 redirect_uri,
                 ..
             } => InstalledAppPendingAuth {
-                state,
-                pkce_verifier,
-                redirect_uri,
+                state: OauthState::from_validated_persistence(state.clone()),
+                pkce_verifier: PkceVerifier::from_validated_persistence(pkce_verifier.clone()),
+                redirect_uri: LoopbackRedirectUri::from_validated_persistence(redirect_uri.clone()),
             },
         }
     }
@@ -1346,14 +1347,14 @@ impl EmailGooglePendingAuth {
     }
 }
 
-/// Borrowed installed-app pending authorization fields.
-pub(crate) struct InstalledAppPendingAuth<'a> {
+/// Owned validated projection of installed-app pending authorization fields.
+pub(crate) struct InstalledAppPendingAuth {
     /// OAuth state expected in the pasted redirect URL.
-    pub(crate) state: &'a str,
+    pub(crate) state: OauthState,
     /// PKCE verifier saved at start.
-    pub(crate) pkce_verifier: &'a str,
+    pub(crate) pkce_verifier: PkceVerifier,
     /// Exact redirect URI saved at start.
-    pub(crate) redirect_uri: &'a str,
+    pub(crate) redirect_uri: LoopbackRedirectUri,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1557,7 +1558,7 @@ impl StateStore {
     pub(crate) fn save_google_refresh_token(
         &self,
         account: &str,
-        refresh_token: &str,
+        refresh_token: &RefreshToken,
     ) -> Result<(), String> {
         let auth = EmailGoogleStoredAuth::new(account, refresh_token);
         validate_google_stored_auth(&auth, Some(account))?;
@@ -1565,7 +1566,10 @@ impl StateStore {
     }
 
     /// Load a stored Google OAuth refresh token for one email account.
-    pub(crate) fn google_refresh_token(&self, account: &str) -> Result<Option<String>, String> {
+    pub(crate) fn google_refresh_token(
+        &self,
+        account: &str,
+    ) -> Result<Option<RefreshToken>, String> {
         let path = self.google_auth_path(account);
         let Some(bytes) = self.read_file(&path)? else {
             return Ok(None);
@@ -1573,7 +1577,9 @@ impl StateStore {
         let auth: EmailGoogleStoredAuth = serde_json::from_slice(&bytes)
             .map_err(|error| format!("failed to parse {path}: {error}"))?;
         validate_google_stored_auth(&auth, Some(account))?;
-        Ok(Some(auth.refresh_token))
+        Ok(Some(RefreshToken::from_validated_persistence(
+            auth.refresh_token,
+        )))
     }
 
     /// Store a pending Google authorization request for email.
@@ -2462,9 +2468,9 @@ pub trait EmailBackend {
     fn finish_google_installed_app_auth(
         &self,
         _account: &str,
-        _code: &str,
-        _pkce_verifier: &str,
-        _redirect_uri: &str,
+        _code: &AuthorizationCode,
+        _pkce_verifier: &PkceVerifier,
+        _redirect_uri: &LoopbackRedirectUri,
     ) -> Result<GoogleInstalledAppAuthFinish, String> {
         Err("auth_error: Google email OAuth is not available in this backend".to_owned())
     }
@@ -4500,14 +4506,14 @@ impl<B: EmailBackend> Engine<B> {
         let installed_app = pending.installed_app_data();
         let redirect = parse_installed_app_redirect_url(
             redirect_url,
-            installed_app.redirect_uri,
-            installed_app.state,
+            &installed_app.redirect_uri,
+            &installed_app.state,
         )?;
         let finished = self.backend.finish_google_installed_app_auth(
             account_id.as_ref(),
             &redirect.code,
-            installed_app.pkce_verifier,
-            installed_app.redirect_uri,
+            &installed_app.pkce_verifier,
+            &installed_app.redirect_uri,
         )?;
         self.state
             .save_google_refresh_token(account_id.as_ref(), &finished.refresh_token)?;

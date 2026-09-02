@@ -9,6 +9,7 @@ use crate::calendar::config::{
     CalendarAccountConfig, CalendarBackendConfig, CalendarPolicyConfig, CalendarSelectionConfig,
     CalendarWritePolicyConfig, ValidatedReadPolicy, ValidatedWritePolicy,
 };
+use crate::google_oauth::{DeviceCode, UserCode};
 
 /// The private RSVP type must preserve every exact accepted spelling and the
 /// existing invalid-value diagnostic.
@@ -1051,8 +1052,8 @@ fn google_auth_start_response_uses_colon_finish_command() {
     let response = format_google_auth_started(
         "google",
         &crate::google_oauth::GoogleDeviceAuthStart {
-            device_code: "device-secret".to_owned(),
-            user_code: "USER-CODE".to_owned(),
+            device_code: DeviceCode::from_validated_provider("device-secret".to_owned()),
+            user_code: UserCode::from_validated_provider("USER-CODE".to_owned()),
             verification_uri: "https://example.test/device".to_owned(),
             expires_in_secs: 900,
             interval_secs: 5,

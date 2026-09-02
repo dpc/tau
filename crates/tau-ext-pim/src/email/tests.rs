@@ -12,6 +12,7 @@ use tau_proto::{
 };
 
 use super::*;
+use crate::google_oauth::AccessToken;
 
 struct FramePair {
     reader: HarnessInputReader<BufReader<UnixStream>>,
@@ -172,9 +173,13 @@ impl EmailBackend for OAuthBackend {
         assert_eq!(account, "work");
         Ok(GoogleInstalledAppAuthStart {
             authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?scope=https%3A%2F%2Fmail.google.com%2F&access_type=offline&prompt=consent&state=state-secret&code_challenge=challenge-secret&code_challenge_method=S256".to_owned(),
-            state: "state-secret".to_owned(),
-            pkce_verifier: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
-            redirect_uri: "http://127.0.0.1:54321/".to_owned(),
+            state: OauthState::from_generator("state-secret".to_owned()),
+            pkce_verifier: PkceVerifier::from_generator(
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
+            ),
+            redirect_uri: LoopbackRedirectUri::from_generator(
+                "http://127.0.0.1:54321/".to_owned(),
+            ),
             pending_lifetime: Duration::from_secs(600),
         })
     }
@@ -182,20 +187,22 @@ impl EmailBackend for OAuthBackend {
     fn finish_google_installed_app_auth(
         &self,
         account: &str,
-        code: &str,
-        pkce_verifier: &str,
-        redirect_uri: &str,
+        code: &AuthorizationCode,
+        pkce_verifier: &PkceVerifier,
+        redirect_uri: &LoopbackRedirectUri,
     ) -> Result<GoogleInstalledAppAuthFinish, String> {
         assert_eq!(account, "work");
         self.exchanged.borrow_mut().push((
             account.to_owned(),
-            code.to_owned(),
-            pkce_verifier.to_owned(),
-            redirect_uri.to_owned(),
+            code.expose_for_provider().to_owned(),
+            pkce_verifier.expose_for_provider().to_owned(),
+            redirect_uri.expose_for_provider().to_owned(),
         ));
         Ok(GoogleInstalledAppAuthFinish {
-            refresh_token: "refresh-secret".to_owned(),
-            access_token: Some("access-secret".to_owned()),
+            refresh_token: RefreshToken::from_validated_provider("refresh-secret".to_owned()),
+            access_token: Some(AccessToken::from_validated_provider(
+                "access-secret".to_owned(),
+            )),
             access_token_lifetime: Some(Duration::from_secs(3600)),
         })
     }
@@ -211,7 +218,7 @@ impl EmailBackend for OAuthBackend {
             .expect("finish result with an access token");
         self.primed.borrow_mut().push((
             account.to_owned(),
-            access_token.clone(),
+            access_token.expose_for_provider().to_owned(),
             finished.access_token_lifetime,
         ));
         Ok(())
@@ -1506,11 +1513,18 @@ fn email_google_oauth_state_is_private_and_account_checked() {
     let temp = tempfile::tempdir().expect("tempdir");
     let state = StateStore::open(temp.path().join("state")).expect("state");
     state
-        .save_google_refresh_token("work", "refresh-token")
+        .save_google_refresh_token(
+            "work",
+            &RefreshToken::from_validated_provider("refresh-token".to_owned()),
+        )
         .expect("save token");
     assert_eq!(
-        state.google_refresh_token("work").expect("load token"),
-        Some("refresh-token".to_owned())
+        state
+            .google_refresh_token("work")
+            .expect("load token")
+            .as_ref()
+            .map(RefreshToken::expose_for_persistence),
+        Some("refresh-token")
     );
     assert!(
         temp.path()
@@ -1523,9 +1537,11 @@ fn email_google_oauth_state_is_private_and_account_checked() {
 
     let pending = EmailGooglePendingAuth::installed_app(
         "work",
-        "state-secret",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.",
-        "http://127.0.0.1:54321/",
+        &OauthState::from_generator("state-secret".to_owned()),
+        &PkceVerifier::from_generator(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
+        ),
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
         Duration::from_secs(900),
     );
     state
@@ -1533,8 +1549,11 @@ fn email_google_oauth_state_is_private_and_account_checked() {
         .expect("save pending auth");
     let loaded = state.pending_google_auth("work").expect("pending");
     let installed_app = loaded.installed_app_data();
-    assert_eq!(installed_app.redirect_uri, "http://127.0.0.1:54321/");
-    assert_eq!(installed_app.state, "state-secret");
+    assert_eq!(
+        installed_app.redirect_uri.expose_for_persistence(),
+        "http://127.0.0.1:54321/"
+    );
+    assert_eq!(installed_app.state.expose_for_persistence(), "state-secret");
     assert!(state.pending_google_auth("other").is_err());
 }
 
@@ -1544,9 +1563,11 @@ fn email_google_oauth_state_is_private_and_account_checked() {
 fn email_google_oauth_pending_duration_preserves_timestamp_representation() {
     let pending = EmailGooglePendingAuth::installed_app(
         "work",
-        "state-secret",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.",
-        "http://127.0.0.1:54321/",
+        &OauthState::from_generator("state-secret".to_owned()),
+        &PkceVerifier::from_generator(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
+        ),
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
         Duration::from_millis(900_999),
     );
     let encoded = serde_json::to_value(&pending).expect("pending serializes");
@@ -1560,9 +1581,11 @@ fn email_google_oauth_pending_duration_preserves_timestamp_representation() {
 
     let overflow = EmailGooglePendingAuth::installed_app(
         "work",
-        "state-secret",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.",
-        "http://127.0.0.1:54321/",
+        &OauthState::from_generator("state-secret".to_owned()),
+        &PkceVerifier::from_generator(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
+        ),
+        &LoopbackRedirectUri::from_generator("http://127.0.0.1:54321/".to_owned()),
         Duration::from_secs(u64::MAX),
     );
     let encoded = serde_json::to_value(&overflow).expect("overflow pending serializes");
@@ -1633,8 +1656,10 @@ fn email_google_oauth_actions_manage_private_state_without_token_output() {
         engine
             .state
             .google_refresh_token("work")
-            .expect("stored refresh token"),
-        Some("refresh-secret".to_owned())
+            .expect("stored refresh token")
+            .as_ref()
+            .map(RefreshToken::expose_for_persistence),
+        Some("refresh-secret")
     );
     assert!(engine.state.pending_google_auth("work").is_err());
     assert_eq!(

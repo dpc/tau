@@ -8,6 +8,7 @@ use ureq::tls as path_ureq_tls;
 
 #[cfg(test)]
 mod tests;
+mod value;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Mutex;
@@ -21,6 +22,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tau_proto::SecretValue;
 use url::{Url, form_urlencoded};
+pub(crate) use value::{
+    AccessToken, AuthorizationCode, DeviceCode, LoopbackRedirectUri, OauthState, PkceVerifier,
+    RefreshToken, UserCode,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -51,9 +56,9 @@ pub(crate) struct GoogleOauthSecretConfig<'a> {
 /// User-facing information returned by Google device authorization start.
 pub struct GoogleDeviceAuthStart {
     /// Provider device code used only by the extension to finish auth.
-    pub device_code: String,
+    pub device_code: DeviceCode,
     /// User code to enter on Google's verification page.
-    pub user_code: String,
+    pub user_code: UserCode,
     /// Verification URL to open manually.
     pub verification_uri: String,
     /// Number of seconds before the device authorization expires.
@@ -65,9 +70,9 @@ pub struct GoogleDeviceAuthStart {
 /// Tokens returned by Google after device authorization completes.
 pub struct GoogleDeviceAuthFinish {
     /// Long-lived refresh token to store in private extension state.
-    pub refresh_token: String,
+    pub refresh_token: RefreshToken,
     /// Short-lived access token that can be primed into the in-memory cache.
-    pub access_token: Option<String>,
+    pub access_token: Option<AccessToken>,
     /// Seconds until the optional access token expires.
     pub expires_in_secs: Option<u64>,
 }
@@ -78,11 +83,11 @@ pub struct GoogleInstalledAppAuthStart {
     /// Authorization URL to open in a browser.
     pub authorization_url: String,
     /// OAuth state parameter stored privately until finish.
-    pub state: String,
+    pub state: OauthState,
     /// RFC 7636 PKCE verifier stored privately until finish.
-    pub pkce_verifier: String,
+    pub pkce_verifier: PkceVerifier,
     /// Exact loopback redirect URI to send during token exchange.
-    pub redirect_uri: String,
+    pub redirect_uri: LoopbackRedirectUri,
     /// Time before the pending authorization should expire.
     pub pending_lifetime: Duration,
 }
@@ -90,7 +95,7 @@ pub struct GoogleInstalledAppAuthStart {
 /// Validated data extracted from a pasted installed-app redirect URL.
 pub struct GoogleInstalledAppRedirect {
     /// One-time authorization code returned by Google.
-    pub code: String,
+    pub code: AuthorizationCode,
 }
 
 impl std::fmt::Debug for GoogleInstalledAppRedirect {
@@ -104,21 +109,21 @@ impl std::fmt::Debug for GoogleInstalledAppRedirect {
 /// Tokens returned by Google after installed-app authorization completes.
 pub struct GoogleInstalledAppAuthFinish {
     /// Long-lived refresh token to store in private extension state.
-    pub refresh_token: String,
+    pub refresh_token: RefreshToken,
     /// Short-lived access token that can be primed into the in-memory cache.
-    pub access_token: Option<String>,
+    pub access_token: Option<AccessToken>,
     /// Lifetime of the optional access token.
     pub access_token_lifetime: Option<Duration>,
 }
 
 #[derive(Debug)]
 pub(crate) struct GoogleAccessToken {
-    pub(crate) access_token: String,
+    pub(crate) access_token: AccessToken,
     pub(crate) expires_in_secs: Option<u64>,
 }
 
 struct CachedAccessToken {
-    access_token: String,
+    access_token: AccessToken,
     expires_at: Instant,
 }
 
@@ -153,10 +158,10 @@ where
         let pkce_verifier = generate_pkce_verifier();
         let authorization_url = build_installed_app_authorization_url(
             &client_id,
-            &redirect_uri,
+            redirect_uri.expose_for_authorization_url(),
             GOOGLE_MAIL_SCOPE,
-            &state,
-            &pkce_s256_challenge(&pkce_verifier),
+            state.expose_for_authorization_url(),
+            &pkce_s256_challenge(pkce_verifier.expose_for_challenge()),
         )?;
         Ok(GoogleInstalledAppAuthStart {
             authorization_url,
@@ -171,9 +176,9 @@ where
     pub(crate) fn finish_installed_app_auth(
         &self,
         config: GoogleOauthSecretConfig<'_>,
-        code: &str,
-        pkce_verifier: &str,
-        redirect_uri: &str,
+        code: &AuthorizationCode,
+        pkce_verifier: &PkceVerifier,
+        redirect_uri: &LoopbackRedirectUri,
     ) -> Result<GoogleInstalledAppAuthFinish, String> {
         let client_id = self.secret(config.client_id_secret)?;
         let client_secret = config
@@ -183,9 +188,9 @@ where
         let body = build_installed_app_token_request_body(
             &client_id,
             client_secret.as_deref(),
-            code,
-            pkce_verifier,
-            redirect_uri,
+            code.expose_for_provider(),
+            pkce_verifier.expose_for_provider(),
+            redirect_uri.expose_for_provider(),
         );
         let mut response = self
             .agent
@@ -198,8 +203,8 @@ where
                 "finishing Google authorization",
                 &mut response,
                 &[
-                    code,
-                    pkce_verifier,
+                    code.expose_for_provider(),
+                    pkce_verifier.expose_for_provider(),
                     client_secret.as_deref().unwrap_or_default(),
                 ],
             ));
@@ -239,12 +244,12 @@ where
     pub(crate) fn finish_device_auth(
         &self,
         config: GoogleOauthSecretConfig<'_>,
-        device_code: &str,
+        device_code: &DeviceCode,
     ) -> Result<GoogleDeviceAuthFinish, String> {
         let client_id = self.secret(config.client_id_secret)?;
         let mut body = form_urlencoded::Serializer::new(String::new());
         body.append_pair("client_id", &client_id);
-        body.append_pair("device_code", device_code);
+        body.append_pair("device_code", device_code.expose_for_provider());
         body.append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
         let client_secret = config
             .client_secret_secret
@@ -266,7 +271,10 @@ where
             return Err(google_oauth_http_error(
                 "finishing Google authorization",
                 &mut response,
-                &[device_code, client_secret.as_deref().unwrap_or_default()],
+                &[
+                    device_code.expose_for_provider(),
+                    client_secret.as_deref().unwrap_or_default(),
+                ],
             ));
         }
         let text = read_limited_body(&mut response, "Google device token response")?;
@@ -275,10 +283,11 @@ where
         let refresh_token =
             required_oauth_string(&json, "refresh_token", "Google device token response")?
                 .to_owned();
-        let access_token = optional_oauth_string(&json, "access_token")?.map(str::to_owned);
+        let access_token = optional_oauth_string(&json, "access_token")?
+            .map(|value| AccessToken::from_validated_provider(value.to_owned()));
         let expires_in_secs = optional_oauth_u64(&json, "expires_in")?;
         Ok(GoogleDeviceAuthFinish {
-            refresh_token,
+            refresh_token: RefreshToken::from_validated_provider(refresh_token),
             access_token,
             expires_in_secs,
         })
@@ -289,9 +298,9 @@ where
         &self,
         account_id: &AccountId,
         config: GoogleOauthSecretConfig<'_>,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         not_authorized_message: &str,
-    ) -> Result<String, String> {
+    ) -> Result<AccessToken, String> {
         if let Some(access_token) = self.cached_access_token(account_id)? {
             return Ok(access_token);
         }
@@ -315,7 +324,7 @@ where
     pub(crate) fn prime_access_token_cache(
         &self,
         account_id: &AccountId,
-        access_token: String,
+        access_token: AccessToken,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {
         self.cache_access_token(account_id, access_token, expires_in_secs)
@@ -325,7 +334,7 @@ where
     pub(crate) fn prime_access_token_cache_with_lifetime(
         &self,
         account_id: &AccountId,
-        access_token: String,
+        access_token: AccessToken,
         access_token_lifetime: Option<Duration>,
     ) -> Result<(), String> {
         self.cache_access_token_with_lifetime(account_id, access_token, access_token_lifetime)
@@ -344,27 +353,28 @@ where
     fn refresh_token(
         &self,
         secret_name: Option<&str>,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         not_authorized_message: &str,
-    ) -> Result<String, String> {
+    ) -> Result<RefreshToken, String> {
         if let Some(refresh_token) = stored_refresh_token {
-            return Ok(refresh_token.to_owned());
+            return Ok(refresh_token.clone());
         }
         let Some(secret_name) = secret_name else {
             return Err(not_authorized_message.to_owned());
         };
         self.secret(secret_name)
+            .map(RefreshToken::from_configured_secret)
     }
 
     fn exchange_refresh_token(
         &self,
         client_id: &str,
         client_secret_secret: Option<&str>,
-        refresh_token: &str,
+        refresh_token: &RefreshToken,
     ) -> Result<GoogleAccessToken, String> {
         let mut body = form_urlencoded::Serializer::new(String::new());
         body.append_pair("client_id", client_id);
-        body.append_pair("refresh_token", refresh_token);
+        body.append_pair("refresh_token", refresh_token.expose_for_provider());
         body.append_pair("grant_type", "refresh_token");
         let client_secret = client_secret_secret
             .map(|secret_name| self.secret(secret_name))
@@ -385,14 +395,17 @@ where
             return Err(google_oauth_http_error(
                 "refreshing Google access token",
                 &mut response,
-                &[refresh_token, client_secret.as_deref().unwrap_or_default()],
+                &[
+                    refresh_token.expose_for_provider(),
+                    client_secret.as_deref().unwrap_or_default(),
+                ],
             ));
         }
         let text = read_limited_body(&mut response, "Google token response")?;
         parse_access_token_response(&text, "Google token response")
     }
 
-    fn cached_access_token(&self, account_id: &AccountId) -> Result<Option<String>, String> {
+    fn cached_access_token(&self, account_id: &AccountId) -> Result<Option<AccessToken>, String> {
         let now = Instant::now();
         let mut cache = self
             .access_token_cache
@@ -410,7 +423,7 @@ where
     fn cache_access_token(
         &self,
         account_id: &AccountId,
-        access_token: String,
+        access_token: AccessToken,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {
         self.cache_access_token_with_lifetime(
@@ -423,7 +436,7 @@ where
     fn cache_access_token_with_lifetime(
         &self,
         account_id: &AccountId,
-        access_token: String,
+        access_token: AccessToken,
         access_token_lifetime: Option<Duration>,
     ) -> Result<(), String> {
         let access_token_lifetime =
@@ -510,13 +523,14 @@ pub(crate) fn build_installed_app_token_request_body(
 /// Parse and validate a pasted Google installed-app redirect URL.
 pub(crate) fn parse_installed_app_redirect_url(
     pasted_url: &str,
-    stored_redirect_uri: &str,
-    expected_state: &str,
+    stored_redirect_uri: &LoopbackRedirectUri,
+    expected_state: &OauthState,
 ) -> Result<GoogleInstalledAppRedirect, String> {
     if pasted_url.trim().is_empty() || MAX_REDIRECT_URL_CHARS < pasted_url.chars().count() {
         return Err("Google redirect URL was empty or too long".to_owned());
     }
-    let stored = validate_loopback_redirect_uri(stored_redirect_uri)?;
+    let stored =
+        validate_loopback_redirect_uri(stored_redirect_uri.expose_for_redirect_validation())?;
     let parsed =
         Url::parse(pasted_url).map_err(|_| "Google redirect URL was not a valid URL".to_owned())?;
     validate_installed_app_redirect_target(&parsed, &stored)?;
@@ -525,7 +539,7 @@ pub(crate) fn parse_installed_app_redirect_url(
     let state = query
         .state
         .ok_or_else(|| "Google redirect URL was missing state".to_owned())?;
-    if state != expected_state {
+    if state != expected_state.expose_for_redirect_validation() {
         return Err("Google redirect URL state did not match pending authorization".to_owned());
     }
     if let Some(error) = query.provider_error {
@@ -544,7 +558,9 @@ pub(crate) fn parse_installed_app_redirect_url(
     if !is_safe_oauth_parameter(&code) {
         return Err("Google redirect URL authorization code was invalid".to_owned());
     }
-    Ok(GoogleInstalledAppRedirect { code })
+    Ok(GoogleInstalledAppRedirect {
+        code: AuthorizationCode::from_validated_redirect(code),
+    })
 }
 
 #[derive(Default)]
@@ -671,10 +687,11 @@ fn parse_installed_app_token_response(text: &str) -> Result<GoogleInstalledAppAu
         }
     })?
     .to_owned();
-    let access_token = optional_oauth_string(&json, "access_token")?.map(str::to_owned);
+    let access_token = optional_oauth_string(&json, "access_token")?
+        .map(|value| AccessToken::from_validated_provider(value.to_owned()));
     let access_token_lifetime = optional_oauth_u64(&json, "expires_in")?.map(Duration::from_secs);
     Ok(GoogleInstalledAppAuthFinish {
-        refresh_token,
+        refresh_token: RefreshToken::from_validated_provider(refresh_token),
         access_token,
         access_token_lifetime,
     })
@@ -697,18 +714,14 @@ pub(crate) fn parse_device_auth_start(text: &str) -> Result<GoogleDeviceAuthStar
         return Err("Google device authorization response had invalid timing".to_owned());
     }
     Ok(GoogleDeviceAuthStart {
-        device_code: required_oauth_string(
-            &json,
-            "device_code",
-            "Google device authorization response",
-        )?
-        .to_owned(),
-        user_code: required_oauth_string(
-            &json,
-            "user_code",
-            "Google device authorization response",
-        )?
-        .to_owned(),
+        device_code: DeviceCode::from_validated_provider(
+            required_oauth_string(&json, "device_code", "Google device authorization response")?
+                .to_owned(),
+        ),
+        user_code: UserCode::from_validated_provider(
+            required_oauth_string(&json, "user_code", "Google device authorization response")?
+                .to_owned(),
+        ),
         verification_uri: validated_oauth_string(verification_uri, "verification_uri")?.to_owned(),
         expires_in_secs,
         interval_secs,
@@ -722,7 +735,9 @@ pub(crate) fn parse_access_token_response(
     let json: Value =
         serde_json::from_str(text).map_err(|error| format!("{context} was not JSON: {error}"))?;
     Ok(GoogleAccessToken {
-        access_token: required_oauth_string(&json, "access_token", context)?.to_owned(),
+        access_token: AccessToken::from_validated_provider(
+            required_oauth_string(&json, "access_token", context)?.to_owned(),
+        ),
         expires_in_secs: optional_oauth_u64(&json, "expires_in")?,
     })
 }
@@ -861,24 +876,26 @@ fn sanitize_error_text(value: &str) -> String {
         .join(" ")
 }
 
-fn random_loopback_redirect_uri() -> String {
+fn random_loopback_redirect_uri() -> LoopbackRedirectUri {
     let port = rand::thread_rng().gen_range(49152..=65535);
-    format!("http://127.0.0.1:{port}/")
+    LoopbackRedirectUri::from_generator(format!("http://127.0.0.1:{port}/"))
 }
 
-fn generate_pkce_verifier() -> String {
+fn generate_pkce_verifier() -> PkceVerifier {
     let mut rng = rand::thread_rng();
-    (0..PKCE_VERIFIER_LEN)
-        .map(|_| {
-            *PKCE_VERIFIER_ALPHABET
-                .choose(&mut rng)
-                .expect("PKCE alphabet is non-empty") as char
-        })
-        .collect()
+    PkceVerifier::from_generator(
+        (0..PKCE_VERIFIER_LEN)
+            .map(|_| {
+                *PKCE_VERIFIER_ALPHABET
+                    .choose(&mut rng)
+                    .expect("PKCE alphabet is non-empty") as char
+            })
+            .collect(),
+    )
 }
 
-fn generate_oauth_state() -> String {
+fn generate_oauth_state() -> OauthState {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    OauthState::from_generator(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }

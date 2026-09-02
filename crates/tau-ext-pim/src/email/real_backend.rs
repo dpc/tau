@@ -40,8 +40,8 @@ use super::{
     ValidatedAuthConfig, ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig, recent_cutoff,
 };
 use crate::google_oauth::{
-    GoogleInstalledAppAuthFinish, GoogleInstalledAppAuthStart, GoogleOauthClient,
-    GoogleOauthSecretConfig,
+    AccessToken, AuthorizationCode, GoogleInstalledAppAuthFinish, GoogleInstalledAppAuthStart,
+    GoogleOauthClient, GoogleOauthSecretConfig, LoopbackRedirectUri, PkceVerifier,
 };
 
 pub(super) const READ_MESSAGE_FETCH_MAX_BYTES: usize = READ_BODY_MAX_BYTES * 4;
@@ -349,9 +349,9 @@ impl EmailBackend for RealEmailBackend {
     fn finish_google_installed_app_auth(
         &self,
         account: &str,
-        code: &str,
-        pkce_verifier: &str,
-        redirect_uri: &str,
+        code: &AuthorizationCode,
+        pkce_verifier: &PkceVerifier,
+        redirect_uri: &LoopbackRedirectUri,
     ) -> Result<GoogleInstalledAppAuthFinish, String> {
         let account = self.account(account)?;
         let config = account.google_oauth_config()?;
@@ -410,7 +410,7 @@ impl RealAccount {
         })
     }
 
-    fn google_access_token(&self) -> Result<String, String> {
+    fn google_access_token(&self) -> Result<AccessToken, String> {
         let config = self.google_oauth_config()?;
         let stored_refresh_token = if config.refresh_token_secret.is_some() {
             None
@@ -429,7 +429,7 @@ impl RealAccount {
         self.oauth.access_token(
             &self.id,
             config,
-            stored_refresh_token.as_deref(),
+            stored_refresh_token.as_ref(),
             &format!(
                 "Google email account `{}` is not authorized; run `:email auth google start {}` and then `:email auth google finish {} <copied-url>`",
                 self.id, self.id, self.id
@@ -947,8 +947,8 @@ async fn send_message_oauth2_with_token_refresh(
     account: &RealAccount,
     email: &Message,
     submission_stage: &SmtpSubmissionStage,
-    mut access_token: String,
-    mut refresh_access_token: impl FnMut() -> Result<String, String>,
+    mut access_token: AccessToken,
+    mut refresh_access_token: impl FnMut() -> Result<AccessToken, String>,
 ) -> Result<(), EmailSendFailure> {
     let smtp = account
         .smtp_config()
@@ -964,7 +964,7 @@ async fn send_message_oauth2_with_token_refresh(
             )));
         }
     };
-    if smtp_auth_xoauth2(&mut conn, smtp, &access_token)
+    if smtp_auth_xoauth2(&mut conn, smtp, access_token.expose_for_provider())
         .await
         .is_err()
     {
@@ -974,16 +974,22 @@ async fn send_message_oauth2_with_token_refresh(
                 "smtp_error: SMTP connection to {}:{} failed after auth retry: {}",
                 smtp.host,
                 smtp.port,
-                sanitized_backend_error_redacting(&error.to_string(), &access_token)
+                sanitized_backend_error_redacting(
+                    &error.to_string(),
+                    access_token.expose_for_provider(),
+                )
             ))
         })?;
-        smtp_auth_xoauth2(&mut conn, smtp, &access_token)
+        smtp_auth_xoauth2(&mut conn, smtp, access_token.expose_for_provider())
             .await
             .map_err(|retry_error| {
                 EmailSendFailure::NotDispatched(format!(
                     "auth_error: SMTP XOAUTH2 authentication failed for {}: {}",
                     smtp.login,
-                    sanitized_backend_error_redacting(&retry_error.to_string(), &access_token)
+                    sanitized_backend_error_redacting(
+                        &retry_error.to_string(),
+                        access_token.expose_for_provider(),
+                    )
                 ))
             })?;
     }
@@ -1121,7 +1127,7 @@ async fn authenticate_imap_xoauth2(
 ) -> Result<Session<RealImapStream>, String> {
     for attempt in 0..2 {
         let access_token = account.google_access_token()?;
-        let authenticator = Xoauth2Authenticator::new(login, &access_token);
+        let authenticator = Xoauth2Authenticator::new(login, access_token.expose_for_provider());
         match client.authenticate("XOAUTH2", authenticator).await {
             Ok(session) => return Ok(session),
             Err((_, returned_client)) if attempt == 0 => {

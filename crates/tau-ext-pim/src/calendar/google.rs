@@ -12,8 +12,8 @@ use super::ics_feed::TimeRange;
 use super::identity::{EventEtag, EventId, ICalUid, ProviderCalendarId};
 use super::runtime::InviteResponse;
 use crate::google_oauth::{
-    GoogleDeviceAuthFinish, GoogleDeviceAuthStart, GoogleOauthClient, GoogleOauthSecretConfig,
-    google_http_agent,
+    AccessToken, DeviceCode, GoogleDeviceAuthFinish, GoogleDeviceAuthStart, GoogleOauthClient,
+    GoogleOauthSecretConfig, RefreshToken, google_http_agent,
 };
 const GOOGLE_OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const GOOGLE_CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
@@ -334,7 +334,7 @@ impl GoogleBackend {
     pub fn finish_device_auth(
         &self,
         account: &ValidatedAccount,
-        device_code: &str,
+        device_code: &DeviceCode,
     ) -> Result<GoogleDeviceAuthFinish, String> {
         let config = google_oauth_config(account)?;
         self.oauth.finish_device_auth(config, device_code)
@@ -344,7 +344,7 @@ impl GoogleBackend {
     pub(crate) fn prime_access_token_cache(
         &self,
         account_id: &CalendarAccountId,
-        access_token: String,
+        access_token: AccessToken,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {
         self.oauth
@@ -355,7 +355,7 @@ impl GoogleBackend {
     pub fn list_calendars(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
     ) -> Result<Vec<GoogleCalendar>, String> {
         self.list_calendar_records(account, stored_refresh_token)
             .map(|calendars| calendars.into_iter().map(GoogleCalendar::from).collect())
@@ -365,7 +365,7 @@ impl GoogleBackend {
     pub(super) fn list_calendar_records(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
     ) -> Result<Vec<GoogleCalendarRecord>, String> {
         let token = self.access_token(account, stored_refresh_token)?;
         let api_base = api_base(account)?;
@@ -386,7 +386,7 @@ impl GoogleBackend {
     pub fn list_events(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &str,
         range: TimeRange,
         limit: usize,
@@ -414,7 +414,7 @@ impl GoogleBackend {
     pub(super) fn list_events_page(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &ProviderCalendarId,
         query: GoogleEventListQuery<'_>,
     ) -> Result<GoogleEventRecordPage, String> {
@@ -447,7 +447,7 @@ impl GoogleBackend {
     pub fn read_event(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &str,
         event_id: &str,
     ) -> Result<GoogleEvent, String> {
@@ -464,7 +464,7 @@ impl GoogleBackend {
     pub(super) fn read_event_record(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &ProviderCalendarId,
         event_id: &EventId,
     ) -> Result<GoogleEventRecord, String> {
@@ -489,7 +489,7 @@ impl GoogleBackend {
     pub fn create_event(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &str,
         event: &GoogleEventWrite<'_>,
     ) -> Result<GoogleEvent, String> {
@@ -507,7 +507,7 @@ impl GoogleBackend {
     pub(super) fn create_event_classified(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &ProviderCalendarId,
         event: (&GoogleEventWrite<'_>, Option<&EventTimeRange>),
     ) -> Result<GoogleEventRecord, GoogleWriteError> {
@@ -535,7 +535,7 @@ impl GoogleBackend {
     pub fn update_event(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &str,
         event_id: &str,
         etag: &str,
@@ -557,7 +557,7 @@ impl GoogleBackend {
     pub(super) fn update_event_classified(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &ProviderCalendarId,
         event_id: &EventId,
         etag: &EventEtag,
@@ -588,7 +588,7 @@ impl GoogleBackend {
     pub fn delete_event(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &str,
         event_id: &str,
         etag: &str,
@@ -607,7 +607,7 @@ impl GoogleBackend {
     pub(super) fn delete_event_classified(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &ProviderCalendarId,
         event_id: &EventId,
         etag: &EventEtag,
@@ -630,7 +630,10 @@ impl GoogleBackend {
         let response = self
             .agent
             .delete(&url)
-            .header("Authorization", format!("Bearer {token}"))
+            .header(
+                "Authorization",
+                format!("Bearer {}", token.expose_for_provider()),
+            )
             .header("If-Match", google_if_match_header(etag.as_str()))
             .call()
             .map_err(|_| GoogleWriteError::OutcomeUnknown)?;
@@ -645,7 +648,7 @@ impl GoogleBackend {
     pub fn respond_invite(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &str,
         event_id: &str,
         etag: &str,
@@ -667,7 +670,7 @@ impl GoogleBackend {
     pub(super) fn respond_invite_classified(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &ProviderCalendarId,
         event_id: &EventId,
         etag: &EventEtag,
@@ -686,7 +689,7 @@ impl GoogleBackend {
     fn respond_invite_classified_with(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
+        stored_refresh_token: Option<&RefreshToken>,
         calendar_id: &ProviderCalendarId,
         event_id: &EventId,
         etag: &EventEtag,
@@ -720,8 +723,8 @@ impl GoogleBackend {
     fn access_token(
         &self,
         account: &ValidatedAccount,
-        stored_refresh_token: Option<&str>,
-    ) -> Result<String, String> {
+        stored_refresh_token: Option<&RefreshToken>,
+    ) -> Result<AccessToken, String> {
         let config = google_oauth_config(account)?;
         let message = "Google calendar account is not authorized; run `:calendar auth google start <account>` and then `:calendar auth google finish <account>`";
         self.oauth
@@ -731,9 +734,10 @@ impl GoogleBackend {
     fn get_json(
         &self,
         url: &str,
-        access_token: &str,
+        access_token: &AccessToken,
         custom_api_base: Option<&str>,
     ) -> Result<Value, String> {
+        let access_token = access_token.expose_for_provider();
         let redaction = ErrorBodyRedaction::new(access_token, custom_api_base);
         let mut response = self
             .agent
@@ -748,7 +752,7 @@ impl GoogleBackend {
     fn post_json_write(
         &self,
         url: &str,
-        access_token: &str,
+        access_token: &AccessToken,
         body: &Value,
     ) -> Result<Value, GoogleWriteError> {
         let json_body = serde_json::to_string(body).map_err(|error| {
@@ -756,6 +760,7 @@ impl GoogleBackend {
                 "serializing Google Calendar request failed: {error}"
             ))
         })?;
+        let access_token = access_token.expose_for_provider();
         let mut response = self
             .agent
             .post(url)
@@ -770,10 +775,11 @@ impl GoogleBackend {
     fn patch_json_write(
         &self,
         url: &str,
-        access_token: &str,
+        access_token: &AccessToken,
         if_match: Option<&str>,
         body: &Value,
     ) -> Result<Value, GoogleWriteError> {
+        let access_token = access_token.expose_for_provider();
         let mut request = self
             .agent
             .patch(url)

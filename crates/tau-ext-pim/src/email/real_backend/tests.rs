@@ -325,10 +325,12 @@ fn oauth_auth_retry_precedes_single_submission() {
                 &account,
                 &message,
                 &stage,
-                "expired-token".to_owned(),
+                AccessToken::from_validated_provider("expired-token".to_owned()),
                 || {
                     refreshes.set(refreshes.get() + 1);
-                    Ok("fresh-token".to_owned())
+                    Ok(AccessToken::from_validated_provider(
+                        "fresh-token".to_owned(),
+                    ))
                 },
             ));
 
