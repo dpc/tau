@@ -727,16 +727,38 @@ fn print_tools_requires_usable_model_route_or_explicit_role_grants() {
     assert!(!ordinary_default.contains(&"shell_command".to_owned()));
 }
 
-/// Proves tool previews expose a disabled-by-default extension from the public
-/// environment and apply later CLI disable/re-enable operations in argv order.
+/// Returns whether one successful tool preview exposes the test-dummy tool.
+fn preview_has_test_dummy(output: &Output) -> bool {
+    String::from_utf8_lossy(&output.stdout).contains("\"name\": \"restart_test_dummy\"")
+}
+
+/// The public extension environment must enable test-dummy idempotently when
+/// the same extension name appears more than once.
 #[test]
-fn print_tools_composes_extension_environment_and_ordered_cli() {
+fn print_tools_extension_environment_is_idempotent() {
     let home = TempDir::new().expect("temporary home");
     let env_only = preview(
         &home,
         Some("test-dummy"),
         &["--role", "engineer", "dev", "print-tools"],
     );
+    let duplicated = preview(
+        &home,
+        Some("test-dummy,test-dummy"),
+        &["--role", "engineer", "dev", "print-tools"],
+    );
+    for output in [&env_only, &duplicated] {
+        assert!(output.status.success(), "{:?}", output.stderr);
+    }
+    assert!(preview_has_test_dummy(&env_only));
+    assert_eq!(env_only.stdout, duplicated.stdout);
+}
+
+/// A later CLI disable must override test-dummy enabled by the public
+/// extension environment.
+#[test]
+fn print_tools_cli_disable_overrides_extension_environment() {
+    let home = TempDir::new().expect("temporary home");
     let disabled = preview(
         &home,
         Some("test-dummy"),
@@ -749,6 +771,15 @@ fn print_tools_composes_extension_environment_and_ordered_cli() {
             "print-tools",
         ],
     );
+
+    assert!(disabled.status.success(), "{:?}", disabled.stderr);
+    assert!(!preview_has_test_dummy(&disabled));
+}
+
+/// A later CLI enable must override an earlier CLI disable in argv order.
+#[test]
+fn print_tools_cli_reenable_follows_ordered_disable() {
+    let home = TempDir::new().expect("temporary home");
     let reenabled = preview(
         &home,
         Some("test-dummy"),
@@ -763,21 +794,9 @@ fn print_tools_composes_extension_environment_and_ordered_cli() {
             "print-tools",
         ],
     );
-    let duplicated = preview(
-        &home,
-        Some("test-dummy,test-dummy"),
-        &["--role", "engineer", "dev", "print-tools"],
-    );
-    for output in [&env_only, &disabled, &reenabled, &duplicated] {
-        assert!(output.status.success(), "{:?}", output.stderr);
-    }
-    let has_dummy = |output: &Output| {
-        String::from_utf8_lossy(&output.stdout).contains("\"name\": \"restart_test_dummy\"")
-    };
-    assert!(has_dummy(&env_only));
-    assert!(!has_dummy(&disabled));
-    assert!(has_dummy(&reenabled));
-    assert_eq!(env_only.stdout, duplicated.stdout);
+
+    assert!(reenabled.status.success(), "{:?}", reenabled.stderr);
+    assert!(preview_has_test_dummy(&reenabled));
 }
 
 /// Rejects malformed and unknown public extension input before configured
