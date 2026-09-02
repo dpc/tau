@@ -728,7 +728,7 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
     )
     .expect("external request");
     assert!(
-        started.elapsed() < std::time::Duration::from_millis(100),
+        started.elapsed() < Duration::from_millis(100),
         "external auth should be delegated off-loop"
     );
     assert!(session_agent_message_received_events(&h).is_empty());
@@ -1414,6 +1414,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
                 node_id: None,
                 activation_observation: None,
                 source_observation: None,
+                delivery_schedule: None,
             });
     }
     let agents_before = h.agent_runtime.agent_registry.agents.len();
@@ -1490,6 +1491,7 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
             node_id: None,
             activation_observation: None,
             source_observation: None,
+            delivery_schedule: None,
         }));
     let recipient = crate::parse_agent_id(&pending_id);
     assert_eq!(
@@ -1519,6 +1521,7 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
             node_id: None,
             activation_observation: None,
             source_observation: None,
+            delivery_schedule: None,
         }));
     assert_eq!(
         h.admit_peer_input(&recipient, 1)
@@ -1915,6 +1918,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
         })),
     )
     .expect("commit nested publication batch");
+    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(60_000));
     drop(interceptor);
 
     assert!(!h.input_wait_pending_for(&recipient_cid));
@@ -2154,6 +2158,11 @@ fn local_message_to_exact_waiter_releases_sender_and_parallel_successor() {
     let state = td.path().join("state");
     let mut h = echo_harness(&state).expect("start");
     h.config.selected_model = Some("test/model".into());
+    h.config
+        .accepted_harness_settings
+        .notification_delivery
+        .agent_message =
+        NotificationDeliveryPolicy::from_millis(0, 0, 0).expect("immediate test policy");
     let sender_cid = ensure_test_user_agent(&mut h);
     let role = h.config.selected_role.clone();
     let first_recipient_cid =
@@ -4691,15 +4700,19 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 
-/// Agent-to-agent messages are real input for the recipient. If the recipient
-/// is blocked in `wait`, the wait must return immediately so the hidden message
-/// can be folded into the next prompt instead of being stuck behind a passive
-/// wait for background work.
+/// Agent-to-agent input interrupts an exact wait only at its bounded wait-tool
+/// deadline, preserving an aggregation window without stalling indefinitely.
 #[test]
 fn agent_message_interrupts_recipient_active_wait() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.config
+        .accepted_harness_settings
+        .notification_delivery
+        .agent_message = HarnessSettings::built_in()
+        .notification_delivery
+        .agent_message;
     h.config.selected_model = Some("test/model".into());
 
     let _tool_events = connect_test_tool(&mut h, "conn-msg-wait");
@@ -4753,6 +4766,11 @@ fn agent_message_interrupts_recipient_active_wait() {
             message: "please stop waiting".to_owned(),
         }),
     );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result) if result.call_id.as_str() == wait_call_id.as_str()
+    )));
+    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(120_000));
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -4798,6 +4816,11 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.config.selected_model = Some("test/model".into());
+    h.config
+        .accepted_harness_settings
+        .notification_delivery
+        .agent_message = NotificationDeliveryPolicy::from_millis(0, 1, 1)
+        .expect("one-millisecond prospective wait policy");
 
     let _tool_events = connect_ready_configured_extension(
         &mut h,
@@ -4819,7 +4842,16 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
         "slow_queued_message_wait",
     );
     let wait_call_id: ToolCallId = "wait-queued-message".into();
-    let wait_call = wait_no_args_call(wait_call_id.as_str());
+    let wait_call = AgentToolCall {
+        call_ref: None,
+        id: wait_call_id.clone(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(background_call_id.to_string()),
+        )]),
+    };
     seed_tools_running(&mut h, &cid, vec![wait_call_id.clone()]);
     let recipient_id = h.agent_runtime.agent_registry.agents[&cid]
         .identity
@@ -4842,6 +4874,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
             message: "queued manager message".to_owned(),
         }),
     );
+    std::thread::sleep(Duration::from_millis(2));
     h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
         .expect("wait interrupted by queued agent message");
 
@@ -4884,6 +4917,106 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     );
 
     h.shutdown().expect("shutdown");
+}
+
+/// Queue-before-register correlation skips an earlier ready sibling wake and
+/// settles against the first ready activation on the selected branch.
+#[test]
+fn wait_start_cites_selected_branch_activation_after_off_branch_wake() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let _tool_events = connect_test_tool(&mut h, "branch-wait-correlation-tool");
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("branch-wait-correlation-tool"),
+        instant_background_test_tool_spec("slow_branch_wait"),
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = durable_agent_id_for_conversation(&h, &cid);
+    let background_call: ToolCallId = "branch-wait-background".into();
+    start_background_tool_and_finish_placeholder_turn(
+        &mut h,
+        &cid,
+        background_call.as_str(),
+        "slow_branch_wait",
+    );
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: test_agent_prompt_id("branch-wait-busy"),
+        },
+    );
+    let message = |id: &str, body: &str| {
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse(id).expect("message id"),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            message: body.to_owned(),
+        })
+    };
+    h.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        message("off-branch-wait-wake", "off branch"),
+    );
+    let off_branch = h.agent_runtime.agent_registry.agents[&cid].identity.head;
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: recipient_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    h.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        message("selected-branch-wait-wake", "selected branch"),
+    );
+    let selected = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .head
+        .expect("selected message node");
+    assert_ne!(off_branch, Some(selected));
+    let wakes = &h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .pending_message_wakes;
+    let selected_activation = wakes
+        .iter()
+        .find(|wake| wake.node_id == Some(selected))
+        .and_then(|wake| wake.activation_observation)
+        .expect("selected activation");
+
+    let wait_call = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([91; 16]),
+            item_index: 0,
+        }),
+        id: "branch-aware-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(background_call.to_string()),
+        )]),
+    };
+    assert_eq!(
+        h.first_wait_preempting_message_activation_for_kind(&cid, DeliveryDeadlineKind::WaitTool,),
+        Some(selected_activation),
+        "the earlier dormant sibling cannot own wait settlement correlation"
+    );
+    seed_tools_running(&mut h, &cid, vec![wait_call.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
+        .expect("settle prospective exact wait");
+    h.drain_publish_idle_dispatches();
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id == wait_call.id
+                && matches!(&result.result, CborValue::Text(text) if text.contains("wait_outcome: interrupted"))
+    )));
 }
 
 /// A no-tool response is not request-terminal while an accepted agent message

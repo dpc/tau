@@ -106,6 +106,14 @@ progress requires external intervention. Waiting, Done, and Blocked mutate
 reported status only, never close a turn or install a wait; later
 substantive work while any is current receives a fresh reminder to set
 Working.
+
+Noninitial provider, work, long-wait, and lifecycle notifications use the
+harness-owned status delivery policy. An exact tool wait selects its wait-tool
+deadline; a bare or activating-input wait, or a current `Waiting` report, selects
+wait-any. `Done` and `Blocked` select idle. These scheduling meanings affect only
+trigger readiness and wait interruption; they do not turn a status report into a
+mechanical suspension. Replay never recreates watch topology or refans a watch
+notification.
 Tool guidance asks agents to report meaningful user-level work rather than
 routine progress or label-only changes, and to batch status with independent tool
 calls when possible. The model-visible status argument names this label

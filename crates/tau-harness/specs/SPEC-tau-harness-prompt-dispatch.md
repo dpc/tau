@@ -242,6 +242,14 @@ Harness-generated active and passive background-tool completion prompts carry
 tag changes only UI classification: activation, prompt delivery, wait
 suppression, retained-result consumption, and replay position remain unchanged.
 
+Prompt-injected notification admission remains separate from provider-trigger
+readiness. A natural user prompt, timer prompt, or tool continuation
+opportunistically folds every already-admitted selected-branch notification at
+its materialization cut, even when a notification's own deadline is later. A
+notification that becomes ready during active inference or ordinary foreground
+tool work never starts concurrent inference; it waits for the next safe
+continuation. Provider-unavailable failure applies only after trigger readiness.
+
 ## Prompt dispatch lifecycle split
 
 Prompt dispatch first completes bounded persistence admission and the in-memory

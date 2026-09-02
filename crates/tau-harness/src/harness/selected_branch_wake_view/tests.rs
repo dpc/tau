@@ -6,7 +6,7 @@ use tau_core::{AgentTree, PersistedAgentEventSeq};
 use tau_proto::{AgentHead, AgentId, Event, PromptOriginator};
 
 use super::*;
-use crate::agent::PendingMessageWakeSource;
+use crate::agent::{DeliveryDeadlineKind, PendingMessageWakeSource};
 
 /// Appends one ordinary transcript node and returns its identifier.
 fn append_node(tree: &mut AgentTree, agent_id: &AgentId, label: &str) -> NodeId {
@@ -42,6 +42,7 @@ fn wake(
         node_id,
         activation_observation: None,
         source_observation: None,
+        delivery_schedule: None,
     }
 }
 
@@ -123,7 +124,12 @@ fn randomized_view_matches_reference_at_every_head() {
                 .map(|node| node.parent_id.map_or(AgentHead::Root, AgentHead::Node))
         });
         let view = SelectedBranchWakeView::new(&tree, head.as_option(), &wakes);
-        let probe = SelectedBranchWakeView::probe_ready(&tree, head.as_option(), &wakes);
+        let probe = SelectedBranchWakeView::probe_ready(
+            &tree,
+            head.as_option(),
+            &wakes,
+            DeliveryDeadlineKind::Idle,
+        );
         assert_eq!(probe.ready, expected_class.is_some());
         assert_eq!(view.has_ready_wake(), expected_class.is_some());
         assert_eq!(view.activation_class(), expected_class);
@@ -186,7 +192,8 @@ fn measured_view_visits_branch_and_wakes_once() {
         })
         .collect::<VecDeque<_>>();
     let (_, work) = SelectedBranchWakeView::new_measured(&tree, tree.head(), &wakes);
-    let probe = SelectedBranchWakeView::probe_ready(&tree, tree.head(), &wakes);
+    let probe =
+        SelectedBranchWakeView::probe_ready(&tree, tree.head(), &wakes, DeliveryDeadlineKind::Idle);
     assert_eq!(
         work,
         SelectedBranchWakeWork {
@@ -233,6 +240,7 @@ fn benchmark_selected_branch_wake_view_scaling() {
                             black_box(&tree),
                             tree.head(),
                             black_box(&wakes),
+                            DeliveryDeadlineKind::Idle,
                         ));
                     }
                     black_box(SelectedBranchWakeView::new(

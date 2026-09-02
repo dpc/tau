@@ -8,6 +8,11 @@ wait_timeout_minimum_minutes: 1
 wait_timeout_maximum_minutes: 1440
 # Suppress early live retry notifications sent to agents watching other agents.
 agent_watch_retry_notification_threshold: 5
+notification_delivery:
+  user_prompt: { idle_ms: 0, wait_any_ms: 0, wait_tool_ms: 5000 }
+  status: { idle_ms: 120000, wait_any_ms: 240000, wait_tool_ms: 240000 }
+  agent_message: { idle_ms: 0, wait_any_ms: 60000, wait_tool_ms: 120000 }
+  external_message: { idle_ms: 0, wait_any_ms: 0, wait_tool_ms: 30000 }
 provider_cache_refresh:
   enabled: false
   max_idle_seconds: 300

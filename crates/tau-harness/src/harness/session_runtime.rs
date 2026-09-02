@@ -5,6 +5,7 @@
 //! remain outside this owner.
 
 use super::*;
+use crate::agent::DeliverySchedule;
 
 pub(super) const RESTORE_NOTICE_BODY_PREFIX: &str =
     "Previous session was interrupted and restored.";
@@ -309,8 +310,13 @@ impl Harness {
                 None,
                 None,
             );
-            self.activate_waits_for(&cid, activation);
-            self.try_advance_queue();
+            let (admitted_at, delayed) = self.arm_latest_user_prompt_delivery(&cid);
+            if delayed {
+                self.process_new_notification_delivery(admitted_at);
+            } else {
+                self.activate_waits_for(&cid, activation);
+                self.try_advance_queue();
+            }
             return Ok(PromptSubmission::Queued);
         }
         if self.dispatch_blocked_for(&cid) {
@@ -328,8 +334,13 @@ impl Harness {
                 None,
                 None,
             );
-            self.activate_waits_for(&cid, activation);
-            self.try_advance_queue();
+            let (admitted_at, delayed) = self.arm_latest_user_prompt_delivery(&cid);
+            if delayed {
+                self.process_new_notification_delivery(admitted_at);
+            } else {
+                self.activate_waits_for(&cid, activation);
+                self.try_advance_queue();
+            }
             return Ok(PromptSubmission::Queued);
         }
         let activation = tau_proto::ObservationId::random();
@@ -398,6 +409,10 @@ impl Harness {
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
+            let human_ui = matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+            );
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 let mut queued_prompt = prompt.clone();
                 queued_prompt.activation_observation = activation;
@@ -406,6 +421,11 @@ impl Harness {
             if let Some(activation) = activation {
                 self.append_prompt_activation_queued(&cid, activation, activation_kind, &prompt);
             }
+            let (admitted_at, delayed) = if human_ui {
+                self.arm_latest_user_prompt_delivery(&cid)
+            } else {
+                (Instant::now(), false)
+            };
             self.publish_event(
                 None,
                 Event::AgentPromptQueued(AgentPromptQueued {
@@ -414,10 +434,12 @@ impl Harness {
                     message_class: prompt.message_class,
                 }),
             );
-            if let Some(activation) = activation {
+            if delayed {
+                self.process_new_notification_delivery(admitted_at);
+            } else if let Some(activation) = activation {
                 self.activate_waits_for(&cid, activation);
             }
-            if may_supersede_uncertain {
+            if may_supersede_uncertain && !delayed {
                 self.terminalize_uncertain_marked_owner_for_live_activation(&cid);
             }
             self.try_advance_queue();
@@ -435,6 +457,10 @@ impl Harness {
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
+            let human_ui = matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+            );
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 let mut queued_prompt = prompt.clone();
                 queued_prompt.activation_observation = activation;
@@ -443,6 +469,11 @@ impl Harness {
             if let Some(activation) = activation {
                 self.append_prompt_activation_queued(&cid, activation, activation_kind, &prompt);
             }
+            let (admitted_at, delayed) = if human_ui {
+                self.arm_latest_user_prompt_delivery(&cid)
+            } else {
+                (Instant::now(), false)
+            };
             self.publish_event(
                 None,
                 Event::AgentPromptQueued(AgentPromptQueued {
@@ -451,10 +482,12 @@ impl Harness {
                     message_class: prompt.message_class,
                 }),
             );
-            if let Some(activation) = activation {
+            if delayed {
+                self.process_new_notification_delivery(admitted_at);
+            } else if let Some(activation) = activation {
                 self.activate_waits_for(&cid, activation);
             }
-            if may_supersede_uncertain {
+            if may_supersede_uncertain && !delayed {
                 self.terminalize_uncertain_marked_owner_for_live_activation(&cid);
             }
             self.try_advance_queue();
@@ -2418,6 +2451,7 @@ impl Harness {
                     node_id,
                     activation_observation: None,
                     source_observation: Some(record.observation_id),
+                    delivery_schedule: Some(DeliverySchedule::replay_ready(Instant::now())),
                 })
             })
             .collect()

@@ -4108,6 +4108,7 @@ impl Harness {
             self.retry_pending_agent_publish_completion(&cid);
             self.retry_standalone_inference_checkpoint(&cid);
             self.drain_publish_idle_dispatches();
+            self.process_notification_delivery_deadlines_at(Instant::now());
             self.try_advance_queue();
         }
     }

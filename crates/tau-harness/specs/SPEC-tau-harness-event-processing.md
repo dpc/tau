@@ -314,6 +314,13 @@ This provider-visible typing does not change the canonical wait settlement,
 event schema, observation linkage, queue ordering, or once-only completion
 ownership.
 
+Runtime notification deadlines are process-monotonic and generation-scoped.
+The event loop processes due notification readiness before an equal
+activating-input timeout, then background/tool deadlines and lower-priority
+operational deadlines. It drains a bounded cohort before returning to ingress.
+Session rollover, unload, and shutdown discard the runtime schedules; no
+deadline metadata is persisted.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

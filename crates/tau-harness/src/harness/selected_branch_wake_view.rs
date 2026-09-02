@@ -1,6 +1,7 @@
 //! Owns one immutable projection of message wakes onto a selected agent branch.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use tau_core::{AgentTree, NodeId};
 
@@ -52,9 +53,15 @@ impl SelectedBranchWakeView {
         tree: &AgentTree,
         selected_head: Option<NodeId>,
         wakes: &VecDeque<PendingMessageWake>,
+        deadline_kind: crate::agent::DeliveryDeadlineKind,
     ) -> SelectedBranchWakeProbe {
         let wake_nodes = wakes
             .iter()
+            .filter(|wake| {
+                wake.delivery_schedule
+                    .as_ref()
+                    .is_none_or(|schedule| schedule.is_ready_at(deadline_kind, Instant::now()))
+            })
             .filter_map(|wake| wake.node_id)
             .collect::<HashSet<_>>();
         let mut branch_nodes = 0;
@@ -158,15 +165,15 @@ impl SelectedBranchWakeView {
         }
     }
 
-    /// Returns whether at least one materialized wake is on the selected
-    /// branch.
-    pub(crate) fn has_ready_wake(&self) -> bool {
-        self.activation_class.is_some()
-    }
-
     /// Returns the coalesced lifecycle class of selected-branch wakes.
     pub(crate) fn activation_class(&self) -> Option<AgentMessageActivationClass> {
         self.activation_class
+    }
+
+    /// Return whether the full batching view contains a selected-branch wake.
+    #[cfg(test)]
+    pub(crate) fn has_ready_wake(&self) -> bool {
+        self.activation_class.is_some()
     }
 
     /// Merges a captured cut with the earliest selected message-wake cut.

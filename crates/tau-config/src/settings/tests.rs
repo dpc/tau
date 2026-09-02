@@ -1104,6 +1104,88 @@ fn agent_watch_retry_notification_threshold_defaults_and_overrides() {
     );
 }
 
+/// Notification delivery defaults preserve the four approved millisecond
+/// classes and ordered delay invariant.
+#[test]
+fn notification_delivery_defaults_match_runtime_contract() {
+    let policies = HarnessSettings::built_in().notification_delivery;
+    assert_eq!(policies.user_prompt.idle(), Duration::ZERO);
+    assert_eq!(policies.user_prompt.wait_any(), Duration::ZERO);
+    assert_eq!(
+        policies.user_prompt.wait_tool(),
+        Duration::from_millis(5_000)
+    );
+    assert_eq!(policies.status.idle(), Duration::from_millis(120_000));
+    assert_eq!(policies.status.wait_any(), Duration::from_millis(240_000));
+    assert_eq!(policies.status.wait_tool(), Duration::from_millis(240_000));
+    assert_eq!(policies.agent_message.idle(), Duration::ZERO);
+    assert_eq!(
+        policies.agent_message.wait_any(),
+        Duration::from_millis(60_000)
+    );
+    assert_eq!(
+        policies.agent_message.wait_tool(),
+        Duration::from_millis(120_000)
+    );
+    assert_eq!(policies.external_message.idle(), Duration::ZERO);
+    assert_eq!(policies.external_message.wait_any(), Duration::ZERO);
+    assert_eq!(
+        policies.external_message.wait_tool(),
+        Duration::from_millis(30_000)
+    );
+}
+
+/// Reordered notification delays fail configuration instead of being
+/// normalized or saturated.
+#[test]
+fn notification_delivery_rejects_reordered_delays() {
+    assert_eq!(
+        NotificationDeliveryPolicy::from_millis(2, 1, 3).expect_err("reordered delays must fail"),
+        "notification delivery delays must satisfy idle_ms <= wait_any_ms <= wait_tool_ms"
+    );
+}
+
+/// File-layer aliases normalize before merging with the canonical built-in
+/// policy, including aliases nested below one notification class.
+#[test]
+fn notification_delivery_file_aliases_override_built_in_policy() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "notificationDelivery:\n  user_prompt:\n    idleMs: 1\n    waitAnyMs: 2\n    waitToolMs: 3\n",
+    )
+    .expect("write aliased policy");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load aliased policy");
+    assert_eq!(
+        settings.notification_delivery.user_prompt.idle(),
+        Duration::from_millis(1)
+    );
+    assert_eq!(
+        settings.notification_delivery.user_prompt.wait_any(),
+        Duration::from_millis(2)
+    );
+    assert_eq!(
+        settings.notification_delivery.user_prompt.wait_tool(),
+        Duration::from_millis(3)
+    );
+}
+
+/// Same-layer canonical and alias keys fail with source context rather than
+/// producing ambiguous layered precedence.
+#[test]
+fn notification_delivery_rejects_alias_conflicts() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "notificationDelivery: {}\nnotification_delivery: {}\n",
+    )
+    .expect("write conflicting policy");
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("conflicting aliases must fail");
+    assert!(error.to_string().contains("both legacy key"));
+}
+
 /// Ensures an inverted activating-input wait range fails configuration loading
 /// instead of creating contradictory silent-clamping behavior.
 #[test]
@@ -2011,6 +2093,18 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         (
             "agents.roleGroups.engineer.roles.engineer.requiredSkills",
             "agents.role_groups.engineer.roles.engineer.required_skills",
+        ),
+        (
+            "notificationDelivery.user_prompt.idleMs",
+            "notification_delivery.user_prompt.idle_ms",
+        ),
+        (
+            "notificationDelivery.status.waitAnyMs",
+            "notification_delivery.status.wait_any_ms",
+        ),
+        (
+            "notificationDelivery.agent_message.waitToolMs",
+            "notification_delivery.agent_message.wait_tool_ms",
         ),
     ];
 

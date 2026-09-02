@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::num::{NonZeroU8, NonZeroU16, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt, io as path_std_io};
 
 use indexmap::IndexMap;
@@ -920,6 +920,111 @@ impl AgentWatchRetryNotificationPolicy {
     }
 }
 
+/// Validated millisecond delays for one harness-owned notification class.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(try_from = "NotificationDeliveryPolicyWire")]
+pub struct NotificationDeliveryPolicy {
+    /// Delay while the target is dispatchable and idle.
+    idle: Duration,
+    /// Delay while the target waits for any input or reports `Waiting`.
+    wait_any: Duration,
+    /// Delay while the target waits for one or more exact tool calls.
+    wait_tool: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotificationDeliveryPolicyWire {
+    /// Idle delay in integer milliseconds.
+    #[serde(alias = "idleMs")]
+    idle_ms: u64,
+    /// Wait-any delay in integer milliseconds.
+    #[serde(alias = "waitAnyMs")]
+    wait_any_ms: u64,
+    /// Exact-tool-wait delay in integer milliseconds.
+    #[serde(alias = "waitToolMs")]
+    wait_tool_ms: u64,
+}
+
+impl TryFrom<NotificationDeliveryPolicyWire> for NotificationDeliveryPolicy {
+    type Error = String;
+
+    fn try_from(raw: NotificationDeliveryPolicyWire) -> Result<Self, Self::Error> {
+        if raw.wait_any_ms < raw.idle_ms || raw.wait_tool_ms < raw.wait_any_ms {
+            return Err(
+                "notification delivery delays must satisfy idle_ms <= wait_any_ms <= wait_tool_ms"
+                    .to_owned(),
+            );
+        }
+        let now = Instant::now();
+        for (name, millis) in [
+            ("idle_ms", raw.idle_ms),
+            ("wait_any_ms", raw.wait_any_ms),
+            ("wait_tool_ms", raw.wait_tool_ms),
+        ] {
+            if now.checked_add(Duration::from_millis(millis)).is_none() {
+                return Err(format!(
+                    "notification delivery {name} exceeds the monotonic clock range"
+                ));
+            }
+        }
+        Ok(Self {
+            idle: Duration::from_millis(raw.idle_ms),
+            wait_any: Duration::from_millis(raw.wait_any_ms),
+            wait_tool: Duration::from_millis(raw.wait_tool_ms),
+        })
+    }
+}
+
+impl NotificationDeliveryPolicy {
+    /// Validate and construct one integer-millisecond delivery policy.
+    pub fn from_millis(idle_ms: u64, wait_any_ms: u64, wait_tool_ms: u64) -> Result<Self, String> {
+        Self::try_from(NotificationDeliveryPolicyWire {
+            idle_ms,
+            wait_any_ms,
+            wait_tool_ms,
+        })
+    }
+
+    /// Returns the idle delay.
+    #[must_use]
+    pub const fn idle(self) -> Duration {
+        self.idle
+    }
+
+    /// Returns the wait-any delay.
+    #[must_use]
+    pub const fn wait_any(self) -> Duration {
+        self.wait_any
+    }
+
+    /// Returns the exact-tool-wait delay.
+    #[must_use]
+    pub const fn wait_tool(self) -> Duration {
+        self.wait_tool
+    }
+
+    /// Return whether every runtime state selects immediate delivery.
+    #[must_use]
+    pub const fn is_immediate(self) -> bool {
+        self.idle.is_zero() && self.wait_any.is_zero() && self.wait_tool.is_zero()
+    }
+}
+
+/// Harness-owned delivery policy for every approved notification class.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationDeliveryPolicies {
+    /// Authenticated visible user prompts.
+    pub user_prompt: NotificationDeliveryPolicy,
+    /// Noninitial provider, work, long-wait, and lifecycle watch notifications.
+    pub status: NotificationDeliveryPolicy,
+    /// Message, WatchPrompt, and WatchResponse agent messages.
+    pub agent_message: NotificationDeliveryPolicy,
+    /// Accepted live canonical external-message facts.
+    pub external_message: NotificationDeliveryPolicy,
+}
+
 /// Harness/agent settings loaded from `harness.yaml`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
@@ -942,6 +1047,8 @@ pub struct HarnessSettings {
     pub wait_timeout_bounds: WaitTimeoutBounds,
     /// Inclusive policy for suppressing live agent-watch retry notifications.
     pub agent_watch_retry_notification_threshold: AgentWatchRetryNotificationPolicy,
+    /// Bounded runtime-only prompt-injected notification delivery delays.
+    pub notification_delivery: NotificationDeliveryPolicies,
     /// Disabled-by-default bounded Provider cache refresh policy.
     pub provider_cache_refresh: ProviderCacheRefresh,
     /// Default Tau-state presentation for supervised extension instances.
@@ -1029,6 +1136,9 @@ struct HarnessSettingsWire {
     /// Largest provider retry attempt hidden from watching agents.
     #[serde(alias = "agentWatchRetryNotificationThreshold")]
     agent_watch_retry_notification_threshold: u32,
+    /// Bounded runtime-only prompt-injected notification delivery delays.
+    #[serde(alias = "notificationDelivery")]
+    notification_delivery: NotificationDeliveryPolicies,
     /// Disabled-by-default bounded Provider cache refresh policy.
     #[serde(default)]
     provider_cache_refresh: ProviderCacheRefresh,
@@ -1146,6 +1256,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             agent_watch_retry_notification_threshold: AgentWatchRetryNotificationPolicy::from_raw(
                 wire.agent_watch_retry_notification_threshold,
             ),
+            notification_delivery: wire.notification_delivery,
             provider_cache_refresh: wire.provider_cache_refresh,
             tau_state_access: wire.tau_state_access,
             extensions: wire.extensions,
@@ -4282,6 +4393,23 @@ fn normalize_harness_config_value(
         source,
         "root",
     )?;
+    normalize_alias_key(
+        map,
+        "notificationDelivery",
+        "notification_delivery",
+        source,
+        "root",
+    )?;
+    if let Some(serde_json::Value::Object(classes)) = map.get_mut("notification_delivery") {
+        for (class, policy) in classes {
+            if let serde_json::Value::Object(policy) = policy {
+                let path = format!("notification_delivery.{class}");
+                normalize_alias_key(policy, "idleMs", "idle_ms", source, &path)?;
+                normalize_alias_key(policy, "waitAnyMs", "wait_any_ms", source, &path)?;
+                normalize_alias_key(policy, "waitToolMs", "wait_tool_ms", source, &path)?;
+            }
+        }
+    }
     if let Some(serde_json::Value::Object(extensions)) = map.get_mut("extensions") {
         for (extension_name, extension) in extensions {
             if let serde_json::Value::Object(extension) = extension {
@@ -4664,6 +4792,14 @@ fn normalize_harness_config_override_key(key: &str) -> String {
     if parts[0] == "extensions" && parts.len() > 2 && parts[2] == "toolPrefix" {
         parts[2] = "tool_prefix";
     }
+    if parts[0] == "notification_delivery" && parts.len() > 2 {
+        parts[2] = match parts[2] {
+            "idleMs" => "idle_ms",
+            "waitAnyMs" => "wait_any_ms",
+            "waitToolMs" => "wait_tool_ms",
+            key => key,
+        };
+    }
     if parts[0] == "agents" && parts.len() > 1 {
         parts[1] = canonical_agents_key(parts[1]);
         if parts[1] == "web_tools" {
@@ -4713,6 +4849,7 @@ fn canonical_top_level_key(key: &str) -> &str {
         "waitTimeoutMinimumMinutes" => "wait_timeout_minimum_minutes",
         "waitTimeoutMaximumMinutes" => "wait_timeout_maximum_minutes",
         "agentWatchRetryNotificationThreshold" => "agent_watch_retry_notification_threshold",
+        "notificationDelivery" => "notification_delivery",
         _ => key,
     }
 }

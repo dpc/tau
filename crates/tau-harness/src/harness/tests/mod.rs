@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, fs as path_std_fs, thread};
 
 use tau_config::settings as path_tau_config_settings;
+use tau_config::settings::{HarnessSettings, NotificationDeliveryPolicy};
 use tau_core::{
     AgentEntry, AgentStore, AgentTree, Connection, ConnectionOrigin, ConnectionSendError,
     ConnectionSink, PendingConnectionMetadata, RoutedFrame,
@@ -31,7 +32,9 @@ use tau_session_inspect::open_session_store;
 use tempfile::TempDir;
 
 use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall};
-use crate::agent::{AgentTurnState, PendingPrompt, PendingPromptSource};
+use crate::agent::{
+    AgentTurnState, DeliveryDeadlineKind, DeliverySchedule, PendingPrompt, PendingPromptSource,
+};
 use crate::daemon::{
     ServeOptions, bind_listener, get_daemon_rendered_system_prompt,
     get_daemon_rendered_tool_definitions, run_daemon_with_echo, run_embedded_message_with_echo,
@@ -1177,6 +1180,21 @@ pub(super) fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, Har
     echo_harness_with_storage_mode(state_dir, crate::HarnessStorageMode::Durable)
 }
 
+/// Preserve immediate legacy scheduling in broad fixtures; focused deadline
+/// tests opt back into the shipped policies they exercise.
+fn make_notification_delivery_immediate(harness: &mut Harness) {
+    let immediate =
+        NotificationDeliveryPolicy::from_millis(0, 0, 0).expect("valid immediate policy");
+    let policies = &mut harness
+        .config
+        .accepted_harness_settings
+        .notification_delivery;
+    policies.user_prompt = immediate;
+    policies.status = immediate;
+    policies.agent_message = immediate;
+    policies.external_message = immediate;
+}
+
 /// Builds the echo-provider fixture without persistent session or agent stores
 /// for tests whose assertions do not cover durability.
 fn echo_harness_memory_only(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
@@ -1306,6 +1324,7 @@ fn echo_harness_with_dirs_and_start_reason(
         }
         h.finalize_agent_discovery(&agent_id)?;
     }
+    make_notification_delivery_immediate(&mut h);
     Ok(h)
 }
 
@@ -1568,6 +1587,7 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
         storage_mode,
     )?;
     h.agent_runtime.agent_registry.id_rng = super::deterministic_agent_id_rng();
+    make_notification_delivery_immediate(&mut h);
     Ok(h)
 }
 

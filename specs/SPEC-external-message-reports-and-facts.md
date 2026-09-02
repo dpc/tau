@@ -265,10 +265,14 @@ The harness is an ordinary post-commit consumer:
 - `message.sent` projects as `ContextRole::Assistant` and never activates a
   model by itself.
 - A valid live incoming fact immediately creates one payload-free activation
-  wake. Its canonical transcript item folds exactly once when branch placement
+  wake. Admission, publication, and acknowledgement remain immediate, while its
+  runtime trigger readiness follows the harness-owned external-message delivery
+  policy. Its canonical transcript item folds exactly once when branch placement
   permits.
-- Replay reconstructs the same transcript projection but never wakes an agent,
-  resends transport traffic, or emits a new durable event.
+- Replay reconstructs the same transcript projection and rebuilds each uncovered
+  canonical activation as immediately trigger-ready. A fact already covered by a
+  later selected-branch inference checkpoint remains context-only. Replay never
+  resends transport traffic, refans a notification, or emits a new durable event.
 - An unavailable/unloaded/terminating target is not a reason to reject the
   fact. A durably known target can consume it on normal restore; an
   unprojectable session-journal fallback has no harness transcript projection
@@ -284,7 +288,7 @@ ancestor of the fact's accepted parent. Root, ancestor-above-assistant, and
 sibling-branch facts materialize immediately and are never drained by that round.
 An applicable live wake is owned immediately, while provider dispatch waits for
 placement after all terminal results and the normal idle boundary. Replay uses
-the same branch-applicable fold order without creating a runtime wake. This state
+the same branch-applicable fold order and the uncovered-wake rule above. This state
 is generic pending context/input state rather than message-envelope-specific
 state; see
 [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).

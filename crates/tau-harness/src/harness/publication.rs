@@ -1729,6 +1729,9 @@ impl Harness {
             return;
         }
         let activation = tau_proto::ObservationId::random();
+        let wake_source = path_crate_agent::PendingMessageWakeSource::MessageFact {
+            durable_event_seq: outcome.seq,
+        };
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
             && !agent.dispatch.pending_message_wakes.iter().any(|wake| {
                 matches!(
@@ -1743,12 +1746,11 @@ impl Harness {
                 .dispatch
                 .pending_message_wakes
                 .push_back(crate::agent::PendingMessageWake {
-                    source: path_crate_agent::PendingMessageWakeSource::MessageFact {
-                        durable_event_seq: outcome.seq,
-                    },
+                    source: wake_source,
                     node_id: outcome.folded_node_id,
                     activation_observation: Some(activation),
                     source_observation: Some(outcome.observation_id),
+                    delivery_schedule: None,
                 });
         }
         self.append_activation_queued(
@@ -1758,11 +1760,15 @@ impl Harness {
             Some(outcome.observation_id),
             None,
         );
-        self.activate_waits_for(&cid, activation);
-        if self.terminalize_uncertain_marked_owner_for_live_activation(&cid) {
-            return;
+        let (admitted_at, delayed) = self.arm_latest_message_wake_delivery(&cid);
+        if delayed {
+            self.process_new_notification_delivery(admitted_at);
+        } else {
+            self.activate_waits_for(&cid, activation);
+            if !self.terminalize_uncertain_marked_owner_for_live_activation(&cid) {
+                self.try_advance_queue();
+            }
         }
-        self.try_advance_queue();
     }
 
     /// Own and drive one exact Stale terminal for an eligible uncertain

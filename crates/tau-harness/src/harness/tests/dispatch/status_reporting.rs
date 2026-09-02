@@ -662,6 +662,10 @@ fn agent_watch_reports_structured_work_status() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.config
+        .accepted_harness_settings
+        .notification_delivery
+        .status = HarnessSettings::built_in().notification_delivery.status;
     let watched_cid = ensure_test_user_agent(&mut h);
     let watcher_cid = h.create_durable_user_agent(
         h.session_runtime.current_session_id.clone(),
@@ -945,6 +949,7 @@ fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
             initial: false,
         },
     );
+    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(120_000));
     let response_prompt_id = match &h.agent_runtime.agent_registry.agents[&b_cid]
         .turn
         .turn_state

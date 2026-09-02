@@ -9,11 +9,11 @@ use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 
 use path_crate_harness::start_coordinator::StartPhase;
 
+use crate::agent::DeliveryDeadlineKind;
 use crate::harness::SessionGeneration;
 use crate::{harness as path_crate_harness, runtime_dir as path_crate_runtime_dir};
 
 mod wait_tracker;
-
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -27,7 +27,7 @@ use tau_proto::{
     ToolBackgroundResult, ToolCallId, ToolCallRef, ToolError, ToolName, ToolResult, ToolResultKind,
     ToolType,
 };
-pub(crate) use wait_tracker::PendingWaitSettlement;
+pub(crate) use wait_tracker::{InstalledWaitKind, PendingWaitSettlement};
 use wait_tracker::{
     WaitReply, WaitReplyKind, WaitRequest, WaitTarget, WaitTracker,
     normalized_wait_timeout_minutes_inner, parse_wait_args_with_bounds, wait_error_reply,
@@ -387,6 +387,17 @@ impl Harness {
             .subagents
             .wait_tracker
             .input_wait_timeout_bounds()
+    }
+
+    /// Return the installed wait mode used by notification delivery scheduling.
+    pub(crate) fn installed_notification_wait_kind(
+        &self,
+        owner: &AgentId,
+    ) -> Option<InstalledWaitKind> {
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .installed_wait_kind(owner)
     }
 
     /// Normalize an activating-input wait timeout with this harness's validated
@@ -2836,9 +2847,23 @@ impl Harness {
                 .oldest_completed_for_owner(agent_id),
             Ok(WaitTarget::AnyInput(_)) | Err(_) => None,
         };
-        if self.has_pending_wait_preempting_prompt(agent_id, consumable_completion.as_ref()) {
-            let activation =
-                self.pending_wait_preempting_activation(agent_id, consumable_completion.as_ref());
+        let prospective_kind = match &parsed {
+            Ok(WaitTarget::Exact(_)) => DeliveryDeadlineKind::WaitTool,
+            Ok(WaitTarget::AnyBackground | WaitTarget::AnyInput(_)) => {
+                DeliveryDeadlineKind::WaitAny
+            }
+            Err(_) => self.notification_deadline_kind_for(agent_id),
+        };
+        if self.has_pending_wait_preempting_prompt(
+            agent_id,
+            consumable_completion.as_ref(),
+            prospective_kind,
+        ) {
+            let activation = self.pending_wait_preempting_activation(
+                agent_id,
+                consumable_completion.as_ref(),
+                prospective_kind,
+            );
             let wait = WaitRequest {
                 call_id: call_id.clone(),
                 tool_name: visible_tool_name.clone(),
@@ -2940,8 +2965,9 @@ impl Harness {
         &self,
         agent_id: &AgentId,
         consumable_completion: Option<&ToolCallId>,
+        deadline_kind: crate::agent::DeliveryDeadlineKind,
     ) -> bool {
-        if self.has_wait_preempting_message_wake(agent_id) {
+        if self.has_wait_preempting_message_wake_for_kind(agent_id, deadline_kind) {
             return true;
         }
         self.agent_runtime
@@ -2957,6 +2983,9 @@ impl Harness {
                 agent.dispatch.pending_replay_activation
                     || agent.dispatch.pending_prompts.iter().any(|prompt| {
                         prompt.creates_inference_activation()
+                            && prompt.delivery_schedule.as_ref().is_none_or(|schedule| {
+                                schedule.is_ready_at(deadline_kind, Instant::now())
+                            })
                             && (!prompt.is_activating_background_completion()
                                 || consumable_completion.is_none_or(|call_id| {
                                     prompt.text
@@ -2970,16 +2999,16 @@ impl Harness {
         &self,
         agent_id: &AgentId,
         consumable_completion: Option<&ToolCallId>,
+        deadline_kind: crate::agent::DeliveryDeadlineKind,
     ) -> Option<tau_proto::ObservationId> {
         let agent = self.agent_runtime.agent_registry.agents.get(agent_id)?;
-        agent
-            .dispatch
-            .pending_message_wakes
-            .iter()
-            .find_map(|wake| wake.activation_observation)
+        self.first_wait_preempting_message_activation_for_kind(agent_id, deadline_kind)
             .or_else(|| {
                 agent.dispatch.pending_prompts.iter().find_map(|prompt| {
                     (prompt.creates_inference_activation()
+                        && prompt.delivery_schedule.as_ref().is_none_or(|schedule| {
+                            schedule.is_ready_at(deadline_kind, Instant::now())
+                        })
                         && (!prompt.is_activating_background_completion()
                             || consumable_completion.is_none_or(|call_id| {
                                 prompt.text != crate::harness::background_completion_prompt(call_id)

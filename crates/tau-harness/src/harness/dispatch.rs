@@ -305,7 +305,8 @@ impl Harness {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id) {
                 agent.dispatch.pending_prompts.push_back(prompt);
             }
-            self.terminalize_uncertain_marked_owner_for_live_activation(agent_id);
+            let (admitted_at, _) = self.arm_latest_user_prompt_delivery(agent_id);
+            self.process_new_notification_delivery(admitted_at);
             return Ok(());
         }
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id) {
@@ -666,6 +667,7 @@ impl Harness {
                 );
             }
         }
+        self.process_notification_delivery_deadlines_at(Instant::now());
         self.drain_publish_idle_dispatches();
     }
 
@@ -688,12 +690,13 @@ impl Harness {
                         .agents
                         .get(*agent_id)
                         .is_some_and(|agent| {
-                            agent
-                                .dispatch
-                                .pending_prompts
-                                .iter()
-                                .any(|prompt| !prompt.is_passive_background_completion())
-                                || agent.dispatch.pending_replay_activation
+                            let kind = self.notification_deadline_kind_for(agent_id);
+                            agent.dispatch.pending_prompts.iter().any(|prompt| {
+                                !prompt.is_passive_background_completion()
+                                    && prompt.delivery_schedule.as_ref().is_none_or(|schedule| {
+                                        schedule.is_ready_at(kind, Instant::now())
+                                    })
+                            }) || agent.dispatch.pending_replay_activation
                                 || self.has_ready_message_wake_on_selected_branch(agent_id)
                         })
             })
@@ -717,9 +720,14 @@ impl Harness {
                 .pending_prompts
                 .drain(..)
                 .collect::<Vec<_>>();
-            let (passive, rejected): (Vec<_>, Vec<_>) = pending
-                .into_iter()
-                .partition(PendingPrompt::is_passive_background_completion);
+            let kind = self.notification_deadline_kind_for(&agent_id);
+            let (rejected, retained): (Vec<_>, Vec<_>) = pending.into_iter().partition(|prompt| {
+                !prompt.is_passive_background_completion()
+                    && prompt
+                        .delivery_schedule
+                        .as_ref()
+                        .is_none_or(|schedule| schedule.is_ready_at(kind, Instant::now()))
+            });
             self.agent_runtime
                 .agent_registry
                 .agents
@@ -727,7 +735,7 @@ impl Harness {
                 .expect("collected runnable agent must remain loaded")
                 .dispatch
                 .pending_prompts
-                .extend(passive);
+                .extend(retained);
 
             for prompt in rejected {
                 if let Some(correlation) = prompt.initial_prompt_correlation {
@@ -844,6 +852,7 @@ impl Harness {
                 continue;
             }
 
+            let deadline_kind = self.notification_deadline_kind_for(agent_id);
             let non_passive =
                 conv.dispatch
                     .pending_prompts
@@ -854,6 +863,9 @@ impl Harness {
                             work.prompt_visits += 1;
                         }
                         !prompt.is_passive_background_completion()
+                            && prompt.delivery_schedule.as_ref().is_none_or(|schedule| {
+                                schedule.is_ready_at(deadline_kind, Instant::now())
+                            })
                     });
             let prompt_index = non_passive.as_ref().map(|(index, _)| *index);
             let initial_prompt_correlation = non_passive
@@ -866,7 +878,7 @@ impl Harness {
             }
             let had_ready_message_wake =
                 if prompt_index.is_none() && !conv.dispatch.pending_replay_activation {
-                    let probe = self.selected_branch_wake_probe(agent_id);
+                    let probe = self.selected_branch_wake_probe_for_kind(agent_id, deadline_kind);
                     if MEASURE {
                         work.wake_probes += 1;
                         if let Some(probe) = &probe {

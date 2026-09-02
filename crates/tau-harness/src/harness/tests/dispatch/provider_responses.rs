@@ -255,6 +255,16 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         let td = TempDir::new().expect("tempdir");
         let state = td.path().join("state");
         let mut h = quiet_provider_harness(&state).expect("start");
+        let immediate =
+            NotificationDeliveryPolicy::from_millis(0, 0, 0).expect("immediate test policy");
+        h.config
+            .accepted_harness_settings
+            .notification_delivery
+            .agent_message = immediate;
+        h.config
+            .accepted_harness_settings
+            .notification_delivery
+            .external_message = immediate;
         let replacement_model = h
             .provider_runtime
             .model_info
@@ -426,6 +436,8 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
             })),
         )
         .expect("commit retried terminal");
+        h.drain_publish_idle_dispatches();
+        h.process_notification_delivery_deadlines_at(Instant::now());
         h.try_advance_queue();
         h.drain_publish_idle_dispatches();
         let node_id = h
@@ -1662,6 +1674,7 @@ fn provider_loss_keeps_standalone_checkpoint_uncertain_with_deferred_input() {
             node_id: None,
             activation_observation: None,
             source_observation: None,
+            delivery_schedule: None,
         });
 
     h.handle_disconnect(&crate::test_connection_id(&provider));

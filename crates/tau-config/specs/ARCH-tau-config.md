@@ -130,6 +130,15 @@ five; zero preserves category-deduplicated delivery from the first retry.
 snapshot state still updates and remains available to newly enabled watchers.
 The setting does not suppress other provider-work phases or terminal failures.
 
+`notification_delivery` defines four closed harness-owned runtime classes:
+`user_prompt`, `status`, `agent_message`, and `external_message`. Each class
+contains integer `idle_ms`, `wait_any_ms`, and `wait_tool_ms` delays satisfying
+`idle_ms <= wait_any_ms <= wait_tool_ms`; equality is valid and invalid order or
+monotonic-clock overflow fails configuration loading. Admission snapshots the
+effective policy, so later configuration or state changes cannot reset a queued
+deadline. The shipped defaults are respectively `0/0/5000`,
+`120000/240000/240000`, `0/60000/120000`, and `0/0/30000` milliseconds.
+
 `tau-config::provider_debug_capture` owns the dependency-neutral provider
 capture basename contract shared by provider writers and harness retention:
 canonical decimal microsecond timestamp, validated `AgentPromptId`, one valid

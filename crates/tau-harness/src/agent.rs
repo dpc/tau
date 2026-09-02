@@ -11,6 +11,7 @@
 //! `prompt_agents: HashMap<AgentPromptId, AgentId>` and
 //! `tool_agents: HashMap<ToolCallId, AgentId>`.
 
+mod delivery_schedule;
 mod dispatch_state;
 mod execution_state;
 mod foreground_tool_round;
@@ -21,6 +22,7 @@ mod work_status;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
+pub(crate) use delivery_schedule::{DeliveryDeadlineKind, DeliverySchedule};
 pub(crate) use dispatch_state::AgentDispatchState;
 pub(crate) use execution_state::AgentExecutionState;
 pub(crate) use foreground_tool_round::ForegroundToolRound;
@@ -323,6 +325,8 @@ pub(crate) struct PendingMessageWake {
     pub(crate) activation_observation: Option<tau_proto::ObservationId>,
     /// Canonical durable message occurrence that triggered this wake.
     pub(crate) source_observation: Option<tau_proto::ObservationId>,
+    /// Runtime-only immutable delivery deadlines, absent for immediate classes.
+    pub(crate) delivery_schedule: Option<DeliverySchedule>,
 }
 
 /// Per-agent outer-turn state from activating input through terminal response.
@@ -424,6 +428,8 @@ pub(crate) struct PendingPrompt {
     /// Exact activation observation allocated when this prompt entered the
     /// queue.
     pub(crate) activation_observation: Option<tau_proto::ObservationId>,
+    /// Runtime-only immutable delivery deadlines, absent for immediate classes.
+    pub(crate) delivery_schedule: Option<DeliverySchedule>,
     /// Correlation retained until this accepted initial prompt materializes.
     pub(crate) initial_prompt_correlation: Option<InitialPromptCorrelation>,
     /// Typed durable authority when this prompt delivers self compaction.
@@ -479,6 +485,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            delivery_schedule: None,
             initial_prompt_correlation: None,
             self_compaction_terminal: None,
             start_operation_id: None,
@@ -512,6 +519,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            delivery_schedule: None,
             initial_prompt_correlation: None,
             self_compaction_terminal: None,
             start_operation_id: None,

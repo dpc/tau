@@ -50,6 +50,107 @@ fn start_coordinator_enforces_operation_count_bound() {
     );
 }
 
+/// A persistent self-reported `Waiting` phase does not create a preemptible
+/// deadline cut during active inference; it selects wait-any only once idle.
+#[test]
+fn waiting_status_does_not_preempt_active_inference() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Waiting,
+            "awaiting external state".to_owned(),
+        )
+        .expect("valid waiting status"),
+    )
+    .expect("report waiting");
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: test_agent_prompt_id("waiting-active-inference"),
+        },
+    );
+    let admitted = Instant::now();
+    let mut prompt = PendingPrompt::internal("scheduled status input".to_owned());
+    prompt.delivery_schedule = Some(
+        DeliverySchedule::new(
+            admitted,
+            NotificationDeliveryPolicy::from_millis(0, 10, 10).expect("valid policy"),
+        )
+        .expect("clock range"),
+    );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_prompts
+        .push_back(prompt);
+
+    assert_eq!(h.next_notification_delivery_deadline(), None);
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    assert_eq!(
+        h.next_notification_delivery_deadline(),
+        Some(admitted + Duration::from_millis(10)),
+        "Waiting selects the original wait-any deadline"
+    );
+    h.try_advance_queue();
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .in_flight_prompt
+            .is_none()
+    );
+    h.process_notification_delivery_deadlines_at(admitted + Duration::from_millis(9));
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .in_flight_prompt
+            .is_none()
+    );
+    h.process_notification_delivery_deadlines_at(admitted + Duration::from_millis(10));
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .in_flight_prompt
+            .is_some()
+    );
+}
+
+/// One runtime cycle marks only a bounded delivery cohort even when more
+/// zero-duration passive notifications are simultaneously due.
+#[test]
+fn notification_delivery_deadline_cohort_is_bounded() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let admitted = Instant::now();
+    let policy = NotificationDeliveryPolicy::from_millis(0, 0, 0).expect("valid policy");
+    for index in 0..300 {
+        let mut prompt = PendingPrompt::passive_background_completion(format!("passive-{index}"));
+        prompt.delivery_schedule =
+            Some(DeliverySchedule::new(admitted, policy).expect("clock range"));
+        h.agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .dispatch
+            .pending_prompts
+            .push_back(prompt);
+    }
+
+    h.process_notification_delivery_deadlines_at(admitted);
+    assert_eq!(
+        h.next_notification_delivery_deadline(),
+        Some(admitted),
+        "a later runtime cycle retains the remainder of the due cohort"
+    );
+}
+
 /// Parked acceptances reserve their minted ids, so a collision-prone template
 /// cannot overwrite the agent-to-operation index.
 #[test]
@@ -2072,6 +2173,7 @@ fn randomized_streaming_runnable_selection_matches_collecting_reference() {
                             node_id,
                             activation_observation: None,
                             source_observation: None,
+                            delivery_schedule: None,
                         },
                     );
                 }

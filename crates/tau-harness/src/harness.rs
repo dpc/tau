@@ -1401,6 +1401,7 @@ mod context_discovery_state;
 mod extension_activation;
 mod extension_lifecycle;
 mod harness_config_state;
+mod notification_delivery;
 mod ordinary_no_tool_terminal_reducer;
 mod output_length_continuation_reducer;
 mod peer_messaging;

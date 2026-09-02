@@ -71,6 +71,15 @@ pub(super) enum WaitTarget {
     ),
 }
 
+/// Installed wait mode relevant to notification deadline selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InstalledWaitKind {
+    /// One or more exact tool targets own the wait.
+    ExactTool,
+    /// Bare background or activating-input waiting owns the wait.
+    Any,
+}
+
 /// Runtime lifecycle for one non-wait call.
 #[derive(Clone, Debug, PartialEq)]
 enum WaitCallState {
@@ -343,6 +352,25 @@ impl WaitTracker {
             .chain(self.input_waiters.keys().cloned())
             .chain(self.claimed_waits.keys().cloned())
             .collect()
+    }
+
+    /// Return the highest-precedence installed wait mode for one owner.
+    pub(super) fn installed_wait_kind(&self, owner: &AgentId) -> Option<InstalledWaitKind> {
+        if self.waiters.values().any(|wait| &wait.owner == owner)
+            || matches!(
+                self.claimed_waits.get(owner),
+                Some(ClaimedWait::Exact { .. })
+            )
+        {
+            return Some(InstalledWaitKind::ExactTool);
+        }
+        (self.any_waiters.contains_key(owner)
+            || self.input_waiters.contains_key(owner)
+            || matches!(
+                self.claimed_waits.get(owner),
+                Some(ClaimedWait::AnyBackground { .. } | ClaimedWait::Input { .. })
+            ))
+        .then_some(InstalledWaitKind::Any)
     }
 
     /// Atomically claim the installed wait matching this owner and call.

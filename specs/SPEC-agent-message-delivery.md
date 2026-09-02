@@ -148,12 +148,13 @@ as durable sequence, activation class, eventual node, and peer admission byte
 weight. It contains no body, display name, sender-authored instruction, route
 capability, or second authority claim.
 
-The harness queues input before completing the exact agent's registered wait.
-The content-free wait result does not consume the wake. Existing eligible
-queued-tool preemption may close a round first; foreground and partially queued
-rounds are not preempted. Recipient arrival does not itself reset loop-failure
-history. Side-agent completion drains owed activating wakes before releasing
-the original start owner or tearing the endpoint down.
+The harness queues input before applying runtime trigger readiness. Each approved
+source snapshots harness-owned idle, wait-any, and wait-tool monotonic deadlines
+from one post-admission cut; later input and state changes never reset them.
+Admission, folding, publication, peer acknowledgement, and activation observation
+remain immediate. Only a trigger-ready selected-branch wake completes a registered
+wait, preempts an otherwise eligible queued tool, enters no-provider failure, or
+makes the agent runnable. Readiness is sticky.
 
 Activation classes are:
 
@@ -162,14 +163,21 @@ Activation classes are:
   provider and work-status projections and typed lifecycle notifications; and
 - no activation for initial or redundant structured watch snapshots.
 
+Ordinary `Message`, `WatchResponse`, and `WatchPrompt` use the agent-message
+policy; noninitial provider/work/long-wait/lifecycle notifications use status;
+canonical external message facts use external-message. Unclassified and control
+sources retain immediate behavior.
+
 Explicit message intake never becomes watch-prompt fanout. Isolated current
 provider/work-status watch turns retain cascade suppression.
 
 ## Checkpoints, branches, and compaction
 
 Dispatch waits for every selected wake to materialize, then commits an
-`AgentInferenceDispatchStarted.through` checkpoint. One checkpoint may coalesce
-multiple ready wakes. It acknowledges only message-fact and agent-message wakes
+`AgentInferenceDispatchStarted.through` checkpoint. One trigger-ready
+selected-branch occurrence makes the agent runnable, and the materialized prompt
+opportunistically coalesces every already-admitted selected-branch wake at its
+cut, including wakes whose own deadline is later. It acknowledges only message-fact and agent-message wakes
 whose nodes are ancestors of its selected-branch watermark.
 
 If provider and extension initialization instead settles with no available
@@ -209,7 +217,7 @@ exact suffix content.
 ## Replay, recovery, and cleanup
 
 Replay folds each canonical fact with the same sequence-aware placement and
-rendering. It rebuilds one payload-free wake for each uncovered activating typed
+rendering. It rebuilds one immediately trigger-ready payload-free wake for each uncovered activating typed
 receive or canonical `message.*` occurrence; it does not recreate admission
 ownership, wait completion, watch fanout/edge, private reply authority, or peer
 retry. A marked uncertain ordinary dispatch with deferred activating input is

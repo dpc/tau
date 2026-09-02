@@ -261,6 +261,11 @@ impl Harness {
                 self.promote_lifecycle_notification_turn(&cid);
             }
             let activation = tau_proto::ObservationId::random();
+            let wake_source = path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
+                durable_event_seq: outcome.seq,
+                activation_class,
+                peer_admission_bytes,
+            };
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
                 && !agent.dispatch.pending_message_wakes.iter().any(|wake| {
                     matches!(
@@ -276,14 +281,11 @@ impl Harness {
                     .dispatch
                     .pending_message_wakes
                     .push_back(crate::agent::PendingMessageWake {
-                        source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
-                            durable_event_seq: outcome.seq,
-                            activation_class,
-                            peer_admission_bytes,
-                        },
+                        source: wake_source,
                         node_id: outcome.folded_node_id,
                         activation_observation: Some(activation),
                         source_observation: Some(outcome.observation_id),
+                        delivery_schedule: None,
                     });
             }
             let kind = match activation_class {
@@ -301,53 +303,82 @@ impl Harness {
                 Some(outcome.observation_id),
                 None,
             );
-            self.activate_waits_for(&cid, activation);
-            self.preempt_queued_tool_calls_for_message_received(&cid);
-            if self.terminalize_uncertain_marked_owner_for_live_activation(&cid) {
-                return;
+            let (admitted_at, delayed) = self.arm_latest_message_wake_delivery(&cid);
+            if delayed {
+                self.process_new_notification_delivery(admitted_at);
+            } else {
+                self.activate_waits_for(&cid, activation);
+                self.preempt_queued_tool_calls_for_message_received(&cid);
+                if !self.terminalize_uncertain_marked_owner_for_live_activation(&cid) {
+                    self.try_advance_queue();
+                }
             }
-            self.try_advance_queue();
             return;
         }
         let Some(activation_class) = agent_message_activation_class(message) else {
             return;
         };
-        if let Some(operation) = self
+        let wake_source = path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
+            durable_event_seq: outcome.seq,
+            activation_class,
+            peer_admission_bytes,
+        };
+        let operation_id = self
             .agent_runtime
             .agent_registry
             .start_coordinator
             .operations
-            .values_mut()
-            .find(|operation| {
-                operation.phase != StartPhase::AwaitAcceptedCommit
+            .iter()
+            .find_map(|(operation_id, operation)| {
+                (operation.phase != StartPhase::AwaitAcceptedCommit
                     && operation.pending.agent_id == message.recipient_id.as_str()
-            })
-            && !operation
-                .pending
-                .pending_agent_message_wakes
-                .iter()
-                .any(|wake| {
-                    matches!(
-                        wake.source,
-                        crate::agent::PendingMessageWakeSource::AgentMessageReceived {
-                            durable_event_seq,
-                            ..
-                        } if durable_event_seq == outcome.seq
-                    )
-                })
-        {
+                    && !operation
+                        .pending
+                        .pending_agent_message_wakes
+                        .iter()
+                        .any(|wake| {
+                            matches!(
+                                wake.source,
+                                crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                                    durable_event_seq,
+                                    ..
+                                } if durable_event_seq == outcome.seq
+                            )
+                        }))
+                .then_some(*operation_id)
+            });
+        if let Some(operation_id) = operation_id {
+            let operation = self
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .get_mut(&operation_id)
+                .expect("selected start operation remains");
             operation.pending.pending_agent_message_wakes.push_back(
                 crate::agent::PendingMessageWake {
-                    source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
-                        durable_event_seq: outcome.seq,
-                        activation_class,
-                        peer_admission_bytes,
-                    },
+                    source: wake_source.clone(),
                     node_id: outcome.folded_node_id,
                     activation_observation: Some(tau_proto::ObservationId::random()),
                     source_observation: Some(outcome.observation_id),
+                    delivery_schedule: None,
                 },
             );
+            let admitted_at = Instant::now();
+            let schedule = self
+                .message_wake_delivery_schedule(&wake_source, admitted_at)
+                .ok()
+                .flatten();
+            if let Some(wake) = self
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .get_mut(&operation_id)
+                .and_then(|operation| operation.pending.pending_agent_message_wakes.back_mut())
+            {
+                wake.delivery_schedule = schedule;
+            }
         }
     }
 
@@ -422,14 +453,23 @@ impl Harness {
     /// Returns whether at least one materialized wake belongs to the selected
     /// branch. Off-branch wakes remain dormant until navigation reselects them.
     pub(crate) fn has_ready_message_wake_on_selected_branch(&self, cid: &AgentId) -> bool {
-        self.selected_branch_wake_view(cid)
-            .is_some_and(|view| view.has_ready_wake())
+        self.selected_branch_wake_probe(cid)
+            .is_some_and(|probe| probe.ready)
     }
 
     /// Probes readiness and reports exact transient branch/wake work.
     pub(crate) fn selected_branch_wake_probe(
         &self,
         cid: &AgentId,
+    ) -> Option<SelectedBranchWakeProbe> {
+        self.selected_branch_wake_probe_for_kind(cid, self.notification_deadline_kind_for(cid))
+    }
+
+    /// Probe selected-branch readiness using a prospective wait classification.
+    pub(crate) fn selected_branch_wake_probe_for_kind(
+        &self,
+        cid: &AgentId,
+        deadline_kind: crate::agent::DeliveryDeadlineKind,
     ) -> Option<SelectedBranchWakeProbe> {
         let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
         let tree = agent
@@ -441,6 +481,7 @@ impl Harness {
             tree,
             agent.identity.head,
             &agent.dispatch.pending_message_wakes,
+            deadline_kind,
         ))
     }
 
@@ -450,19 +491,53 @@ impl Harness {
     /// Unmaterialized wakes remain globally actionable while tool adjacency is
     /// open. Once materialized, only wakes on the selected branch interrupt;
     /// sibling-branch wakes stay dormant until navigation reselects them.
-    pub(crate) fn has_wait_preempting_message_wake(&self, cid: &AgentId) -> bool {
+    /// Return whether queued input is ready under a prospective wait mode.
+    pub(crate) fn has_wait_preempting_message_wake_for_kind(
+        &self,
+        cid: &AgentId,
+        deadline_kind: crate::agent::DeliveryDeadlineKind,
+    ) -> bool {
         self.agent_runtime
             .agent_registry
             .agents
             .get(cid)
             .is_some_and(|agent| {
-                agent
-                    .dispatch
-                    .pending_message_wakes
-                    .iter()
-                    .any(|wake| wake.node_id.is_none())
+                agent.dispatch.pending_message_wakes.iter().any(|wake| {
+                    wake.node_id.is_none()
+                        && wake.delivery_schedule.as_ref().is_none_or(|schedule| {
+                            schedule.is_ready_at(deadline_kind, Instant::now())
+                        })
+                })
             })
-            || self.has_ready_message_wake_on_selected_branch(cid)
+            || self
+                .selected_branch_wake_probe_for_kind(cid, deadline_kind)
+                .is_some_and(|probe| probe.ready)
+    }
+
+    /// Return the first branch-applicable activation ready under a prospective
+    /// wait mode.
+    pub(crate) fn first_wait_preempting_message_activation_for_kind(
+        &self,
+        cid: &AgentId,
+        deadline_kind: crate::agent::DeliveryDeadlineKind,
+    ) -> Option<tau_proto::ObservationId> {
+        let selected_nodes = self.notification_selected_branch_nodes(cid);
+        self.agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)?
+            .dispatch
+            .pending_message_wakes
+            .iter()
+            .find(|wake| {
+                wake.node_id
+                    .is_none_or(|node| selected_nodes.contains(&node))
+                    && wake
+                        .delivery_schedule
+                        .as_ref()
+                        .is_none_or(|schedule| schedule.is_ready_at(deadline_kind, Instant::now()))
+            })
+            .and_then(|wake| wake.activation_observation)
     }
 
     /// Builds one immutable projection of pending wakes onto the selected

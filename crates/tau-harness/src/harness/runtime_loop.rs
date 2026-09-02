@@ -673,6 +673,7 @@ impl Harness {
                 .tool_turn
                 .next_background_deadline();
             let input = self.next_input_wait_deadline();
+            let notification = self.next_notification_delivery_deadline();
             let work_wait = self.next_work_wait_threshold_deadline();
             let extension = self.next_extension_deadline();
             let cache = self.next_cache_refresh_deadline();
@@ -683,14 +684,27 @@ impl Harness {
                 .values()
                 .map(|pending| pending.deadline)
                 .min();
-            let next = [work_wait, input, background, extension, cache, preview]
-                .into_iter()
-                .flatten()
-                .min();
+            let next = [
+                notification,
+                input,
+                background,
+                work_wait,
+                extension,
+                cache,
+                preview,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let Some(deadline) = next.filter(|deadline| *deadline <= now) else {
                 break;
             };
-            if work_wait == Some(deadline) {
+            if notification == Some(deadline) {
+                self.process_notification_delivery_deadlines_at(deadline);
+                // The notification processor owns a bounded cohort budget. Return
+                // to the central loop before admitting another due cohort.
+                break;
+            } else if work_wait == Some(deadline) {
                 let budget = self
                     .agent_runtime
                     .agent_watch
@@ -726,6 +740,7 @@ impl Harness {
                 .tool_turn
                 .next_background_deadline(),
             self.next_input_wait_deadline(),
+            self.next_notification_delivery_deadline(),
             self.next_work_wait_threshold_deadline(),
             self.next_extension_deadline(),
             self.next_cache_refresh_deadline(),

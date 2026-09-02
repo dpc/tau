@@ -45,9 +45,9 @@ The label is static metadata, not a countdown or
 elapsed/remaining-time update.
 
 Queueing and waiter registration both execute on the harness event-loop thread.
-Starting a wait first checks the same per-agent pending-activation predicate;
-otherwise it registers one waiter. Canonical queueing first stores the input and
-then removes that agent's waiter. This level-triggered invariant covers both
+Starting a wait first checks the same per-agent trigger-ready activation predicate;
+otherwise it registers one waiter. Canonical queueing first stores the input, but
+only its selected runtime deadline removes that agent's waiter. This level-triggered invariant covers both
 queue-before-register and register-before-queue without polling. Wakeup neither
 dequeues input nor consumes a background completion, and the content-free result
 only promises that input is available.
@@ -58,6 +58,12 @@ completion prompt can preempt them. A different unsuppressed completion prompt
 is ordinary activating input and interrupts them in either queue/register order;
 an exact or bare waiter that consumed/suppressed the completion produces no
 prompt to wake an input waiter.
+
+Delivery readiness wins equality with an activating-input timeout. Exact tool
+waits select wait-tool delay; bare background and activating-input waits select
+wait-any delay. An authenticated visible user prompt uses a five-second
+wait-tool delay, so completion before that cut coalesces the prompt and expiry
+interrupts the wait once with the typed activating-input result.
 
 An interrupted background wait remains a successful scheduling result with the
 exact provider-visible headers `tau_internal: true`, `wait_outcome: interrupted`,

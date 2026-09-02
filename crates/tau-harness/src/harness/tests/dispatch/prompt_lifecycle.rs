@@ -2187,6 +2187,11 @@ fn wait_start_is_interrupted_by_already_queued_user_prompt() {
 fn input_wait_returns_immediately_for_already_queued_activation() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.config
+        .accepted_harness_settings
+        .notification_delivery
+        .user_prompt = NotificationDeliveryPolicy::from_millis(0, 1, 1)
+        .expect("one-millisecond prospective wait policy");
     let cid = ensure_test_user_agent(&mut h);
     let call = wait_input_call("wait-input-queued");
     seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
@@ -2199,10 +2204,11 @@ fn input_wait_returns_immediately_for_already_queued_activation() {
         .submit_prompt_to_agent(
             h.session_runtime.current_session_id.clone(),
             &durable_id,
-            PendingPrompt::internal("secret queued input".to_owned()),
+            PendingPrompt::human_ui("secret queued input".to_owned()),
         )
         .expect("queue activation");
     assert_eq!(submission, PromptSubmission::Queued);
+    std::thread::sleep(Duration::from_millis(2));
     h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
         .expect("input wait");
 
@@ -2258,6 +2264,65 @@ fn input_wait_wakes_once_when_activating_prompt_is_queued() {
     h.activate_waits_for(&cid, tau_proto::ObservationId::random());
     assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
     h.shutdown().expect("shutdown");
+}
+
+/// A visible HumanUI prompt waits up to the approved five-second exact-wait
+/// window, then interrupts once without consuming the awaited completion.
+#[test]
+fn human_ui_prompt_interrupts_exact_wait_at_five_second_deadline() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.config
+        .accepted_harness_settings
+        .notification_delivery
+        .user_prompt = HarnessSettings::built_in()
+        .notification_delivery
+        .user_prompt;
+    let _tool_events = connect_test_tool(&mut h, "human-ui-deadline-tool");
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("human-ui-deadline-tool"),
+        instant_background_test_tool_spec("slow_human_ui_wait"),
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_id = durable_agent_id_for_conversation(&h, &cid);
+    let background_call: ToolCallId = "human-ui-deadline-background".into();
+    start_background_tool_and_finish_placeholder_turn(
+        &mut h,
+        &cid,
+        background_call.as_str(),
+        "slow_human_ui_wait",
+    );
+    let wait_call = AgentToolCall {
+        call_ref: None,
+        id: "human-ui-deadline-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(background_call.to_string()),
+        )]),
+    };
+    h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
+        .expect("install exact wait");
+    seed_tools_running(&mut h, &cid, vec![wait_call.id.clone()]);
+
+    let before_admission = Instant::now();
+    h.submit_prompt_to_agent(
+        h.session_runtime.current_session_id.clone(),
+        durable_id.as_str(),
+        PendingPrompt::human_ui("urgent visible input".to_owned()),
+    )
+    .expect("queue HumanUI prompt");
+    h.process_notification_delivery_deadlines_at(before_admission + Duration::from_millis(4_999));
+    assert_eq!(tool_result_count(&h, wait_call.id.as_str()), 0);
+    h.process_notification_delivery_deadlines_at(before_admission + Duration::from_millis(5_001));
+    assert_eq!(tool_result_count(&h, wait_call.id.as_str()), 1);
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id == wait_call.id
+                && matches!(&result.result, CborValue::Text(text) if text.contains("wait_mode: exact"))
+    )));
 }
 
 /// Successful preemption compacts the complete closed cancellation round, then
