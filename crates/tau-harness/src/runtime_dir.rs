@@ -681,6 +681,56 @@ enum ProbeConnect {
     Infrastructure(std::io::Error),
 }
 
+/// Minimal message transport used by deterministic probe protocol tests.
+trait ProbeTransport {
+    /// Sends one client-to-harness probe message.
+    fn send_probe_input(&mut self, message: &tau_proto::HarnessInputMessage) -> bool;
+
+    /// Receives one harness-to-client probe outcome.
+    fn receive_probe_output(&mut self, timeout: Duration) -> ProbeTransportReceive;
+}
+
+impl ProbeTransport for tau_socket::SocketPeer {
+    fn send_probe_input(&mut self, message: &tau_proto::HarnessInputMessage) -> bool {
+        self.send(message).is_ok()
+    }
+
+    fn receive_probe_output(&mut self, timeout: Duration) -> ProbeTransportReceive {
+        match self.recv_timeout(timeout) {
+            Ok(tau_socket::SocketReceive::Message { message }) => {
+                ProbeTransportReceive::Message(message)
+            }
+            Ok(tau_socket::SocketReceive::Timeout) => ProbeTransportReceive::Timeout,
+            Ok(tau_socket::SocketReceive::Closed) | Err(_) => ProbeTransportReceive::Closed,
+        }
+    }
+}
+
+/// One protocol receive outcome relevant to bounded discovery probes.
+enum ProbeTransportReceive {
+    /// One decoded harness output message.
+    Message(tau_proto::HarnessOutputMessage),
+    /// No complete response arrived before the per-probe budget.
+    Timeout,
+    /// The transport closed or failed before a complete response.
+    Closed,
+}
+
+/// Sends the shared authenticated discovery-probe greeting.
+fn send_probe_hello(
+    peer: &mut impl ProbeTransport,
+    client_name: tau_proto::ExtensionName,
+    client_kind: tau_proto::ClientKind,
+) -> bool {
+    peer.send_probe_input(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name,
+        client_kind,
+        expected_session_id: None,
+        capabilities: Vec::new(),
+    }))
+}
+
 fn connect_probe_peer(
     harness_path: &Path,
     deadline: Instant,
@@ -706,14 +756,7 @@ fn connect_probe_peer(
         };
         peer.set_write_timeout(probe_deadline.checked_duration_since(Instant::now())?)
             .ok()?;
-        peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
-            protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name,
-            client_kind,
-            expected_session_id: None,
-            capabilities: Vec::new(),
-        }))
-        .ok()?;
+        send_probe_hello(&mut peer, client_name, client_kind).then_some(())?;
         if cancelled.load(Ordering::Acquire) {
             return None;
         }
@@ -1051,27 +1094,166 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
 /// spawned, or the total probe deadline expires before every candidate is
 /// resolved.
 pub fn list_running_sessions() -> Result<Vec<RunningSession>, std::io::Error> {
-    list_running_sessions_with_entry_limit(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES)
+    list_running_sessions_with_policy(
+        SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
+        RunningSessionListPolicy::production(),
+    )
 }
 
-fn list_running_sessions_with_entry_limit(
+#[cfg(test)]
+type TestRunningSessionProbe =
+    Arc<dyn Fn(&Path, &RunningSessionListDeadline) -> CurrentSessionProbe + Send + Sync>;
+
+/// Per-call deadline and worker-start behavior for running-session listing.
+#[derive(Clone)]
+struct RunningSessionListPolicy {
+    /// Deadline policy applied to the scan and every subsequent probe.
+    deadline: RunningSessionListDeadline,
+    /// Optional test-only interception before the scan worker starts storage
+    /// work.
+    #[cfg(test)]
+    before_scan: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Optional call-owned semantic probe fixture.
+    #[cfg(test)]
+    probe: Option<TestRunningSessionProbe>,
+}
+
+impl RunningSessionListPolicy {
+    /// Creates the fixed production policy with one absolute two-second budget.
+    fn production() -> Self {
+        Self {
+            deadline: RunningSessionListDeadline::Absolute(
+                Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT,
+            ),
+            #[cfg(test)]
+            before_scan: None,
+            #[cfg(test)]
+            probe: None,
+        }
+    }
+
+    /// Creates a non-expiring semantic-test policy with an optional worker
+    /// gate.
+    #[cfg(test)]
+    fn non_expiring(
+        before_scan: Option<Arc<dyn Fn() + Send + Sync>>,
+        probe: TestRunningSessionProbe,
+    ) -> Self {
+        Self {
+            deadline: RunningSessionListDeadline::NonExpiring,
+            before_scan,
+            probe: Some(probe),
+        }
+    }
+
+    /// Creates a manually expired deadline-test policy with a worker gate.
+    #[cfg(test)]
+    fn manual(
+        expired: Arc<AtomicBool>,
+        before_scan: Option<Arc<dyn Fn() + Send + Sync>>,
+        probe: TestRunningSessionProbe,
+    ) -> Self {
+        Self {
+            deadline: RunningSessionListDeadline::Manual(expired),
+            before_scan,
+            probe: Some(probe),
+        }
+    }
+
+    /// Acquires production discovery admission or uses call-owned test
+    /// admission.
+    fn acquire_permit(&self) -> Result<Option<DiscoveryCallPermit>, std::io::Error> {
+        match self.deadline {
+            RunningSessionListDeadline::Absolute(_) => DiscoveryCallPermit::try_acquire()
+                .map(Some)
+                .ok_or_else(|| running_session_list_incomplete("runtime scan capacity is busy")),
+            #[cfg(test)]
+            RunningSessionListDeadline::NonExpiring | RunningSessionListDeadline::Manual(_) => {
+                Ok(None)
+            }
+        }
+    }
+
+    /// Probes one candidate through production I/O or the call-owned test
+    /// fixture.
+    fn probe(&self, harness_path: &Path, cancelled: &AtomicBool) -> CurrentSessionProbe {
+        #[cfg(test)]
+        if let Some(probe) = &self.probe {
+            return probe(harness_path, &self.deadline);
+        }
+        probe_current_session(harness_path, &self.deadline, cancelled)
+    }
+}
+
+/// Clock policy used by one running-session listing call.
+#[derive(Clone)]
+enum RunningSessionListDeadline {
+    /// Fixed production wall-clock deadline.
+    Absolute(Instant),
+    /// Semantic-test clock that never expires.
+    #[cfg(test)]
+    NonExpiring,
+    /// Deadline-test clock advanced explicitly by its owning test.
+    #[cfg(test)]
+    Manual(Arc<AtomicBool>),
+}
+
+impl RunningSessionListDeadline {
+    /// Reports whether the total listing budget has expired.
+    fn expired(&self) -> bool {
+        match self {
+            Self::Absolute(deadline) => Instant::now() >= *deadline,
+            #[cfg(test)]
+            Self::NonExpiring => false,
+            #[cfg(test)]
+            Self::Manual(expired) => expired.load(Ordering::Acquire),
+        }
+    }
+
+    /// Returns the real I/O deadline used to retain the per-probe cap.
+    fn probe_io_deadline(&self) -> Instant {
+        match self {
+            Self::Absolute(deadline) => *deadline,
+            #[cfg(test)]
+            Self::NonExpiring | Self::Manual(_) => Instant::now() + SESSION_DISCOVERY_PROBE_TIMEOUT,
+        }
+    }
+
+    /// Receives the isolated scan result under this policy.
+    fn receive_scan<T>(&self, receiver: &mpsc::Receiver<T>) -> Result<T, ()> {
+        match self {
+            Self::Absolute(deadline) => {
+                let timeout = deadline.checked_duration_since(Instant::now()).ok_or(())?;
+                receiver.recv_timeout(timeout).map_err(|_| ())
+            }
+            #[cfg(test)]
+            Self::NonExpiring | Self::Manual(_) => receiver.recv().map_err(|_| ()),
+        }
+    }
+}
+
+fn list_running_sessions_with_policy(
     entry_limit: usize,
+    policy: RunningSessionListPolicy,
 ) -> Result<Vec<RunningSession>, std::io::Error> {
-    let permit = DiscoveryCallPermit::try_acquire()
-        .ok_or_else(|| running_session_list_incomplete("runtime scan capacity is busy"))?;
-    let deadline = Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT;
+    let permit = policy.acquire_permit()?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let scan_cancelled = Arc::clone(&cancelled);
     let runtime_dir = harnesses_dir();
     let scan_permit = permit.clone();
+    let scan_policy = policy.clone();
     let (scan_tx, scan_rx) = mpsc::sync_channel(1);
     path_std_thread::Builder::new()
         .name("tau-running-session-scan".to_owned())
         .spawn(move || {
             let _permit = scan_permit;
+            #[cfg(test)]
+            if let Some(before_scan) = &scan_policy.before_scan {
+                before_scan();
+            }
             let result = scan_running_session_candidates(
                 &runtime_dir,
-                deadline,
+                &scan_policy.deadline,
                 &scan_cancelled,
                 entry_limit,
             );
@@ -1080,10 +1262,7 @@ fn list_running_sessions_with_entry_limit(
         .map_err(|error| {
             running_session_list_incomplete(&format!("could not spawn runtime scan: {error}"))
         })?;
-    let scan_timeout = deadline
-        .checked_duration_since(Instant::now())
-        .ok_or_else(|| running_session_list_incomplete("runtime scan timed out"))?;
-    let mut candidates = match scan_rx.recv_timeout(scan_timeout) {
+    let mut candidates = match policy.deadline.receive_scan(&scan_rx) {
         Ok(result) => result?,
         Err(_) => {
             cancelled.store(true, Ordering::Release);
@@ -1093,12 +1272,12 @@ fn list_running_sessions_with_entry_limit(
     candidates.sort();
     let mut sessions = Vec::new();
     for harness_path in candidates {
-        if Instant::now() >= deadline {
+        if policy.deadline.expired() {
             return Err(running_session_list_incomplete(
                 "runtime probe deadline reached before every candidate",
             ));
         }
-        match probe_current_session(&harness_path, deadline, &cancelled) {
+        match policy.probe(&harness_path, &cancelled) {
             CurrentSessionProbe::Reported(session) => sessions.push(session),
             CurrentSessionProbe::Unresponsive => {}
             CurrentSessionProbe::DeadlineExpired => {
@@ -1121,28 +1300,20 @@ fn list_running_sessions_with_entry_limit(
 
 fn scan_running_session_candidates(
     runtime_dir: &Path,
-    deadline: Instant,
+    deadline: &RunningSessionListDeadline,
     cancelled: &AtomicBool,
     entry_limit: usize,
 ) -> Result<Vec<PathBuf>, std::io::Error> {
-    #[cfg(test)]
-    let delay_ms = TEST_DISCOVERY_SCAN_DELAY
-        .lock()
-        .expect("test scan delay lock poisoned")
-        .as_ref()
-        .filter(|(path, _)| path == runtime_dir)
-        .map(|(_, delay_ms)| *delay_ms);
-    #[cfg(test)]
-    if let Some(delay_ms) = delay_ms {
-        std::thread::sleep(Duration::from_millis(delay_ms));
-    }
     if !runtime_dir.try_exists()? {
+        if deadline.expired() {
+            return Err(running_session_list_incomplete("runtime scan timed out"));
+        }
         return Ok(Vec::new());
     }
     let mut entries = std::fs::read_dir(runtime_dir)?;
     let mut candidates = Vec::new();
     for entries_visited in 0..=entry_limit {
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        if cancelled.load(Ordering::Acquire) || deadline.expired() {
             return Err(running_session_list_incomplete("runtime scan timed out"));
         }
         let Some(entry) = entries.next() else {
@@ -1168,15 +1339,46 @@ enum CurrentSessionProbe {
     Infrastructure(std::io::Error),
 }
 
+/// Requests and correlates one authoritative current-session response.
+fn request_current_session(
+    peer: &mut impl ProbeTransport,
+    request_id: &str,
+    mut remaining: impl FnMut() -> Option<Duration>,
+) -> Option<RunningSession> {
+    if !peer.send_probe_input(&tau_proto::HarnessInputMessage::GetCurrentSession(
+        tau_proto::GetCurrentSession {
+            request_id: request_id.to_owned(),
+        },
+    )) {
+        return None;
+    }
+    loop {
+        match peer.receive_probe_output(remaining()?) {
+            ProbeTransportReceive::Message(
+                tau_proto::HarnessOutputMessage::CurrentSessionResult(result),
+            ) if result.request_id == request_id => {
+                return Some(RunningSession {
+                    session_id: result.session_id,
+                    project_root: result.project_root,
+                });
+            }
+            ProbeTransportReceive::Message(tau_proto::HarnessOutputMessage::Disconnect(_))
+            | ProbeTransportReceive::Timeout
+            | ProbeTransportReceive::Closed => return None,
+            ProbeTransportReceive::Message(_) => {}
+        }
+    }
+}
+
 fn probe_current_session(
     harness_path: &Path,
-    deadline: Instant,
+    deadline: &RunningSessionListDeadline,
     cancelled: &AtomicBool,
 ) -> CurrentSessionProbe {
     let reported = (|| {
         let (mut peer, probe_deadline) = match connect_probe_peer(
             harness_path,
-            deadline,
+            deadline.probe_io_deadline(),
             cancelled,
             tau_proto::ExtensionName::parse("tau-session-list")
                 .expect("built-in extension name must satisfy the extension identifier grammar"),
@@ -1189,38 +1391,15 @@ fn probe_current_session(
             }
         };
         let request_id = format!("current-session-{}", std::process::id());
-        peer.send(&tau_proto::HarnessInputMessage::GetCurrentSession(
-            tau_proto::GetCurrentSession {
-                request_id: request_id.clone(),
-            },
-        ))
-        .ok()?;
-        loop {
-            match peer
-                .recv_timeout(probe_deadline.checked_duration_since(Instant::now())?)
-                .ok()?
-            {
-                tau_socket::SocketReceive::Message {
-                    message: tau_proto::HarnessOutputMessage::CurrentSessionResult(result),
-                } if result.request_id == request_id => {
-                    return Some(Ok(RunningSession {
-                        session_id: result.session_id,
-                        project_root: result.project_root,
-                    }));
-                }
-                tau_socket::SocketReceive::Message {
-                    message: tau_proto::HarnessOutputMessage::Disconnect(_),
-                }
-                | tau_socket::SocketReceive::Timeout
-                | tau_socket::SocketReceive::Closed => return None,
-                tau_socket::SocketReceive::Message { .. } => {}
-            }
-        }
+        request_current_session(&mut peer, &request_id, || {
+            probe_deadline.checked_duration_since(Instant::now())
+        })
+        .map(Ok)
     })();
     match reported {
         Some(Ok(session)) => CurrentSessionProbe::Reported(session),
         Some(Err(error)) => CurrentSessionProbe::Infrastructure(error),
-        None if Instant::now() >= deadline => CurrentSessionProbe::DeadlineExpired,
+        None if deadline.expired() => CurrentSessionProbe::DeadlineExpired,
         None => CurrentSessionProbe::Unresponsive,
     }
 }

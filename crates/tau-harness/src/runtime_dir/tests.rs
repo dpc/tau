@@ -2,6 +2,7 @@ use std::os::unix as path_std_os_unix;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::process::{Child, Command};
+use std::sync::{Barrier, Mutex};
 
 use tempfile::TempDir;
 
@@ -69,6 +70,158 @@ fn discover_for_test(
     current_session_id: &str,
 ) -> PeerSessionSnapshot {
     discover_peer_sessions_for_test(query, limit, current_session_id)
+}
+
+fn list_running_sessions_for_semantic_test(
+    probe: TestRunningSessionProbe,
+) -> Result<Vec<RunningSession>, std::io::Error> {
+    list_running_sessions_with_policy(
+        SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
+        RunningSessionListPolicy::non_expiring(None, probe),
+    )
+}
+
+fn list_running_sessions_with_entry_limit_for_semantic_test(
+    entry_limit: usize,
+    probe: TestRunningSessionProbe,
+) -> Result<Vec<RunningSession>, std::io::Error> {
+    list_running_sessions_with_policy(
+        entry_limit,
+        RunningSessionListPolicy::non_expiring(None, probe),
+    )
+}
+
+fn unexpected_running_session_probe() -> TestRunningSessionProbe {
+    Arc::new(|path, _| panic!("unexpected running-session probe for {}", path.display()))
+}
+
+fn running_session_probe_fixture(
+    sessions: impl IntoIterator<Item = (PathBuf, RunningSession)>,
+) -> TestRunningSessionProbe {
+    let sessions = sessions
+        .into_iter()
+        .collect::<path_std_collections::HashMap<_, _>>();
+    Arc::new(move |path, _| {
+        sessions.get(path).cloned().map_or(
+            CurrentSessionProbe::Unresponsive,
+            CurrentSessionProbe::Reported,
+        )
+    })
+}
+
+fn fixture_running_session(path: &Path, session_id: &str) -> RunningSession {
+    RunningSession {
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        project_root: path
+            .parent()
+            .expect("runtime path parent")
+            .canonicalize()
+            .expect("canonical project root"),
+    }
+}
+
+/// Deterministic in-memory transport for current-session probe protocol tests.
+struct ProbeTransportFixture {
+    /// Client messages sent by the probe.
+    sent: Vec<tau_proto::HarnessInputMessage>,
+    /// Ordered receive outcomes supplied to the probe.
+    received: path_std_collections::VecDeque<ProbeTransportReceive>,
+}
+
+impl ProbeTransport for ProbeTransportFixture {
+    fn send_probe_input(&mut self, message: &tau_proto::HarnessInputMessage) -> bool {
+        self.sent.push(message.clone());
+        true
+    }
+
+    fn receive_probe_output(&mut self, _timeout: Duration) -> ProbeTransportReceive {
+        self.received
+            .pop_front()
+            .expect("probe fixture receive outcome")
+    }
+}
+
+/// Ensures the production current-session probe protocol sends its UI greeting
+/// and request, ignores an unrelated result, and accepts the correlated result.
+#[test]
+fn current_session_probe_protocol_correlates_authoritative_response() {
+    let request_id = "current-session-test";
+    let expected_session = "reported-session"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
+    let expected_root = PathBuf::from("/reported/project");
+    let mut transport = ProbeTransportFixture {
+        sent: Vec::new(),
+        received: path_std_collections::VecDeque::from([
+            ProbeTransportReceive::Message(tau_proto::HarnessOutputMessage::CurrentSessionResult(
+                tau_proto::CurrentSessionResult {
+                    request_id: "unrelated".to_owned(),
+                    session_id: "wrong-session"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
+                    project_root: PathBuf::from("/wrong/project"),
+                },
+            )),
+            ProbeTransportReceive::Message(tau_proto::HarnessOutputMessage::CurrentSessionResult(
+                tau_proto::CurrentSessionResult {
+                    request_id: request_id.to_owned(),
+                    session_id: expected_session.clone(),
+                    project_root: expected_root.clone(),
+                },
+            )),
+        ]),
+    };
+
+    assert!(send_probe_hello(
+        &mut transport,
+        tau_proto::ExtensionName::parse("tau-session-list")
+            .expect("built-in extension name must be valid"),
+        tau_proto::ClientKind::Ui,
+    ));
+    assert_eq!(
+        request_current_session(&mut transport, request_id, || Some(Duration::ZERO)),
+        Some(RunningSession {
+            session_id: expected_session,
+            project_root: expected_root,
+        })
+    );
+    assert!(matches!(
+        &transport.sent[0],
+        tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            client_name,
+            client_kind: tau_proto::ClientKind::Ui,
+            ..
+        }) if client_name.as_str() == "tau-session-list"
+    ));
+    assert!(matches!(
+        &transport.sent[1],
+        tau_proto::HarnessInputMessage::GetCurrentSession(request)
+            if request.request_id == request_id
+    ));
+}
+
+/// Ensures current-session probe timeout and closure outcomes both reject a
+/// partial or invented response without wall-clock waits.
+#[test]
+fn current_session_probe_protocol_maps_timeout_and_closure_to_unresponsive() {
+    for outcome in [
+        ProbeTransportReceive::Timeout,
+        ProbeTransportReceive::Closed,
+    ] {
+        let mut transport = ProbeTransportFixture {
+            sent: Vec::new(),
+            received: path_std_collections::VecDeque::from([outcome]),
+        };
+
+        assert_eq!(
+            request_current_session(&mut transport, "current-session-test", || {
+                Some(Duration::ZERO)
+            }),
+            None
+        );
+    }
 }
 
 fn write_peer_metadata(path: &Path, session_id: &str, project_root: &Path, opted_in: bool) {
@@ -149,53 +302,6 @@ fn spawn_probe_daemon(
                 std::thread::sleep(SESSION_DISCOVERY_PROBE_TIMEOUT * 2);
             }
         }
-    })
-}
-
-fn spawn_current_session_daemon(path: &Path, session_id: &str) -> std::thread::JoinHandle<()> {
-    let listener =
-        tau_socket::SocketListener::bind(socket_path(path)).expect("current-session listener");
-    let session_id =
-        tau_proto::SessionId::parse(session_id).expect("known-safe SessionId must be valid");
-    let project_root = path
-        .parent()
-        .expect("runtime path parent")
-        .canonicalize()
-        .expect("canonical project root");
-    std::thread::spawn(move || {
-        let mut client = listener.accept().expect("accept current-session probe");
-        assert!(matches!(
-            client.recv().expect("hello"),
-            Some(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
-                client_kind: tau_proto::ClientKind::Ui,
-                ..
-            }))
-        ));
-        let Some(tau_proto::HarnessInputMessage::GetCurrentSession(request)) =
-            client.recv().expect("current-session request")
-        else {
-            panic!("expected current-session request");
-        };
-        client
-            .send(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
-                tau_proto::CurrentSessionResult {
-                    request_id: "unrelated-request".to_owned(),
-                    session_id: "wrong-session"
-                        .parse::<tau_proto::SessionId>()
-                        .expect("known-safe SessionId must be valid"),
-                    project_root: PathBuf::from("/wrong/project"),
-                },
-            ))
-            .expect("unrelated current-session result");
-        client
-            .send(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
-                tau_proto::CurrentSessionResult {
-                    request_id: request.request_id,
-                    session_id,
-                    project_root,
-                },
-            ))
-            .expect("current-session result");
     })
 }
 
@@ -698,35 +804,66 @@ fn running_session_list_includes_only_reachable_active_sessions() {
     std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
     let live = harnesses_dir().join("live");
     let stale = harnesses_dir().join(std::process::id().to_string());
-    let daemon = spawn_current_session_daemon(&live, "running-session");
+    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
     write_peer_metadata(&stale, "historical-session", Path::new("/stale"), false);
     std::fs::write(socket_path(&stale), b"not a socket").expect("stale socket");
+    let running_session = fixture_running_session(&live, "running-session");
 
     assert_eq!(
-        list_running_sessions().expect("running sessions"),
-        vec![RunningSession {
-            session_id: "running-session"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            project_root: harnesses_dir().canonicalize().expect("canonical root"),
-        }]
+        list_running_sessions_for_semantic_test(running_session_probe_fixture([(
+            live,
+            running_session.clone(),
+        )]))
+        .expect("running sessions"),
+        vec![running_session]
     );
-    daemon.join().expect("current-session daemon");
 }
 
 /// Ensures absence of runtime candidates is a successful empty,
-/// pipe-friendly listing rather than a synthesized placeholder row.
+/// pipe-friendly listing rather than a synthesized placeholder row, even when
+/// the scan worker is held after spawning.
 #[test]
 fn running_session_list_is_empty_without_runtime_directory() {
     let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
+    let runtime_root = temp.path().to_path_buf();
+    let scan_started = Arc::new(Barrier::new(2));
+    let release_scan = Arc::new(Barrier::new(2));
+    let worker_started = Arc::clone(&scan_started);
+    let worker_release = Arc::clone(&release_scan);
+    let policy = RunningSessionListPolicy::non_expiring(
+        Some(Arc::new(move || {
+            worker_started.wait();
+            worker_release.wait();
+        })),
+        unexpected_running_session_probe(),
+    );
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let listing = std::thread::spawn(move || {
+        with_runtime_dir(Some(&runtime_root), || {
+            result_tx
+                .send(list_running_sessions_with_policy(
+                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
+                    policy,
+                ))
+                .expect("report listing result");
+        });
+    });
 
+    scan_started.wait();
     assert!(
-        list_running_sessions()
+        result_rx.try_recv().is_err(),
+        "scan result must remain pending while worker start is gated"
+    );
+    release_scan.wait();
+    assert!(
+        result_rx
+            .recv()
+            .expect("listing result")
             .expect("running sessions")
             .is_empty()
     );
-    assert!(!harnesses_dir().exists());
+    listing.join().expect("listing thread");
+    assert!(!temp.path().join("tau/harnesses").exists());
 }
 
 /// Ensures daemon memory remains authoritative when adjacent metadata is
@@ -737,19 +874,18 @@ fn running_session_list_ignores_invalid_runtime_metadata() {
     let _guard = runtime_override(&temp);
     std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
     let live = harnesses_dir().join("live");
-    let daemon = spawn_current_session_daemon(&live, "authoritative-session");
+    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
     std::fs::write(metadata_path(&live), b"{").expect("invalid metadata");
+    let running_session = fixture_running_session(&live, "authoritative-session");
 
     assert_eq!(
-        list_running_sessions().expect("running sessions"),
-        vec![RunningSession {
-            session_id: "authoritative-session"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            project_root: harnesses_dir().canonicalize().expect("canonical root"),
-        }]
+        list_running_sessions_for_semantic_test(running_session_probe_fixture([(
+            live,
+            running_session.clone(),
+        )]))
+        .expect("running sessions"),
+        vec![running_session]
     );
-    daemon.join().expect("current-session daemon");
 }
 
 /// Ensures listing sorts responsive records while retaining
@@ -760,36 +896,25 @@ fn running_session_list_sorts_and_retains_duplicate_identities() {
     let temp = TempDir::new().expect("temp runtime");
     let _guard = runtime_override(&temp);
     std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let z = spawn_current_session_daemon(&harnesses_dir().join("a"), "z-session");
-    let duplicate = spawn_current_session_daemon(&harnesses_dir().join("b"), "a-session");
-    let a = spawn_current_session_daemon(&harnesses_dir().join("c"), "a-session");
+    let z = harnesses_dir().join("a");
+    let duplicate = harnesses_dir().join("b");
+    let a = harnesses_dir().join("c");
+    for candidate in [&z, &duplicate, &a] {
+        std::fs::write(socket_path(candidate), b"fixture").expect("socket candidate");
+    }
+    let z_session = fixture_running_session(&z, "z-session");
+    let duplicate_session = fixture_running_session(&duplicate, "a-session");
+    let a_session = fixture_running_session(&a, "a-session");
 
     assert_eq!(
-        list_running_sessions().expect("running sessions"),
-        vec![
-            RunningSession {
-                session_id: "a-session"
-                    .parse::<tau_proto::SessionId>()
-                    .expect("known-safe SessionId must be valid"),
-                project_root: harnesses_dir().canonicalize().expect("canonical root"),
-            },
-            RunningSession {
-                session_id: "a-session"
-                    .parse::<tau_proto::SessionId>()
-                    .expect("known-safe SessionId must be valid"),
-                project_root: harnesses_dir().canonicalize().expect("canonical root"),
-            },
-            RunningSession {
-                session_id: "z-session"
-                    .parse::<tau_proto::SessionId>()
-                    .expect("known-safe SessionId must be valid"),
-                project_root: harnesses_dir().canonicalize().expect("canonical root"),
-            },
-        ]
+        list_running_sessions_for_semantic_test(running_session_probe_fixture([
+            (z, z_session.clone()),
+            (duplicate, duplicate_session.clone()),
+            (a, a_session.clone()),
+        ]))
+        .expect("running sessions"),
+        vec![duplicate_session, a_session, z_session]
     );
-    z.join().expect("z daemon");
-    duplicate.join().expect("duplicate daemon");
-    a.join().expect("a daemon");
 }
 
 /// Ensures the raw directory-entry bound fails the whole listing rather
@@ -805,8 +930,11 @@ fn running_session_list_fails_at_directory_entry_bound() {
             .expect("junk runtime entry");
     }
 
-    let error = list_running_sessions_with_entry_limit(TEST_DIRECTORY_ENTRY_LIMIT)
-        .expect_err("bounded listing");
+    let error = list_running_sessions_with_entry_limit_for_semantic_test(
+        TEST_DIRECTORY_ENTRY_LIMIT,
+        unexpected_running_session_probe(),
+    )
+    .expect_err("bounded listing");
     assert!(
         error
             .to_string()
@@ -823,83 +951,194 @@ fn running_session_list_continues_after_one_probe_timeout() {
     std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
     let blocked = harnesses_dir().join("a-blocked");
     let live = harnesses_dir().join("b-live");
-    let blocked_listener =
-        tau_socket::SocketListener::bind(socket_path(&blocked)).expect("blocked listener");
-    let blocked_daemon = std::thread::spawn(move || {
-        let _client = blocked_listener.accept().expect("accept blocked probe");
-        std::thread::sleep(SESSION_DISCOVERY_PROBE_TIMEOUT * 2);
+    std::fs::write(socket_path(&blocked), b"fixture").expect("blocked socket candidate");
+    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
+    let running_session = fixture_running_session(&live, "responsive-session");
+    let probe_started = Arc::new(Barrier::new(2));
+    let release_probe = Arc::new(Barrier::new(2));
+    let blocked_timed_out = Arc::new(AtomicBool::new(false));
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let fixture_started = Arc::clone(&probe_started);
+    let fixture_release = Arc::clone(&release_probe);
+    let fixture_timed_out = Arc::clone(&blocked_timed_out);
+    let fixture_trace = Arc::clone(&trace);
+    let fixture_blocked = blocked.clone();
+    let fixture_live = live.clone();
+    let fixture_session = running_session.clone();
+    let probe = Arc::new(move |path: &Path, _deadline: &RunningSessionListDeadline| {
+        fixture_trace
+            .lock()
+            .expect("probe trace lock poisoned")
+            .push(path.to_path_buf());
+        if path == fixture_blocked {
+            fixture_started.wait();
+            fixture_release.wait();
+            assert!(
+                fixture_timed_out.load(Ordering::Acquire),
+                "blocked probe released before manual timeout"
+            );
+            return CurrentSessionProbe::Unresponsive;
+        }
+        assert_eq!(path, fixture_live);
+        CurrentSessionProbe::Reported(fixture_session.clone())
     });
-    let live_daemon = spawn_current_session_daemon(&live, "responsive-session");
-    let started = Instant::now();
+    let policy = RunningSessionListPolicy::non_expiring(None, probe);
+    let runtime_root = temp.path().to_path_buf();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let listing = std::thread::spawn(move || {
+        with_runtime_dir(Some(&runtime_root), || {
+            result_tx
+                .send(list_running_sessions_with_policy(
+                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
+                    policy,
+                ))
+                .expect("report listing result");
+        });
+    });
 
-    assert_eq!(
-        list_running_sessions().expect("running sessions"),
-        vec![RunningSession {
-            session_id: "responsive-session"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            project_root: harnesses_dir().canonicalize().expect("canonical root"),
-        }]
+    probe_started.wait();
+    assert!(
+        result_rx.try_recv().is_err(),
+        "listing must wait for the blocked probe timeout"
     );
-    assert!(started.elapsed() < Duration::from_secs(1));
-    blocked_daemon.join().expect("blocked daemon");
-    live_daemon.join().expect("live daemon");
+    blocked_timed_out.store(true, Ordering::Release);
+    release_probe.wait();
+    assert_eq!(
+        result_rx
+            .recv()
+            .expect("listing result")
+            .expect("running sessions"),
+        vec![running_session]
+    );
+    listing.join().expect("listing thread");
+    assert_eq!(
+        *trace.lock().expect("probe trace lock poisoned"),
+        [blocked, live]
+    );
 }
 
-/// Ensures a blocked runtime-directory operation is isolated from the
-/// caller's total deadline while retaining bounded discovery admission.
+/// Ensures the isolated scan reports timeout only after its owning test
+/// explicitly advances the per-call deadline.
 #[test]
 fn running_session_list_isolates_slow_storage() {
     let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let _serial = TEST_DISCOVERY_SERIAL
-        .lock()
-        .expect("test discovery serial lock poisoned");
-    *TEST_DISCOVERY_SCAN_DELAY
-        .lock()
-        .expect("test scan delay lock poisoned") = Some((harnesses_dir(), 2_100));
-    let started = Instant::now();
+    let runtime_root = temp.path().to_path_buf();
+    let scan_started = Arc::new(Barrier::new(2));
+    let release_scan = Arc::new(Barrier::new(2));
+    let worker_started = Arc::clone(&scan_started);
+    let worker_release = Arc::clone(&release_scan);
+    let expired = Arc::new(AtomicBool::new(false));
+    let policy = RunningSessionListPolicy::manual(
+        Arc::clone(&expired),
+        Some(Arc::new(move || {
+            worker_started.wait();
+            worker_release.wait();
+        })),
+        unexpected_running_session_probe(),
+    );
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let listing = std::thread::spawn(move || {
+        with_runtime_dir(Some(&runtime_root), || {
+            std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+            result_tx
+                .send(list_running_sessions_with_policy(
+                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
+                    policy,
+                ))
+                .expect("report listing result");
+        });
+    });
 
-    let error = list_running_sessions().expect_err("scan deadline");
+    scan_started.wait();
+    assert!(
+        result_rx.try_recv().is_err(),
+        "scan must not time out before manual deadline advancement"
+    );
+    expired.store(true, Ordering::Release);
+    release_scan.wait();
+    let error = result_rx
+        .recv()
+        .expect("listing result")
+        .expect_err("scan deadline");
 
-    *TEST_DISCOVERY_SCAN_DELAY
-        .lock()
-        .expect("test scan delay lock poisoned") = None;
-    assert!(started.elapsed() < Duration::from_millis(2_200));
     assert!(error.to_string().contains("runtime scan timed out"));
+    listing.join().expect("listing thread");
 }
 
-/// Ensures expiry inside the final probe fails the whole listing rather
-/// than returning the ids collected before the global budget ran out.
+/// Ensures manually advancing the total deadline while the final probe is
+/// blocked rejects the already collected partial result.
 #[test]
 fn running_session_list_rejects_partial_result_on_final_probe_deadline() {
     let temp = TempDir::new().expect("temp runtime");
     let _guard = runtime_override(&temp);
     std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let _serial = TEST_DISCOVERY_SERIAL
-        .lock()
-        .expect("test discovery serial lock poisoned");
-    let live = spawn_current_session_daemon(&harnesses_dir().join("a-live"), "collected");
+    let live = harnesses_dir().join("a-live");
     let blocked = harnesses_dir().join("z-blocked");
-    let listener =
-        tau_socket::SocketListener::bind(socket_path(&blocked)).expect("blocked listener");
-    let daemon = std::thread::spawn(move || {
-        let _client = listener.accept().expect("accept final probe");
-        std::thread::sleep(SESSION_DISCOVERY_PROBE_TIMEOUT);
+    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
+    std::fs::write(socket_path(&blocked), b"fixture").expect("blocked socket candidate");
+    let collected = fixture_running_session(&live, "collected");
+    let request_received = Arc::new(Barrier::new(2));
+    let release_request = Arc::new(Barrier::new(2));
+    let probe_received = Arc::clone(&request_received);
+    let probe_release = Arc::clone(&release_request);
+    let probe_live = live.clone();
+    let probe_blocked = blocked.clone();
+    let probe_collected = collected.clone();
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let probe_trace = Arc::clone(&trace);
+    let probe = Arc::new(move |path: &Path, deadline: &RunningSessionListDeadline| {
+        let mut trace = probe_trace.lock().expect("probe trace lock poisoned");
+        trace.push(path.to_path_buf());
+        if path == probe_live {
+            return CurrentSessionProbe::Reported(probe_collected.clone());
+        }
+        assert_eq!(path, probe_blocked);
+        assert_eq!(
+            trace.as_slice(),
+            [probe_live.clone(), probe_blocked.clone()],
+            "final blocked probe must follow one collected live report"
+        );
+        drop(trace);
+        probe_received.wait();
+        probe_release.wait();
+        if deadline.expired() {
+            CurrentSessionProbe::DeadlineExpired
+        } else {
+            CurrentSessionProbe::Unresponsive
+        }
     });
-    *TEST_DISCOVERY_SCAN_DELAY
-        .lock()
-        .expect("test scan delay lock poisoned") = Some((harnesses_dir(), 1_750));
+    let expired = Arc::new(AtomicBool::new(false));
+    let policy = RunningSessionListPolicy::manual(Arc::clone(&expired), None, probe);
+    let runtime_root = temp.path().to_path_buf();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let listing = std::thread::spawn(move || {
+        with_runtime_dir(Some(&runtime_root), || {
+            result_tx
+                .send(list_running_sessions_with_policy(
+                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
+                    policy,
+                ))
+                .expect("report listing result");
+        });
+    });
 
-    let error = list_running_sessions().expect_err("global probe deadline");
-
-    *TEST_DISCOVERY_SCAN_DELAY
-        .lock()
-        .expect("test scan delay lock poisoned") = None;
+    request_received.wait();
+    assert!(
+        result_rx.try_recv().is_err(),
+        "final probe must remain pending before manual deadline advancement"
+    );
+    expired.store(true, Ordering::Release);
+    release_request.wait();
+    let error = result_rx
+        .recv()
+        .expect("listing result")
+        .expect_err("global probe deadline");
     assert!(error.to_string().contains("probe deadline expired"));
-    live.join().expect("live daemon");
-    daemon.join().expect("blocked daemon");
+    listing.join().expect("listing thread");
+    assert_eq!(
+        *trace.lock().expect("probe trace lock poisoned"),
+        [live, blocked]
+    );
 }
 
 /// Ensures session discovery ignores the old active-session value after a
