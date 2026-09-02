@@ -421,6 +421,7 @@ impl Harness {
                 last_live_egress_lag_warning: None,
                 debug_log: None,
                 debug_log_poisoned: false,
+                provider_terminal_timing: Default::default(),
                 publication: PublicationState::default(),
             },
             session_runtime: SessionRuntimeState {
@@ -973,6 +974,7 @@ impl Harness {
                 last_live_egress_lag_warning: None,
                 debug_log: None,
                 debug_log_poisoned: false,
+                provider_terminal_timing: Default::default(),
                 publication: PublicationState::default(),
             },
             session_runtime: SessionRuntimeState {

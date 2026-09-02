@@ -1965,7 +1965,14 @@ impl Harness {
             self.retain_start_terminal(event, owner);
             return;
         }
-        let mut commit_timing = CommitEventTiming::new(event.name());
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_canonical_enqueue_at_commit_entry(&event);
+        let provider_terminal_timing = self
+            .runtime_io
+            .provider_terminal_timing
+            .canonical_commit_timing(&event);
+        let mut commit_timing = CommitEventTiming::new(event.name(), provider_terminal_timing);
         // When this publish was stamped with a conversation, fold
         // the event onto that agent's branch directly. This
         // skips the `UiNavigateTree` head-bouncing dance that

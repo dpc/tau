@@ -727,6 +727,9 @@ impl Harness {
             return;
         }
         if let AgentPublishCompletion::GatedFinal { disposition, .. } = completion {
+            self.runtime_io
+                .provider_terminal_timing
+                .start_stage(provider_terminal_timing::ProviderTerminalStage::CommitGatedReducer);
             match disposition {
                 GatedFinalDisposition::Challenge { challenge } => {
                     if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
@@ -750,6 +753,9 @@ impl Harness {
                     if cancellation_owns_other_prompt {
                         // This earlier terminal remains durable, but a later
                         // prompt owns every live completion effect.
+                        self.runtime_io.provider_terminal_timing.finish_stage(
+                            provider_terminal_timing::ProviderTerminalStage::CommitGatedReducer,
+                        );
                         return;
                     }
                     if self
@@ -764,6 +770,9 @@ impl Harness {
                     self.complete_committed_gated_final(cid, *terminal);
                 }
             }
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_stage(provider_terminal_timing::ProviderTerminalStage::CommitGatedReducer);
             return;
         }
         if let AgentPublishCompletion::OutputLengthContinuation { reducer, .. } = completion {

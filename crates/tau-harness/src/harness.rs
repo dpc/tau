@@ -287,6 +287,8 @@ struct CommitEventTiming {
     post_commit: Duration,
     /// Terminal status of this commit attempt.
     result: CommitEventTimingResult,
+    /// Private correlation for an immediately nested canonical terminal commit.
+    provider_terminal: Option<provider_terminal_timing::ProviderTerminalCommitTiming>,
 }
 
 /// Complete inference checkpoint inputs selected before either dispatch path
@@ -338,7 +340,10 @@ enum CommitEventTimingResult {
 }
 
 impl CommitEventTiming {
-    fn new(event_name: tau_proto::EventName) -> Self {
+    fn new(
+        event_name: tau_proto::EventName,
+        provider_terminal: Option<provider_terminal_timing::ProviderTerminalCommitTiming>,
+    ) -> Self {
         Self {
             event_name,
             started: Instant::now(),
@@ -347,6 +352,7 @@ impl CommitEventTiming {
             bus_enqueue: Duration::ZERO,
             post_commit: Duration::ZERO,
             result: CommitEventTimingResult::Aborted,
+            provider_terminal,
         }
     }
 }
@@ -354,6 +360,9 @@ impl CommitEventTiming {
 impl Drop for CommitEventTiming {
     fn drop(&mut self) {
         let total = self.started.elapsed();
+        if let Some(provider_terminal) = self.provider_terminal.take() {
+            provider_terminal.finish(total);
+        }
         let total_us = duration_as_micros(total);
         let debug_log_us = duration_as_micros(self.debug_log);
         let semantic_persist_us = duration_as_micros(self.semantic_persist);
@@ -1407,6 +1416,9 @@ mod prompt_runtime_state;
 mod provider_report_ownership;
 mod provider_response;
 mod provider_terminal_plan;
+mod provider_terminal_timing;
+#[cfg(test)]
+mod provider_terminal_timing_tests;
 mod publication;
 mod publication_completion;
 mod publication_state;

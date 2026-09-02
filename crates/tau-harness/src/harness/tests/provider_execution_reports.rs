@@ -1,7 +1,8 @@
 use tau_config::settings::ProviderCacheMaxIdle;
 
 use super::*;
-use crate::harness::{provider_report_ownership, terminal_response_projection};
+use crate::harness::provider_terminal_timing::ProviderTerminalTimingSnapshot;
+use crate::harness::{provider_report_ownership, provider_response, terminal_response_projection};
 use crate::provider_cache_residency::{ProviderCacheResidency, tests as cache_fixtures};
 use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
@@ -1652,6 +1653,487 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
             .in_flight_prompt
             .is_none()
     );
+}
+
+/// Ensures the private terminal timing observer records each ordinary
+/// source-order phase once, correlates the immediately entered canonical
+/// commit, and retains no response content or event identity.
+#[test]
+fn provider_terminal_timing_records_ordinary_terminal_source_order() {
+    use crate::harness::provider_terminal_timing::ProviderTerminalStage;
+
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let cid = ensure_test_user_agent(&mut harness);
+    let prompt_id = "timing-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    seed_agent_thinking(&mut harness, &cid, prompt_id.as_str());
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    harness
+        .provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id("provider"));
+    {
+        let agent = harness
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
+        agent.dispatch.in_flight_prompt = Some(prompt_id.clone());
+        agent.dispatch.last_prompt_id = Some(prompt_id.clone());
+    }
+    harness
+        .runtime_io
+        .provider_terminal_timing
+        .enable_for_test();
+
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
+                &prompt_id,
+                crate::parse_agent_id("spoofed"),
+                "done",
+            )),
+        )
+        .expect("finished report");
+
+    let timings = harness
+        .runtime_io
+        .provider_terminal_timing
+        .take_completed_for_test();
+    assert_eq!(timings.len(), 1);
+    let timing = &timings[0];
+    assert!(timing.canonical_commit.is_some());
+    assert_eq!(timing.output_items_visited, 1);
+    assert_eq!(timing.tool_calls_visited, 0);
+    assert_eq!(timing.output_items_copied, 1);
+    assert_eq!(timing.tool_calls_copied, 0);
+    for stage in [
+        ProviderTerminalStage::Projection,
+        ProviderTerminalStage::Normalize,
+        ProviderTerminalStage::Accounting,
+        ProviderTerminalStage::Classification,
+        ProviderTerminalStage::CanonicalCandidateClone,
+        ProviderTerminalStage::CanonicalEnqueue,
+        ProviderTerminalStage::EagerReducer,
+    ] {
+        assert!(timing.stage(stage).is_some(), "missing stage {stage:?}");
+    }
+    assert!(
+        timing
+            .stage(ProviderTerminalStage::RetainedPlanClone)
+            .is_none()
+    );
+    assert_eq!(
+        timing.stage_order,
+        [
+            ProviderTerminalStage::Projection,
+            ProviderTerminalStage::Normalize,
+            ProviderTerminalStage::Accounting,
+            ProviderTerminalStage::Classification,
+            ProviderTerminalStage::CanonicalCandidateClone,
+            ProviderTerminalStage::CanonicalEnqueue,
+            ProviderTerminalStage::EagerReducer,
+        ]
+    );
+    assert!(
+        timing.unattributed <= timing.pipeline_total,
+        "unattributed time must be nonnegative"
+    );
+}
+
+/// Ensures disabled terminal timing does not traverse response content merely
+/// to derive diagnostic counters.
+#[test]
+fn disabled_provider_terminal_timing_skips_diagnostic_payload_traversal() {
+    let _ = provider_response::take_provider_terminal_timing_diagnostic_visits();
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let cid = ensure_test_user_agent(&mut harness);
+    let prompt_id = "disabled-timing-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    seed_agent_thinking(&mut harness, &cid, prompt_id.as_str());
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    harness
+        .provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id("provider"));
+    {
+        let agent = harness
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
+        agent.dispatch.in_flight_prompt = Some(prompt_id.clone());
+        agent.dispatch.last_prompt_id = Some(prompt_id.clone());
+    }
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
+                &prompt_id,
+                crate::parse_agent_id("spoofed"),
+                "never inspected by disabled diagnostics",
+            )),
+        )
+        .expect("finished report");
+    assert_eq!(
+        provider_response::take_provider_terminal_timing_diagnostic_visits(),
+        0,
+        "disabled timing must not inspect response content"
+    );
+}
+
+/// Production-admissible terminal shapes used only by the release timing
+/// fixture.
+#[derive(Clone, Copy)]
+enum ProviderTerminalBenchmarkShape {
+    /// One assistant text output item.
+    Text,
+    /// Assistant text plus a separate reasoning output item.
+    MixedOutputItems,
+    /// One tool-call terminal with a large provider-owned argument body.
+    ToolCall,
+}
+
+impl ProviderTerminalBenchmarkShape {
+    const ALL: [Self; 3] = [Self::Text, Self::MixedOutputItems, Self::ToolCall];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::MixedOutputItems => "mixed-output-items",
+            Self::ToolCall => "tool-call",
+        }
+    }
+}
+
+/// Builds one response shape without putting any of its content into benchmark
+/// output.
+fn provider_terminal_benchmark_response(
+    prompt_id: &tau_proto::AgentPromptId,
+    shape: ProviderTerminalBenchmarkShape,
+    payload_bytes: usize,
+) -> tau_proto::ProviderResponseFinished {
+    let payload = "x".repeat(payload_bytes);
+    match shape {
+        ProviderTerminalBenchmarkShape::Text => super::dispatch::provider_text_response(
+            prompt_id,
+            crate::parse_agent_id("spoofed"),
+            &payload,
+        ),
+        ProviderTerminalBenchmarkShape::MixedOutputItems => {
+            let split = payload_bytes / 2;
+            let mut response = super::dispatch::provider_text_response(
+                prompt_id,
+                crate::parse_agent_id("spoofed"),
+                &payload[..split],
+            );
+            response
+                .output_items
+                .push(tau_proto::ContextItem::ReasoningText(
+                    tau_proto::ReasoningTextItem {
+                        kind: tau_proto::ReasoningTextKind::Full,
+                        text: payload[split..].to_owned(),
+                    },
+                ));
+            response
+        }
+        ProviderTerminalBenchmarkShape::ToolCall => tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: prompt_id.clone(),
+            agent_id: crate::parse_agent_id("spoofed"),
+            output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+                call_id: "benchmark-call".into(),
+                name: tau_proto::ToolName::new("benchmark_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: tau_proto::CborValue::Text(payload),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        },
+    }
+}
+
+/// Runs one fresh current-owner terminal sample through raw admission and
+/// canonical publication.
+fn run_provider_terminal_benchmark_sample(
+    shape: ProviderTerminalBenchmarkShape,
+    payload_bytes: usize,
+) -> ProviderTerminalTimingSnapshot {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let cid = ensure_test_user_agent(&mut harness);
+    let prompt_id = "benchmark-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    seed_agent_thinking(&mut harness, &cid, prompt_id.as_str());
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    harness
+        .provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id("provider"));
+    {
+        let agent = harness
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
+        agent.dispatch.in_flight_prompt = Some(prompt_id.clone());
+        agent.dispatch.last_prompt_id = Some(prompt_id.clone());
+    }
+    harness
+        .runtime_io
+        .provider_terminal_timing
+        .enable_for_test();
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseFinishedReported(provider_terminal_benchmark_response(
+                &prompt_id,
+                shape,
+                payload_bytes,
+            )),
+        )
+        .expect("finished report");
+    let mut timings = harness
+        .runtime_io
+        .provider_terminal_timing
+        .take_completed_for_test();
+    assert_eq!(timings.len(), 1, "one accepted terminal sample");
+    let timing = timings.pop().expect("one timing");
+    assert!(
+        timing.canonical_commit.is_some(),
+        "unparked lane must enter the immediate canonical commit"
+    );
+    timing
+}
+
+/// Proves a parked canonical lane retains the raw report and records canonical
+/// commit absence instead of charging delayed interceptor release to that
+/// report.
+fn assert_parked_provider_terminal_benchmark_lane() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let cid = ensure_test_user_agent(&mut harness);
+    let prompt_id = "benchmark-parked-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    seed_agent_thinking(&mut harness, &cid, prompt_id.as_str());
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    harness
+        .provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id("provider"));
+    {
+        let agent = harness
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
+        agent.dispatch.in_flight_prompt = Some(prompt_id.clone());
+        agent.dispatch.last_prompt_id = Some(prompt_id.clone());
+    }
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register interceptor");
+    harness
+        .runtime_io
+        .provider_terminal_timing
+        .enable_for_test();
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseFinishedReported(provider_terminal_benchmark_response(
+                &prompt_id,
+                ProviderTerminalBenchmarkShape::Text,
+                22,
+            )),
+        )
+        .expect("finished report");
+    let mut timings = harness
+        .runtime_io
+        .provider_terminal_timing
+        .take_completed_for_test();
+    assert_eq!(timings.len(), 1, "one accepted parked terminal");
+    assert!(
+        timings
+            .pop()
+            .expect("one timing")
+            .canonical_commit
+            .is_none(),
+        "parked canonical publication must be recorded as absent"
+    );
+    assert!(
+        committed_events(&harness)
+            .iter()
+            .any(|(_, event)| matches!(event, Event::ProviderResponseFinishedReported(_))),
+        "raw report must retain ordinary admission"
+    );
+    assert!(
+        committed_events(&harness)
+            .iter()
+            .all(|(_, event)| !matches!(event, Event::ProviderResponseFinished(_))),
+        "parked canonical response must not commit"
+    );
+}
+
+/// Measures content-free terminal subphases over large production-admissible
+/// shapes. It is ignored because it deliberately creates 450 fresh release-mode
+/// harnesses; its TSV is evidence, not a pass/fail performance threshold.
+#[test]
+#[ignore = "release-only measurement fixture"]
+fn benchmark_provider_terminal_subphase_scaling() {
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
+
+    use crate::harness::provider_terminal_timing::ProviderTerminalStage;
+
+    const BASELINE: &str = "b250fbbf09e3";
+    const SIZES: [usize; 5] = [22, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
+    const REPETITIONS: usize = 30;
+    const SEED: u64 = 0x5550_5550;
+
+    let mut order = ProviderTerminalBenchmarkShape::ALL
+        .into_iter()
+        .flat_map(|shape| SIZES.into_iter().map(move |size| (shape, size)))
+        .collect::<Vec<_>>();
+    let mut rng = StdRng::seed_from_u64(SEED);
+    println!();
+    println!(
+        "baseline\tseed\trepetition\tshape\tpayload_bytes\tcorrelation\toutput_items_visited\ttool_calls_visited\tresponse_bytes_visited\toutput_items_copied\ttool_calls_copied\tresponse_bytes_copied\tprojection_us\tnormalize_us\taccounting_us\tclassification_us\tretained_plan_clone_us\tcanonical_candidate_clone_us\tcanonical_enqueue_us\teager_reducer_us\tcommit_gated_reducer_us\tcanonical_commit_present\tcanonical_commit_us\tpipeline_total_us\tunattributed_us"
+    );
+    for repetition in 0..REPETITIONS {
+        order.shuffle(&mut rng);
+        for (shape, payload_bytes) in &order {
+            let timing = run_provider_terminal_benchmark_sample(*shape, *payload_bytes);
+            println!(
+                "{BASELINE}\t{SEED}\t{repetition}\t{}\t{payload_bytes}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                shape.name(),
+                timing.correlation,
+                timing.output_items_visited,
+                timing.tool_calls_visited,
+                timing.response_bytes_visited,
+                timing.output_items_copied,
+                timing.tool_calls_copied,
+                timing.response_bytes_copied,
+                timing
+                    .stage(ProviderTerminalStage::Projection)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::Normalize)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::Accounting)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::Classification)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::RetainedPlanClone)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::CanonicalCandidateClone)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::CanonicalEnqueue)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::EagerReducer)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing
+                    .stage(ProviderTerminalStage::CommitGatedReducer)
+                    .unwrap_or_default()
+                    .as_micros(),
+                timing.canonical_commit.is_some(),
+                timing.canonical_commit.unwrap_or_default().as_micros(),
+                timing.pipeline_total.as_micros(),
+                timing.unattributed.as_micros(),
+            );
+        }
+    }
+    assert_parked_provider_terminal_benchmark_lane();
 }
 
 /// Live subscribers receive terminal reports with provider-image bytes removed,

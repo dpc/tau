@@ -29,6 +29,8 @@ pub(crate) struct RuntimeIoState {
     pub(crate) debug_log: Option<DebugEventLog>,
     /// Test-visible synchronous debug writer rollback poison.
     pub(crate) debug_log_poisoned: bool,
+    /// Private process-local timing for accepted provider terminals.
+    pub(crate) provider_terminal_timing: super::provider_terminal_timing::ProviderTerminalTiming,
     /// Interception, deferred publication, and continuation state.
     pub(crate) publication: PublicationState,
 }

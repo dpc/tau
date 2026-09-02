@@ -6,7 +6,123 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static PROVIDER_TERMINAL_TIMING_DIAGNOSTIC_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_provider_terminal_timing_diagnostic_visit() {
+    PROVIDER_TERMINAL_TIMING_DIAGNOSTIC_VISITS.with(|visits| {
+        visits.set(visits.get().saturating_add(1));
+    });
+}
+
+/// Returns and clears test-only payload traversal performed by timing
+/// diagnostics.
+#[cfg(test)]
+pub(super) fn take_provider_terminal_timing_diagnostic_visits() -> usize {
+    PROVIDER_TERMINAL_TIMING_DIAGNOSTIC_VISITS.with(|visits| visits.replace(0))
+}
+
+/// Counts payload bytes traversed by the timing probe without serializing or
+/// retaining provider content. Unknown structured provider items deliberately
+/// contribute no bytes because the probe records only known typed work.
+fn provider_terminal_timing_response_bytes(response: &ProviderResponseFinished) -> usize {
+    #[cfg(test)]
+    note_provider_terminal_timing_diagnostic_visit();
+    response
+        .output_items
+        .iter()
+        .map(|item| match item {
+            ContextItem::Message(message) => message
+                .content
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => text.len(),
+                    _ => 0,
+                })
+                .sum(),
+            ContextItem::ReasoningText(reasoning) => reasoning.text.len(),
+            ContextItem::ToolCall(call) => match &call.arguments {
+                CborValue::Text(text) => text.len(),
+                _ => 0,
+            },
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Counts typed tool-call items traversed by the timing probe.
+fn provider_terminal_timing_tool_call_count(response: &ProviderResponseFinished) -> usize {
+    #[cfg(test)]
+    note_provider_terminal_timing_diagnostic_visit();
+    response
+        .output_items
+        .iter()
+        .filter(|item| matches!(item, ContextItem::ToolCall(_)))
+        .count()
+}
+
 impl Harness {
+    /// Clones one terminal response while recording only enabled, content-free
+    /// work counters for the owning source-order phase.
+    fn clone_finished_response_for_timing(
+        &mut self,
+        stage: provider_terminal_timing::ProviderTerminalStage,
+        response: &ProviderResponseFinished,
+    ) -> ProviderResponseFinished {
+        if !self.runtime_io.provider_terminal_timing.is_active() {
+            return response.clone();
+        }
+        self.runtime_io
+            .provider_terminal_timing
+            .require_stage(stage);
+        self.runtime_io.provider_terminal_timing.start_stage(stage);
+        let cloned = response.clone();
+        self.runtime_io
+            .provider_terminal_timing
+            .record_response_clone(
+                response.output_items.len(),
+                provider_terminal_timing_tool_call_count(response),
+                provider_terminal_timing_response_bytes(response),
+            );
+        self.runtime_io.provider_terminal_timing.finish_stage(stage);
+        cloned
+    }
+
+    /// Enqueues one canonical response while retaining the established
+    /// caller-owned route cleanup and completion behavior.
+    fn enqueue_finished_response_for_timing(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&tau_proto::ConnectionId>,
+        response: &ProviderResponseFinished,
+        completion: Option<AgentPublishCompletion>,
+        notify_watchers: bool,
+    ) {
+        let event = Event::ProviderResponseFinished(self.clone_finished_response_for_timing(
+            provider_terminal_timing::ProviderTerminalStage::CanonicalCandidateClone,
+            response,
+        ));
+        self.runtime_io
+            .provider_terminal_timing
+            .start_stage(provider_terminal_timing::ProviderTerminalStage::CanonicalEnqueue);
+        self.publish_event_for_agent_with_completion(
+            cid,
+            source,
+            event,
+            completion,
+            notify_watchers,
+        );
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_stage_if_open(
+                provider_terminal_timing::ProviderTerminalStage::CanonicalEnqueue,
+            );
+    }
+
     #[cfg(test)]
     pub(super) fn handle_provider_response_finished(
         &mut self,
@@ -113,8 +229,30 @@ impl Harness {
         // Cancellation, duplicate, and stale ownership checks deliberately run
         // before this aggregate pass so discarded provider output is never
         // cloned or concatenated.
+        self.runtime_io
+            .provider_terminal_timing
+            .start_accepted_terminal();
+        self.runtime_io
+            .provider_terminal_timing
+            .require_stage(provider_terminal_timing::ProviderTerminalStage::Projection);
+        self.runtime_io
+            .provider_terminal_timing
+            .start_stage(provider_terminal_timing::ProviderTerminalStage::Projection);
         let mut projection =
             terminal_response_projection::TerminalResponseProjection::from_response(&response);
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_stage(provider_terminal_timing::ProviderTerminalStage::Projection);
+        if self.runtime_io.provider_terminal_timing.is_active() {
+            self.runtime_io.provider_terminal_timing.record_work(
+                response.output_items.len(),
+                projection.tool_calls.len(),
+                provider_terminal_timing_response_bytes(&response),
+            );
+        }
+        self.runtime_io
+            .provider_terminal_timing
+            .start_stage(provider_terminal_timing::ProviderTerminalStage::Normalize);
         let raw_response_contains_tool_calls = !projection.tool_calls.is_empty();
         // A tool-bearing response cannot acquire a second foreground round in
         // this AgentTree. Enforce that ownership boundary before attaching
@@ -156,6 +294,12 @@ impl Harness {
             } else {
                 self.terminalize_global_round_rejected_prompt(&cid, &response, source);
             }
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_stage_if_open(provider_terminal_timing::ProviderTerminalStage::Normalize);
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_accepted_terminal();
             return Ok(());
         }
         if !standalone_compaction
@@ -189,6 +333,12 @@ impl Harness {
             } else {
                 self.terminalize_global_round_rejected_prompt(&cid, &response, source);
             }
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_stage_if_open(provider_terminal_timing::ProviderTerminalStage::Normalize);
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_accepted_terminal();
             return Ok(());
         }
         if active_compaction_response
@@ -202,6 +352,12 @@ impl Harness {
                 source,
             );
             self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_stage_if_open(provider_terminal_timing::ProviderTerminalStage::Normalize);
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_accepted_terminal();
             return Ok(());
         }
         let standalone_terminal = standalone_compaction
@@ -213,6 +369,12 @@ impl Harness {
             }
         }
         normalize_finished_response_cached_usage(&mut response);
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_stage(provider_terminal_timing::ProviderTerminalStage::Normalize);
+        self.runtime_io
+            .provider_terminal_timing
+            .start_stage(provider_terminal_timing::ProviderTerminalStage::Accounting);
         let standalone_success = matches!(
             standalone_terminal,
             Some(ProviderTerminalPlan::StandaloneCompaction(
@@ -330,16 +492,36 @@ impl Harness {
             .compaction_policies
             .remove(&response.agent_prompt_id)
             .unwrap_or_default();
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_stage(provider_terminal_timing::ProviderTerminalStage::Accounting);
         let reported_input_tokens = input_tokens
             .filter(|tokens| *tokens > 0)
             .map(tau_proto::TokenCount::new);
+        self.runtime_io
+            .provider_terminal_timing
+            .require_stage(provider_terminal_timing::ProviderTerminalStage::Classification);
+        self.runtime_io
+            .provider_terminal_timing
+            .start_stage(provider_terminal_timing::ProviderTerminalStage::Classification);
         let terminal_plan = if !standalone_compaction || standalone_success {
             self.classify_reactive_context_recovery(&cid, &response, source)
         } else {
             ProviderTerminalPlan::Other
         };
-        if self.execute_provider_terminal_plan(&cid, &mut response, terminal_plan) {
-            return Ok(());
+        if matches!(
+            &terminal_plan,
+            ProviderTerminalPlan::ReactiveContextRecovery(_)
+        ) {
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_stage(provider_terminal_timing::ProviderTerminalStage::Classification);
+            if self.execute_provider_terminal_plan(&cid, &mut response, terminal_plan) {
+                self.runtime_io
+                    .provider_terminal_timing
+                    .finish_accepted_terminal();
+                return Ok(());
+            }
         }
         self.prompt_coordination
             .prompt_runtime
@@ -421,6 +603,11 @@ impl Harness {
         if prompt_operation.0 == tau_proto::PromptOperation::StandaloneCompaction
             || standalone_compaction
         {
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_stage_if_open(
+                    provider_terminal_timing::ProviderTerminalStage::Classification,
+                );
             self.reduce_standalone_compaction_terminal(EagerStandaloneCompactionTerminal {
                 cid: &cid,
                 plan: match standalone_terminal
@@ -444,6 +631,14 @@ impl Harness {
                 response: &response,
                 source,
             });
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_stage_if_open(
+                    provider_terminal_timing::ProviderTerminalStage::Classification,
+                );
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_accepted_terminal();
             return Ok(());
         }
         let (mut requested_tool_calls, tool_calls_with_non_tool_stop) =
@@ -554,6 +749,9 @@ impl Harness {
                 });
         }
         let final_status_gated = !matches!(final_status_plan, ProviderTerminalPlan::Other);
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_stage_if_open(provider_terminal_timing::ProviderTerminalStage::Classification);
         let completion = match final_status_plan {
             ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Challenge {
                 challenge,
@@ -579,7 +777,10 @@ impl Harness {
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                     disposition: GatedFinalDisposition::Accept {
                         terminal: Box::new(CommittedGatedFinal {
-                            response: response.clone(),
+                            response: self.clone_finished_response_for_timing(
+                                provider_terminal_timing::ProviderTerminalStage::RetainedPlanClone,
+                                &response,
+                            ),
                             response_contains_compaction,
                             input_tokens,
                             context_size_alerts: context_size_alerts.clone(),
@@ -655,7 +856,10 @@ impl Harness {
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                 disposition: GatedFinalDisposition::Accept {
                     terminal: Box::new(CommittedGatedFinal {
-                        response: response.clone(),
+                        response: self.clone_finished_response_for_timing(
+                            provider_terminal_timing::ProviderTerminalStage::RetainedPlanClone,
+                            &response,
+                        ),
                         response_contains_compaction,
                         input_tokens,
                         context_size_alerts: context_size_alerts.clone(),
@@ -680,7 +884,7 @@ impl Harness {
                 unreachable!("earlier provider-terminal family reached commit-gated classification")
             }
         };
-        let output_length_source_plan = Self::classify_output_length_continuation_source_terminal(
+        let output_length_source_plan = self.classify_output_length_continuation_source_terminal(
             OutputLengthContinuationSourceClassification {
                 response: &response,
                 assistant_text: assistant_text.as_deref(),
@@ -741,7 +945,10 @@ impl Harness {
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                 disposition: GatedFinalDisposition::Accept {
                     terminal: Box::new(CommittedGatedFinal {
-                        response: response.clone(),
+                        response: self.clone_finished_response_for_timing(
+                            provider_terminal_timing::ProviderTerminalStage::RetainedPlanClone,
+                            &response,
+                        ),
                         response_contains_compaction,
                         input_tokens,
                         context_size_alerts: context_size_alerts.clone(),
@@ -802,8 +1009,14 @@ impl Harness {
             || output_length_source
             || output_length_terminal
         {
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_accepted_terminal();
             return Ok(());
         }
+        self.runtime_io
+            .provider_terminal_timing
+            .start_stage(provider_terminal_timing::ProviderTerminalStage::EagerReducer);
         if response_contains_compaction {
             self.clear_agent_context_usage(&cid);
         } else if successful {
@@ -839,6 +1052,12 @@ impl Harness {
                             source,
                         },
                     );
+                    self.runtime_io.provider_terminal_timing.finish_stage(
+                        provider_terminal_timing::ProviderTerminalStage::EagerReducer,
+                    );
+                    self.runtime_io
+                        .provider_terminal_timing
+                        .finish_accepted_terminal();
                     return Ok(());
                 }
                 ProviderTerminalPlan::Other => {}
@@ -863,13 +1082,14 @@ impl Harness {
             response,
             assistant_text,
         });
-        match ordinary_plan {
+        let reducer_result = match ordinary_plan {
             ProviderTerminalPlan::ToolCalls(ToolCallTerminalPlan { reducer }) => {
-                self.reduce_tool_call_terminal(&cid, reducer)?;
+                self.reduce_tool_call_terminal(&cid, reducer)
             }
             ProviderTerminalPlan::OrdinaryNoTool(plan) => {
                 let OrdinaryNoToolTerminalPlan { reducer } = *plan;
                 self.reduce_ordinary_no_tool_terminal(&cid, reducer);
+                Ok(())
             }
             ProviderTerminalPlan::StandaloneCompaction(_)
             | ProviderTerminalPlan::ReactiveContextRecovery(_)
@@ -881,9 +1101,14 @@ impl Harness {
             | ProviderTerminalPlan::Other => {
                 unreachable!("earlier provider-terminal family reached ordinary classification")
             }
-        }
-
-        Ok(())
+        };
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_stage(provider_terminal_timing::ProviderTerminalStage::EagerReducer);
+        self.runtime_io
+            .provider_terminal_timing
+            .finish_accepted_terminal();
+        reducer_result
     }
 
     /// Normalize and publish billing for a dispatched terminal rejected before
@@ -1227,10 +1452,10 @@ impl Harness {
         {
             agent.dispatch.in_flight_prompt = None;
         }
-        self.publish_event_for_agent_with_completion(
+        self.enqueue_finished_response_for_timing(
             cid,
             source.as_ref(),
-            Event::ProviderResponseFinished(response.clone()),
+            response,
             Some(AgentPublishCompletion::ReactiveContextRecovery {
                 reducer: CommittedReactiveContextRecovery {
                     checkpoint,
@@ -1903,13 +2128,17 @@ impl Harness {
             rejection,
             StandaloneCompactionRejection::ContextWindowExceeded
         ) {
-            self.publish_event_for_agent_with_completion(
+            let retained_response = self.clone_finished_response_for_timing(
+                provider_terminal_timing::ProviderTerminalStage::RetainedPlanClone,
+                response,
+            );
+            self.enqueue_finished_response_for_timing(
                 cid,
                 source,
-                Event::ProviderResponseFinished(response.clone()),
+                response,
                 Some(AgentPublishCompletion::StandaloneContextRejection {
                     reducer: CommittedStandaloneContextRejection {
-                        response: Box::new(response.clone()),
+                        response: Box::new(retained_response),
                         source: source.cloned(),
                     },
                     owned_publication: None,
@@ -3397,10 +3626,10 @@ impl Harness {
         // whichever branch happened to be at `tree.head` (e.g. after
         // a sibling side conv's teardown touched another branch).
         // `publish_for_agent` snaps and updates `c.head`.
-        self.publish_event_for_agent_with_completion(
+        self.enqueue_finished_response_for_timing(
             cid,
             source,
-            Event::ProviderResponseFinished(response.clone()),
+            response,
             completion,
             notify_watchers,
         );
@@ -4220,6 +4449,7 @@ impl Harness {
     /// Classify one fully prepared output-length continuation source without
     /// changing runtime state.
     fn classify_output_length_continuation_source_terminal(
+        &mut self,
         classification: OutputLengthContinuationSourceClassification,
     ) -> ProviderTerminalPlan {
         let OutputLengthContinuationSourceClassification {
@@ -4234,7 +4464,10 @@ impl Harness {
         }
         ProviderTerminalPlan::OutputLengthContinuationSource(OutputLengthContinuationSourcePlan {
             reducer: CommittedOutputLengthContinuation {
-                response: Box::new(response.clone()),
+                response: Box::new(self.clone_finished_response_for_timing(
+                    provider_terminal_timing::ProviderTerminalStage::RetainedPlanClone,
+                    response,
+                )),
                 assistant_text: assistant_text.map(str::to_owned),
             },
         })
