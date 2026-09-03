@@ -113,6 +113,7 @@ fn ordinary_stream_semantics_drive_request_idle_progress() {
         &mut Vec::new(),
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| {},
     )
     .expect("ordinary semantic event");
@@ -143,6 +144,7 @@ fn local_summary_stream_semantics_drive_request_idle_progress() {
         &mut Vec::new(),
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| {},
     )
     .expect("private summary semantic event");
@@ -405,6 +407,7 @@ fn chat_stream_body_rejects_incomplete_data_at_eof() {
         path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |state| observed.push(state.response_bytes_received()),
         &mut || false,
     )
@@ -443,6 +446,7 @@ fn chat_stream_body_stops_after_done_without_waiting_for_eof() {
         DoneThenPanicReader { sent_done: false },
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| updates += 1,
         &mut || false,
     )
@@ -466,6 +470,7 @@ fn chat_stream_body_observes_prompt_cancellation() {
         path_std_io::Cursor::new(b"data: never read\n\n"),
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| {},
         &mut || true,
     )
@@ -898,6 +903,228 @@ fn attempt_path_finalizes_correlated_http_capture_once() {
     );
 }
 
+/// The real HTTP/SSE path must continue semantic processing after raw-event
+/// capture crosses 16 MiB while omitting only the ineligible response capture.
+#[test]
+fn attempt_path_continues_after_raw_event_capture_becomes_ineligible() {
+    TEST_DEBUG_CAPTURES.with(|captures| *captures.borrow_mut() = Some(Vec::new()));
+    let mut events = over_bound_sse_events();
+    events.push_str(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"kept\"},\"finish_reason\":\"stop\"}]}\n\n",
+    );
+    events.push_str("data: [DONE]\n\n");
+    let server = spawn_sse_server(events);
+    let mut configured = provider();
+    configured.base_url = format!("http://{}/v1", server.address());
+    let model = configured.models[0].clone();
+    let prompt = prompt();
+    let outcome = run_attempt(
+        &prompt,
+        &resolved_provider(&configured),
+        &model,
+        true,
+        &mut |_| {},
+        &mut || false,
+        &tau_provider::OutboundNetworkPolicy::from_environment(
+            path_std_collections::BTreeMap::new(),
+            None,
+        ),
+    );
+    server.finish();
+
+    let AttemptOutcome::Completed(success) = outcome else {
+        panic!("capture ineligibility must not alter provider success");
+    };
+    assert_eq!(success.output_items, vec![assistant_text_item("kept")]);
+    let captures = TEST_DEBUG_CAPTURES.with(|captures| {
+        captures
+            .borrow_mut()
+            .take()
+            .expect("test capture sink installed")
+    });
+    assert_eq!(captures.len(), 1);
+    assert_eq!(
+        captures[0].class(),
+        ProviderDebugCaptureClass::HttpSseRequest
+    );
+}
+
+/// Build individually line-bounded provider events whose retained compact JSON
+/// array exceeds the shared 16-MiB raw-message bound.
+fn over_bound_sse_events() -> String {
+    let padding = "x".repeat(990_000);
+    let mut events = String::new();
+    for _ in 0..17 {
+        events.push_str("data: {\"padding\":\"");
+        events.push_str(&padding);
+        events.push_str("\"}\n\n");
+    }
+    events
+}
+
+/// Serve one complete finite SSE response through the real reqwest transport.
+fn spawn_sse_server(events: String) -> ScriptedTcpServer<()> {
+    ScriptedTcpServer::spawn(move |mut socket| {
+        let mut request = [0_u8; 16 * 1024];
+        let _ = path_std_io::Read::read(&mut socket, &mut request).expect("read request");
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            events.len()
+        );
+        socket
+            .write_all(headers.as_bytes())
+            .expect("write response headers");
+        socket
+            .write_all(events.as_bytes())
+            .expect("write streamed response");
+    })
+}
+
+/// Cancellation and retryable failure after an over-bound transition keep
+/// their existing outcomes, submit no response capture, and do not poison a
+/// fresh below-bound retry accumulator.
+#[test]
+fn raw_event_capture_ineligibility_is_isolated_across_cancel_and_retry() {
+    TEST_DEBUG_CAPTURES.with(|captures| *captures.borrow_mut() = Some(Vec::new()));
+    let trace_output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace_output = trace_output.clone();
+            move || trace_output.clone()
+        })
+        .finish();
+    let prompt = prompt();
+    let mut configured = provider();
+    let model = configured.models[0].clone();
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(
+        path_std_collections::BTreeMap::new(),
+        None,
+    );
+
+    let mut canceled_events = over_bound_sse_events();
+    canceled_events.push_str(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"cancel-me\"}}]}\n\n\
+         data: [DONE]\n\n",
+    );
+    let cancel_server = spawn_sse_server(canceled_events);
+    configured.base_url = format!("http://{}/v1", cancel_server.address());
+    let canceled = Cell::new(false);
+    let cancel_outcome = tracing::subscriber::with_default(subscriber, || {
+        run_attempt_numbered(
+            tau_proto::ProviderAttempt::ONE,
+            &prompt,
+            &resolved_provider(&configured),
+            &model,
+            true,
+            &mut |update| {
+                if matches!(
+                    update,
+                    AttemptUpdate::Progress(progress)
+                        if progress.has_timed_semantic_output()
+                ) {
+                    canceled.set(true);
+                }
+            },
+            &mut || canceled.get(),
+            &network,
+        )
+    });
+    cancel_server.finish();
+    assert!(matches!(cancel_outcome, AttemptOutcome::Canceled { .. }));
+
+    let mut failed_events = over_bound_sse_events();
+    failed_events.push_str("data: {malformed-json}\n\n");
+    let failure_server = spawn_sse_server(failed_events);
+    configured.base_url = format!("http://{}/v1", failure_server.address());
+    let failure_outcome = tracing::subscriber::with_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_ansi(false)
+            .with_writer({
+                let trace_output = trace_output.clone();
+                move || trace_output.clone()
+            })
+            .finish(),
+        || {
+            run_attempt_numbered(
+                tau_proto::ProviderAttempt::new(2).expect("second attempt"),
+                &prompt,
+                &resolved_provider(&configured),
+                &model,
+                true,
+                &mut |_| {},
+                &mut || false,
+                &network,
+            )
+        },
+    );
+    failure_server.finish();
+    assert!(matches!(failure_outcome, AttemptOutcome::Retryable { .. }));
+
+    let fresh_events = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"fresh\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    )
+    .to_owned();
+    let fresh_server = spawn_sse_server(fresh_events);
+    configured.base_url = format!("http://{}/v1", fresh_server.address());
+    let fresh_outcome = run_attempt_numbered(
+        tau_proto::ProviderAttempt::new(3).expect("third attempt"),
+        &prompt,
+        &resolved_provider(&configured),
+        &model,
+        true,
+        &mut |_| {},
+        &mut || false,
+        &network,
+    );
+    fresh_server.finish();
+    assert!(matches!(fresh_outcome, AttemptOutcome::Completed(_)));
+
+    let trace =
+        String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert_eq!(
+        trace
+            .matches("chat completions response debug capture is ineligible")
+            .count(),
+        2,
+        "{trace}"
+    );
+    let captures = TEST_DEBUG_CAPTURES.with(|captures| {
+        captures
+            .borrow_mut()
+            .take()
+            .expect("test capture sink installed")
+    });
+    assert_eq!(
+        captures
+            .iter()
+            .map(|capture| capture.class())
+            .collect::<Vec<_>>(),
+        vec![
+            ProviderDebugCaptureClass::HttpSseRequest,
+            ProviderDebugCaptureClass::HttpSseRequest,
+            ProviderDebugCaptureClass::HttpSseRequest,
+            ProviderDebugCaptureClass::HttpSseResponse,
+        ]
+    );
+    let attempts = captures
+        .iter()
+        .map(|capture| {
+            serde_json::from_slice::<serde_json::Value>(capture.json())
+                .expect("capture JSON")["logical_attempt"]
+                .as_u64()
+                .expect("numeric logical attempt")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attempts, vec![1, 2, 3, 3]);
+}
+
 /// First-output timing uses accepted semantic state rather than replay-safety
 /// progress, raw delimiters, ids, or empty structures.
 #[test]
@@ -940,6 +1167,7 @@ fn chat_stream_body_rejects_oversized_partial_line() {
         path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| {},
         &mut || false,
     )
@@ -1015,6 +1243,7 @@ fn chat_stream_chunk_accepts_many_complete_sub_limit_lines() {
         &mut pending,
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| {},
     )
     .expect("complete sub-limit SSE lines must not exhaust the residual-line bound");
@@ -1040,11 +1269,173 @@ fn chat_stream_body_bounds_debug_event_retention() {
         path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| {},
         &mut || false,
     )
     .expect("bounded event stream");
     assert_eq!(raw_events.events().len(), MAX_DEBUG_EVENTS);
+}
+
+/// The borrowed compact serializer must count exactly the same array bytes as
+/// serde_json across framing, escaping, nesting, and multibyte UTF-8.
+#[test]
+fn debug_event_capture_compact_byte_count_matches_serde_json() {
+    let prompt = prompt();
+    let mut capture = DebugEventCapture::new(true);
+    let mut expected = Vec::new();
+    assert!(matches!(
+        capture,
+        DebugEventCapture::Eligible {
+            compact_array_bytes: 2,
+            ..
+        }
+    ));
+    for event in [
+        serde_json::json!(null),
+        serde_json::json!({"nested": [true, 42, {"escaped": "\"\\\n\u{0001}"}]}),
+        serde_json::json!("snow 雪 and lambda λ"),
+    ] {
+        capture.record(&event, &prompt.agent_prompt_id);
+        expected.push(event);
+        let expected_bytes = serde_json::to_vec(&expected)
+            .expect("JSON values serialize")
+            .len() as u64;
+        assert!(matches!(
+            capture,
+            DebugEventCapture::Eligible {
+                compact_array_bytes,
+                ..
+            } if compact_array_bytes == expected_bytes
+        ));
+    }
+}
+
+/// Equality with the shared 16-MiB raw bound remains eligible, while the first
+/// proven byte beyond it transitions before cloning the candidate.
+#[test]
+fn debug_event_capture_accepts_exact_raw_bound_and_rejects_plus_one() {
+    let prompt = prompt();
+    let exact_event =
+        serde_json::Value::String("x".repeat(MAX_DEBUG_RAW_EVENT_ARRAY_BYTES as usize - 4));
+    let mut exact = DebugEventCapture::new(true);
+    exact.record(&exact_event, &prompt.agent_prompt_id);
+    assert!(matches!(
+        exact,
+        DebugEventCapture::Eligible {
+            ref events,
+            compact_array_bytes: MAX_DEBUG_RAW_EVENT_ARRAY_BYTES,
+        } if events == std::slice::from_ref(&exact_event)
+    ));
+
+    let over_event =
+        serde_json::Value::String("x".repeat(MAX_DEBUG_RAW_EVENT_ARRAY_BYTES as usize - 3));
+    let mut over = DebugEventCapture::new(true);
+    over.record(&over_event, &prompt.agent_prompt_id);
+    assert!(matches!(over, DebugEventCapture::IneligibleOverRawBound));
+}
+
+/// Crossing the raw bound drops retained sensitive values atomically, emits one
+/// content-free warning, and makes every suffix record inert.
+#[test]
+fn debug_event_capture_over_bound_release_warning_and_suffix_are_exact() {
+    let prompt = prompt();
+    let trace_output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace_output = trace_output.clone();
+            move || trace_output.clone()
+        })
+        .finish();
+    let mut capture = DebugEventCapture::new(true);
+    tracing::subscriber::with_default(subscriber, || {
+        capture.record(
+            &serde_json::json!({"sensitive-canary": "provider-content-canary"}),
+            &prompt.agent_prompt_id,
+        );
+        capture.record(
+            &serde_json::Value::String("x".repeat(MAX_DEBUG_RAW_EVENT_ARRAY_BYTES as usize)),
+            &prompt.agent_prompt_id,
+        );
+        capture.record(
+            &serde_json::json!({"suffix-canary": "must-be-inert"}),
+            &prompt.agent_prompt_id,
+        );
+    });
+    assert!(matches!(capture, DebugEventCapture::IneligibleOverRawBound));
+    let trace =
+        String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    let message = "chat completions response debug capture is ineligible: compact raw-event JSON alone exceeds the protocol bound; skipping capture";
+    assert_eq!(trace.matches(message).count(), 1, "{trace}");
+    assert!(trace.contains("provider-chat-completions"), "{trace}");
+    assert!(trace.contains("agent_prompt_id=ap-test"), "{trace}");
+    assert!(
+        trace.contains("raw_events_compact_json_bytes_lower_bound=16777217"),
+        "{trace}"
+    );
+    for forbidden in [
+        "sensitive-canary",
+        "provider-content-canary",
+        "suffix-canary",
+        "must-be-inert",
+        "session-test",
+        "test-model",
+        "endpoint",
+        "error=",
+    ] {
+        assert!(!trace.contains(forbidden), "leaked {forbidden}: {trace}");
+    }
+}
+
+/// The established 4,096-event prefix wins before byte accounting, so an
+/// oversized suffix cannot invalidate the already complete count-capped
+/// capture.
+#[test]
+fn debug_event_capture_count_cap_precedes_raw_byte_accounting() {
+    let prompt = prompt();
+    let mut capture = DebugEventCapture::new(true);
+    for _ in 0..MAX_DEBUG_EVENTS {
+        capture.record(&serde_json::json!({}), &prompt.agent_prompt_id);
+    }
+    capture.record(
+        &serde_json::Value::String("x".repeat(MAX_DEBUG_RAW_EVENT_ARRAY_BYTES as usize)),
+        &prompt.agent_prompt_id,
+    );
+    assert!(matches!(
+        capture,
+        DebugEventCapture::Eligible { ref events, .. } if events.len() == MAX_DEBUG_EVENTS
+    ));
+}
+
+/// Raw-bound ineligibility bypasses response metadata projection,
+/// serialization, capture construction, and sink submission rather than
+/// producing a false empty raw-event artifact.
+#[test]
+fn ineligible_response_capture_bypasses_entire_terminal_path() {
+    OUTPUT_MATERIALIZATIONS.with(|count| count.set(0));
+    TEST_DEBUG_CAPTURES.with(|captures| *captures.borrow_mut() = Some(Vec::new()));
+    let prompt = prompt();
+    let provider = provider();
+    maybe_debug_submit_captured_provider_response(
+        &prompt,
+        &provider.models[0],
+        true,
+        &StreamState::new(),
+        &DebugEventCapture::IneligibleOverRawBound,
+        tau_proto::ProviderAttempt::ONE,
+        1,
+    );
+    assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 0);
+    let captures = TEST_DEBUG_CAPTURES.with(|captures| {
+        captures
+            .borrow_mut()
+            .take()
+            .expect("test capture sink installed")
+    });
+    assert!(captures.is_empty());
 }
 
 /// Ensures disabled debug capture retains no raw provider JSON while the same
@@ -1062,6 +1453,7 @@ fn chat_stream_body_materializes_no_disabled_debug_events() {
         path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
+        &prompt().agent_prompt_id,
         &mut |_| {},
         &mut || false,
     )
@@ -1141,6 +1533,7 @@ fn sse_framing_distinguishes_comments_from_provider_data() {
             &mut pending,
             &mut state,
             &mut raw_events,
+            &prompt().agent_prompt_id,
             &mut |_| {},
         )
         .expect("SSE framing input must parse");
@@ -1439,6 +1832,72 @@ fn debug_capture_producers_submit_typed_http_sse_jobs() {
     );
     assert_eq!(submitted[2].1["http_status"], 429);
     assert_eq!(submitted[2].1["body"], "bounded error");
+}
+
+/// Eligible response capture keeps the exact established pretty-serialized
+/// artifact bytes, including field order, indentation, and raw-event spelling.
+#[test]
+fn below_bound_response_capture_bytes_remain_exact() {
+    let prompt = prompt();
+    let provider = provider();
+    let state = StreamState::new();
+    let mut submitted = Vec::new();
+    maybe_debug_submit_provider_response_with(
+        &prompt,
+        &provider.models[0],
+        true,
+        &state,
+        &[serde_json::json!({"done": true, "text": "snow 雪"})],
+        tau_proto::ProviderAttempt::new(4).expect("attempt"),
+        1,
+        |capture| submitted.push(capture),
+    );
+    assert_eq!(submitted.len(), 1);
+    let sorted_map_bytes = r#"{
+  "agent_prompt_id": "ap-test",
+  "backend": "chat_completions",
+  "logical_attempt": 4,
+  "model": "test-model",
+  "operation": "inference",
+  "output_items": [],
+  "raw_events": [
+    {
+      "done": true,
+      "text": "snow 雪"
+    }
+  ],
+  "session_id": "session-test",
+  "stop_reason": "end_turn",
+  "transport": "http-sse",
+  "usage": null,
+  "wire_dispatch_index": 1
+}"#
+    .as_bytes();
+    let insertion_order_map_bytes = r#"{
+  "session_id": "session-test",
+  "agent_prompt_id": "ap-test",
+  "transport": "http-sse",
+  "backend": "chat_completions",
+  "model": "test-model",
+  "operation": "inference",
+  "logical_attempt": 4,
+  "wire_dispatch_index": 1,
+  "usage": null,
+  "stop_reason": "end_turn",
+  "output_items": [],
+  "raw_events": [
+    {
+      "done": true,
+      "text": "snow 雪"
+    }
+  ]
+}"#
+    .as_bytes();
+    assert!(
+        [sorted_map_bytes, insertion_order_map_bytes].contains(&submitted[0].json()),
+        "unexpected eligible response bytes: {}",
+        String::from_utf8_lossy(submitted[0].json()),
+    );
 }
 
 /// Ensures disabled capture returns before constructing metadata or invoking

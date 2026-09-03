@@ -75,6 +75,7 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const STREAM_ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 const MAX_DEBUG_EVENTS: usize = 4096;
+const MAX_DEBUG_RAW_EVENT_ARRAY_BYTES: u64 = tau_proto::MAX_PROTOCOL_MESSAGE_BYTES;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
@@ -193,16 +194,85 @@ enum DebugEventCapture {
     /// Debug capture is disabled, so provider events are never cloned or
     /// retained.
     Disabled,
-    /// Debug capture is enabled and retains at most the established event
-    /// limit.
-    Enabled(Vec<serde_json::Value>),
+    /// Debug capture is eligible and retains events within the established
+    /// event-count and shared raw-message bounds.
+    Eligible {
+        /// Parsed provider events retained for terminal response capture.
+        events: Vec<serde_json::Value>,
+        /// Exact compact JSON bytes for the retained event array.
+        compact_array_bytes: u64,
+    },
+    /// The compact raw-event array alone proved that the complete response
+    /// capture cannot pass the shared raw-message bound.
+    IneligibleOverRawBound,
+}
+
+/// Allocation-free byte counter for compact serialization of one borrowed JSON
+/// value.
+struct CompactJsonByteCounter {
+    /// Bytes accepted without exceeding the shared raw-message bound.
+    bytes: u64,
+    /// Whether serialization proved at least one byte beyond the bound.
+    exceeded: bool,
+}
+
+impl path_std_io::Write for CompactJsonByteCounter {
+    /// Count serialized bytes and abort at the first write that proves the
+    /// shared raw-message bound is exceeded.
+    fn write(&mut self, buffer: &[u8]) -> path_std_io::Result<usize> {
+        let buffer_bytes = u64::try_from(buffer.len()).map_err(|_| {
+            self.bytes = MAX_DEBUG_RAW_EVENT_ARRAY_BYTES
+                .checked_add(1)
+                .expect("protocol bound leaves room for a lower-bound sentinel");
+            self.exceeded = true;
+            path_std_io::Error::from(path_std_io::ErrorKind::Other)
+        })?;
+        let Some(next_bytes) = self.bytes.checked_add(buffer_bytes) else {
+            self.bytes = MAX_DEBUG_RAW_EVENT_ARRAY_BYTES
+                .checked_add(1)
+                .expect("protocol bound leaves room for a lower-bound sentinel");
+            self.exceeded = true;
+            return Err(path_std_io::Error::from(path_std_io::ErrorKind::Other));
+        };
+        if MAX_DEBUG_RAW_EVENT_ARRAY_BYTES < next_bytes {
+            self.bytes = MAX_DEBUG_RAW_EVENT_ARRAY_BYTES
+                .checked_add(1)
+                .expect("protocol bound leaves room for a lower-bound sentinel");
+            self.exceeded = true;
+            return Err(path_std_io::Error::from(path_std_io::ErrorKind::Other));
+        }
+        self.bytes = next_bytes;
+        Ok(buffer.len())
+    }
+
+    /// The counter has no buffered output.
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Warn once when one attempt first proves its compact raw-event array alone
+/// exceeds the shared raw-message bound.
+fn warn_debug_raw_event_array_over_bound(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    lower_bound: u64,
+) {
+    tracing::warn!(
+        target: LOG_TARGET,
+        agent_prompt_id = %agent_prompt_id,
+        raw_events_compact_json_bytes_lower_bound = lower_bound,
+        "chat completions response debug capture is ineligible: compact raw-event JSON alone exceeds the protocol bound; skipping capture",
+    );
 }
 
 impl DebugEventCapture {
     /// Start raw-event retention only when debug capture is enabled.
     fn new(enabled: bool) -> Self {
         if enabled {
-            Self::Enabled(Vec::new())
+            Self::Eligible {
+                events: Vec::new(),
+                compact_array_bytes: 2,
+            }
         } else {
             Self::Disabled
         }
@@ -210,21 +280,62 @@ impl DebugEventCapture {
 
     /// Retain one parsed event when capture is enabled and below its event
     /// limit.
-    fn record(&mut self, event: &serde_json::Value) {
-        let Self::Enabled(events) = self else {
+    fn record(&mut self, event: &serde_json::Value, agent_prompt_id: &tau_proto::AgentPromptId) {
+        let Self::Eligible {
+            events,
+            compact_array_bytes,
+        } = self
+        else {
             return;
         };
-        if events.len() < MAX_DEBUG_EVENTS {
-            events.push(event.clone());
+        if MAX_DEBUG_EVENTS <= events.len() {
+            return;
+        }
+        let initial_bytes = compact_array_bytes
+            .checked_add(u64::from(!events.is_empty()))
+            .unwrap_or(u64::MAX);
+        if MAX_DEBUG_RAW_EVENT_ARRAY_BYTES < initial_bytes {
+            *self = Self::IneligibleOverRawBound;
+            warn_debug_raw_event_array_over_bound(
+                agent_prompt_id,
+                MAX_DEBUG_RAW_EVENT_ARRAY_BYTES
+                    .checked_add(1)
+                    .expect("protocol bound leaves room for a lower-bound sentinel"),
+            );
+            return;
+        }
+        let mut counter = CompactJsonByteCounter {
+            bytes: initial_bytes,
+            exceeded: false,
+        };
+        let serialized = serde_json::to_writer(&mut counter, event);
+        if serialized.is_err() {
+            let exceeded = counter.exceeded;
+            let lower_bound = counter.bytes;
+            *self = Self::IneligibleOverRawBound;
+            if exceeded {
+                warn_debug_raw_event_array_over_bound(agent_prompt_id, lower_bound);
+            }
+            return;
+        }
+        *compact_array_bytes = counter.bytes;
+        events.push(event.clone());
+    }
+
+    /// Borrow raw events for terminal response capture, or decline the entire
+    /// capture after raw-bound ineligibility.
+    fn eligible_events(&self) -> Option<&[serde_json::Value]> {
+        match self {
+            Self::Disabled => Some(&[]),
+            Self::Eligible { events, .. } => Some(events),
+            Self::IneligibleOverRawBound => None,
         }
     }
 
-    /// Borrow retained raw events, or an empty slice when capture is disabled.
+    /// Borrow retained events for focused state assertions.
+    #[cfg(test)]
     fn events(&self) -> &[serde_json::Value] {
-        match self {
-            Self::Disabled => &[],
-            Self::Enabled(events) => events,
-        }
+        self.eligible_events().unwrap_or(&[])
     }
 }
 
@@ -1356,6 +1467,7 @@ fn read_chat_stream_body(
     mut reader: impl Read,
     state: &mut StreamState,
     raw_events: &mut DebugEventCapture,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     on_update: &mut impl FnMut(&StreamState),
     is_canceled: &mut impl FnMut() -> bool,
 ) -> Result<(), LlmError> {
@@ -1368,7 +1480,13 @@ fn read_chat_stream_body(
         }
         match reader.read(&mut buffer) {
             Ok(0) => {
-                apply_pending_sse_line(&mut pending, state, raw_events, on_update)?;
+                apply_pending_sse_line(
+                    &mut pending,
+                    state,
+                    raw_events,
+                    agent_prompt_id,
+                    on_update,
+                )?;
                 return Ok(());
             }
             Ok(bytes) => {
@@ -1377,6 +1495,7 @@ fn read_chat_stream_body(
                     &mut pending,
                     state,
                     raw_events,
+                    agent_prompt_id,
                     on_update,
                 )?;
                 deadlines.observe(state);
@@ -1422,6 +1541,7 @@ fn process_stream_chunk(
     pending: &mut Vec<u8>,
     state: &mut StreamState,
     raw_events: &mut DebugEventCapture,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<SseChunkOutcome, LlmError> {
     state.record_transport_response_bytes(bytes.len());
@@ -1433,7 +1553,7 @@ fn process_stream_chunk(
     }
     pending.extend_from_slice(bytes);
     let lines = take_complete_sse_lines(pending)?;
-    let outcome = apply_chat_stream_lines(&lines, state, raw_events, on_update)?;
+    let outcome = apply_chat_stream_lines(&lines, state, raw_events, agent_prompt_id, on_update)?;
     on_update(state);
     Ok(outcome)
 }
@@ -1476,13 +1596,14 @@ fn apply_pending_sse_line(
     pending: &mut Vec<u8>,
     state: &mut StreamState,
     raw_events: &mut DebugEventCapture,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
     if pending.is_empty() {
         return Ok(());
     }
     let line = std::mem::take(pending);
-    let _ = apply_chat_stream_lines(&line, state, raw_events, on_update)?;
+    let _ = apply_chat_stream_lines(&line, state, raw_events, agent_prompt_id, on_update)?;
     Ok(())
 }
 
@@ -1490,6 +1611,7 @@ fn apply_chat_stream_lines(
     lines: &[u8],
     state: &mut StreamState,
     raw_events: &mut DebugEventCapture,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<SseChunkOutcome, LlmError> {
     let mut provider_event = false;
@@ -1507,7 +1629,7 @@ fn apply_chat_stream_lines(
         let data = String::from_utf8_lossy(data);
         let event: serde_json::Value =
             serde_json::from_str(data.as_ref()).map_err(LlmError::Json)?;
-        raw_events.record(&event);
+        raw_events.record(&event, agent_prompt_id);
         apply_event(state, &event, on_update)?;
     }
     Ok(SseChunkOutcome {
@@ -1592,12 +1714,12 @@ fn chat_completions_stream(
         }
     };
     flush_pending_content(&mut state, on_update)?;
-    maybe_debug_submit_provider_response(
+    maybe_debug_submit_captured_provider_response(
         prompt,
         model,
         debug_provider_requests,
         &state,
-        raw_events.events(),
+        &raw_events,
         provider_attempt,
         1,
     );
@@ -1827,6 +1949,7 @@ async fn chat_completions_stream_async(
                         &mut pending,
                         &mut state,
                         &mut raw_events,
+                        &context.prompt.agent_prompt_id,
                         &mut on_parser_update,
                     )
                 };
@@ -1884,6 +2007,7 @@ async fn chat_completions_stream_async(
                         &mut pending,
                         &mut state,
                         &mut raw_events,
+                        &context.prompt.agent_prompt_id,
                         &mut on_parser_update,
                     )
                 };
@@ -2346,6 +2470,31 @@ fn maybe_debug_submit_provider_response(
         provider_attempt,
         wire_dispatch_index,
         submit_provider_capture,
+    );
+}
+
+/// Submit an eligible successful-response capture while making raw-bound
+/// ineligibility bypass the complete metadata and sink path.
+fn maybe_debug_submit_captured_provider_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    state: &StreamState,
+    raw_events: &DebugEventCapture,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
+) {
+    let Some(raw_events) = raw_events.eligible_events() else {
+        return;
+    };
+    maybe_debug_submit_provider_response(
+        prompt,
+        model,
+        debug_provider_requests,
+        state,
+        raw_events,
+        provider_attempt,
+        wire_dispatch_index,
     );
 }
 
