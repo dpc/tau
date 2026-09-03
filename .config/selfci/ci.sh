@@ -8,7 +8,13 @@ function job_lint() {
   fi
 
   selfci step start "ast-grep scan"
-  if ! ast-grep scan --error --config sgconfig.yml; then
+  if ! ast-grep scan --error --off=limit-rust-struct-fields --config sgconfig.yml; then
+    selfci step fail
+  fi
+  if ! .config/ast-grep/test-rust-struct-field-limit.sh; then
+    selfci step fail
+  fi
+  if ! .config/ast-grep/check-rust-struct-field-limit.py; then
     selfci step fail
   fi
   if ! .config/ast-grep/test-debug-assert-acknowledgments.sh; then
