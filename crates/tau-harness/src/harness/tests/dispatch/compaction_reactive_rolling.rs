@@ -277,6 +277,122 @@ fn reactive_context_overflow_rolls_fitting_prefixes_without_token_evidence() {
     h.shutdown().expect("shutdown");
 }
 
+/// A committed partial reactive chain re-checks current route capability before
+/// deriving its next pass, then closes the owed chain with one linked local
+/// `RouteFailed` terminal instead of dispatching stale provider work or
+/// checkpointing inference.
+#[test]
+fn reactive_context_overflow_terminalizes_live_capability_downgrade() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
+    info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(1_000));
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    for marker in ["old-A", "old-B"] {
+        h.publish_for_agent(
+            &cid,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
+                agent_id: agent_id.clone(),
+                text: format!("{marker}:{}", "x".repeat(600)),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        );
+    }
+    let agent = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent");
+    agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1));
+    agent.execution.context_usage_model = Some("test/model".into());
+    agent.execution.context_usage_prompt_id = Some(test_agent_prompt_id("ap-test-provider-usage"));
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("retained activation".to_owned()))
+        .expect("dispatch rejected inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("plan reactive recovery");
+    let first = read_nth_prompt_created(&h, 1);
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = false;
+    h.handle_provider_response_finished(provider_text_response(
+        &first.agent_prompt_id,
+        first.agent_id,
+        "summary",
+    ))
+    .expect("terminalize capability loss");
+
+    let events = event_log_events(&h);
+    let route_failed_start = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started)
+                if matches!(
+                    started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                        reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
+                        ..
+                    }
+                ) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("linked route-failed start");
+    let previous_transaction_id = match &route_failed_start.trigger {
+        tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+            previous_transaction_id: Some(previous_transaction_id),
+            ..
+        } => previous_transaction_id,
+        _ => unreachable!("selected linked route failure"),
+    };
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentCompacted(compacted)
+            if compacted.transaction_id.as_ref() == Some(previous_transaction_id)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionFailed(failed)
+            if failed.transaction_id == route_failed_start.transaction_id
+                && failed.reason == tau_proto::StandaloneCompactionFailureReason::RouteFailed
+    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        2,
+        "capability loss must dispatch neither a second compact prompt nor inference"
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.transaction_id.as_ref() == Some(previous_transaction_id)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// A reactive rolling pass that cannot fit its replacement plus one remaining
 /// closed group must commit one typed local failure without provider dispatch.
 #[test]
@@ -590,7 +706,7 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
                     tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
                         reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                         ..
-                    } | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
+                    }
                 ) =>
             {
                 Some(started)

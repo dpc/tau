@@ -1271,6 +1271,10 @@ impl Harness {
             return RollingCompactionPass::NotNeeded;
         }
         let info = self.provider_runtime.model_info.get(model);
+        let route_supports_standalone = info.is_some_and(|info| {
+            info.supports_standalone_compaction
+                && self.provider_runtime.model_routes.contains_key(model)
+        });
         let budget = info.and_then(|info| info.standalone_compaction_prefix_budget);
         let role_name = self.role_name_for_agent_id(cid);
         let role = self.config.available_roles.get(&role_name);
@@ -1343,10 +1347,22 @@ impl Harness {
             }
         }
         let provisional_cut = reactive_target_cut.unwrap_or(selected);
-        let fitting = budget.map_or(Some(provisional_cut), |budget| {
-            self.fitting_automatic_compaction_cut(&agent_id, selected, reactive_target_cut, budget)
+        let failure_reason = if route_supports_standalone {
+            tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
+        } else {
+            tau_proto::StandaloneCompactionFailureReason::RouteFailed
+        };
+        let fitting = route_supports_standalone.then(|| {
+            budget.map_or(Some(provisional_cut), |budget| {
+                self.fitting_automatic_compaction_cut(
+                    &agent_id,
+                    selected,
+                    reactive_target_cut,
+                    budget,
+                )
+            })
         });
-        let failure_reason = tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge;
+        let fitting = fitting.flatten();
         let cut = fitting.unwrap_or(provisional_cut);
         let Some((next, originator)) =
             self.agent_runtime
