@@ -358,7 +358,8 @@ pub struct AttemptProgress {
     pub output_items: Vec<AttemptOutputItem>,
     /// Cumulative transport bytes.
     pub response_bytes_received: u64,
-    /// Whether this state qualifies as semantic output timing.
+    /// Whether this finite attempt has accepted qualifying semantic output for
+    /// timing, even if a later authoritative replacement removes that output.
     pub has_timed_semantic_output: bool,
 }
 
@@ -392,11 +393,12 @@ impl AttemptProgressRef<'_> {
         self.state.bytes
     }
 
-    /// Return whether the accepted state contains output that qualifies for
-    /// first-semantic-output timing.
+    /// Return whether this finite attempt has accepted qualifying semantic
+    /// output for first-semantic-output timing, even if a later authoritative
+    /// replacement removes that output.
     #[must_use]
     pub fn has_timed_semantic_output(&self) -> bool {
-        self.state.has_qualifying_stream_progress()
+        self.state.semantic_progress_revision != 0
     }
 }
 
@@ -786,7 +788,7 @@ fn run_attempt_with_capture_and_updates(
                 state
                     .debug_capture
                     .submit_response(prompt, config, model, &state, stop_reason);
-                let has_timed_semantic_output = state.has_qualifying_stream_progress();
+                let has_timed_semantic_output = state.semantic_progress_revision != 0;
                 let (output_items, terminal_display) = state.take_output_items();
                 AttemptOutcome::Completed(AttemptSuccess {
                     output_items,
@@ -1406,7 +1408,7 @@ impl State {
         AttemptProgress {
             output_items: self.progress_items(),
             response_bytes_received: self.bytes,
-            has_timed_semantic_output: self.has_qualifying_stream_progress(),
+            has_timed_semantic_output: self.semantic_progress_revision != 0,
         }
     }
 
@@ -1474,36 +1476,6 @@ impl State {
     /// Borrow parser state for one synchronous extension sampling callback.
     fn progress_view(&self) -> AttemptProgressRef<'_> {
         AttemptProgressRef { state: self }
-    }
-
-    /// Returns whether this state contains material semantic stream output.
-    ///
-    /// This intentionally matches first-semantic-output timing: non-empty
-    /// assistant or reasoning text, non-empty function name or arguments, and
-    /// a completed opaque reasoning item qualify. Transport bytes, item
-    /// allocation, empty deltas, status/control events, and unknown events do
-    /// not qualify.
-    fn has_qualifying_stream_progress(&self) -> bool {
-        self.items.iter().any(|slot| {
-            slot.reasoning_text
-                .as_ref()
-                .is_some_and(|item| !item.text.is_empty())
-                || match &slot.item {
-                    ContextItem::Message(message) => message
-                        .content
-                        .iter()
-                        .any(|part| matches!(part, ContentPart::Text { text } if !text.is_empty())),
-                    ContextItem::ToolCall(call) => {
-                        !call.name.as_str().is_empty()
-                            || call
-                                .raw_arguments_json
-                                .as_deref()
-                                .is_some_and(|value| !value.is_empty())
-                    }
-                    ContextItem::Reasoning(_) => slot.state == SlotState::ReasoningCompleted,
-                    _ => false,
-                }
-        })
     }
 
     fn has_incomplete_reasoning(&self) -> bool {

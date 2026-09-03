@@ -674,6 +674,31 @@ fn terminal_replacement_renews_borrowed_display_generation() {
     );
 }
 
+/// A terminal authoritative empty replacement must clear the current output
+/// projection without losing an already accepted semantic timing observation.
+#[test]
+fn terminal_empty_replacement_preserves_cumulative_semantic_progress() {
+    let mut state = State::default();
+    assert!(
+        state
+            .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"old"}"#)
+            .expect("qualifying streamed text")
+    );
+    assert_eq!(state.semantic_progress_revision, 1);
+
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.completed","response":{"output":[]}}"#)
+            .expect("authoritative empty terminal replacement")
+    );
+
+    assert_eq!(state.terminal, Some(TerminalKind::Completed));
+    assert!(state.progress_view().has_timed_semantic_output());
+    assert!(state.progress().has_timed_semantic_output);
+    assert!(state.progress_items().is_empty());
+    assert!(state.output_items().is_empty());
+}
+
 /// Removing an emitted display channel invalidates its generation so later
 /// unrelated multibyte text cannot reuse the old byte cursor.
 #[test]
@@ -1888,11 +1913,48 @@ fn qualifying_stream_progress_excludes_heartbeats_and_empty_events() {
             .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"drip"}"#)
             .expect("text drip")
     );
+    assert_eq!(state.semantic_progress_revision, 1);
     assert!(
         !state
             .apply_event(r#"{"type":"response.heartbeat"}"#)
             .expect("later heartbeat event")
     );
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.created","response":{"status":"in_progress"}}"#)
+            .expect("status event")
+    );
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.output_text.done","output_index":0,"text":"drip"}"#,)
+            .expect("duplicate text completion")
+    );
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.completed","response":{}}"#)
+            .expect("terminal-only event")
+    );
+    assert_eq!(state.semantic_progress_revision, 1);
+}
+
+/// Content-free events, including a terminal with authoritative empty output,
+/// must never create cumulative semantic timing progress.
+#[test]
+fn content_free_attempt_stays_without_semantic_progress_through_terminal() {
+    let mut state = State::default();
+    for event in [
+        r#"{"type":"response.heartbeat"}"#,
+        r#"{"type":"response.created","response":{"status":"in_progress"}}"#,
+        r#"{"type":"response.output_text.delta","output_index":0,"delta":""}"#,
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+    ] {
+        assert!(!state.apply_event(event).expect("content-free event"));
+    }
+
+    assert_eq!(state.semantic_progress_revision, 0);
+    assert!(!state.progress_view().has_timed_semantic_output());
+    assert!(!state.progress().has_timed_semantic_output);
+    assert!(state.progress_items().is_empty());
 }
 
 /// Item completion that changes only provider status, IDs, or sidecars must
@@ -2216,7 +2278,7 @@ fn empty_message_terminal_preserves_content_free_timing() {
     slot.state = SlotState::Message;
     let mut state = State::default();
     state.items.push(slot);
-    let has_timed_semantic_output = state.has_qualifying_stream_progress();
+    let has_timed_semantic_output = state.semantic_progress_revision != 0;
     let (output_items, terminal_display) = state.take_output_items();
     let success = AttemptSuccess {
         output_items,
@@ -3096,6 +3158,36 @@ fn websocket_max_output_completes_with_truncated_tool_call() {
             if call.call_id.as_str() == "call_1"
                 && call.raw_arguments_json.as_deref() == Some("{\"path\"")
     ));
+}
+
+/// An exact max-output terminal retains prior semantic timing even when its
+/// authoritative output array intentionally clears the current projection.
+#[test]
+fn websocket_max_output_empty_replacement_retains_semantic_timing() {
+    let outcome = run_websocket_messages(
+        vec![
+            Message::Text(
+                r#"{"type":"response.output_text.delta","output_index":0,"delta":"partial"}"#
+                    .into(),
+            ),
+            Message::Text(
+                r#"{"type":"response.incomplete","response":{"id":"resp_empty_limited","incomplete_details":{"reason":"max_output_tokens"},"output":[]}}"#
+                    .into(),
+            ),
+        ],
+        &mut || false,
+    );
+
+    let AttemptOutcome::Completed(success) = outcome else {
+        panic!("max-output empty replacement must complete");
+    };
+    assert_eq!(success.stop_reason, ProviderStopReason::Length);
+    assert!(success.has_timed_semantic_output());
+    assert!(success.output_items.is_empty());
+    assert_eq!(
+        success.provider_response_id.as_deref(),
+        Some("resp_empty_limited")
+    );
 }
 
 /// A text message exactly at the established one-MiB event limit must still
