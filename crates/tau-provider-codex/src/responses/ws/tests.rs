@@ -361,6 +361,23 @@ impl TurnAbort for FlagAbort {
     }
 }
 
+/// Shared trace writer for private dispatch-accounting assertions.
+#[derive(Clone, Default)]
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for TraceWriter {
+    /// Append one formatted trace fragment.
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("trace lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    /// The in-memory sink has no external buffer.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Test envelope that records serialization and can cancel its owning turn
 /// before serialization returns.
 struct CancellationSeamEnvelope {
@@ -443,6 +460,69 @@ fn websocket_enqueue_rechecks_cancellation_after_serialization() {
     assert_eq!(enqueued, None);
 }
 
+/// Cancellation published by the about-to-dispatch callback must prevent
+/// private wire-dispatch accounting and the writer handoff.
+#[test]
+fn websocket_enqueue_rechecks_cancellation_after_dispatch_callback() {
+    let aborted = Arc::new(AtomicBool::new(false));
+    let serialization_count = Arc::new(AtomicUsize::new(0));
+    let envelope = CancellationSeamEnvelope {
+        serialization_count: Arc::clone(&serialization_count),
+        aborted: Arc::clone(&aborted),
+        cancel_during_serialization: false,
+    };
+    let mut abort = FlagAbort {
+        aborted: Arc::clone(&aborted),
+    };
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let mut enqueued = None;
+    let output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let output = output.clone();
+            move || output.clone()
+        })
+        .finish();
+
+    let error = tracing::subscriber::with_default(subscriber, || {
+        let mut trace = private_trace::AttemptTrace::selected(
+            private_trace::Backend::Codex,
+            private_trace::Transport::Websocket,
+        );
+        let error = serialize_and_enqueue_envelope_observed(
+            &envelope,
+            &mut abort,
+            &mut |_| {
+                dispatch_count.fetch_add(1, Ordering::SeqCst);
+                aborted.store(true, Ordering::SeqCst);
+            },
+            &mut trace,
+            |text| {
+                enqueued = Some(text);
+                Ok(())
+            },
+        )
+        .expect_err("callback cancellation must prevent enqueue");
+        trace
+            .take()
+            .expect("enabled trace")
+            .finish(private_trace::Outcome::Canceled);
+        error
+    });
+
+    assert!(matches!(error, LlmError::Canceled));
+    assert_eq!(error.retry_decision(), None);
+    assert_eq!(serialization_count.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert_eq!(enqueued, None);
+    let trace =
+        String::from_utf8(output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert!(trace.contains("dispatch_count=0"), "{trace}");
+}
+
 /// A live turn must preserve the serializer's exact bytes and publish dispatch
 /// exactly once immediately before the sole enqueue.
 #[test]
@@ -478,11 +558,11 @@ fn websocket_enqueue_preserves_live_request_bytes_and_order() {
     );
 }
 
-/// The production response path must preserve correlated debug capture while a
-/// post-build cancellation suppresses both dispatch publication and the actual
-/// writer-channel enqueue.
+/// The production response path must preserve correlated debug capture while
+/// callback cancellation suppresses private dispatch and writer-channel
+/// enqueue.
 #[test]
-fn websocket_response_cancellation_after_build_preserves_capture_without_enqueue() {
+fn websocket_response_callback_cancellation_preserves_capture_without_enqueue() {
     let (mut conn, _inbound_tx, mut outbound_rx) = test_ws_conn();
     let config = test_responses_config();
     let fixture = PromptFixture::new();
@@ -491,9 +571,12 @@ fn websocket_response_cancellation_after_build_preserves_capture_without_enqueue
     let mut correlation =
         path_crate_attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(7));
     let dispatch = correlation.next_dispatch();
-    let mut abort = AbortAfterChecks { remaining_false: 1 };
+    let aborted = Arc::new(AtomicBool::new(false));
+    let mut abort = FlagAbort {
+        aborted: Arc::clone(&aborted),
+    };
     let mut capture = None;
-    let mut dispatched = false;
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
 
     let error = match conn.run_response_with_capture_submit(
         &config,
@@ -503,17 +586,20 @@ fn websocket_response_cancellation_after_build_preserves_capture_without_enqueue
         None,
         ResponseMode::Ordinary,
         &mut abort,
-        &mut |_| dispatched = true,
+        &mut |_| {
+            dispatch_count.fetch_add(1, Ordering::SeqCst);
+            aborted.store(true, Ordering::SeqCst);
+        },
         &mut |_| {},
         |submitted| capture = Some(submitted),
     ) {
-        Ok(_) => panic!("post-build cancellation must prevent enqueue"),
+        Ok(_) => panic!("callback cancellation must prevent enqueue"),
         Err(error) => error,
     };
 
     assert!(matches!(error, LlmError::Canceled));
     assert_eq!(error.retry_decision(), None);
-    assert!(!dispatched);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
     assert!(matches!(
         outbound_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)

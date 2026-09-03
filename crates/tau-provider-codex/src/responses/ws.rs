@@ -1321,6 +1321,9 @@ fn serialize_and_enqueue_envelope_observed(
         return Err(LlmError::Canceled);
     }
     on_dispatched(Instant::now());
+    if abort.is_aborted() {
+        return Err(LlmError::Canceled);
+    }
     if let Some(trace) = private_trace.as_mut() {
         trace.record_dispatch();
     }
