@@ -1190,6 +1190,16 @@ impl Harness {
                 Some(tau_proto::TokenCount::new(value)),
                 tau_proto::ContextLimitCompactionPolicy::Threshold,
             ),
+            path_tau_config_settings::RoleCompaction::Reserve(reserve) => (
+                compaction_threshold_from_reserve(
+                    model,
+                    self.provider_runtime.model_info.get(model),
+                    reserve,
+                )
+                .map(Some)
+                .expect("compaction reserve was validated before prompt dispatch"),
+                tau_proto::ContextLimitCompactionPolicy::Threshold,
+            ),
             path_tau_config_settings::RoleCompaction::ProviderDefault => (
                 self.provider_runtime
                     .model_info

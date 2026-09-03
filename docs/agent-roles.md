@@ -16,9 +16,10 @@ configuration. `--profile focused,review` applies only `profiles.focused` then
 - `thinking_summary`: `off`, `auto`, `concise`, or `detailed`
 - `service_tier`: `fast` or `flex`
 - `inference_compaction`: singular provider-inline and reactive-overflow policy:
-  `provider_default`, `disabled`, or `{ threshold: 200000 }`
+  `provider_default`, `disabled`, `{ threshold: 200000 }`, or
+  `{ reserve: 25000 }`
 - `compactions`: named harness-scheduled standalone policies; each selects a
-  threshold plus an optional lifecycle/status condition
+  `threshold` or `reserve` boundary plus an optional lifecycle/status condition
 - `compaction`: legacy shorthand normalized into both domains above
 
 For `effort`, `verbosity`, and `thinking_summary`, use `increase` or
@@ -274,7 +275,7 @@ agents:
           inference_compaction: disabled
           compactions:
             eager:
-              threshold: 160000
+              reserve: 40000
               when:
                 at: outer_turn_finished
                 statuses: [done]
@@ -290,6 +291,12 @@ than shadowing it. Set `compactions.default.enable: false` to opt out; legacy
 `compaction: disabled` remains a replace-all opt-out. `context_limit_safe`
 resolves the adapter-published safe scheduling threshold;
 `provider_default` remains a compatibility spelling for the same value.
+An explicit `reserve: N` resolves against the selected provider-qualified
+model as `context_window - N`; `threshold` and `reserve` are mutually exclusive.
+`reserve: 0` selects the full context window. A reserve equal to the context
+window resolves to zero and therefore supplies no proactive scheduling
+authority; a larger reserve fails prompt validation with an actionable
+role/policy/model diagnostic.
 
 Matching policies at one lifecycle point OR together and produce one
 standalone compaction using the lowest resolved matching threshold. Omitted
@@ -371,7 +378,7 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
             description: "Balanced coding engineer",
             model: "chatgpt/gpt-5.3-codex",
             effort: "medium",
-            compaction: { threshold: 200000 },
+            compaction: { reserve: 25000 },
             tools: ["read", "grep"],
             enable_tool_groups: ["calendar", "email"],
             disable_tools: ["email_trash"],

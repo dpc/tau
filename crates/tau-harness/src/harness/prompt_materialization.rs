@@ -1021,6 +1021,18 @@ impl Harness {
             ));
             return None;
         };
+        if let Some(role) = self.config.available_roles.get(&role_name)
+            && let Some(message) = compaction_reserve_configuration_error(
+                &role_name,
+                role,
+                &model,
+                self.provider_runtime.model_info.get(&model),
+            )
+        {
+            self.emit_harness_failure(&message);
+            self.terminalize_owned_dispatch_error(cid, message);
+            return None;
+        }
         // Non-tool extension side agents (`std-notifications`' idle summary,
         // etc.) must not execute tools. Provider `tool_choice: none` is the
         // upstream authority; local rejection alone cannot contain hosted tools.
@@ -1246,7 +1258,14 @@ impl Harness {
             .config
             .available_roles
             .get(&role_name)
-            .map(|role| role.compactions.clone())
+            .map(|role| {
+                resolve_compaction_policies_for_prompt(
+                    &model,
+                    self.provider_runtime.model_info.get(&model),
+                    &role.compactions,
+                )
+                .expect("compaction reserves were validated before prompt materialization")
+            })
             .unwrap_or_default();
         self.prompt_coordination
             .prompt_runtime
@@ -1357,6 +1376,21 @@ impl Harness {
         let Some(model) = model else {
             return true;
         };
+        if let Some(role) = self.config.available_roles.get(&role_name)
+            && let Some(message) = compaction_reserve_configuration_error(
+                &role_name,
+                role,
+                &model,
+                self.provider_runtime.model_info.get(&model),
+            )
+        {
+            self.emit_harness_failure(&message);
+            self.fail_initial_prompt_materialization(
+                cid,
+                "failed to validate compaction reserve configuration",
+            );
+            return false;
+        }
         let is_non_tool_ext_query = Self::agent_uses_non_tool_prompt_surface(conv);
         if let Some(message) = self.shell_tool_style_error(Some(&model)) {
             self.emit_harness_failure(&message);

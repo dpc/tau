@@ -2,7 +2,7 @@
 //! effort/verbosity/thinking-summary levels from provider metadata, and gauging
 //! context-window usage.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tau_config::settings::{
     AgentRole, CompactionPolicyThreshold, ContextPolicyPoint, HarnessSettings, RoleCompaction,
@@ -432,6 +432,8 @@ pub(crate) fn role_infos(
                                                 "provider_default".to_owned(),
                                             CompactionPolicyThreshold::Tokens(tokens) =>
                                                 tokens.to_string(),
+                                            CompactionPolicyThreshold::Reserve(tokens) =>
+                                                format!("reserve:{tokens}"),
                                         },
                                         if policy.enable { "" } else { ":disabled" }
                                     )
@@ -452,6 +454,7 @@ fn format_role_compaction(value: tau_config::settings::RoleCompaction) -> String
         RoleCompaction::ProviderDefault => "provider_default".to_owned(),
         RoleCompaction::Disabled => "disabled".to_owned(),
         RoleCompaction::Threshold(tokens) => tokens.to_string(),
+        RoleCompaction::Reserve(tokens) => format!("reserve:{tokens}"),
     }
 }
 
@@ -494,6 +497,107 @@ pub(crate) fn context_window_for_model(
     model: &ModelId,
 ) -> Option<tau_proto::TokenCount> {
     provider_models.get(model).map(|info| info.context_window)
+}
+
+/// Resolves a reserve against the selected provider-qualified model's published
+/// context window.
+pub(crate) fn compaction_threshold_from_reserve(
+    model: &ModelId,
+    info: Option<&ProviderModelInfo>,
+    reserve: u64,
+) -> Result<tau_proto::TokenCount, String> {
+    let info = info.ok_or_else(|| {
+        format!(
+            "cannot resolve compaction reserve {reserve} for model `{model}`: \
+             provider model metadata is unavailable"
+        )
+    })?;
+    tau_config::settings::compaction_threshold_from_reserve(info.context_window.get(), reserve)
+        .map(tau_proto::TokenCount::new)
+        .map_err(|error| format!("cannot resolve compaction reserve for model `{model}`: {error}"))
+}
+
+/// Resolves one named standalone compaction boundary for the selected model.
+pub(crate) fn resolve_compaction_policy_threshold(
+    model: &ModelId,
+    info: Option<&ProviderModelInfo>,
+    boundary: CompactionPolicyThreshold,
+) -> Result<Option<tau_proto::TokenCount>, String> {
+    match boundary {
+        CompactionPolicyThreshold::ProviderDefault => {
+            Ok(info.and_then(|info| info.standalone_compaction_threshold))
+        }
+        CompactionPolicyThreshold::Tokens(tokens) => Ok(Some(tau_proto::TokenCount::new(tokens))),
+        CompactionPolicyThreshold::Reserve(reserve) => {
+            compaction_threshold_from_reserve(model, info, reserve).map(Some)
+        }
+    }
+}
+
+/// Freezes named compaction boundaries for one provider prompt so terminal
+/// processing cannot reinterpret them after a model metadata update.
+pub(crate) fn resolve_compaction_policies_for_prompt(
+    model: &ModelId,
+    info: Option<&ProviderModelInfo>,
+    policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
+) -> Result<BTreeMap<String, tau_config::settings::CompactionPolicy>, String> {
+    let Some(info) = info else {
+        if policies.values().any(|policy| {
+            policy.enable && matches!(policy.threshold, CompactionPolicyThreshold::Reserve(_))
+        }) {
+            return Err(format!(
+                "cannot resolve compaction reserve for model `{model}`: provider model metadata is unavailable"
+            ));
+        }
+        return Ok(BTreeMap::new());
+    };
+    if !info.supports_standalone_compaction {
+        return Ok(BTreeMap::new());
+    }
+    let mut resolved_policies = BTreeMap::new();
+    for (name, policy) in policies {
+        if !policy.enable {
+            continue;
+        }
+        if let Some(threshold) =
+            resolve_compaction_policy_threshold(model, Some(info), policy.threshold)?
+        {
+            let mut resolved = policy.clone();
+            resolved.threshold = CompactionPolicyThreshold::Tokens(threshold.get());
+            resolved_policies.insert(name.clone(), resolved);
+        }
+    }
+    Ok(resolved_policies)
+}
+
+/// Validates every reserve-based compaction boundary for one resolved
+/// role/model pair and returns a path-oriented dispatch diagnostic.
+pub(crate) fn compaction_reserve_configuration_error(
+    role_name: &str,
+    role: &AgentRole,
+    model: &ModelId,
+    info: Option<&ProviderModelInfo>,
+) -> Option<String> {
+    if let Some(RoleCompaction::Reserve(reserve)) = role.inference_compaction.or(role.compaction)
+        && let Err(error) = compaction_threshold_from_reserve(model, info, reserve)
+    {
+        return Some(format!(
+            "role `{role_name}` inference_compaction.reserve is invalid: {error}"
+        ));
+    }
+    role.compactions.iter().find_map(|(policy_name, policy)| {
+        if !policy.enable {
+            return None;
+        }
+        let CompactionPolicyThreshold::Reserve(reserve) = policy.threshold else {
+            return None;
+        };
+        compaction_threshold_from_reserve(model, info, reserve)
+            .err()
+            .map(|error| {
+                format!("role `{role_name}` compactions.{policy_name}.reserve is invalid: {error}")
+            })
+    })
 }
 
 /// Convert used input tokens into a clamped percentage of the context window.

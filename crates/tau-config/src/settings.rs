@@ -2872,16 +2872,83 @@ pub struct AgentRole {
 }
 
 /// Automatic provider-side compaction policy for a harness role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoleCompaction {
     /// Ask the provider to use its model-specific default threshold.
-    #[serde(alias = "providerDefault")]
     ProviderDefault,
     /// Do not request provider-side automatic compaction.
     Disabled,
     /// Ask the provider to compact at an explicit token threshold.
     Threshold(u64),
+    /// Ask the provider to compact when this many tokens remain in the selected
+    /// model's context window.
+    Reserve(u64),
+}
+
+impl Serialize for RoleCompaction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        match self {
+            Self::ProviderDefault => serializer.serialize_str("provider_default"),
+            Self::Disabled => serializer.serialize_str("disabled"),
+            Self::Threshold(tokens) | Self::Reserve(tokens) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry(
+                    if matches!(self, Self::Threshold(_)) {
+                        "threshold"
+                    } else {
+                        "reserve"
+                    },
+                    tokens,
+                )?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RoleCompaction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Name(String),
+            Boundary(Boundary),
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Boundary {
+            threshold: Option<u64>,
+            reserve: Option<u64>,
+        }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Name(name) if matches!(name.as_str(), "provider_default" | "providerDefault") => {
+                Ok(Self::ProviderDefault)
+            }
+            Wire::Name(name) if name == "disabled" => Ok(Self::Disabled),
+            Wire::Name(name) => Err(D::Error::custom(format!(
+                "unknown compaction policy `{name}`"
+            ))),
+            Wire::Boundary(Boundary { threshold, reserve }) => match (threshold, reserve) {
+                (Some(_), Some(_)) => Err(D::Error::custom(
+                    "compaction policy cannot set both `threshold` and `reserve`",
+                )),
+                (Some(tokens), None) => Ok(Self::Threshold(tokens)),
+                (None, Some(tokens)) => Ok(Self::Reserve(tokens)),
+                (None, None) => Err(D::Error::custom(
+                    "compaction policy requires `threshold` or `reserve`",
+                )),
+            },
+        }
+    }
 }
 
 /// Lifecycle point at which a context policy is evaluated.
@@ -2941,6 +3008,45 @@ pub enum CompactionPolicyThreshold {
     ProviderDefault,
     /// Compact at this explicit positive token count.
     Tokens(u64),
+    /// Compact when this many tokens remain in the selected model's context
+    /// window.
+    Reserve(u64),
+}
+
+/// Error returned when a remaining-context reserve cannot fit the selected
+/// model's context window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompactionReserveError {
+    /// Context window published for the selected model.
+    pub context_window: u64,
+    /// Configured number of tokens to keep in reserve.
+    pub reserve: u64,
+}
+
+impl fmt::Display for CompactionReserveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "compaction reserve {} exceeds selected model context window {}",
+            self.reserve, self.context_window
+        )
+    }
+}
+
+impl std::error::Error for CompactionReserveError {}
+
+/// Converts a remaining-context reserve into the equivalent used-context
+/// threshold for the selected model.
+pub fn compaction_threshold_from_reserve(
+    context_window: u64,
+    reserve: u64,
+) -> Result<u64, CompactionReserveError> {
+    context_window
+        .checked_sub(reserve)
+        .ok_or(CompactionReserveError {
+            context_window,
+            reserve,
+        })
 }
 
 impl Serialize for CompactionPolicyThreshold {
@@ -2951,6 +3057,13 @@ impl Serialize for CompactionPolicyThreshold {
         match self {
             Self::ProviderDefault => serializer.serialize_str("provider_default"),
             Self::Tokens(tokens) => serializer.serialize_u64(*tokens),
+            Self::Reserve(tokens) => {
+                use serde::ser::SerializeMap;
+
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("reserve", tokens)?;
+                map.end()
+            }
         }
     }
 }
@@ -2963,15 +3076,32 @@ impl<'de> Deserialize<'de> for CompactionPolicyThreshold {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Wire {
-            Tokens(u64),
-            Name(String),
+            Scalar(CompactionPolicyThresholdScalarWire),
+            Reserve(CompactionReserveWire),
         }
         match Wire::deserialize(deserializer)? {
-            Wire::Tokens(0) => Err(D::Error::custom(
-                "compaction policy threshold must be positive",
-            )),
-            Wire::Tokens(tokens) => Ok(Self::Tokens(tokens)),
-            Wire::Name(name)
+            Wire::Scalar(wire) => wire.into_threshold::<D::Error>(),
+            Wire::Reserve(CompactionReserveWire { reserve }) => Ok(Self::Reserve(reserve)),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CompactionPolicyThresholdScalarWire {
+    Tokens(u64),
+    Name(String),
+}
+
+impl CompactionPolicyThresholdScalarWire {
+    fn into_threshold<E>(self) -> Result<CompactionPolicyThreshold, E>
+    where
+        E: serde::de::Error,
+    {
+        match self {
+            Self::Tokens(0) => Err(E::custom("compaction policy threshold must be positive")),
+            Self::Tokens(tokens) => Ok(CompactionPolicyThreshold::Tokens(tokens)),
+            Self::Name(name)
                 if matches!(
                     name.as_str(),
                     "context_limit_safe"
@@ -2980,27 +3110,94 @@ impl<'de> Deserialize<'de> for CompactionPolicyThreshold {
                         | "providerDefault"
                 ) =>
             {
-                Ok(Self::ProviderDefault)
+                Ok(CompactionPolicyThreshold::ProviderDefault)
             }
-            Wire::Name(name) => Err(D::Error::custom(format!(
+            Self::Name(name) => Err(E::custom(format!(
                 "unknown compaction policy threshold `{name}`"
             ))),
         }
     }
 }
 
-/// One effective named harness-scheduled standalone compaction policy.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CompactionReserveWire {
+    reserve: u64,
+}
+
+fn deserialize_optional_compaction_policy_threshold<'de, D>(
+    deserializer: D,
+) -> Result<Option<CompactionPolicyThreshold>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<CompactionPolicyThresholdScalarWire>::deserialize(deserializer)?
+        .map(CompactionPolicyThresholdScalarWire::into_threshold::<D::Error>)
+        .transpose()
+}
+
+/// One effective named harness-scheduled standalone compaction policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionPolicy {
-    /// Token threshold for this policy.
+    /// Token boundary for this policy. `Reserve` is serialized through the
+    /// sibling `reserve` key rather than `threshold`.
     pub threshold: CompactionPolicyThreshold,
     /// Whether this policy participates in evaluation.
-    #[serde(default = "context_size_alert_enabled_default")]
     pub enable: bool,
     /// Lifecycle and logical-status selector.
-    #[serde(default)]
     pub when: ContextPolicyWhen,
+}
+
+impl Serialize for CompactionPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        match self.threshold {
+            CompactionPolicyThreshold::Reserve(tokens) => {
+                map.serialize_entry("reserve", &tokens)?;
+            }
+            threshold => map.serialize_entry("threshold", &threshold)?,
+        }
+        map.serialize_entry("enable", &self.enable)?;
+        map.serialize_entry("when", &self.when)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(
+                default,
+                deserialize_with = "deserialize_optional_compaction_policy_threshold"
+            )]
+            threshold: Option<CompactionPolicyThreshold>,
+            reserve: Option<u64>,
+            #[serde(default = "context_size_alert_enabled_default")]
+            enable: bool,
+            #[serde(default)]
+            when: ContextPolicyWhen,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let threshold = compaction_policy_boundary(wire.threshold, wire.reserve)
+            .map_err(D::Error::custom)?
+            .ok_or_else(|| D::Error::missing_field("threshold or reserve"))?;
+        Ok(Self {
+            threshold,
+            enable: wire.enable,
+            when: wire.when,
+        })
+    }
 }
 
 impl CompactionPolicy {
@@ -3016,16 +3213,55 @@ impl CompactionPolicy {
 }
 
 /// Presence-aware patch for one named standalone compaction policy.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Default)]
 struct CompactionPolicyPatch {
-    /// Replacement threshold when this layer specifies one.
+    /// Replacement boundary when this layer specifies one.
     threshold: Option<CompactionPolicyThreshold>,
     /// Replacement enablement when this layer specifies one.
     enable: Option<bool>,
     /// Nested condition patch; null resets the complete condition.
-    #[serde(deserialize_with = "present_option")]
     when: Option<Option<ContextPolicyWhenPatch>>,
+}
+
+impl<'de> Deserialize<'de> for CompactionPolicyPatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Wire {
+            #[serde(
+                default,
+                deserialize_with = "deserialize_optional_compaction_policy_threshold"
+            )]
+            threshold: Option<CompactionPolicyThreshold>,
+            reserve: Option<u64>,
+            enable: Option<bool>,
+            #[serde(deserialize_with = "present_option")]
+            when: Option<Option<ContextPolicyWhenPatch>>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            threshold: compaction_policy_boundary(wire.threshold, wire.reserve)
+                .map_err(D::Error::custom)?,
+            enable: wire.enable,
+            when: wire.when,
+        })
+    }
+}
+
+fn compaction_policy_boundary(
+    threshold: Option<CompactionPolicyThreshold>,
+    reserve: Option<u64>,
+) -> Result<Option<CompactionPolicyThreshold>, &'static str> {
+    match (threshold, reserve) {
+        (Some(_), Some(_)) => Err("compaction policy cannot set both `threshold` and `reserve`"),
+        (Some(threshold), None) => Ok(Some(threshold)),
+        (None, Some(reserve)) => Ok(Some(CompactionPolicyThreshold::Reserve(reserve))),
+        (None, None) => Ok(None),
+    }
 }
 
 impl CompactionPolicyPatch {
@@ -3301,6 +3537,9 @@ impl AgentRole {
                         RoleCompaction::Disabled => unreachable!("disabled policy is not inserted"),
                         RoleCompaction::Threshold(tokens) => {
                             CompactionPolicyThreshold::Tokens(tokens)
+                        }
+                        RoleCompaction::Reserve(tokens) => {
+                            CompactionPolicyThreshold::Reserve(tokens)
                         }
                     },
                     enable: true,

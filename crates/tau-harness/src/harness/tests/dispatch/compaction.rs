@@ -198,6 +198,37 @@ fn provider_report_below_threshold_never_schedules_from_suffix_size() {
     h.shutdown().expect("shutdown");
 }
 
+/// The legacy/singular reserve form must lower to an explicit provider-inline
+/// threshold using the agent's selected model context window.
+#[test]
+fn inference_compaction_reserve_lowers_against_selected_model() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let model: tau_proto::ModelId = "test/model".into();
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&model)
+        .expect("test model");
+    info.context_window = tau_proto::TokenCount::new(200_000);
+    info.supports_compaction = true;
+    let role = h
+        .config
+        .available_roles
+        .get_mut(&h.config.selected_role)
+        .expect("selected role");
+    role.inference_compaction = Some(path_tau_config_settings::RoleCompaction::Reserve(25_000));
+
+    assert_eq!(
+        h.compaction_context_for_agent(&cid, &model),
+        Some(tau_proto::PromptCompactionContext {
+            compact_threshold: Some(tau_proto::TokenCount::new(175_000)),
+        })
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Exact provider input at the token threshold must authorize one proactive
 /// transaction even when the complete durable transcript is tiny in bytes.
 #[test]
@@ -6361,6 +6392,49 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
         })
     );
 
+    h.shutdown().expect("shutdown");
+}
+
+/// Manual standalone compaction must terminalize an invalid reserve with an
+/// actionable diagnostic instead of panicking during prompt materialization.
+#[test]
+fn manual_compact_rejects_oversized_inference_reserve_without_panic() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let target_agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .agent_id
+        .clone()
+        .expect("durable agent id");
+    let model: tau_proto::ModelId = "test/model".into();
+    let context_window = h.provider_runtime.model_info[&model].context_window.get();
+    h.config
+        .available_roles
+        .get_mut(&h.config.selected_role)
+        .expect("selected role")
+        .inference_compaction = Some(path_tau_config_settings::RoleCompaction::Reserve(
+        context_window + 1,
+    ));
+
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&target_agent_id),
+    );
+
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+    )));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.kind.as_str() == tau_proto::notice_kind::HARNESS_FAILURE
+                && notice.message.contains("inference_compaction.reserve")
+    )));
     h.shutdown().expect("shutdown");
 }
 

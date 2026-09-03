@@ -367,6 +367,9 @@ impl Harness {
                     path_tau_config_settings::RoleCompaction::ProviderDefault => {
                         path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault
                     }
+                    path_tau_config_settings::RoleCompaction::Reserve(tokens) => {
+                        path_tau_config_settings::CompactionPolicyThreshold::Reserve(tokens)
+                    }
                     path_tau_config_settings::RoleCompaction::Disabled => {
                         unreachable!("legacy UI command never selects disabled")
                     }

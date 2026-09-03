@@ -79,7 +79,9 @@
 # `description` is shown in `:role ...` completions. `compaction` controls
 # provider-side automatic compaction: omit it or set `provider_default` for the
 # provider's model-specific default, `disabled` to turn it off, or `{ threshold:
-# 200000 }` for an explicit token threshold.
+# 200000 }` for an explicit used-context threshold. `{ reserve: 25000 }` instead
+# derives the threshold from the selected model as `context_window - reserve`.
+# `threshold` and `reserve` are mutually exclusive.
 # `context_size_alerts` entries inherit field-by-field from `agents` through the
 # role group to each role, so a specific role can set `enable: false`.
 # Per-role `prompt_fragments` add instructions only for that role.
@@ -105,7 +107,7 @@
 #           order: 20
 #           description: Balanced coding engineer.
 #           model: chatgpt/gpt-5.6-sol
-#           compaction: { threshold: 200000 }
+#           compaction: { reserve: 25000 }
 #           tools: [read, grep]
 #           disable_tools: [shell]
 #           required_skills: [project-review-process]

@@ -190,8 +190,10 @@ use crate::harness::tool_runtime::ToolRuntimeState;
 use crate::harness::ui_runtime::UiRuntimeState;
 use crate::internal_tools::InternalToolHandlers;
 use crate::model::{
-    LoadedRoles, MissingDefaultRole, baseline_params_for_selection, context_percent_used,
-    context_window_for_model, efforts_for_model, fallback_role, load_roles, model_for_role,
+    LoadedRoles, MissingDefaultRole, baseline_params_for_selection,
+    compaction_reserve_configuration_error, compaction_threshold_from_reserve,
+    context_percent_used, context_window_for_model, efforts_for_model, fallback_role, load_roles,
+    model_for_role, resolve_compaction_policies_for_prompt, resolve_compaction_policy_threshold,
     role_infos, select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
     verbosities_for_model,
 };

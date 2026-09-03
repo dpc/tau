@@ -458,6 +458,15 @@ independent telemetry. Threshold-fired standalone compaction persists exact
 evidence; only explicit UI compaction retains the legacy/default `manual`
 trigger.
 
+Configured automatic-compaction boundaries may be an absolute used-context
+`threshold` or a remaining-context `reserve`, but never both in one policy.
+Reserve resolution uses the selected provider-qualified model declaration's
+context window and computes the exact threshold as `context_window - reserve`.
+Zero reserve selects the full window; equality resolves to zero and therefore
+does not create the nonzero proactive scheduling authority required above.
+Larger reserves fail explicitly instead of saturating, and unavailable model
+metadata cannot be replaced with a provider default or guessed window.
+
 Named automatic-compaction policies are harness-scheduled standalone policies.
 The built-in named `default` policy runs at `before_inference` at the
 adapter-published context-limit-safe threshold. Other named policies augment it;

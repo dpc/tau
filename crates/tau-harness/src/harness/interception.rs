@@ -3305,6 +3305,10 @@ impl Harness {
             if !deferred.obligation.is_committed() {
                 self.runtime_io.publication.idle_dispatches.remove(index);
             }
+            if deferred.obligation.is_committed() && !self.validate_prompt_render_for_dispatch(&cid)
+            {
+                break;
+            }
             if deferred.obligation.is_committed()
                 && self.schedule_standalone_auto_compaction_for_activation(
                     &cid,

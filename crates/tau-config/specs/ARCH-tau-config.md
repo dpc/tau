@@ -192,10 +192,12 @@ array replacement:
   Alert patches retain raw integer thresholds until merge validation. Effective
   alerts carry a positive `ContextSizeAlertThreshold`, rather than a raw `u64`,
   and compare provider token usage through its named policy method.
-- Named `compactions` likewise merge field-by-field. Absent fields inherit,
+- Named `compactions` likewise merge field-by-field. Their mutually exclusive
+  `threshold` and `reserve` keys form one replaceable boundary field, so a later
+  layer may switch forms without retaining the earlier form. Absent fields inherit,
   `when: null` resets to `before_inference` with any status,
   `when.statuses: null` clears the restriction, and a nonempty status list
-  replaces it. Empty status lists and new rules without a threshold are invalid.
+  replaces it. Empty status lists and new rules without either boundary are invalid.
   Legacy config `compaction` is a replace-all edit that normalizes into
   `inference_compaction` plus `compactions.default`. The legacy interactive CLI
   threshold command is intentionally different: it updates `default` while

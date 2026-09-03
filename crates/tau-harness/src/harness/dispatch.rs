@@ -470,14 +470,6 @@ impl Harness {
                             path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
                         )
                     });
-                if !output_length_owner_ready
-                    && self.schedule_standalone_auto_compaction_with_wake_view(
-                        &agent_id,
-                        selected_wakes.as_ref(),
-                    )
-                {
-                    continue;
-                }
                 if !output_length_owner_ready {
                     let preflight_started = materialization_timing.as_ref().map(|_| Instant::now());
                     if !self.validate_prompt_render_for_dispatch(&agent_id) {
@@ -488,6 +480,14 @@ impl Harness {
                     {
                         timing.set_preflight(started.elapsed());
                     }
+                }
+                if !output_length_owner_ready
+                    && self.schedule_standalone_auto_compaction_with_wake_view(
+                        &agent_id,
+                        selected_wakes.as_ref(),
+                    )
+                {
+                    continue;
                 }
                 if let Some(activation_class) = selected_wakes
                     .as_ref()

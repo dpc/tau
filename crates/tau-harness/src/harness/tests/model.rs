@@ -7,7 +7,9 @@ use tau_proto::{
 };
 
 use super::*;
-use crate::model::LoadedRoles;
+use crate::model::{
+    LoadedRoles, compaction_reserve_configuration_error, compaction_threshold_from_reserve,
+};
 use crate::{discovery as path_crate_discovery, event_log as path_crate_event_log};
 
 /// Scan the harness event log for a mandatory warning `HarnessNotice`
@@ -3024,4 +3026,44 @@ fn selected_params_use_runtime_role_fields() {
     assert_eq!(params.effort, Effort::High);
     assert_eq!(params.verbosity, Verbosity::Low);
     assert_eq!(params.thinking_summary, ThinkingSummary::Concise);
+}
+
+/// Reserve resolution must use the provider-qualified selected model's actual
+/// context window rather than another route's metadata or provider default.
+#[test]
+fn compaction_reserve_uses_selected_model_context_window() {
+    let selected: ModelId = "provider/selected".parse().expect("selected model");
+    let other: ModelId = "provider/other".parse().expect("other model");
+    let models = provider_models([
+        provider_model(selected.clone(), 200_000),
+        provider_model(other, 500_000),
+    ]);
+
+    assert_eq!(
+        compaction_threshold_from_reserve(&selected, models.get(&selected), 25_000)
+            .expect("selected model reserve"),
+        tau_proto::TokenCount::new(175_000)
+    );
+}
+
+/// Missing provider metadata and oversized reserves must produce actionable
+/// role/model diagnostics rather than silently disabling automatic compaction.
+#[test]
+fn compaction_reserve_configuration_errors_are_explicit() {
+    let model: ModelId = "provider/model".parse().expect("model");
+    let role = path_tau_config_settings::AgentRole {
+        inference_compaction: Some(path_tau_config_settings::RoleCompaction::Reserve(100_001)),
+        ..Default::default()
+    };
+    let info = provider_model(model.clone(), 100_000);
+    let oversized = compaction_reserve_configuration_error("engineer", &role, &model, Some(&info))
+        .expect("oversized reserve");
+    assert!(oversized.contains("inference_compaction.reserve"));
+    assert!(oversized.contains("100001"));
+    assert!(oversized.contains("100000"));
+
+    let missing = compaction_reserve_configuration_error("engineer", &role, &model, None)
+        .expect("missing model metadata");
+    assert!(missing.contains("provider model metadata is unavailable"));
+    assert!(missing.contains("provider/model"));
 }

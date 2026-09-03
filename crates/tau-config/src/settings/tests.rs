@@ -6256,6 +6256,117 @@ fn context_limit_safe_aliases_provider_default_canonically() {
     );
 }
 
+/// Reserve-based role policy input must retain its distinct boundary form
+/// through the public serde surface.
+#[test]
+fn role_compaction_reserve_round_trips() {
+    let policy: RoleCompaction =
+        serde_yaml_ng::from_str("reserve: 25000\n").expect("reserve policy");
+    assert_eq!(policy, RoleCompaction::Reserve(25_000));
+    assert_eq!(
+        serde_yaml_ng::to_string(&policy).expect("serialize reserve"),
+        "reserve: 25000\n"
+    );
+}
+
+/// The singular and legacy form shares the same exclusive boundary contract as
+/// named policies.
+#[test]
+fn role_compaction_rejects_threshold_and_reserve_together() {
+    let error = serde_yaml_ng::from_str::<RoleCompaction>("threshold: 75000\nreserve: 25000\n")
+        .expect_err("ambiguous boundary must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot set both `threshold` and `reserve`")
+    );
+}
+
+/// Named policies must reject ambiguous same-layer boundaries with a clear
+/// diagnostic instead of choosing one by field order.
+#[test]
+fn named_compaction_rejects_threshold_and_reserve_together() {
+    let error = serde_yaml_ng::from_str::<CompactionPolicy>("threshold: 75000\nreserve: 25000\n")
+        .expect_err("ambiguous boundary must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot set both `threshold` and `reserve`")
+    );
+}
+
+/// Reserve zero and equality with the context window are exact arithmetic
+/// boundaries; only a reserve larger than the window underflows.
+#[test]
+fn compaction_reserve_resolution_preserves_exact_edges() {
+    assert_eq!(
+        compaction_threshold_from_reserve(100_000, 0).expect("zero reserve"),
+        100_000
+    );
+    assert_eq!(
+        compaction_threshold_from_reserve(100_000, 100_000).expect("equal reserve"),
+        0
+    );
+    assert_eq!(
+        compaction_threshold_from_reserve(100_000, 100_001),
+        Err(CompactionReserveError {
+            context_window: 100_000,
+            reserve: 100_001,
+        })
+    );
+}
+
+/// A later config layer may switch one named policy from an absolute threshold
+/// to a reserve without inheriting both mutually exclusive keys.
+#[test]
+fn named_compaction_layer_can_replace_threshold_with_reserve() {
+    let mut policy = CompactionPolicy {
+        threshold: CompactionPolicyThreshold::Tokens(75_000),
+        enable: true,
+        when: ContextPolicyWhen::default(),
+    };
+    let patch: CompactionPolicyPatch =
+        serde_yaml_ng::from_str("reserve: 25000\n").expect("reserve patch");
+    patch.apply_to(&mut policy);
+    assert_eq!(policy.threshold, CompactionPolicyThreshold::Reserve(25_000));
+    let yaml = serde_yaml_ng::to_string(&policy).expect("serialize policy");
+    assert!(yaml.contains("reserve: 25000"));
+    assert!(!yaml.contains("threshold:"));
+}
+
+/// The public boundary enum must not erase reserve semantics when callers
+/// serialize it outside an enclosing named policy.
+#[test]
+fn compaction_policy_threshold_reserve_round_trips_directly() {
+    let boundary = CompactionPolicyThreshold::Reserve(25_000);
+    let yaml = serde_yaml_ng::to_string(&boundary).expect("serialize reserve boundary");
+    assert_eq!(yaml, "reserve: 25000\n");
+    assert_eq!(
+        serde_yaml_ng::from_str::<CompactionPolicyThreshold>(&yaml)
+            .expect("deserialize reserve boundary"),
+        boundary
+    );
+}
+
+/// Named policies expose reserve only as a sibling boundary key; nesting it
+/// under `threshold` would create an undocumented second grammar.
+#[test]
+fn named_compaction_rejects_nested_reserve_threshold() {
+    let error = serde_yaml_ng::from_str::<CompactionPolicy>("threshold: { reserve: 25000 }\n")
+        .expect_err("nested reserve must fail");
+    assert!(error.to_string().contains("did not match any variant"));
+}
+
+/// Direct reserve boundary maps remain closed so misspelled fields cannot be
+/// ignored while preserving an apparently valid reserve.
+#[test]
+fn compaction_policy_threshold_reserve_rejects_unknown_fields() {
+    let error =
+        serde_yaml_ng::from_str::<CompactionPolicyThreshold>("reserve: 25000\nunexpected: true\n")
+            .expect_err("unknown reserve field must fail");
+    assert!(error.to_string().contains("did not match any variant"));
+}
+
 /// An empty status set is almost certainly a configuration error; users must
 /// use null or omission to express an unrestricted policy.
 #[test]
