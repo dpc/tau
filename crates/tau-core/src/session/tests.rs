@@ -3932,7 +3932,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
     reactive.cut = preserved_suffix;
     reactive.resume_through = Some(through);
     reactive.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
-        failed_agent_prompt_id: failed_prompt_id,
+        failed_agent_prompt_id: failed_prompt_id.clone(),
     };
     let persisted = record(
         records.len() as u64,
@@ -3973,6 +3973,11 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
         assert_eq!(
             tree.reactive_compaction_progress(&reactive.transaction_id),
             Some(ReactiveCompactionProgress::ReachedTargetCut)
+        );
+        assert_eq!(
+            tree.reactive_compaction_source_prompt(&reactive.transaction_id),
+            Some(&failed_prompt_id),
+            "live and cold folds keep the exact rejected inference correlation"
         );
     }
     let current = AgentHead::Node(live.head().expect("reactive boundary"));

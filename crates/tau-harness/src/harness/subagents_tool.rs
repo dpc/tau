@@ -1989,6 +1989,104 @@ impl Harness {
         );
     }
 
+    /// Return the exact rejected inference and attempt that own one durable
+    /// reactive compaction transaction.
+    pub(crate) fn reactive_compaction_watch_owner(
+        &self,
+        cid: &crate::AgentId,
+        transaction_id: &tau_proto::CompactionTransactionId,
+    ) -> Option<(tau_proto::AgentPromptId, u32)> {
+        let agent_id = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)?
+            .identity
+            .agent_id
+            .as_ref()?;
+        let tree = self.session_runtime.agent_store.agent(agent_id.as_str())?;
+        let prompt_id = tree
+            .reactive_compaction_source_prompt(transaction_id)?
+            .clone();
+        let attempt = tree
+            .provider_attempt_for_prompt(&prompt_id)
+            .map(tau_proto::ProviderAttempt::get)
+            .unwrap_or(1);
+        Some((prompt_id, attempt))
+    }
+
+    /// Keep the existing reactive provider-watch phase correlated to the
+    /// original rejected inference across retreat and rolling successors.
+    pub(crate) fn project_reactive_compaction_watch_state(
+        &mut self,
+        cid: &crate::AgentId,
+        transaction_id: &tau_proto::CompactionTransactionId,
+    ) {
+        let Some((agent_prompt_id, attempt)) =
+            self.reactive_compaction_watch_owner(cid, transaction_id)
+        else {
+            return;
+        };
+        let already_current = self
+            .ensure_agent_id_for_agent(cid)
+            .and_then(|agent_id| {
+                self.agent_runtime
+                    .agent_watch
+                    .provider_status
+                    .get(agent_id.as_str())
+            })
+            .is_some_and(|status| {
+                status.agent_prompt_id == agent_prompt_id
+                    && matches!(
+                        status.state,
+                        tau_proto::AgentWatchProviderState::RecoveringContext {
+                            attempt: current
+                        } if current == attempt
+                    )
+            });
+        if !already_current {
+            self.project_agent_watch_provider_state(
+                cid,
+                agent_prompt_id,
+                tau_proto::AgentWatchProviderState::RecoveringContext { attempt },
+            );
+        }
+    }
+
+    /// Retire only the reactive provider-watch phase owned by this
+    /// transaction's original rejected inference.
+    pub(crate) fn retire_reactive_compaction_watch_state(
+        &mut self,
+        cid: &crate::AgentId,
+        transaction_id: &tau_proto::CompactionTransactionId,
+    ) {
+        let Some((agent_prompt_id, _)) = self.reactive_compaction_watch_owner(cid, transaction_id)
+        else {
+            return;
+        };
+        let Some(agent_id) = self.ensure_agent_id_for_agent(cid) else {
+            return;
+        };
+        if self
+            .agent_runtime
+            .agent_watch
+            .provider_status
+            .get(agent_id.as_str())
+            .is_some_and(|status| {
+                status.agent_prompt_id == agent_prompt_id
+                    && matches!(
+                        status.state,
+                        tau_proto::AgentWatchProviderState::RecoveringContext { .. }
+                    )
+            })
+        {
+            self.agent_runtime
+                .agent_watch
+                .provider_status
+                .remove(agent_id.as_str());
+        }
+    }
+
     fn notify_agent_watcher_provider_status(
         &mut self,
         watcher_id: &str,

@@ -3117,23 +3117,7 @@ impl Harness {
                     },
                 );
                 self.dispatch_prompt_after_publish_idle(&cid);
-                if let tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
-                    failed_agent_prompt_id,
-                } = &started.trigger
-                {
-                    let attempt = self
-                        .session_runtime
-                        .agent_store
-                        .agent(started.agent_id.as_str())
-                        .and_then(|tree| tree.provider_attempt_for_prompt(failed_agent_prompt_id))
-                        .map(tau_proto::ProviderAttempt::get)
-                        .unwrap_or(1);
-                    self.project_agent_watch_provider_state(
-                        &cid,
-                        failed_agent_prompt_id.clone(),
-                        tau_proto::AgentWatchProviderState::RecoveringContext { attempt },
-                    );
-                }
+                self.project_reactive_compaction_watch_state(&cid, &started.transaction_id);
             }
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event
@@ -3309,6 +3293,7 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
         {
+            self.retire_reactive_compaction_watch_state(&cid, &failed.transaction_id);
             let failed_prompt_id =
                 self.agent_runtime
                     .agent_registry
@@ -3594,6 +3579,11 @@ impl Harness {
         if let Event::AgentInferenceDispatchStarted(started) = event
             && let Some(transaction_id) = started.transaction_id.as_ref()
         {
+            if let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+            {
+                self.retire_reactive_compaction_watch_state(&cid, transaction_id);
+            }
             self.prompt_coordination
                 .compaction_runtime
                 .enqueued_inference_checkpoints

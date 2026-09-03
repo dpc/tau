@@ -2896,6 +2896,24 @@ impl Harness {
                 .navigation_modes
                 .entry(agent_id.clone())
                 .or_insert(navigation_mode);
+            let restored_reactive_transaction = match restored_compaction.as_ref() {
+                Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
+                    started,
+                    ..
+                }) => Some(&started.transaction_id),
+                Some(tau_core::StandaloneCompactionRecovery::AwaitingContextRetreat {
+                    failed,
+                    ..
+                }) => Some(&failed.transaction_id),
+                Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
+                    transaction_id,
+                    ..
+                }) => Some(transaction_id),
+                _ => None,
+            };
+            if let Some(transaction_id) = restored_reactive_transaction {
+                self.project_reactive_compaction_watch_state(&cid, transaction_id);
+            }
             match restored_compaction.clone() {
                 Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
                     ref decision,

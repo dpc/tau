@@ -1231,6 +1231,47 @@ impl AgentTree {
         }
     }
 
+    /// Returns the rejected inference prompt that owns one reactive compaction
+    /// transaction, following every validated retreat and rolling predecessor.
+    ///
+    /// This is a replay-derived correlation query. It does not grant recovery,
+    /// scheduling, provider-watch, or checkpoint authority.
+    #[must_use]
+    pub fn reactive_compaction_source_prompt(
+        &self,
+        transaction_id: &tau_proto::CompactionTransactionId,
+    ) -> Option<&tau_proto::AgentPromptId> {
+        let mut transaction = self.compaction_transactions.get(transaction_id)?;
+        let mut remaining = self.compaction_transactions.len();
+        loop {
+            if remaining == 0 {
+                return None;
+            }
+            remaining -= 1;
+            match &transaction.started.trigger {
+                tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                    failed_agent_prompt_id,
+                } => return Some(failed_agent_prompt_id),
+                tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
+                    failed_transaction_id,
+                    ..
+                } => {
+                    transaction = self.compaction_transactions.get(failed_transaction_id)?;
+                }
+                tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                    previous_transaction_id,
+                }
+                | tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                    previous_transaction_id: Some(previous_transaction_id),
+                    ..
+                } => {
+                    transaction = self.compaction_transactions.get(previous_transaction_id)?;
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// Returns the latest unresolved terminal failure for one exact model and
     /// selected branch.
     ///

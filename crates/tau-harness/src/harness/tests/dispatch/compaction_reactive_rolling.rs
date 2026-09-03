@@ -2,6 +2,41 @@
 
 use super::*;
 
+/// Return provider-watch notifications from one watched agent to one watcher
+/// in durable publication order.
+fn reactive_provider_watch_notifications(
+    h: &Harness,
+    watched_id: &tau_proto::AgentId,
+    watcher_id: &tau_proto::AgentId,
+) -> Vec<tau_proto::AgentWatchProviderStatusNotification> {
+    session_agent_message_received_events(h)
+        .into_iter()
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                && message.sender_id == *watched_id
+                && message.recipient_id == *watcher_id
+        })
+        .filter_map(|message| message.watch_provider_status)
+        .collect()
+}
+
+/// Return one provider prompt for an exact durable agent without counting
+/// watcher-side notification prompts.
+fn nth_prompt_created_for_agent(
+    h: &Harness,
+    agent_id: &tau_proto::AgentId,
+    index: usize,
+) -> tau_proto::AgentPromptCreated {
+    event_log_events(h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == *agent_id => Some(prompt),
+            _ => None,
+        })
+        .nth(index)
+        .expect("agent prompt created")
+}
+
 /// Absence of a byte work cap is not absence of recovery capability: the
 /// harness dispatches the exact normalized provider-closed target and lets a
 /// canonical provider rejection authorize retreat.
@@ -40,7 +75,7 @@ fn reactive_context_overflow_without_byte_budget_dispatches_exact_target() {
     }
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow activation".to_owned()))
         .expect("dispatch rejected inference");
-    let inference = read_nth_prompt_created(&h, 0);
+    let inference = nth_prompt_created_for_agent(&h, &agent_id, 0);
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("provider rejection authorizes no-cap recovery");
 
@@ -186,6 +221,22 @@ fn reactive_context_overflow_rolls_fitting_prefixes_without_token_evidence() {
     info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(1_000));
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let late_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    let late_id = durable_agent_id_for_conversation(&h, &late_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        agent_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
     for marker in ["old-A", "old-B"] {
         h.publish_for_agent(
             &cid,
@@ -215,12 +266,26 @@ fn reactive_context_overflow_rolls_fitting_prefixes_without_token_evidence() {
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow activation".to_owned()))
         .expect("dispatch rejected inference");
-    let inference = read_nth_prompt_created(&h, 0);
+    let inference = nth_prompt_created_for_agent(&h, &agent_id, 0);
     assert_eq!(inference.operation, tau_proto::PromptOperation::Inference);
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("plan reactive recovery");
+    let expected_status = tau_proto::AgentWatchProviderStatusNotification {
+        session_id: h.session_runtime.current_session_id.clone(),
+        subscription_id: String::new(),
+        turn_generation: h.agent_runtime.agent_registry.agents[&cid]
+            .turn
+            .turn_generation,
+        agent_prompt_id: inference.agent_prompt_id.clone(),
+        state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+        initial: false,
+    };
+    assert_eq!(
+        h.agent_runtime.agent_watch.provider_status[agent_id.as_str()],
+        expected_status
+    );
 
-    let first = read_nth_prompt_created(&h, 1);
+    let first = nth_prompt_created_for_agent(&h, &agent_id, 1);
     let first_context = serde_json::to_string(&first.context).expect("first context");
     assert!(first_context.contains("old-A"));
     assert!(!first_context.contains("old-B"));
@@ -231,7 +296,37 @@ fn reactive_context_overflow_rolls_fitting_prefixes_without_token_evidence() {
     ))
     .expect("accept first pass");
 
-    let second = read_nth_prompt_created(&h, 2);
+    let second = nth_prompt_created_for_agent(&h, &agent_id, 2);
+    assert_eq!(
+        h.agent_runtime.agent_watch.provider_status[agent_id.as_str()],
+        expected_status,
+        "a partial success must not retire or re-key the original recovery state"
+    );
+    let mut watcher_notifications =
+        reactive_provider_watch_notifications(&h, &agent_id, &watcher_id);
+    assert_eq!(watcher_notifications.len(), 1);
+    watcher_notifications[0].subscription_id.clear();
+    assert_eq!(
+        watcher_notifications,
+        vec![expected_status.clone()],
+        "a rolling successor must not emit a duplicate or false terminal phase"
+    );
+    h.set_agent_watch(
+        late_id.as_str(),
+        agent_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let mut initial_status = expected_status.clone();
+    initial_status.initial = true;
+    let mut late_notifications = reactive_provider_watch_notifications(&h, &agent_id, &late_id);
+    assert_eq!(late_notifications.len(), 1);
+    late_notifications[0].subscription_id.clear();
+    assert_eq!(
+        late_notifications,
+        vec![initial_status],
+        "a warm late watcher must observe the original recovery correlation"
+    );
     assert_eq!(
         second.operation,
         tau_proto::PromptOperation::StandaloneCompaction
@@ -252,7 +347,23 @@ fn reactive_context_overflow_rolls_fitting_prefixes_without_token_evidence() {
     ))
     .expect("accept second pass");
 
-    let resumed = read_nth_prompt_created(&h, 3);
+    let resumed = nth_prompt_created_for_agent(&h, &agent_id, 3);
+    assert!(
+        !h.agent_runtime
+            .agent_watch
+            .provider_status
+            .contains_key(agent_id.as_str()),
+        "the final inference checkpoint settles the recovery snapshot"
+    );
+    let mut watcher_notifications =
+        reactive_provider_watch_notifications(&h, &agent_id, &watcher_id);
+    assert_eq!(watcher_notifications.len(), 1);
+    watcher_notifications[0].subscription_id.clear();
+    assert_eq!(
+        watcher_notifications,
+        vec![expected_status],
+        "final settlement must not invent a provider terminal notification"
+    );
     assert_eq!(resumed.operation, tau_proto::PromptOperation::Inference);
     let resumed_context = serde_json::to_string(&resumed.context).expect("resumed context");
     assert!(resumed_context.contains("summary-B"));
@@ -515,6 +626,7 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
     let state = td.path().join("state");
     let first_transaction_id;
     let first_started;
+    let failed_agent_prompt_id;
     {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
@@ -574,6 +686,7 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("replayed activation".to_owned()))
             .expect("dispatch rejected inference");
         let inference = read_nth_prompt_created(&h, 0);
+        failed_agent_prompt_id = inference.agent_prompt_id.clone();
         h.handle_provider_response_finished(context_overflow_response(&inference))
             .expect("plan first reactive pass");
         let reactive = event_log_events(&h)
@@ -678,6 +791,169 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
     drop(store);
     let loss_state = td.path().join("loss-state");
     copy_tree(&state, &loss_state);
+    let rejected_start_state = td.path().join("rejected-start-state");
+    copy_tree(&state, &rejected_start_state);
+
+    {
+        let mut rejected = quiet_provider_harness_for_with_start_reason_and_storage_mode(
+            "s3",
+            &rejected_start_state,
+            tau_proto::SessionStartReason::Initial,
+            crate::HarnessStorageMode::Durable,
+        )
+        .expect("start rejected-publication harness");
+        let info = rejected
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
+        info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(1_000));
+        let interceptor = "reactive-rolling-restart-reject";
+        connect_test_tool(&mut rejected, interceptor);
+        rejected
+            .handle_extension_event(
+                interceptor,
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(
+                        tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+                    )],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("register rolling-start interceptor");
+        rejected
+            .switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
+            .expect("restore partial success with rejected successor start");
+        assert!(matches!(
+            rejected
+                .runtime_io
+                .publication
+                .pending_intercept
+                .as_ref()
+                .map(|pending| &pending.event),
+            Some(Event::AgentStandaloneCompactionStarted(started))
+                if matches!(
+                    &started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                        previous_transaction_id
+                    } if previous_transaction_id == &first_transaction_id
+                )
+        ));
+        assert!(matches!(
+            rejected
+                .agent_runtime
+                .agent_watch
+                .provider_status
+                .get(first_started.agent_id.as_str()),
+            Some(tau_proto::AgentWatchProviderStatusNotification {
+                agent_prompt_id,
+                state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+                ..
+            }) if agent_prompt_id == &failed_agent_prompt_id
+        ));
+        assert!(
+            event_log_events(&rejected).iter().all(|event| !matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
+                    )
+            )),
+            "the rejected rolling successor must not appear committed"
+        );
+        reject_next_semantic_admission(&rejected);
+        rejected
+            .handle_extension_event(
+                interceptor,
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("reject rolling successor append");
+        assert!(matches!(
+            rejected
+                .agent_runtime
+                .agent_watch
+                .provider_status
+                .get(first_started.agent_id.as_str()),
+            Some(tau_proto::AgentWatchProviderStatusNotification {
+                agent_prompt_id,
+                state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+                ..
+            }) if agent_prompt_id == &failed_agent_prompt_id
+        ));
+        let late_cid = rejected.create_durable_user_agent(
+            rejected.session_runtime.current_session_id.clone(),
+            &rejected.config.selected_role.clone(),
+        );
+        let late_id = durable_agent_id_for_conversation(&rejected, &late_cid);
+        rejected.set_agent_watch(
+            late_id.as_str(),
+            first_started.agent_id.as_str(),
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        );
+        assert!(matches!(
+            reactive_provider_watch_notifications(
+                &rejected,
+                &first_started.agent_id,
+                &late_id
+            )
+            .as_slice(),
+            [tau_proto::AgentWatchProviderStatusNotification {
+                agent_prompt_id,
+                state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+                initial: true,
+                ..
+            }] if agent_prompt_id == &failed_agent_prompt_id
+        ));
+        rejected.retry_pending_agent_publications();
+        let continuation = event_log_events(&rejected)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        &started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                            previous_transaction_id
+                        } if previous_transaction_id == &first_transaction_id
+                    ) =>
+                {
+                    Some(started)
+                }
+                _ => None,
+            })
+            .expect("retry commits the exact rolling successor");
+        let compact = read_prompt_created(&rejected, &continuation.compact_prompt_id);
+        rejected.handle_cancel_prompt(
+            crate::harness::harness_connection_id(),
+            &tau_proto::UiCancelPrompt {
+                session_id: test_session_id("s1"),
+                target_agent_id: Some(continuation.agent_id.clone()),
+                agent_prompt_id: Some(compact.agent_prompt_id),
+            },
+        );
+        assert!(event_log_events(&rejected).iter().any(|event| matches!(
+            event,
+            Event::AgentStandaloneCompactionFailed(failed)
+                if failed.transaction_id == continuation.transaction_id
+                    && failed.reason
+                        == tau_proto::StandaloneCompactionFailureReason::Cancelled
+        )));
+        assert!(
+            !rejected
+                .agent_runtime
+                .agent_watch
+                .provider_status
+                .contains_key(continuation.agent_id.as_str()),
+            "the matching terminal retires the restored recovery snapshot"
+        );
+        rejected.shutdown().expect("shutdown rejected harness");
+    }
 
     {
         let mut loss = quiet_provider_harness_for_with_start_reason_and_storage_mode(
@@ -786,6 +1062,49 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
         1
     );
     let compact = read_nth_prompt_created(&resumed, 0);
+    let target_cid = resumed
+        .runtime_agent_id_for_target_agent(Some(continuation.agent_id.as_str()))
+        .expect("restored reactive agent");
+    let late_cid = resumed.create_durable_user_agent(
+        resumed.session_runtime.current_session_id.clone(),
+        &resumed.config.selected_role.clone(),
+    );
+    let late_id = durable_agent_id_for_conversation(&resumed, &late_cid);
+    assert!(matches!(
+        resumed.agent_runtime.agent_watch.provider_status.get(
+            continuation.agent_id.as_str()
+        ),
+        Some(tau_proto::AgentWatchProviderStatusNotification {
+            agent_prompt_id,
+            state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+            ..
+        }) if agent_prompt_id == &failed_agent_prompt_id
+    ));
+    resumed.set_agent_watch(
+        late_id.as_str(),
+        continuation.agent_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    assert!(matches!(
+        reactive_provider_watch_notifications(&resumed, &continuation.agent_id, &late_id)
+            .as_slice(),
+        [tau_proto::AgentWatchProviderStatusNotification {
+            agent_prompt_id,
+            state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+            initial: true,
+            ..
+        }] if agent_prompt_id == &failed_agent_prompt_id
+    ));
+    assert!(matches!(
+        resumed.agent_runtime.agent_registry.agents[&target_cid]
+            .dispatch
+            .activation_dispatch,
+        path_crate_agent::ActivationDispatchState::Running {
+            ref id,
+            ..
+        } if id == &continuation.transaction_id
+    ));
     let context = serde_json::to_string(&compact.context).expect("compact context");
     assert!(context.contains("reactive summary"));
     assert!(context.contains("old-B"));

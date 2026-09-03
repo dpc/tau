@@ -2011,7 +2011,21 @@ impl Harness {
             );
             return;
         }
-        self.settle_standalone_provider_watch_status(cid, response);
+        let retains_reactive_recovery = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| match &agent.dispatch.activation_dispatch {
+                path_crate_agent::ActivationDispatchState::Running { id, .. } => {
+                    self.reactive_compaction_watch_owner(cid, id)
+                }
+                _ => None,
+            })
+            .is_some();
+        if !retains_reactive_recovery {
+            self.settle_standalone_provider_watch_status(cid, response);
+        }
         self.publish_event_for_agent_with_completion(
             cid,
             source,
@@ -2313,7 +2327,9 @@ impl Harness {
             .remove(&response.agent_prompt_id);
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-        self.settle_standalone_provider_watch_status(cid, response);
+        if retreat_plan.is_none() {
+            self.settle_standalone_provider_watch_status(cid, response);
+        }
         self.emit_info_important(&format!(
             "standalone compaction failed for agent `{cid}` ({reason:?}); retry with :compact, switch model/role, or rewind"
         ));
