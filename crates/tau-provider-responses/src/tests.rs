@@ -3650,6 +3650,202 @@ fn sse_chunk_processing_observes_cancellation_between_complete_lines() {
     ));
 }
 
+/// When cancellation and expiry become authoritative at the same buffered-line
+/// boundary, cancellation must win without sampling the deadline clock.
+#[test]
+fn buffered_sse_lines_check_cancellation_before_deadline() {
+    let start = Instant::now();
+    let mut pending = SseLineBuffer::default();
+    pending.append(
+        concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"accepted\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"rejected\"}\n",
+        )
+        .as_bytes(),
+    );
+    let mut state = State::default();
+    let mut deadlines = deadlines::StreamDeadlines::new(start);
+    let update_count = Cell::new(0);
+    let clock_samples = Cell::new(0);
+
+    let error = process_active_sse_lines(
+        &mut pending,
+        &mut state,
+        &mut deadlines,
+        &mut |_| update_count.set(update_count.get() + 1),
+        &mut || update_count.get() == 1,
+        &mut None,
+        &mut || {
+            clock_samples.set(clock_samples.get() + 1);
+            if update_count.get() == 0 {
+                start
+            } else {
+                start + deadlines::STREAM_TOTAL_TIMEOUT
+            }
+        },
+    )
+    .expect_err("cancellation must preempt simultaneous expiry");
+
+    assert!(matches!(error, Error::Canceled));
+    assert_eq!(update_count.get(), 1);
+    assert_eq!(
+        clock_samples.get(),
+        2,
+        "the canceled second line must not sample deadline time"
+    );
+    assert!(matches!(
+        state.progress().output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "accepted".to_owned(),
+        }]
+    ));
+}
+
+/// A qualifying buffered line may renew semantic-idle time, but it must not
+/// renew the absolute deadline before the next already-buffered line.
+#[test]
+fn buffered_sse_lines_preserve_absolute_nonrenewing_deadline() {
+    let start = Instant::now();
+    let mut pending = SseLineBuffer::default();
+    pending.append(
+        concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"accepted\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"rejected\"}\n",
+            "data: [DONE]\n",
+        )
+        .as_bytes(),
+    );
+    let mut state = State::default();
+    let mut deadlines = deadlines::StreamDeadlines::new(start);
+    let update_count = Cell::new(0);
+    let clock_samples = Cell::new(0);
+
+    let error = process_active_sse_lines(
+        &mut pending,
+        &mut state,
+        &mut deadlines,
+        &mut |_| update_count.set(update_count.get() + 1),
+        &mut || false,
+        &mut None,
+        &mut || {
+            let sample = match clock_samples.get() {
+                0 => start,
+                1 => start + Duration::from_secs(9 * 60),
+                _ => start + deadlines::STREAM_TOTAL_TIMEOUT,
+            };
+            clock_samples.set(clock_samples.get() + 1);
+            sample
+        },
+    )
+    .expect_err("absolute expiry must preempt the second buffered line");
+
+    assert!(matches!(error, Error::StreamFailure));
+    assert_eq!(update_count.get(), 1);
+    assert_eq!(
+        deadlines.next_deadline(),
+        start + deadlines::STREAM_TOTAL_TIMEOUT,
+        "qualifying progress must renew only semantic-idle time"
+    );
+    assert!(state.terminal.is_none());
+    assert!(matches!(
+        state.progress().output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "accepted".to_owned(),
+        }]
+    ));
+}
+
+/// A nonqualifying buffered SSE comment must not renew semantic-idle time, so
+/// idle expiry preempts the next complete semantic line.
+#[test]
+fn buffered_sse_lines_preserve_nonqualifying_idle_deadline() {
+    let start = Instant::now();
+    let mut pending = SseLineBuffer::default();
+    pending.append(
+        concat!(
+            ": heartbeat\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"rejected\"}\n",
+        )
+        .as_bytes(),
+    );
+    let mut state = State::default();
+    let mut deadlines = deadlines::StreamDeadlines::new(start);
+    let update_count = Cell::new(0);
+    let clock_samples = Cell::new(0);
+
+    let error = process_active_sse_lines(
+        &mut pending,
+        &mut state,
+        &mut deadlines,
+        &mut |_| update_count.set(update_count.get() + 1),
+        &mut || false,
+        &mut None,
+        &mut || {
+            let sample = if clock_samples.get() == 0 {
+                start
+            } else {
+                start + deadlines::STREAM_IDLE_TIMEOUT
+            };
+            clock_samples.set(clock_samples.get() + 1);
+            sample
+        },
+    )
+    .expect_err("idle expiry must preempt the semantic line after a comment");
+
+    assert!(matches!(error, Error::StreamFailure));
+    assert_eq!(update_count.get(), 0);
+    assert!(state.progress().output_items.is_empty());
+}
+
+/// Active buffered multi-line SSE parsing must retain its existing wire order,
+/// semantic updates, terminal handling, and accumulated output.
+#[test]
+fn buffered_sse_lines_preserve_normal_multi_line_parsing() {
+    let start = Instant::now();
+    let mut pending = SseLineBuffer::default();
+    pending.append(
+        concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"first\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\" second\"}\n",
+            "data: [DONE]\n",
+        )
+        .as_bytes(),
+    );
+    let mut state = State::default();
+    let mut deadlines = deadlines::StreamDeadlines::new(start);
+    let update_count = Cell::new(0);
+
+    let control = process_active_sse_lines(
+        &mut pending,
+        &mut state,
+        &mut deadlines,
+        &mut |_| update_count.set(update_count.get() + 1),
+        &mut || false,
+        &mut None,
+        &mut || start,
+    )
+    .expect("active multi-line SSE must parse");
+
+    assert_eq!(control, SseLineControl::Break);
+    assert_eq!(update_count.get(), 2);
+    assert!(state.terminal.is_some());
+    assert!(matches!(
+        state.progress().output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "first second".to_owned(),
+        }]
+    ));
+}
+
 /// The residual SSE-line bound accepts exactly one MiB before any newline
 /// arrives, preserving the existing inclusive boundary.
 #[test]

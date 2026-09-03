@@ -1983,6 +1983,59 @@ async fn stream(
     }
 }
 
+/// Applies every complete buffered SSE line while the stream remains active.
+///
+/// Cancellation is authoritative before deadline expiry at each line boundary.
+/// The caller-owned deadlines retain their existing absolute and semantic-idle
+/// renewal behavior.
+#[allow(clippy::too_many_arguments)]
+fn process_active_sse_lines(
+    pending: &mut SseLineBuffer,
+    state: &mut State,
+    deadlines: &mut deadlines::StreamDeadlines,
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
+    is_canceled: &mut impl FnMut() -> bool,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
+    now: &mut impl FnMut() -> Instant,
+) -> Result<SseLineControl, Error> {
+    let decode_started = private_trace::started(private_trace);
+    let mut callback_elapsed = private_trace.as_ref().map(|_| Duration::ZERO);
+    let control = process_complete_sse_lines(pending, |line| {
+        if is_canceled() {
+            return Err(Error::Canceled);
+        }
+        if deadlines.expired(now()) {
+            return Err(Error::StreamFailure);
+        }
+        if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
+            if data == "[DONE]" {
+                state.terminalize(TerminalKind::Completed)?;
+                return Ok(SseLineControl::Break);
+            }
+            let qualifying_progress = state.apply_event(data)?;
+            if qualifying_progress && let Some(trace) = private_trace.as_mut() {
+                trace.semantic_qualified();
+            }
+            let callback_started = private_trace::started(private_trace);
+            on_update(AttemptUpdate::Progress(state.progress_view()));
+            if let (Some(elapsed), Some(started)) = (callback_elapsed.as_mut(), callback_started) {
+                *elapsed = elapsed.saturating_add(started.elapsed());
+            }
+            if qualifying_progress {
+                deadlines.renew_for_qualifying_progress(now());
+            }
+            if state.terminal.is_some() {
+                return Ok(SseLineControl::Break);
+            }
+        }
+        Ok(SseLineControl::Continue)
+    });
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+        trace.decoded_excluding(started, callback_elapsed.unwrap_or_default(), false);
+    }
+    control
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stream_sse(
     prompt: &tau_proto::AgentPromptCreated,
@@ -2115,40 +2168,15 @@ async fn stream_sse(
             return Err((Error::StreamFailure, state.progress()));
         }
         pending.append(&chunk);
-        let decode_started = private_trace::started(private_trace);
-        let mut callback_elapsed = private_trace.as_ref().map(|_| Duration::ZERO);
-        let control = process_complete_sse_lines(&mut pending, |line| {
-            if is_canceled() {
-                return Err(Error::Canceled);
-            }
-            if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
-                if data == "[DONE]" {
-                    state.terminalize(TerminalKind::Completed)?;
-                    return Ok(SseLineControl::Break);
-                }
-                let qualifying_progress = state.apply_event(data)?;
-                if qualifying_progress && let Some(trace) = private_trace.as_mut() {
-                    trace.semantic_qualified();
-                }
-                let callback_started = private_trace::started(private_trace);
-                on_update(AttemptUpdate::Progress(state.progress_view()));
-                if let (Some(elapsed), Some(started)) =
-                    (callback_elapsed.as_mut(), callback_started)
-                {
-                    *elapsed = elapsed.saturating_add(started.elapsed());
-                }
-                if qualifying_progress {
-                    deadlines.renew_for_qualifying_progress(Instant::now());
-                }
-                if state.terminal.is_some() {
-                    return Ok(SseLineControl::Break);
-                }
-            }
-            Ok(SseLineControl::Continue)
-        });
-        if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
-            trace.decoded_excluding(started, callback_elapsed.unwrap_or_default(), false);
-        }
+        let control = process_active_sse_lines(
+            &mut pending,
+            &mut state,
+            &mut deadlines,
+            on_update,
+            is_canceled,
+            private_trace,
+            &mut Instant::now,
+        );
         let control = control.map_err(|error| (error, state.progress()))?;
         if control == SseLineControl::Break {
             return Ok(state);
