@@ -1,6 +1,301 @@
 //! Focused durable standalone backend-attempt accounting oracles.
 
+use tau_config::settings::AgentWatchRetryNotificationPolicy;
+
 use super::*;
+
+fn report_standalone_retry(h: &mut Harness, prompt: &tau_proto::AgentPromptCreated, attempt: u32) {
+    let provider = h
+        .provider_runtime
+        .pending_prompts
+        .get(&prompt.agent_prompt_id)
+        .cloned()
+        .expect("provider owner");
+    h.handle_extension_event(
+        provider.as_str(),
+        TestProtocolItem::Event(Event::ProviderResponseUpdatedReported(
+            ProviderResponseUpdated {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                agent_id: prompt.agent_id.clone(),
+                deltas: Vec::new(),
+                compaction: None,
+                status: Some(tau_proto::ProviderResponseStatusUpdate {
+                    text: "retrying".to_owned(),
+                    clear_response: true,
+                    retry: Some(tau_proto::ProviderRetryStatus {
+                        category: tau_proto::ProviderRetryCategory::Transport,
+                        attempt,
+                        next_retry_delay_secs: 1,
+                    }),
+                }),
+                response_stats: None,
+                originator: prompt.originator.clone(),
+            },
+        )),
+    )
+    .expect("record retry");
+}
+
+/// A failed standalone provider terminal must replace its retry snapshot for
+/// current and warm late watchers, while restart drops the runtime-only state.
+#[test]
+fn standalone_failure_terminalizes_warm_provider_watch_status() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let watched_id = {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        h.config
+            .accepted_harness_settings
+            .agent_watch_retry_notification_threshold =
+            AgentWatchRetryNotificationPolicy::from_raw(0);
+        let watched_cid = ensure_test_user_agent(&mut h);
+        let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+        let watcher_cid = h.create_durable_user_agent(
+            h.session_runtime.current_session_id.clone(),
+            &h.config.selected_role.clone(),
+        );
+        let late_cid = h.create_durable_user_agent(
+            h.session_runtime.current_session_id.clone(),
+            &h.config.selected_role.clone(),
+        );
+        let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+        let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
+        h.set_agent_watch(
+            &watcher_id,
+            &watched_id,
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        );
+
+        h.handle_compact_request(
+            crate::harness::harness_connection_id(),
+            test_session_id("s1"),
+            Some(&watched_id),
+        );
+        let prompt = read_nth_prompt_created(&h, 0);
+        report_standalone_retry(&mut h, &prompt, 1);
+        assert!(matches!(
+            h.agent_runtime.agent_watch.provider_status[&watched_id].state,
+            tau_proto::AgentWatchProviderState::Retrying { attempt: 1, .. }
+        ));
+
+        h.handle_provider_response_finished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: prompt.agent_prompt_id.clone(),
+            agent_id: prompt.agent_id,
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::Error,
+            error: Some("private provider failure".to_owned()),
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: prompt.originator,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+        .expect("record terminal failure");
+        assert!(matches!(
+            h.agent_runtime.agent_watch.provider_status[&watched_id].state,
+            tau_proto::AgentWatchProviderState::TerminalError {
+                failure_kind: tau_proto::ProviderFailureKind::Unknown,
+                attempt: 2,
+            }
+        ));
+        let watcher_statuses = session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                    && message.recipient_id.as_str() == watcher_id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(watcher_statuses.len(), 2);
+        assert!(matches!(
+            watcher_statuses[1]
+                .watch_provider_status
+                .as_ref()
+                .expect("terminal status")
+                .state,
+            tau_proto::AgentWatchProviderState::TerminalError {
+                failure_kind: tau_proto::ProviderFailureKind::Unknown,
+                attempt: 2,
+            }
+        ));
+
+        h.set_agent_watch(
+            &late_id,
+            &watched_id,
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        );
+        let late_status = session_agent_message_received_events(&h)
+            .into_iter()
+            .rev()
+            .find(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                    && message.recipient_id.as_str() == late_id
+            })
+            .expect("warm late-watch snapshot");
+        let late_status = late_status
+            .watch_provider_status
+            .expect("typed warm late-watch status");
+        assert!(late_status.initial);
+        assert!(matches!(
+            late_status.state,
+            tau_proto::AgentWatchProviderState::TerminalError {
+                failure_kind: tau_proto::ProviderFailureKind::Unknown,
+                attempt: 2,
+            }
+        ));
+        h.shutdown().expect("shutdown");
+        watched_id
+    };
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert!(
+        !resumed
+            .agent_runtime
+            .agent_watch
+            .provider_status
+            .contains_key(&watched_id),
+        "provider-watch state remains runtime-only after restart"
+    );
+    let cold_late_cid = resumed.create_durable_user_agent(
+        resumed.session_runtime.current_session_id.clone(),
+        &resumed.config.selected_role.clone(),
+    );
+    let cold_late_id = durable_agent_id_for_conversation(&resumed, &cold_late_cid).to_string();
+    let provider_status_count = |h: &Harness| {
+        session_agent_message_received_events(h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                    && message.recipient_id.as_str() == cold_late_id
+            })
+            .count()
+    };
+    let before = provider_status_count(&resumed);
+    resumed.set_agent_watch(
+        &cold_late_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    assert_eq!(
+        provider_status_count(&resumed),
+        before,
+        "cold late watch must not replay a runtime-only provider terminal"
+    );
+}
+
+/// User cancellation must retire the exact standalone retry snapshot without
+/// projecting cancellation as a provider terminal error to current or late
+/// watchers.
+#[test]
+fn standalone_cancellation_retires_warm_provider_watch_status() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    h.config
+        .accepted_harness_settings
+        .agent_watch_retry_notification_threshold = AgentWatchRetryNotificationPolicy::from_raw(0);
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let late_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&watched_id),
+    );
+    let prompt = read_nth_prompt_created(&h, 0);
+    report_standalone_retry(&mut h, &prompt, 1);
+    let watcher_provider_status_count = |h: &Harness| {
+        session_agent_message_received_events(h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                    && message.recipient_id.as_str() == watcher_id
+            })
+            .count()
+    };
+    assert_eq!(watcher_provider_status_count(&h), 1);
+
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&watched_id)),
+            agent_prompt_id: Some(prompt.agent_prompt_id.clone()),
+        },
+    );
+
+    assert!(
+        !h.agent_runtime
+            .agent_watch
+            .provider_status
+            .contains_key(&watched_id),
+        "cancelled standalone prompt must not remain retrying"
+    );
+    assert_eq!(
+        watcher_provider_status_count(&h),
+        1,
+        "cancellation is not a provider terminal error"
+    );
+    h.set_agent_watch(
+        &late_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    assert!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .all(|message| {
+                message.kind != tau_proto::AgentMessageKind::WatchProviderStatus
+                    || message.recipient_id.as_str() != late_id
+            }),
+        "warm late watcher must not receive the retired retry snapshot"
+    );
+}
 
 /// A standalone-capable model must bound retry accounting at 64, reserve
 /// attempt 65 for its terminal, and accept validated output as one replacement
@@ -173,6 +468,13 @@ fn manual_standalone_compact_installs_one_boundary() {
         .expect("accept compact response");
     h.handle_provider_response_finished(response)
         .expect("ignore duplicate compact response");
+    assert!(
+        !h.agent_runtime
+            .agent_watch
+            .provider_status
+            .contains_key(agent_id.as_str()),
+        "successful standalone terminal must retire the retry snapshot"
+    );
 
     let compacted: Vec<_> = event_log_events(&h)
         .into_iter()

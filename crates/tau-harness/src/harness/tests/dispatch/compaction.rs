@@ -7914,7 +7914,8 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
     h.shutdown().expect("shutdown");
 }
 /// Incoming user work preempts a non-tool extension's reactive compact through
-/// the production preemption path and durably cancels it exactly once.
+/// the production preemption path, durably cancels it exactly once, and retires
+/// the recovery snapshot for current and warm late watchers.
 #[test]
 fn reactive_context_overflow_extension_preemption_cancels_once() {
     let td = TempDir::new().expect("tempdir");
@@ -7930,12 +7931,71 @@ fn reactive_context_overflow_extension_preemption_cancels_once() {
         ext_query("q-preempt-reactive"),
     )
     .expect("start extension side agent");
+    let side_cid = ext_query_cid(&h, "q-preempt-reactive").expect("side agent retained");
+    let side_id = durable_agent_id_for_conversation(&h, &side_cid).to_string();
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let late_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
+    h.set_agent_watch(
+        &watcher_id,
+        &side_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
     let inference = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("start recovery");
     let compact = read_nth_prompt_created(&h, 1);
+    assert!(matches!(
+        h.agent_runtime.agent_watch.provider_status[&side_id].state,
+        tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 }
+    ));
+    let watcher_provider_status_count = |h: &Harness| {
+        session_agent_message_received_events(h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                    && message.recipient_id.as_str() == watcher_id
+            })
+            .count()
+    };
+    assert_eq!(watcher_provider_status_count(&h), 1);
     h.submit_user_prompt(test_session_id("s1"), "preempt side work".to_owned())
         .expect("submit user prompt");
+    assert!(
+        !h.agent_runtime
+            .agent_watch
+            .provider_status
+            .contains_key(&side_id),
+        "reactive cancellation must retire its source-prompt recovery snapshot"
+    );
+    assert_eq!(
+        watcher_provider_status_count(&h),
+        1,
+        "cancellation is not a provider terminal error"
+    );
+    h.set_agent_watch(
+        &late_id,
+        &side_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    assert!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .all(|message| {
+                message.kind != tau_proto::AgentMessageKind::WatchProviderStatus
+                    || message.recipient_id.as_str() != late_id
+            }),
+        "warm late watcher must not receive retired recovery state"
+    );
     h.handle_provider_response_finished(context_overflow_response(&compact))
         .expect("ignore late compact response");
     assert_eq!(
@@ -7949,7 +8009,6 @@ fn reactive_context_overflow_extension_preemption_cancels_once() {
             .count(),
         1
     );
-    let side_cid = ext_query_cid(&h, "q-preempt-reactive").expect("side agent retained");
     assert!(
         h.agent_runtime.agent_registry.agents[&side_cid]
             .dispatch

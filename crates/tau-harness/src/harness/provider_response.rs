@@ -532,7 +532,7 @@ impl Harness {
             .error
             .as_ref()
             .map(|_| tau_proto::ProviderFailureKind::Unknown));
-        if (!standalone_compaction || standalone_success)
+        if !standalone_compaction
             && let Some(failure_kind) = safe_failure_kind
             && let Some(public_id) = self.ensure_agent_id_for_agent(&cid)
             && !self
@@ -564,7 +564,7 @@ impl Harness {
                     initial: false,
                 },
             );
-        } else if (!standalone_compaction || standalone_success)
+        } else if !standalone_compaction
             && response.error.is_none()
             && let Some(public_id) = self.ensure_agent_id_for_agent(&cid)
         {
@@ -2011,6 +2011,7 @@ impl Harness {
             );
             return;
         }
+        self.settle_standalone_provider_watch_status(cid, response);
         self.publish_event_for_agent_with_completion(
             cid,
             source,
@@ -2312,6 +2313,7 @@ impl Harness {
             .remove(&response.agent_prompt_id);
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        self.settle_standalone_provider_watch_status(cid, response);
         self.emit_info_important(&format!(
             "standalone compaction failed for agent `{cid}` ({reason:?}); retry with :compact, switch model/role, or rewind"
         ));
@@ -2364,6 +2366,75 @@ impl Harness {
             }),
             false,
         );
+    }
+
+    /// Replace or retire the current provider-watch snapshot when one
+    /// standalone provider prompt reaches a terminal response.
+    fn settle_standalone_provider_watch_status(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+    ) {
+        let Some(public_id) = self.ensure_agent_id_for_agent(cid) else {
+            return;
+        };
+        if self
+            .prompt_coordination
+            .compaction_runtime
+            .silent_failure_prompts
+            .contains(&response.agent_prompt_id)
+            || response
+                .output_items
+                .iter()
+                .any(|item| matches!(item, ContextItem::ToolCall(_)))
+        {
+            self.agent_runtime
+                .agent_watch
+                .provider_status
+                .remove(public_id.as_str());
+            return;
+        }
+        let failure_kind = response.failure_kind.or(response
+            .error
+            .as_ref()
+            .map(|_| tau_proto::ProviderFailureKind::Unknown));
+        let lifecycle_notification_only = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.turn.lifecycle_notification_only_turn);
+        if let Some(failure_kind) = failure_kind
+            && !lifecycle_notification_only
+        {
+            let turn_generation = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .map_or(tau_proto::AgentOuterTurnGeneration::initial(), |agent| {
+                    agent.turn.turn_generation
+                });
+            self.update_agent_watch_provider_status(
+                &public_id,
+                tau_proto::AgentWatchProviderStatusNotification {
+                    session_id: self.session_runtime.current_session_id.clone(),
+                    subscription_id: String::new(),
+                    turn_generation,
+                    agent_prompt_id: response.agent_prompt_id.clone(),
+                    state: tau_proto::AgentWatchProviderState::TerminalError {
+                        failure_kind,
+                        attempt: response.provider_attempt.get(),
+                    },
+                    initial: false,
+                },
+            );
+            return;
+        }
+        self.agent_runtime
+            .agent_watch
+            .provider_status
+            .remove(public_id.as_str());
     }
 
     pub(super) fn clear_malformed_repetition_output(

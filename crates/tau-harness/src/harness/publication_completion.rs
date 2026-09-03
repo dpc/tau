@@ -3341,6 +3341,43 @@ impl Harness {
                     .silent_failure_prompts
                     .remove(prompt_id)
             });
+            let cancelled_status_owner = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .and_then(|agent| match &agent.dispatch.activation_dispatch {
+                    path_crate_agent::ActivationDispatchState::Running {
+                        id,
+                        compact_prompt_id,
+                        ..
+                    } if id == &failed.transaction_id => {
+                        Some((compact_prompt_id.clone(), agent.turn.turn_generation))
+                    }
+                    _ => None,
+                });
+            if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
+                && let Some((compact_prompt_id, turn_generation)) = cancelled_status_owner
+                && let Some(public_id) = self.ensure_agent_id_for_agent(&cid)
+                && self
+                    .agent_runtime
+                    .agent_watch
+                    .provider_status
+                    .get(public_id.as_str())
+                    .is_some_and(|status| {
+                        status.turn_generation == turn_generation
+                            && (status.agent_prompt_id == compact_prompt_id
+                                || matches!(
+                                    status.state,
+                                    tau_proto::AgentWatchProviderState::RecoveringContext { .. }
+                                ))
+                    })
+            {
+                self.agent_runtime
+                    .agent_watch
+                    .provider_status
+                    .remove(public_id.as_str());
+            }
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 agent.dispatch.activation_dispatch =
                     path_crate_agent::ActivationDispatchState::None;
