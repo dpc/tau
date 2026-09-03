@@ -161,3 +161,26 @@ fn non_ascii_message_fits_at_exact_utf8_byte_cap() {
         vec![message(exact), compact_item()]
     );
 }
+
+/// The production replacement builder must not clone older eligible messages
+/// after the newest exact-budget message closes the retained window.
+#[test]
+fn newest_first_budget_skips_cloning_excluded_older_messages() {
+    let mut items = (0..32)
+        .map(|_| message("old".repeat(10_000)))
+        .collect::<Vec<_>>();
+    let newest = message("n".repeat(RETAINED_MESSAGE_BYTE_BUDGET));
+    items.push(newest.clone());
+    RETAINED_MESSAGE_CLONES.with(|count| count.set(0));
+
+    let output = build_v2_compacted_window(&context(items), vec![compact_item()]);
+
+    assert_eq!(output, vec![newest, compact_item()]);
+    RETAINED_MESSAGE_CLONES.with(|count| {
+        assert_eq!(
+            count.get(),
+            1,
+            "only the admitted newest message may be cloned"
+        );
+    });
+}

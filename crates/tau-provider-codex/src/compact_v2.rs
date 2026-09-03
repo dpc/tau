@@ -5,6 +5,12 @@ use tau_proto::{ContentPart, ContextBlock, ContextItem, ContextRole, MessageItem
 const RETAINED_MESSAGE_BYTE_BUDGET: usize = 256_000;
 const MAX_RETAINED_AGENT_MESSAGE_BYTES: usize = 40_000;
 
+#[cfg(test)]
+thread_local! {
+    /// Counts message clones performed by the production replacement builder.
+    static RETAINED_MESSAGE_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Builds the approved ChatGPT-v2 replacement from exact retained input and
 /// the single canonical provider compaction item.
 pub(super) fn build_v2_compacted_window(
@@ -14,25 +20,25 @@ pub(super) fn build_v2_compacted_window(
     let candidates = context
         .blocks
         .iter()
+        .rev()
         .filter_map(|block| match block {
             ContextBlock::UserInput(block) => Some(block.items.as_slice()),
             ContextBlock::AssistantResponse(block) => Some(block.output_items.as_slice()),
             ContextBlock::ToolResults(_) => None,
         })
-        .flatten()
-        .filter_map(retained_message)
-        .collect::<Vec<_>>();
+        .flat_map(|items| items.iter().rev())
+        .filter_map(retained_message);
     let mut remaining = RETAINED_MESSAGE_BYTE_BUDGET;
     let mut retained = Vec::new();
-    for item in candidates.into_iter().rev() {
+    for item in candidates {
         if remaining == 0 {
             break;
         }
-        let bytes = message_bytes(&item);
+        let bytes = message_bytes(item);
         if bytes <= remaining {
             remaining = remaining.saturating_sub(bytes);
-            retained.push(ContextItem::Message(item));
-        } else if let Some(item) = truncate_message(item, remaining) {
+            retained.push(ContextItem::Message(clone_retained_message(item)));
+        } else if let Some(item) = truncate_message(clone_retained_message(item), remaining) {
             retained.push(ContextItem::Message(item));
             break;
         } else {
@@ -44,7 +50,8 @@ pub(super) fn build_v2_compacted_window(
     retained
 }
 
-fn retained_message(item: &ContextItem) -> Option<MessageItem> {
+/// Borrows one eligible retained message without materializing a candidate.
+fn retained_message(item: &ContextItem) -> Option<&MessageItem> {
     let ContextItem::Message(message) = item else {
         return None;
     };
@@ -65,7 +72,14 @@ fn retained_message(item: &ContextItem) -> Option<MessageItem> {
     if is_agent_message && MAX_RETAINED_AGENT_MESSAGE_BYTES < message_bytes(message) {
         return None;
     }
-    Some(message.clone())
+    Some(message)
+}
+
+/// Clones one message only after newest-first aggregate admission reaches it.
+fn clone_retained_message(message: &MessageItem) -> MessageItem {
+    #[cfg(test)]
+    RETAINED_MESSAGE_CLONES.with(|count| count.set(count.get().saturating_add(1)));
+    message.clone()
 }
 
 fn is_non_final_agent_message(text: &str) -> bool {
