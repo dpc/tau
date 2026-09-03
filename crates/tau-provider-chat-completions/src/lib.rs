@@ -1783,32 +1783,26 @@ async fn chat_completions_stream_async(
         request = request.bearer_auth(&context.provider.api_key);
     }
     let mut send = Box::pin(request.send());
-    let mut request_deadlines = None;
+    if is_canceled() {
+        return Err(LlmError::Canceled);
+    }
+    let dispatched_at = request_now();
+    if let Some(trace) = private_trace.as_mut() {
+        trace.record_dispatch();
+    }
+    on_dispatched(dispatched_at);
+    let mut request_deadlines = RequestDeadlines::new(dispatched_at);
     let mut response = loop {
-        let deadlines = request_deadlines.get_or_insert_with(|| {
-            let at = request_now();
-            if let Some(trace) = private_trace.as_mut() {
-                trace.record_dispatch();
-            }
-            on_dispatched(at);
-            RequestDeadlines::new(at)
-        });
+        let now = request_now();
+        let polled = tokio::time::timeout(request_deadlines.poll_timeout(now), &mut send).await;
         ensure_request_active(
-            deadlines,
+            &request_deadlines,
             is_canceled,
             network,
             context.url,
             tau_provider::OutboundPhase::Request,
         )?;
-        let now = request_now();
-        if let Ok(result) = tokio::time::timeout(deadlines.poll_timeout(now), &mut send).await {
-            ensure_request_active(
-                deadlines,
-                is_canceled,
-                network,
-                context.url,
-                tau_provider::OutboundPhase::Request,
-            )?;
+        if let Ok(result) = polled {
             break result.map_err(|error| {
                 LlmError::Outbound(network.reqwest_error(
                     context.url,
@@ -1818,8 +1812,6 @@ async fn chat_completions_stream_async(
             })?;
         }
     };
-    let mut request_deadlines =
-        request_deadlines.expect("request dispatch precedes receiving response headers");
     if !response.status().is_success() {
         let code = response.status().as_u16();
         if let Some(error) = network.proxy_response_error(context.url, code) {

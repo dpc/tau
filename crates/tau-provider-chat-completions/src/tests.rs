@@ -793,6 +793,79 @@ fn attempt_dispatch_precedes_backend_send_and_occurs_once() {
     assert!(facts.backend_reached);
 }
 
+/// Cancellation that becomes visible immediately before request dispatch must
+/// not publish or capture a backend transition that never reached its first
+/// send-future poll.
+#[test]
+fn pre_dispatch_cancellation_produces_no_dispatch_observations() {
+    TEST_DEBUG_CAPTURES.with(|captures| *captures.borrow_mut() = Some(Vec::new()));
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind backend sentinel");
+    listener
+        .set_nonblocking(true)
+        .expect("set backend sentinel nonblocking");
+    let mut configured = provider();
+    configured.base_url = format!(
+        "http://{}/v1",
+        listener.local_addr().expect("sentinel address")
+    );
+    let model = configured.models[0].clone();
+    let resolved = resolved_provider(&configured);
+    let trace_output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace_output = trace_output.clone();
+            move || trace_output.clone()
+        })
+        .finish();
+    let cancellation_checks = Cell::new(0_u32);
+    let mut updates = Vec::new();
+    let outcome = tracing::subscriber::with_default(subscriber, || {
+        run_attempt(
+            &prompt(),
+            &resolved,
+            &model,
+            true,
+            &mut |update| updates.push(matches!(update, AttemptUpdate::Dispatched(_))),
+            &mut || {
+                let check = cancellation_checks.get() + 1;
+                cancellation_checks.set(check);
+                check == 2
+            },
+            &tau_provider::OutboundNetworkPolicy::from_environment(
+                path_std_collections::BTreeMap::new(),
+                None,
+            ),
+        )
+    });
+
+    let AttemptOutcome::Canceled { facts, progress } = outcome else {
+        panic!("pre-dispatch cancellation must remain canceled");
+    };
+    assert_eq!(progress, SemanticProgress::None);
+    assert_eq!(facts.wire_dispatches, 0);
+    assert!(!facts.backend_reached);
+    assert_eq!(cancellation_checks.get(), 2);
+    assert!(updates.is_empty());
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock
+    ));
+    assert!(TEST_DEBUG_CAPTURES.with(|captures| {
+        captures
+            .borrow_mut()
+            .take()
+            .expect("test capture sink installed")
+            .is_empty()
+    }));
+    let trace =
+        String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert!(trace.contains("outcome=\"canceled\""), "{trace}");
+    assert!(trace.contains("dispatch_count=0"), "{trace}");
+}
+
 /// Local route resolution failures retain the real logical attempt but report
 /// that no backend request crossed egress.
 #[test]
