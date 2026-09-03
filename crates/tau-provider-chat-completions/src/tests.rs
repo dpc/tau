@@ -2565,6 +2565,165 @@ fn compact_stream_accepts_only_final_narrative_and_reasoning() {
     );
 }
 
+/// One Chat Completions event may carry every reasoning alias for the same
+/// bytes, so ordinary streaming retains the first alias only.
+#[test]
+fn ordinary_stream_deduplicates_all_identical_reasoning_aliases() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "same",
+                    "reasoning": "same",
+                    "thinking": "same",
+                }
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("ordinary aliased reasoning event");
+
+    assert_eq!(state.thinking, "same");
+    assert_eq!(
+        state.output_items(),
+        vec![reasoning_text_context_item("same").expect("reasoning")]
+    );
+}
+
+/// Every pair of aliases, including the non-adjacent outer pair, must retain
+/// one byte-exact reasoning delta from an ordinary stream event.
+#[test]
+fn ordinary_stream_deduplicates_pairwise_reasoning_aliases() {
+    for (delta, expected) in [
+        (
+            serde_json::json!({"reasoning_content": "pair", "reasoning": "pair"}),
+            "pair",
+        ),
+        (
+            serde_json::json!({"reasoning": "pair", "thinking": "pair"}),
+            "pair",
+        ),
+        (
+            serde_json::json!({
+                "reasoning_content": "first",
+                "reasoning": "second",
+                "thinking": "first",
+            }),
+            "firstsecond",
+        ),
+    ] {
+        let mut state = StreamState::new();
+        apply_event(
+            &mut state,
+            &serde_json::json!({"choices": [{"delta": delta}]}),
+            &mut |_| {},
+        )
+        .expect("ordinary aliased reasoning event");
+
+        assert_eq!(state.thinking, expected);
+    }
+}
+
+/// Different reasoning aliases remain append deltas in compatibility order,
+/// rather than applying a precedence or drop policy.
+#[test]
+fn ordinary_stream_preserves_distinct_reasoning_alias_order() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "A",
+                    "reasoning": "B",
+                    "thinking": "C",
+                }
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("ordinary distinct reasoning event");
+
+    assert_eq!(state.thinking, "ABC");
+}
+
+/// Reasoning-alias deduplication leaves visible content and its independent
+/// ordinary-stream accumulation unchanged.
+#[test]
+fn ordinary_stream_preserves_content_alongside_deduplicated_reasoning_aliases() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "plan",
+                    "thinking": "plan",
+                    "content": "answer",
+                }
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("ordinary content and reasoning event");
+
+    assert_eq!(state.thinking, "plan");
+    assert_eq!(state.text, "answer");
+}
+
+/// Standalone local-summary validation keeps its exact shape and per-channel
+/// bounds while accepting one reasoning value repeated through all aliases.
+#[test]
+fn compact_stream_deduplicates_identical_reasoning_aliases_within_event() {
+    let mut state =
+        StreamState::new_for_attempt(CacheUsageCompat::None, Some(tau_proto::ByteCount::new(4)));
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_content": "plan",
+                    "reasoning": "plan",
+                    "thinking": "plan",
+                    "content": "done",
+                },
+                "finish_reason": "stop",
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("bounded standalone alias event");
+    let state = state
+        .validate_compaction()
+        .expect("valid standalone response");
+
+    assert_eq!(
+        state.output_items(),
+        vec![
+            reasoning_text_context_item("plan").expect("reasoning"),
+            assistant_text_item("done"),
+        ]
+    );
+}
+
+/// Alias equality is scoped to one provider event, so a later event carrying
+/// the same bytes remains an accepted reasoning append delta.
+#[test]
+fn ordinary_stream_does_not_deduplicate_reasoning_across_events() {
+    let mut state = StreamState::new();
+    for event in [
+        serde_json::json!({"choices": [{"delta": {"reasoning_content": "again"}}]}),
+        serde_json::json!({"choices": [{"delta": {"thinking": "again"}}]}),
+    ] {
+        apply_event(&mut state, &event, &mut |_| {}).expect("ordinary reasoning event");
+    }
+
+    assert_eq!(state.thinking, "againagain");
+}
+
 /// Tool calls and provider-specific opaque or mixed semantic events must fail
 /// before ordinary compatibility parsing can discard or normalize them.
 #[test]

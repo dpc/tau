@@ -2999,8 +2999,15 @@ fn first_stream_choice(event: &serde_json::Value) -> Option<&serde_json::Value> 
 
 fn apply_text_delta(state: &mut StreamState, delta: &serde_json::Value) -> Result<bool, LlmError> {
     let mut changed = false;
+    let mut reasoning_aliases = [""; 3];
+    let mut reasoning_alias_count = 0;
     for key in ["reasoning_content", "reasoning", "thinking"] {
         if let Some(reasoning) = non_empty_str(&delta[key]) {
+            if reasoning_aliases[..reasoning_alias_count].contains(&reasoning) {
+                continue;
+            }
+            reasoning_aliases[reasoning_alias_count] = reasoning;
+            reasoning_alias_count += 1;
             state.append_reasoning_delta(reasoning)?;
             changed = true;
         }
