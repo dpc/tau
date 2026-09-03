@@ -1,6 +1,8 @@
 //! Bounded child-daemon protocol support for deterministic acceptance.
 #![allow(dead_code)]
 
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -8,6 +10,7 @@ use std::{fs as path_std_fs, thread};
 
 use nix::sys::signal as path_nix_sys_signal;
 use nix::{sys as path_nix_sys, unistd as path_nix_unistd};
+use rustix_v1::process::{Pid as RustixPid, PidfdFlags, pidfd_open};
 use tau_e2e_tests::DeterministicFixture;
 use tau_proto::{
     ClientKind, Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
@@ -28,6 +31,8 @@ pub(super) struct DaemonGuard {
     stderr_path: std::path::PathBuf,
     /// Dedicated process group containing daemon and supervised extensions.
     pgid: nix::unistd::Pid,
+    /// Stable readiness handle for parent-process termination.
+    pidfd: OwnedFd,
     /// Unix socket that must disappear with this daemon generation.
     socket_path: std::path::PathBuf,
 }
@@ -65,6 +70,32 @@ impl TerminatedDaemon {
 }
 
 impl DaemonGuard {
+    /// Returns the operating-system process identity used by fixture
+    /// diagnostics.
+    pub(super) fn pid(&self) -> u32 {
+        self.child.as_ref().expect("daemon guard owns child").id()
+    }
+
+    /// Borrows the readiness descriptor that becomes readable at daemon exit.
+    pub(super) fn pidfd(&self) -> BorrowedFd<'_> {
+        self.pidfd.as_fd()
+    }
+
+    /// Reports a completed daemon parent without consuming cleanup ownership.
+    pub(super) fn poll_exit_diagnostic(&mut self) -> Result<Option<String>, String> {
+        let child = self.child.as_mut().expect("daemon guard owns child");
+        let Some(status) = child.try_wait().map_err(|error| error.to_string())? else {
+            return Ok(None);
+        };
+        let diagnostic =
+            std::fs::read_to_string(&self.stderr_path).map_err(|error| error.to_string())?;
+        Ok(Some(if diagnostic.is_empty() {
+            format!("daemon status={status}; daemon_stderr=empty")
+        } else {
+            format!("daemon status={status}; daemon_stderr={diagnostic:?}")
+        }))
+    }
+
     /// Sends uncatchable termination to the complete private daemon process
     /// group and requires every member to disappear under a bounded deadline.
     ///
@@ -195,7 +226,8 @@ pub(super) enum OutputLengthCrashCut {
 }
 
 impl OutputLengthCrashCut {
-    fn arg(self) -> &'static str {
+    /// Returns the stable fixture-protocol identity and command-line value.
+    pub(super) fn protocol_name(self) -> &'static str {
         match self {
             Self::PlannedResponse => "planned-response",
             Self::ContinuationSteer => "continuation-steer",
@@ -257,7 +289,7 @@ fn spawn_daemon_inner(
     if let Some((cut, reached_path)) = output_length_cut {
         command
             .arg("--output-length-cut")
-            .arg(cut.arg())
+            .arg(cut.protocol_name())
             .arg(reached_path);
     }
     let child = command
@@ -266,12 +298,14 @@ fn spawn_daemon_inner(
         .stderr(Stdio::from(stderr))
         .spawn()
         .expect("spawn deterministic daemon");
+    let pidfd = open_pidfd(child.id()).expect("open deterministic daemon pidfd");
     let pgid = path_nix_unistd::Pid::from_raw(child.id().try_into().expect("daemon pid fits i32"));
     DaemonGuard {
         child: Some(child),
         completed: false,
         stderr_path,
         pgid,
+        pidfd,
         socket_path: socket.to_path_buf(),
     }
 }
@@ -316,16 +350,31 @@ pub(super) fn assert_daemon_finish_rejects_a_lingering_process_group_member() {
         .spawn()
         .expect("spawn lingering process group");
     let pgid = path_nix_unistd::Pid::from_raw(child.id().try_into().expect("child pid fits i32"));
+    let pidfd = open_pidfd(child.id()).expect("open lingering child pidfd");
     let guard = DaemonGuard {
         child: Some(child),
         completed: false,
         stderr_path,
         pgid,
+        pidfd,
         socket_path: tempdir.path().join("absent.sock"),
     };
     let error = guard.finish().expect_err("lingering member must fail");
     assert!(error.contains("required forced cleanup"), "{error}");
     assert!(!process_group_exists(pgid));
+}
+
+/// Opens one stable Linux child-exit readiness descriptor.
+pub(super) fn open_pidfd(pid: u32) -> Result<OwnedFd, IoError> {
+    let raw = i32::try_from(pid).map_err(|_| {
+        IoError::new(
+            IoErrorKind::InvalidInput,
+            format!("child pid {pid} does not fit platform pid type"),
+        )
+    })?;
+    let pid = RustixPid::from_raw(raw)
+        .ok_or_else(|| IoError::new(IoErrorKind::InvalidInput, "child pid was not positive"))?;
+    pidfd_open(pid, PidfdFlags::empty()).map_err(IoError::from)
 }
 
 pub(super) fn status_label(status: tau_harness::SessionLaunchStatus) -> &'static str {

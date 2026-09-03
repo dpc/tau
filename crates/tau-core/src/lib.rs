@@ -45,6 +45,8 @@ pub use connection::{
     RoutedFrame, SharedConsumerId, SharedDeliveryGroup, SharedDeliveryTarget, VisibilityFilter,
 };
 pub use memory::{MemoryInbox, memory_connection};
+#[cfg(any(test, feature = "test-legacy-writer"))]
+pub use semantic_persistence::DurabilityBarrierOutcome;
 pub use semantic_persistence::{
     PersistenceAdmissionError, PersistenceCapacity, PersistenceCapacityLimit,
     PersistenceCapacityPressure, PersistenceFailure, PersistenceFailureKind, PersistenceGeneration,

@@ -3350,9 +3350,12 @@ fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
         );
         assert!(h.runtime_io.publication.pending_intercept.is_some());
         assert!(
-            h.session_runtime.persistence_owner.as_ref().is_some_and(
-                |owner| owner.wait_for_latest_durability_for_test(Duration::from_secs(5))
-            )
+            h.session_runtime
+                .persistence_owner
+                .as_ref()
+                .is_some_and(|owner| owner
+                    .wait_for_latest_durability_for_test(Duration::from_secs(5))
+                    == tau_core::DurabilityBarrierOutcome::Durable)
         );
         drop(h);
         agent_id

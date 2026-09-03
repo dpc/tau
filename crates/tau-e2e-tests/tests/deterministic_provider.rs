@@ -12,6 +12,8 @@ use tau_proto::{
 
 #[path = "deterministic_provider/daemon_support.rs"]
 mod daemon_support;
+#[path = "deterministic_provider/persistence_barrier.rs"]
+mod persistence_barrier;
 #[path = "deterministic_provider/session_restore.rs"]
 mod session_restore;
 #[path = "deterministic_provider/standalone_compaction.rs"]

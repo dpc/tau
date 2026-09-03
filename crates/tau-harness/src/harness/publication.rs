@@ -2969,7 +2969,9 @@ impl Harness {
         if let Some((cid, completion, through)) = agent_publish_completion {
             #[cfg(feature = "output-length-test-barrier")]
             {
-                use crate::output_length_test_barrier::{OutputLengthCommitCut, reach};
+                use tau_core::DurabilityBarrierOutcome;
+
+                use crate::output_length_test_barrier::{OutputLengthCommitCut, wait_and_reach};
                 match &completion {
                     AgentPublishCompletion::OutputLengthContinuation { reducer, .. }
                         if matches!(
@@ -2977,26 +2979,24 @@ impl Harness {
                             tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
                         ) =>
                     {
-                        assert!(
-                            self.session_runtime
-                                .persistence_owner
-                                .as_ref()
-                                .is_some_and(|owner| owner
-                                    .wait_for_latest_durability_for_test(Duration::from_secs(5))),
-                            "planned-response persistence barrier timed out"
+                        wait_and_reach(
+                            OutputLengthCommitCut::AfterPlannedResponse,
+                            |timeout| match self.session_runtime.persistence_owner.as_ref() {
+                                Some(owner) => owner.wait_for_latest_durability_for_test(timeout),
+                                None => DurabilityBarrierOutcome::UnavailableOrFailed,
+                            },
+                            "planned-response persistence barrier timed out",
                         );
-                        reach(OutputLengthCommitCut::AfterPlannedResponse);
                     }
                     AgentPublishCompletion::OutputLengthSteer { .. } => {
-                        assert!(
-                            self.session_runtime
-                                .persistence_owner
-                                .as_ref()
-                                .is_some_and(|owner| owner
-                                    .wait_for_latest_durability_for_test(Duration::from_secs(5))),
-                            "continuation-steer persistence barrier timed out"
+                        wait_and_reach(
+                            OutputLengthCommitCut::AfterContinuationSteer,
+                            |timeout| match self.session_runtime.persistence_owner.as_ref() {
+                                Some(owner) => owner.wait_for_latest_durability_for_test(timeout),
+                                None => DurabilityBarrierOutcome::UnavailableOrFailed,
+                            },
+                            "continuation-steer persistence barrier timed out",
                         );
-                        reach(OutputLengthCommitCut::AfterContinuationSteer);
                     }
                     _ => {}
                 }
@@ -3005,13 +3005,16 @@ impl Harness {
         }
         #[cfg(feature = "output-length-test-barrier")]
         if let Some(cut) = crate::output_length_test_barrier::observe_typed_receipt(&event) {
-            assert!(
-                self.session_runtime.persistence_owner.as_ref().is_some_and(
-                    |owner| owner.wait_for_latest_durability_for_test(Duration::from_secs(5))
-                ),
-                "typed-receipt persistence barrier timed out"
+            use tau_core::DurabilityBarrierOutcome;
+
+            crate::output_length_test_barrier::wait_and_reach(
+                cut,
+                |timeout| match self.session_runtime.persistence_owner.as_ref() {
+                    Some(owner) => owner.wait_for_latest_durability_for_test(timeout),
+                    None => DurabilityBarrierOutcome::UnavailableOrFailed,
+                },
+                "typed-receipt persistence barrier timed out",
             );
-            crate::output_length_test_barrier::reach(cut);
         }
         if let Some(completion) = watch_retirement.as_ref() {
             self.finish_watch_retirement_delivery(completion, true);

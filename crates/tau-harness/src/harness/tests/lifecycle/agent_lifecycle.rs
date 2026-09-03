@@ -1840,7 +1840,8 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
             .persistence_owner
             .as_ref()
             .expect("durable harness owner")
-            .wait_for_latest_durability_for_test(Duration::from_secs(2)),
+            .wait_for_latest_durability_for_test(Duration::from_secs(2))
+            == tau_core::DurabilityBarrierOutcome::Durable,
         "durable prefix reaches the abrupt-cut oracle"
     );
     let abrupt_cut = tau_core::AgentStore::open(td.path().join("agents"))

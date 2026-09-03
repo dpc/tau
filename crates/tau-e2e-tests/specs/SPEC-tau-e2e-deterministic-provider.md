@@ -210,11 +210,19 @@ and cost increment plus their aggregate exactly once; the cold-cut oracle retain
 the absent-usage case.
 The restart oracle alone enables a feature-gated one-shot barrier after the
 planned response or continuation steer has completed durable publication and
-before its next post-commit action. The test daemon accepts only those two cuts
-and an absent marker directly below its private harness-state root. It writes
-and syncs that marker, blocks the event loop, and relies on the existing
-process-group `SIGKILL` owner; no production configuration or durable fact
-represents the barrier.
+before its next post-commit action. That oracle selects two cuts from the shared
+four-cut fixture protocol; the deferred-receipt oracle selects the typed-receipt
+and next-provider-response cuts. The test daemon accepts those exact four values
+plus an absent Unix socket directly below its private harness-state root. At the
+matching hook it reports the exact cut, daemon process identity, and fixed
+durability deadline before waiting. It then reports durable success, durability
+timeout, or unavailable/failed persistence ownership with measured elapsed
+time; durable success blocks the event loop and relies on the existing
+process-group `SIGKILL` owner. The observer uses one bounded protocol to
+distinguish a missing hook, premature daemon exit, and transport or protocol
+failure from those producer outcomes. No production configuration or durable
+fact represents the barrier, and the protocol does not claim to repair an
+underlying crash-cut miss.
 
 V1's closed current-status sequence emits Working plus one dummy call in either
 provider order, optionally substitutes one rejected status state, validates the

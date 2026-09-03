@@ -5848,6 +5848,7 @@ dependencies = [
  "fs2",
  "image",
  "nix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tau-client",

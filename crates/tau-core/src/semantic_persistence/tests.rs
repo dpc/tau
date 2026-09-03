@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use super::backend::{FilesystemBackend, PersistenceBackend};
 use super::worker::StreamLifecycle;
 use super::{
-    PersistenceCapacity, PersistenceFailureKind, RetentionCharge, SemanticPersistenceOwner,
-    StagedFrame,
+    DurabilityBarrierOutcome, PersistenceCapacity, PersistenceFailureKind, RetentionCharge,
+    SemanticPersistenceOwner, StagedFrame,
 };
 use crate::{AgentStore, SessionPreparationMode, SessionStore};
 
@@ -335,7 +335,8 @@ fn release_preempts_due_lossy_touch_before_filesystem_io() {
         )
         .expect("append");
     assert!(
-        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2))
+            == DurabilityBarrierOutcome::Durable,
         "authoritative append and its durability debt drained"
     );
     owner.arm_derived_work_pause_for_test();
@@ -452,6 +453,11 @@ fn worker_exit_makes_every_lease_unavailable() {
             .failures
             .iter()
             .any(|failure| failure.kind() == PersistenceFailureKind::WorkerExit)
+    );
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::UnavailableOrFailed,
+        "worker exit must preserve the unavailable durability classification"
     );
     let error = store
         .append_session_event_at(
@@ -1061,12 +1067,16 @@ fn durability_barrier_waits_for_every_prior_cross_stream_debt() {
             .expect("append");
     }
     assert!(owner.wait_for_failure_for_test(PersistenceFailureKind::Sync, Duration::from_secs(2),));
-    assert!(
-        !owner.wait_for_latest_durability_for_test(Duration::from_millis(50)),
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_millis(50)),
+        DurabilityBarrierOutcome::DeadlineExpired,
         "later stream debt must not satisfy a barrier over earlier failed debt"
     );
     *backend.failed_sync_path.lock().expect("failed sync path") = None;
-    assert!(owner.wait_for_latest_durability_for_test(Duration::from_secs(2)));
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable
+    );
 }
 
 /// A checkpoint/touch rename failure preserves its deadline-owned debt and
@@ -1812,7 +1822,10 @@ fn slow_healthy_worker_does_not_amplify_complete_projection_per_frame() {
             tau_proto::UnixMicros::new(2),
         )
         .expect("build large live projection");
-    assert!(owner.wait_for_latest_durability_for_test(Duration::from_secs(2)));
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable
+    );
     let before_burst = owner.ledger_for_test().1;
 
     backend.hold_writes.store(true, Ordering::SeqCst);
@@ -1843,6 +1856,11 @@ fn slow_healthy_worker_does_not_amplify_complete_projection_per_frame() {
     assert!(
         owner.drain_operational_status().capacity_full.is_none(),
         "healthy burst must not hit byte pressure"
+    );
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_millis(1)),
+        DurabilityBarrierOutcome::DeadlineExpired,
+        "held write must preserve the test barrier's deadline classification"
     );
 
     backend.release_writes();

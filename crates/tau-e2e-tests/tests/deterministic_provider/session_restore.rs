@@ -2,11 +2,7 @@
 //! restoration, watch recreation, and membership composition.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Error as IoError, Read as _};
-use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::sync::mpsc;
-use std::time::Duration;
 
 use serde::Deserialize;
 use tau_e2e_tests::{
@@ -22,6 +18,7 @@ use tau_proto::{
 use super::daemon_support::{
     OutputLengthCrashCut, disconnect_ui, spawn_daemon, spawn_daemon_at_output_length_cut,
 };
+use super::persistence_barrier::PersistenceBarrier;
 use super::{DUMMY_TOOL, FAKE_PROVIDER};
 
 /// Maximum accepted size of the fake provider's durable cursor checkpoint.
@@ -32,33 +29,6 @@ const MAX_FAKE_CURSOR_CHECKPOINT_BYTES: u64 = 64 * 1024;
 struct FakeCursorCheckpoint {
     /// Next action index for each configured scenario lane.
     cursors: Vec<usize>,
-}
-
-fn bind_persistence_barrier(path: &Path) -> std::io::Result<UnixListener> {
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    UnixListener::bind(path)
-}
-
-fn wait_persistence_barrier(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
-    let (send, receive) = mpsc::sync_channel(1);
-    let join = std::thread::spawn(move || {
-        let result = listener.accept().and_then(|(mut stream, _)| {
-            let mut reached = [0; 8];
-            stream.read_exact(&mut reached)?;
-            (reached == *b"reached\n")
-                .then_some(())
-                .ok_or_else(|| IoError::other("invalid persistence barrier payload"))
-        });
-        let _ = send.send(result);
-    });
-    receive
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "persistence barrier notification timed out")??;
-    join.join()
-        .map_err(|_| "persistence barrier listener panicked")?;
-    Ok(())
 }
 
 #[path = "session_restore/dispatch_uncertain.rs"]
@@ -132,9 +102,9 @@ fn run_output_length_restart_cut(
     )?;
     let session_id: SessionId = SESSION.parse()?;
     let reached = fixture.socket_path(&format!("output-length-{cut:?}-{report_usage}-barrier"));
-    let barrier = bind_persistence_barrier(&reached)?;
+    let barrier = PersistenceBarrier::bind(&reached, cut)?;
     let socket_a = fixture.socket_path(&format!("output-length-{cut:?}-{report_usage}-a"));
-    let daemon_a = spawn_daemon_at_output_length_cut(
+    let mut daemon_a = spawn_daemon_at_output_length_cut(
         &fixture,
         &socket_a,
         tau_harness::SessionLaunchStatus::New,
@@ -144,7 +114,7 @@ fn run_output_length_restart_cut(
     let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
     let main = observer_a.create_idle_main()?;
     observer_a.submit(&main, "output-length-restart", USER)?;
-    wait_persistence_barrier(barrier)?;
+    barrier.wait(&mut daemon_a)?;
     let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     let before = &snapshot_a.agent_events[&main];
     assert_eq!(matched_action_count(&fixture)?, 1);
@@ -959,8 +929,9 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
     )?;
     let socket_a = fixture.socket_path("typed-crash-a");
     let reached = fixture.socket_path("typed-receipt-sender-terminal-barrier");
-    let barrier = bind_persistence_barrier(&reached)?;
-    let daemon_a = spawn_daemon_at_output_length_cut(
+    let barrier =
+        PersistenceBarrier::bind(&reached, OutputLengthCrashCut::TypedReceiptSenderTerminal)?;
+    let mut daemon_a = spawn_daemon_at_output_length_cut(
         &fixture,
         &socket_a,
         tau_harness::SessionLaunchStatus::New,
@@ -991,7 +962,7 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
         }
     };
     observer_a.wait_for_agent_marker(&sender, "sender committed receipt", receipt_index)?;
-    wait_persistence_barrier(barrier)?;
+    barrier.wait(&mut daemon_a)?;
     let terminated = daemon_a.kill_ungracefully()?;
     drop(observer_a);
     terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
@@ -1024,15 +995,16 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
     );
     let socket_b = fixture.socket_path("typed-crash-b");
     let reached_b = fixture.socket_path("typed-receipt-resume-barrier");
-    let barrier_b = bind_persistence_barrier(&reached_b)?;
-    let daemon_b = spawn_daemon_at_output_length_cut(
+    let barrier_b =
+        PersistenceBarrier::bind(&reached_b, OutputLengthCrashCut::NextProviderResponse)?;
+    let mut daemon_b = spawn_daemon_at_output_length_cut(
         &fixture,
         &socket_b,
         tau_harness::SessionLaunchStatus::Resumed,
         OutputLengthCrashCut::NextProviderResponse,
         &reached_b,
     );
-    wait_persistence_barrier(barrier_b)?;
+    barrier_b.wait(&mut daemon_b)?;
     let terminated = daemon_b.kill_ungracefully()?;
     terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;

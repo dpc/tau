@@ -83,6 +83,19 @@ pub enum PersistenceFailureKind {
     WorkerExit,
 }
 
+/// Test-only result of waiting for all currently admitted durability debt.
+#[cfg(any(test, feature = "test-legacy-writer"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum DurabilityBarrierOutcome {
+    /// Every accepted frame became fully durable.
+    Durable,
+    /// The fixed caller deadline expired while durability work remained.
+    DeadlineExpired,
+    /// The owner or worker was unavailable or reported a durability failure.
+    UnavailableOrFailed,
+}
+
 /// Capacity boundary which rejected one nonblocking semantic publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PersistenceCapacityLimit {
@@ -947,22 +960,37 @@ impl SemanticPersistenceOwner {
         report_capacity_recovered(&self.shared, &mut state);
     }
 
-    /// Waits until every currently accepted frame is fully durable.
+    /// Waits within `timeout` for every currently accepted frame to become
+    /// durable.
+    ///
+    /// Returns [`DurabilityBarrierOutcome::Durable`] after all debt drains,
+    /// [`DurabilityBarrierOutcome::DeadlineExpired`] when the bound expires, or
+    /// [`DurabilityBarrierOutcome::UnavailableOrFailed`] when the owner or
+    /// worker cannot complete the barrier.
     #[cfg(any(test, feature = "test-legacy-writer"))]
     #[doc(hidden)]
-    pub fn wait_for_latest_durability_for_test(&self, timeout: Duration) -> bool {
+    pub fn wait_for_latest_durability_for_test(
+        &self,
+        timeout: Duration,
+    ) -> DurabilityBarrierOutcome {
         let (reply, receive) = mpsc::sync_channel(1);
         {
             let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
             if !state.available {
-                return false;
+                return DurabilityBarrierOutcome::UnavailableOrFailed;
             }
             state
                 .commands
                 .push_back(WorkerCommand::DurabilityBarrier { reply });
         }
         self.shared.wake.notify_one();
-        matches!(receive.recv_timeout(timeout), Ok(Ok(())))
+        match receive.recv_timeout(timeout) {
+            Ok(Ok(())) => DurabilityBarrierOutcome::Durable,
+            Err(mpsc::RecvTimeoutError::Timeout) => DurabilityBarrierOutcome::DeadlineExpired,
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                DurabilityBarrierOutcome::UnavailableOrFailed
+            }
+        }
     }
 
     /// Prepares one canonical store root on the sole mutable filesystem worker.
