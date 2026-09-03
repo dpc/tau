@@ -43,6 +43,7 @@ use ureq::tls as path_ureq_tls;
 mod admission;
 mod admission_trace;
 mod generations;
+mod occurrence_key;
 mod pending_ingress;
 mod posted_message_cache;
 mod reactions;
@@ -57,6 +58,7 @@ use generations::{
     SlackReactionEpoch, SlackReactionReservation, SlackSendReservation, SlackSessionGeneration,
     SlackTraceSequence,
 };
+use occurrence_key::SlackOccurrenceKey;
 use pending_ingress::{
     OccurrenceDisposition, PendingIngress, PendingIngressKind, PendingMessageAuthority,
     SlackReportId,
@@ -783,7 +785,7 @@ enum IngressReport {
 /// Fully normalized Slack occurrence ready for report submission.
 struct IngressSubmission {
     /// Slack-native occurrence identity used for stable report correlation.
-    occurrence_key: String,
+    occurrence_key: SlackOccurrenceKey,
     /// Exact currently authorized native conversation.
     conversation: SlackConversation,
     /// Live registered agent selected for the occurrence.
@@ -891,16 +893,6 @@ fn slack_message_fact_id(channel_id: &str, native_id: &str) -> MessageFactId {
     hasher.update(b"\0");
     hasher.update(native_id.as_bytes());
     MessageFactId::new(format!("slack-message:{}", hasher.finalize().to_hex()))
-}
-
-/// Return the stable native occurrence key shared by duplicate suppression and
-/// canonical report correlation.
-fn received_message_key(message: &SlackMessage) -> Option<String> {
-    message
-        .ts
-        .as_ref()
-        .map(|ts| format!("message:{}:{ts}", message.channel_id))
-        .or_else(|| message.event_id.as_ref().map(|id| format!("event:{id}")))
 }
 
 /// Derive an opaque canonical sender reference without exposing a Slack user
@@ -1138,14 +1130,14 @@ struct IncomingMessageOwner {
 #[derive(Default)]
 struct ReceivedOccurrenceCache {
     /// Exact recent occurrence ids used for constant-time repeat checks.
-    seen: HashSet<String>,
+    seen: HashSet<SlackOccurrenceKey>,
     /// Oldest-first occurrence ids used to enforce the fixed entry limit.
-    order: VecDeque<String>,
+    order: VecDeque<SlackOccurrenceKey>,
 }
 
 impl ReceivedOccurrenceCache {
     /// Record one Slack-native occurrence and return whether it is new.
-    fn insert_new(&mut self, key: String) -> bool {
+    fn insert_new(&mut self, key: SlackOccurrenceKey) -> bool {
         if self.seen.contains(&key) {
             return false;
         }
@@ -2412,19 +2404,7 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
-        let occurrence_key = reaction.event_id.as_ref().map_or_else(
-            || {
-                format!(
-                    "reaction:{}:{}:{}:{}:{}",
-                    reaction.event_type.as_str(),
-                    reaction.channel_id,
-                    reaction.message_ts,
-                    reaction.user_id,
-                    reaction.reaction
-                )
-            },
-            |event_id| format!("reaction:{event_id}"),
-        );
+        let occurrence_key = SlackOccurrenceKey::reaction(&reaction);
         if !self.admit_or_replay_occurrence(
             occurrence_key.clone(),
             admission,
@@ -2541,13 +2521,7 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
-        let received_key = edit.event_id.clone().unwrap_or_else(|| {
-            format!(
-                "edit:{}:{}:{}",
-                edit.channel_id, edit.message_ts, edit.revision_ts
-            )
-        });
-        let occurrence_key = format!("edit:{received_key}");
+        let occurrence_key = SlackOccurrenceKey::edit(&edit);
         if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, true, false) {
             return;
         }
@@ -2646,11 +2620,7 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
-        let occurrence = delete.event_id.as_ref().map_or_else(
-            || format!("{}:{}", delete.channel_id, delete.message_ts),
-            Clone::clone,
-        );
-        let occurrence_key = format!("delete:{occurrence}");
+        let occurrence_key = SlackOccurrenceKey::delete(&delete);
         if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, false, false) {
             return;
         }
@@ -2850,7 +2820,7 @@ impl Extension {
             return;
         }
         let occurrence_key =
-            received_message_key(&message).expect("validated Slack message identity");
+            SlackOccurrenceKey::message(&message).expect("validated Slack message identity");
         if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, true, false) {
             return;
         }
@@ -2972,7 +2942,7 @@ impl Extension {
     /// report.
     fn classify_received_occurrence(
         &self,
-        key: String,
+        key: SlackOccurrenceKey,
         admission: Option<&AdmissionContext>,
         deduplicate_confirmed: bool,
         require_agent_generation: bool,
@@ -3004,7 +2974,7 @@ impl Extension {
     /// confirmed duplicate before recomputing identity or routing.
     fn admit_or_replay_occurrence(
         &self,
-        key: String,
+        key: SlackOccurrenceKey,
         admission: Option<&AdmissionContext>,
         deduplicate_confirmed: bool,
         require_agent_generation: bool,
@@ -3623,7 +3593,7 @@ impl Extension {
         self.submit_ingress(
             &cfg,
             IngressSubmission {
-                occurrence_key: received_message_key(message)
+                occurrence_key: SlackOccurrenceKey::message(message)
                     .expect("validated Slack message identity"),
                 conversation: route,
                 agent_id,

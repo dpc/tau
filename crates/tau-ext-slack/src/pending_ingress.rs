@@ -13,10 +13,10 @@ pub(super) struct SlackReportId(String);
 impl SlackReportId {
     /// Derive a stable opaque report ID from Slack's native occurrence
     /// identity.
-    pub(super) fn from_occurrence(occurrence_key: &str) -> Self {
+    pub(super) fn from_occurrence(occurrence_key: &SlackOccurrenceKey) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"tau-ext-slack/report-id/v1\0");
-        hasher.update(occurrence_key.as_bytes());
+        hasher.update(occurrence_key.as_str().as_bytes());
         Self(format!("slack-report:{}", hasher.finalize().to_hex()))
     }
 

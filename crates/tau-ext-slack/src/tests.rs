@@ -941,6 +941,91 @@ fn slack_prompt_references_are_opaque_and_domain_separated() {
     assert_eq!(sender.len(), "slack-sender:".len() + 64);
 }
 
+/// Every private occurrence constructor and its report-ID derivation retain the
+/// exact established bytes, preventing a typing-only refactor from splitting
+/// duplicate suppression from canonical correlation.
+#[test]
+fn slack_occurrence_keys_and_report_ids_preserve_exact_bytes() {
+    fn assert_key_and_report_id(
+        key: SlackOccurrenceKey,
+        expected_key: &str,
+        expected_report_id: &str,
+    ) {
+        assert_eq!(key.as_str(), expected_key);
+        assert_eq!(
+            SlackReportId::from_occurrence(&key)
+                .extension_data()
+                .value(),
+            &CborValue::Map(vec![(
+                CborValue::Text("slack_report_id".to_owned()),
+                CborValue::Text(expected_report_id.to_owned()),
+            )])
+        );
+    }
+
+    let mut message = slack_message("C123", Some("channel"), "message");
+    message.ts = Some("123.456".to_owned());
+    message.event_id = Some("Ev123".to_owned());
+    assert_key_and_report_id(
+        SlackOccurrenceKey::message(&message).expect("message timestamp"),
+        "message:C123:123.456",
+        "slack-report:4953964d710680d7e99af023bf07bebda55e3448c589523886f2c5b445c3d896",
+    );
+    message.ts = None;
+    assert_key_and_report_id(
+        SlackOccurrenceKey::message(&message).expect("message event ID"),
+        "event:Ev123",
+        "slack-report:46fc70061dc4a0c0aeb165470ff37c69ee80f3f7d64a7fb93aaf5f37eaf590d9",
+    );
+
+    let reaction = slack_reaction("Ev123", "reaction_added", "C123", "123.456");
+    assert_key_and_report_id(
+        SlackOccurrenceKey::reaction(&reaction),
+        "reaction:Ev123",
+        "slack-report:42548076ae09a4cb566fa5e2b1e2d71c65acc42a41d1cb79dc1dda48f9e5663c",
+    );
+    let mut reaction_without_event_id = reaction;
+    reaction_without_event_id.event_id = None;
+    assert_key_and_report_id(
+        SlackOccurrenceKey::reaction(&reaction_without_event_id),
+        "reaction:reaction_added:C123:123.456:U123:thumbsup",
+        "slack-report:06b12b1299dda20be205b5f41e5af19c591f51d2ea12d2f57dee0b4403260dff",
+    );
+
+    let mut edit = slack_edit("Ev123", "C123", "123.456", None, "edit");
+    edit.revision_ts = "123.789".to_owned();
+    assert_key_and_report_id(
+        SlackOccurrenceKey::edit(&edit),
+        "edit:Ev123",
+        "slack-report:359bf5394204426bf221fd8ea2b7180e72416e8a77c50fc513bde9849134fa53",
+    );
+    edit.event_id = None;
+    assert_key_and_report_id(
+        SlackOccurrenceKey::edit(&edit),
+        "edit:edit:C123:123.456:123.789",
+        "slack-report:3c9cb8716ff71dbb2bf26780e18b16ef4e8fca6f9c44bf2a2b68fb9041510b74",
+    );
+
+    let delete = SlackDelete {
+        event_id: Some("Ev123".to_owned()),
+        channel_id: "C123".to_owned(),
+        message_ts: "123.456".to_owned(),
+        thread_ts: None,
+    };
+    assert_key_and_report_id(
+        SlackOccurrenceKey::delete(&delete),
+        "delete:Ev123",
+        "slack-report:c86b41b624838da71912630972d9cbf5694a91df0d8c9d46a5d4c56a9eaa2c9a",
+    );
+    let mut delete_without_event_id = delete;
+    delete_without_event_id.event_id = None;
+    assert_key_and_report_id(
+        SlackOccurrenceKey::delete(&delete_without_event_id),
+        "delete:C123:123.456",
+        "slack-report:50ca506beadefa78bfad8bb1717440c98c2430f09e5cae3edec64ad6c00809ec",
+    );
+}
+
 fn slack_reaction(
     event_id: &str,
     event_type: &str,
@@ -1456,7 +1541,8 @@ fn ingress_canonical_correlation_rejects_every_mismatch() {
     wrong_message.message_id = MessageFactId::new("slack-message:wrong");
     ext.apply_live_event(&Event::MessageDelivered(wrong_message));
     let mut wrong_report = canonical.clone();
-    wrong_report.extension_data = SlackReportId::from_occurrence("wrong").extension_data();
+    wrong_report.extension_data =
+        SlackReportId::from_occurrence(&SlackOccurrenceKey::test_raw("wrong")).extension_data();
     ext.apply_live_event(&Event::MessageDelivered(wrong_report));
     let mut wrong_type = MessageEdited::new(
         canonical.publisher_extension_id.clone(),
@@ -6761,11 +6847,17 @@ fn pending_delete_replays_after_immediate_authority_revocation() {
 fn received_occurrence_cache_is_bounded() {
     let mut cache = ReceivedOccurrenceCache::default();
     for index in 0..=RECEIVED_OCCURRENCE_LIMIT {
-        assert!(cache.insert_new(format!("event-{index}")));
+        assert!(cache.insert_new(SlackOccurrenceKey::test_raw(format!("event-{index}"))));
     }
     assert_eq!(cache.seen.len(), RECEIVED_OCCURRENCE_LIMIT);
-    assert!(!cache.seen.contains("event-0"));
-    assert!(!cache.insert_new(format!("event-{RECEIVED_OCCURRENCE_LIMIT}")));
+    assert!(
+        !cache
+            .seen
+            .contains(&SlackOccurrenceKey::test_raw("event-0"))
+    );
+    assert!(!cache.insert_new(SlackOccurrenceKey::test_raw(format!(
+        "event-{RECEIVED_OCCURRENCE_LIMIT}"
+    ))));
 }
 
 /// Bot/self messages and message subtypes are ignored to avoid routing Slack
