@@ -440,6 +440,17 @@ fn reactive_context_overflow_terminalizes_live_capability_downgrade() {
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("plan reactive recovery");
     let first = read_nth_prompt_created(&h, 1);
+    let first_transaction_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started)
+                if started.compact_prompt_id == first.agent_prompt_id =>
+            {
+                Some(started.transaction_id)
+            }
+            _ => None,
+        })
+        .expect("first reactive compaction transaction");
     h.provider_runtime
         .model_info
         .get_mut(&"test/model".into())
@@ -453,9 +464,9 @@ fn reactive_context_overflow_terminalizes_live_capability_downgrade() {
     .expect("terminalize capability loss");
 
     let events = event_log_events(&h);
-    let route_failed_start = events
+    let route_failed_starts = events
         .iter()
-        .find_map(|event| match event {
+        .filter_map(|event| match event {
             Event::AgentStandaloneCompactionStarted(started)
                 if matches!(
                     started.trigger,
@@ -469,7 +480,13 @@ fn reactive_context_overflow_terminalizes_live_capability_downgrade() {
             }
             _ => None,
         })
-        .expect("linked route-failed start");
+        .collect::<Vec<_>>();
+    assert_eq!(
+        route_failed_starts.len(),
+        1,
+        "one owed rolling continuation must publish one local route-failed start"
+    );
+    let route_failed_start = route_failed_starts[0];
     let previous_transaction_id = match &route_failed_start.trigger {
         tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
             previous_transaction_id: Some(previous_transaction_id),
@@ -477,6 +494,10 @@ fn reactive_context_overflow_terminalizes_live_capability_downgrade() {
         } => previous_transaction_id,
         _ => unreachable!("selected linked route failure"),
     };
+    assert_eq!(
+        previous_transaction_id, &first_transaction_id,
+        "the local failure must link to the partial rolling pass it terminates"
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         Event::AgentCompacted(compacted)
@@ -491,16 +512,33 @@ fn reactive_context_overflow_terminalizes_live_capability_downgrade() {
     assert_eq!(
         events
             .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.transaction_id == route_failed_start.transaction_id
+                        && failed.reason
+                            == tau_proto::StandaloneCompactionFailureReason::RouteFailed
+            ))
+            .count(),
+        1,
+        "one local route-failed start must have one terminal"
+    );
+    assert_eq!(
+        events
+            .iter()
             .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
             .count(),
         2,
         "capability loss must dispatch neither a second compact prompt nor inference"
     );
-    assert!(events.iter().all(|event| !matches!(
-        event,
-        Event::AgentInferenceDispatchStarted(started)
-            if started.transaction_id.as_ref() == Some(previous_transaction_id)
-    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        1,
+        "capability loss must not checkpoint a post-compaction inference"
+    );
     h.shutdown().expect("shutdown");
 }
 
