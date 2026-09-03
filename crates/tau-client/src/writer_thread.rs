@@ -1,7 +1,9 @@
 use std::io::Write;
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use crate::detached_output::{DetachedOutput, QueuedFrame};
+use crate::output_cost::AdmissionObservation;
 use crate::{ClientError, ClientResult, PeerOutput};
 
 /// Number of commands allowed to wait outside the active transport write.
@@ -35,14 +37,39 @@ pub(crate) struct WriterSender {
 impl WriterSender {
     /// Sends one synchronous writer command with transport backpressure.
     pub(crate) fn send(&self, command: WriterCommand) -> ClientResult<()> {
-        self.commands
-            .send(command)
-            .map_err(|_| ClientError::WriterClosed)
+        self.send_observed(command, None)
+    }
+
+    /// Sends one command and publishes its exact producer admission result.
+    pub(crate) fn send_observed(
+        &self,
+        command: WriterCommand,
+        observation: Option<AdmissionObservation>,
+    ) -> ClientResult<()> {
+        match self.commands.send(command) {
+            Ok(()) => {
+                if let Some(observation) = observation {
+                    observation.admitted();
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(observation) = observation {
+                    observation.rejected("writer_closed");
+                }
+                drop(error);
+                Err(ClientError::WriterClosed)
+            }
+        }
     }
 
     /// Admits one detached frame and wakes the writer when necessary.
-    pub(crate) fn admit_detached(&self, frame: QueuedFrame) -> ClientResult<()> {
-        self.detached.admit(frame)?;
+    pub(crate) fn admit_detached(
+        &self,
+        frame: QueuedFrame,
+        observation: Option<AdmissionObservation>,
+    ) -> ClientResult<()> {
+        self.detached.admit(frame, observation)?;
         self.wake_detached()
     }
 
@@ -98,11 +125,8 @@ where
     while let Ok(command) = receiver.commands.recv() {
         let shutdown = matches!(&command, WriterCommand::Shutdown(_));
         let result = match command {
-            WriterCommand::Send(output, ack) => {
-                let result = writer
-                    .write_message(output.message())
-                    .map_err(ClientError::from)
-                    .and_then(|()| writer.flush().map_err(ClientError::from));
+            WriterCommand::Send(mut output, ack) => {
+                let result = write_output(&mut writer, &mut output);
                 let should_stop = result.is_err();
                 let ack_result = result.as_ref().copied().map_err(clone_error);
                 let _ = ack.send(ack_result);
@@ -113,13 +137,9 @@ where
                 }
             }
             WriterCommand::DetachedReady => drain_detached_batch(&mut writer, &receiver.detached),
-            WriterCommand::SendAfterDetached(output, ack) => {
-                let result = drain_detached_batch(&mut writer, &receiver.detached).and_then(|()| {
-                    writer
-                        .write_message(output.message())
-                        .map_err(ClientError::from)
-                        .and_then(|()| writer.flush().map_err(ClientError::from))
-                });
+            WriterCommand::SendAfterDetached(mut output, ack) => {
+                let result = drain_detached_batch(&mut writer, &receiver.detached)
+                    .and_then(|()| write_output(&mut writer, &mut output));
                 let ack_result = result.as_ref().copied().map_err(clone_error);
                 let _ = ack.send(ack_result);
                 result
@@ -155,13 +175,10 @@ where
     W: Write,
 {
     for _ in 0..detached.active_batch_len() {
-        let Some(output) = detached.pop() else {
+        let Some(mut output) = detached.pop() else {
             break;
         };
-        writer
-            .write_message(output.message())
-            .map_err(ClientError::from)
-            .and_then(|()| writer.flush().map_err(ClientError::from))?;
+        write_output(writer, &mut output)?;
     }
     Ok(())
 }
@@ -178,6 +195,39 @@ where
         drain_detached_batch(writer, detached)?;
     }
     Ok(())
+}
+
+/// Encode and flush one output while measuring only enabled diagnostic phases.
+fn write_output<W>(
+    writer: &mut tau_proto::PeerOutputWriter<W>,
+    output: &mut PeerOutput,
+) -> ClientResult<()>
+where
+    W: Write,
+{
+    output.mark_writer_started();
+    let encode_started = output.phase_start();
+    let encode_result = writer
+        .write_message(output.message())
+        .map_err(ClientError::from);
+    let encode_elapsed = encode_started.map_or(Duration::ZERO, |started| started.elapsed());
+    if let Err(error) = encode_result {
+        output.finish_output_cost(encode_elapsed, Duration::ZERO, "encode_failed");
+        return Err(error);
+    }
+    let flush_started = output.phase_start();
+    let flush_result = writer.flush().map_err(ClientError::from);
+    let flush_elapsed = flush_started.map_or(Duration::ZERO, |started| started.elapsed());
+    output.finish_output_cost(
+        encode_elapsed,
+        flush_elapsed,
+        if flush_result.is_ok() {
+            "written"
+        } else {
+            "flush_failed"
+        },
+    );
+    flush_result
 }
 
 fn clone_error(error: &ClientError) -> ClientError {

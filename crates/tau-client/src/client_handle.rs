@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use crate::detached_output::{EncodedBytes, QueuedFrame};
+use crate::output_cost::OutputLane;
 use crate::writer_thread::{WriterCommand, WriterSender};
 use crate::{ClientError, ClientResult, PeerOutput};
 
@@ -486,9 +487,15 @@ impl ClientHandle {
         &self,
         output: PeerOutput,
     ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
-        ensure_admissible_frame(&output)?;
+        let observation = output.begin_admission(OutputLane::Synchronous);
+        if let Err(error) = ensure_admissible_frame(&output) {
+            if let Some(observation) = observation {
+                observation.rejected("frame_overloaded");
+            }
+            return Err(error);
+        }
         let (ack_sender, ack_receiver) = mpsc::channel();
-        self.enqueue_blocking(WriterCommand::Send(output, ack_sender))?;
+        self.enqueue_blocking_observed(WriterCommand::Send(output, ack_sender), observation)?;
         Ok(ack_receiver)
     }
 
@@ -506,9 +513,18 @@ impl ClientHandle {
         &self,
         output: PeerOutput,
     ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
-        ensure_admissible_frame(&output)?;
+        let observation = output.begin_admission(OutputLane::Synchronous);
+        if let Err(error) = ensure_admissible_frame(&output) {
+            if let Some(observation) = observation {
+                observation.rejected("frame_overloaded");
+            }
+            return Err(error);
+        }
         let (ack_sender, ack_receiver) = mpsc::channel();
-        self.enqueue_blocking(WriterCommand::SendAfterDetached(output, ack_sender))?;
+        self.enqueue_blocking_observed(
+            WriterCommand::SendAfterDetached(output, ack_sender),
+            observation,
+        )?;
         Ok(ack_receiver)
     }
 
@@ -583,12 +599,27 @@ impl ClientHandle {
 
     /// Admits one detached frame to the shared bounded FIFO.
     fn admit_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
-        let frame = QueuedFrame::admit(PeerOutput::prepare(message)?)?;
+        let output = PeerOutput::prepare(message)?;
+        let observation = output.begin_admission(OutputLane::Detached);
+        let frame = match QueuedFrame::admit(output) {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Some(observation) = observation {
+                    observation.rejected("frame_overloaded");
+                }
+                return Err(error);
+            }
+        };
         let sender = self.sender.lock().expect("lock client handle sender");
         sender
             .as_ref()
-            .ok_or(ClientError::WriterClosed)?
-            .admit_detached(frame)
+            .ok_or_else(|| {
+                if let Some(observation) = &observation {
+                    observation.rejected("writer_closed");
+                }
+                ClientError::WriterClosed
+            })?
+            .admit_detached(frame, observation)
     }
 
     /// Emits a durable event through the harness.
@@ -876,15 +907,24 @@ impl ClientHandle {
         ack_receiver.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
-    fn enqueue_blocking(&self, command: WriterCommand) -> ClientResult<()> {
+    fn enqueue_blocking_observed(
+        &self,
+        command: WriterCommand,
+        observation: Option<crate::output_cost::AdmissionObservation>,
+    ) -> ClientResult<()> {
         let sender = self
             .sender
             .lock()
             .expect("lock client handle sender")
             .as_ref()
             .cloned()
-            .ok_or(ClientError::WriterClosed)?;
-        sender.send(command)
+            .ok_or_else(|| {
+                if let Some(observation) = &observation {
+                    observation.rejected("writer_closed");
+                }
+                ClientError::WriterClosed
+            })?;
+        sender.send_observed(command, observation)
     }
 }
 

@@ -15,6 +15,7 @@ mod chat_completions;
 mod credential_record;
 mod oauth_refresh_rejection;
 mod openai_prompt_cache;
+mod output_cost_observation;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
@@ -22,6 +23,7 @@ mod receipt_observation;
 mod report_sink;
 mod responses;
 mod setup_store;
+mod worker_report_sink;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -61,6 +63,9 @@ use chat_completions::{
 use dialoguer::{Confirm, Input, Password, Select};
 use oauth_refresh_rejection::{OAuthRefreshRejectionCache, RefreshCredentialsError};
 pub use openai_prompt_cache::{OpenAiPromptCacheKey, OpenAiPromptCacheRetention};
+use output_cost_observation::{
+    SamplerObservation, WorkerDrainObservation, WorkerOutputObservation, WorkerQueueState,
+};
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
@@ -109,6 +114,9 @@ use tau_provider_codex::{
     TurnAbort, TurnAbortWaker,
 };
 pub use tau_provider_responses::Transport as ResponsesTransport;
+use worker_report_sink::WorkerReportSink;
+#[cfg(test)]
+use worker_report_sink::{WorkerReportWaker, prepare_worker_report};
 
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "provider-builtin";
@@ -2799,7 +2807,10 @@ where
         extension_data_client: None,
         declared_credential_observations: None,
         declared_models: None,
-        diagnostics: ProviderDiagnosticsState::default(),
+        diagnostics: ProviderDiagnosticsState {
+            output_queue: WorkerQueueState::enabled(),
+            ..ProviderDiagnosticsState::default()
+        },
     };
     let install_extension_data_client = startup.publish_models_after_configure;
     let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(
@@ -3111,6 +3122,8 @@ struct ProviderDiagnosticsState {
     session_debug_allowed: BTreeMap<tau_proto::SessionId, bool>,
     /// Private receipt observation owner.
     receipt: ReceiptObservationState,
+    /// Enabled-only worker output queue observation state.
+    output_queue: Option<Arc<WorkerQueueState>>,
 }
 
 /// Live provider event loop state after the Tau extension handshake completes.
@@ -4915,8 +4928,13 @@ where
     }
 
     fn drain_worker_messages(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        let mut drain_observation = WorkerDrainObservation::enabled();
         loop {
-            match self.worker_rx.try_recv() {
+            let received = self.worker_rx.try_recv();
+            if let (Ok(message), Some(observation)) = (&received, &mut drain_observation) {
+                observation.message(matches!(message, WorkerMessage::Output { .. }));
+            }
+            match received {
                 Ok(WorkerMessage::PromptOAuthRefreshFinished { key, result }) => {
                     let Some(refresh) = self.credential_admission.oauth_refreshes.get_mut(&key)
                     else {
@@ -4971,20 +4989,23 @@ where
                 }
                 Ok(WorkerMessage::Output {
                     output,
+                    output_cost,
                     cancel_generation,
                     agent_prompt_id,
                     cooldown_probe,
                 }) => {
-                    if let Some((output, released_provider)) =
-                        validate_worker_output_and_probe_for_commit(
-                            output,
-                            (cancel_generation, self.cancel_generation, self.input_closed),
-                            &agent_prompt_id,
-                            &self.cancellation,
-                            cooldown_probe.as_ref(),
-                            &self.shared_cooldowns,
-                        )?
-                    {
+                    if let Some(observation) = output_cost {
+                        observation.finish("dequeued");
+                    }
+                    let validated = validate_worker_output_and_probe_for_commit(
+                        output,
+                        (cancel_generation, self.cancel_generation, self.input_closed),
+                        &agent_prompt_id,
+                        &self.cancellation,
+                        cooldown_probe.as_ref(),
+                        &self.shared_cooldowns,
+                    )?;
+                    if let Some((output, released_provider)) = validated {
                         if let Some(provider) = released_provider {
                             self.release_shared_cooldown(&provider);
                         }
@@ -5424,6 +5445,7 @@ where
                 .as_ref()
                 .expect("provider runtime worker waker is installed before dispatch")
                 .clone(),
+            worker_output_depth: self.diagnostics.output_queue.clone(),
             prompt_executor: self.prompt_executor.clone(),
             cancellation: self.cancellation.clone(),
             codex_runtime: self.codex_runtime.clone(),
@@ -7186,6 +7208,8 @@ struct PromptExecution {
     cooldown_probe: Option<CooldownProbe>,
     output_tx: Sender<WorkerMessage>,
     output_waker: ManualRuntimeWaker,
+    /// Shared typed-output queue depth for private observations.
+    worker_output_depth: Option<Arc<WorkerQueueState>>,
     cancellation: Arc<CancellationState>,
     codex_runtime: Arc<CodexRuntime>,
 }
@@ -7193,6 +7217,8 @@ struct PromptExecution {
 struct PromptWorkerContext {
     worker_tx: Sender<WorkerMessage>,
     worker_waker: ManualRuntimeWaker,
+    /// Shared typed-output queue depth for private observations.
+    worker_output_depth: Option<Arc<WorkerQueueState>>,
     prompt_executor: PromptExecutor,
     cancellation: Arc<CancellationState>,
     codex_runtime: Arc<CodexRuntime>,
@@ -7203,6 +7229,7 @@ impl PromptExecution {
         WorkerReportSink {
             tx: self.output_tx.clone(),
             waker: self.output_waker.clone(),
+            worker_output_depth: self.worker_output_depth.clone(),
             cancel_generation: self.job.cancel_generation,
             agent_prompt_id: self.job.agent_prompt_id.clone(),
             cooldown_probe: self.cooldown_probe.clone(),
@@ -7230,6 +7257,8 @@ enum WorkerMessage {
     /// client-writer serialization.
     Output {
         output: tau_client::PeerOutput,
+        /// Enabled-only process-local queue observation.
+        output_cost: Option<WorkerOutputObservation>,
         cancel_generation: u64,
         agent_prompt_id: tau_proto::AgentPromptId,
         /// Cooldown generation carried by the manually admitted attempt.
@@ -7322,65 +7351,6 @@ enum WorkerMessage {
         /// Coalescing generation; only the latest deadline may act.
         refresh_generation: u64,
     },
-}
-
-/// Direct typed report destination for one finite prompt attempt.
-struct WorkerReportSink<W = ManualRuntimeWaker> {
-    /// Channel carrying admitted reports to the provider main loop.
-    tx: Sender<WorkerMessage>,
-    /// Wake handle signaled after the report is queued.
-    waker: W,
-    /// Global-cancel generation captured synchronously at dispatch.
-    cancel_generation: u64,
-    /// Prompt identity used for targeted-cancel commit validation.
-    agent_prompt_id: tau_proto::AgentPromptId,
-    /// Exact cooldown probe authority attached to this finite attempt.
-    cooldown_probe: Option<CooldownProbe>,
-}
-
-/// Wake capability used after a typed worker report becomes channel-visible.
-trait WorkerReportWaker {
-    /// Wake the provider main loop.
-    fn wake_provider_loop(&self);
-}
-
-impl WorkerReportWaker for ManualRuntimeWaker {
-    fn wake_provider_loop(&self) {
-        self.wake();
-    }
-}
-
-impl<W: WorkerReportWaker> ProviderReportSink for WorkerReportSink<W> {
-    fn send_report(&mut self, message: HarnessInputMessage) -> ClientResult<()> {
-        let output = prepare_worker_report(message)?;
-        self.tx
-            .send(WorkerMessage::Output {
-                output,
-                cancel_generation: self.cancel_generation,
-                agent_prompt_id: self.agent_prompt_id.clone(),
-                cooldown_probe: self.cooldown_probe.clone(),
-            })
-            .map_err(|_| path_std_io::Error::from(path_std_io::ErrorKind::BrokenPipe))?;
-        self.waker.wake_provider_loop();
-        Ok(())
-    }
-}
-
-/// Check the old worker encoder's validity boundary without moving the final
-/// frame-size admission ahead of main-loop cancellation arbitration.
-fn prepare_worker_report(message: HarnessInputMessage) -> ClientResult<tau_client::PeerOutput> {
-    let output = tau_client::PeerOutput::prepare(message)?;
-    if tau_proto::MAX_PROTOCOL_MESSAGE_BYTES < output.encoded_bytes() {
-        return Err(path_std_io::Error::new(
-            path_std_io::ErrorKind::InvalidData,
-            format!(
-                "protocol message exceeds {} byte limit",
-                tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
-            ),
-        )
-        .into());
-    }
-    Ok(output)
 }
 
 /// Direct typed report destination for provider main-loop helpers.
@@ -7686,6 +7656,7 @@ fn start_prompt_job(mut job: PromptJob, active_prompts: &mut usize, context: &Pr
         cooldown_probe,
         output_tx: context.worker_tx.clone(),
         output_waker: context.worker_waker.clone(),
+        worker_output_depth: context.worker_output_depth.clone(),
         cancellation: context.cancellation.clone(),
         codex_runtime: context.codex_runtime.clone(),
     };

@@ -2236,7 +2236,7 @@ fn retry_schedule_queue_manual_transfer_preserves_logical_prompt_state() {
 /// targeted cancellation wins before main-loop drain, a peer still commits,
 /// and the consumed marker permits later prompt-ID reuse.
 #[test]
-fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
+pub(crate) fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     let (tx, rx) = mpsc::channel();
     let target: tau_proto::AgentPromptId = "target"
         .parse::<tau_proto::AgentPromptId>()
@@ -2277,6 +2277,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     WorkerReportSink {
         tx: tx.clone(),
         waker: target_waker.clone(),
+        worker_output_depth: WorkerQueueState::enabled(),
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
         cooldown_probe: None,
@@ -2306,6 +2307,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     let result = WorkerReportSink {
         tx: rejected_tx,
         waker: rejected_waker.clone(),
+        worker_output_depth: WorkerQueueState::enabled(),
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
         cooldown_probe: None,
@@ -2334,6 +2336,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
             }),
         ))
         .expect("prepare target clear"),
+        output_cost: None,
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
         cooldown_probe: None,
@@ -2354,6 +2357,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
                 Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("prepare terminal"),
+            output_cost: None,
             cancel_generation: 0,
             agent_prompt_id: id.clone(),
             cooldown_probe: None,
@@ -2366,11 +2370,15 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     let mut committed = Vec::new();
     while let Ok(WorkerMessage::Output {
         output,
+        output_cost,
         cancel_generation,
         agent_prompt_id,
-        cooldown_probe: _,
+        ..
     }) = rx.try_recv()
     {
+        if let Some(observation) = output_cost {
+            observation.finish("dequeued");
+        }
         if let Some(output) = validate_worker_output_for_commit(
             output,
             cancel_generation,

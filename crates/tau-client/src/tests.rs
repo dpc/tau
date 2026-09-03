@@ -4165,7 +4165,7 @@ fn detached_output_lifecycle_transition_matrix_preserves_indirect_cuts() {
         .expect("prepare detached frame"),
     )
     .expect("admit individual frame");
-    detached.admit(frame).expect("admit while inactive");
+    detached.admit(frame, None).expect("admit while inactive");
 
     assert_eq!(detached.active_batch_len(), 0);
     assert!(detached.pop().is_none());
@@ -4192,7 +4192,7 @@ fn detached_output_lifecycle_transition_matrix_preserves_indirect_cuts() {
     )
     .expect("admit individual post-close frame");
     assert!(matches!(
-        detached.admit(frame),
+        detached.admit(frame, None),
         Err(ClientError::WriterClosed)
     ));
 }
@@ -4201,7 +4201,7 @@ fn detached_output_lifecycle_transition_matrix_preserves_indirect_cuts() {
 /// blocked, rejects frame 65, and resumes after the writer releases FIFO
 /// budget.
 #[test]
-fn detached_fifo_item_limit_and_blocked_writer_recovery() {
+pub(crate) fn detached_fifo_item_limit_and_blocked_writer_recovery() {
     /// Writer that blocks its first flush until the test releases transport.
     struct FirstFlushBlocks {
         /// Captured protocol output.
@@ -4550,8 +4550,14 @@ fn synchronous_config_error_drains_earlier_detached_fifo_entries() {
 /// Aggregate byte accounting accepts an exact eight-MiB frame, rejects an
 /// additional frame, and retains the independent per-frame cap.
 #[test]
-fn detached_fifo_byte_limit_and_individual_frame_limit_are_exact() {
+pub(crate) fn detached_fifo_byte_limit_and_individual_frame_limit_are_exact() {
     const APPROVED_BYTES: u64 = 8 * 1024 * 1024;
+    let (sender, _receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    handle
+        .send_detached(disconnect_with_encoded_size(APPROVED_BYTES - 1))
+        .expect("admit below aggregate byte budget");
+
     let (sender, _receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     handle

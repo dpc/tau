@@ -140,6 +140,24 @@ size values remain private workload metadata. With the target disabled,
 backends retain only inert `None` checks and perform no diagnostic clock reads,
 allocation, byte sizing, hashing, I/O, or trace-state construction.
 
+Disabled-by-default provider/client output-cost diagnostics use the dedicated
+`provider-builtin.output-cost` and `tau_client::output_cost` TRACE targets.
+They report only fixed phase/lane/outcome classes, process-local numeric
+correlation, item and queue counts, encoded byte counts, and scalar durations
+for sampler materialization, worker admission/queue/drain, client admission,
+writer wait, encoding, and flush. They never retain or emit prompt, response,
+tool, error, model, endpoint, account, session, protocol-field, or credential
+values and create no event, journal, capture, wire field, debug JSON, or
+protocol message. Like other extension tracing, enabled provider observations
+can flow through extension stderr into the owner-private per-session component
+log and optional operational mirror; client observations use the process's
+configured tracing sink. Exact sizes, timing, ordinal correlation, and nearby
+log context remain private workload metadata and can permit heuristic
+cross-correlation. With both targets disabled, the
+paths retain only inert `Option::None` checks/moves and perform no
+diagnostic-specific clock read, allocation, traversal, queue accounting, or
+trace construction.
+
 Overall harness shutdown closes configured in-process extension transport first,
 then gives all such runners one shared finite grace to return on EOF. A runner
 still alive after that grace is left to a detached join-reaper, not

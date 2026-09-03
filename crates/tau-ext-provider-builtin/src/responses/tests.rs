@@ -49,6 +49,33 @@ impl sampling::SamplingProgress for FakeSamplingProgress<'_> {
     }
 }
 
+/// Disabled output-cost diagnostics must not add a delta-byte traversal to the
+/// production sampler path.
+#[test]
+fn disabled_output_cost_sampler_performs_no_diagnostic_traversal() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("off")
+        .without_time()
+        .with_writer(path_std_io::sink)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        crate::output_cost_observation::reset_diagnostic_traversals();
+        let prompt = crate::openai_tests::prompt();
+        let mut sampler = ResponsesResponseSampler::new();
+        sampler.latest_bytes = 1;
+        let mut output = Vec::new();
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut output);
+        sampler.emit_at(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &mut writer,
+            path_std_time::Instant::now(),
+            true,
+        );
+        assert_eq!(crate::output_cost_observation::diagnostic_traversals(), 0);
+    });
+}
+
 /// The production due-sample seam publishes borrowed message/reasoning
 /// projections and slices multibyte suffixes from byte cursors.
 #[test]

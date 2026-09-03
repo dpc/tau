@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use crate::output_cost::AdmissionObservation;
 use crate::peer_output::measure_message;
 use crate::{ClientError, ClientResult, PeerOutput};
 
@@ -157,19 +158,35 @@ impl DetachedOutput {
 
     /// Admits one measured detached frame without blocking on transport
     /// progress.
-    pub(crate) fn admit(&self, frame: QueuedFrame) -> ClientResult<()> {
+    pub(crate) fn admit(
+        &self,
+        frame: QueuedFrame,
+        observation: Option<AdmissionObservation>,
+    ) -> ClientResult<()> {
         let mut state = self.state.lock().expect("lock detached output");
         if state.lifecycle.is_closed() {
+            if let Some(observation) = observation {
+                observation.rejected("writer_closed");
+            }
             return Err(ClientError::WriterClosed);
         }
         let Some(total_bytes) = state.encoded_bytes.checked_add(frame.encoded_bytes()) else {
+            if let Some(observation) = observation {
+                observation.rejected("detached_overloaded");
+            }
             return Err(ClientError::Overloaded);
         };
         if MAX_FRAMES <= state.queue.len() || MAX_ENCODED_BYTES.bytes < total_bytes.bytes {
+            if let Some(observation) = observation {
+                observation.rejected("detached_overloaded");
+            }
             return Err(ClientError::Overloaded);
         }
         state.queue.push_back(frame);
         state.encoded_bytes = total_bytes;
+        if let Some(observation) = observation {
+            observation.admitted();
+        }
         Ok(())
     }
 

@@ -1,6 +1,8 @@
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 use crate::ClientResult;
+use crate::output_cost::{AdmissionObservation, OutputCostObservation, OutputLane};
 
 #[cfg(test)]
 thread_local! {
@@ -19,6 +21,8 @@ pub struct PeerOutput {
     message: tau_proto::HarnessInputMessage,
     /// Exact byte count produced by the current protocol encoder.
     encoded_bytes: u64,
+    /// Enabled-only process-local output-cost observation.
+    output_cost: Option<OutputCostObservation>,
 }
 
 impl PeerOutput {
@@ -28,10 +32,12 @@ impl PeerOutput {
     ///
     /// Returns an error when protocol encoding or byte accounting fails.
     pub fn prepare(message: tau_proto::HarnessInputMessage) -> ClientResult<Self> {
+        let observation_started = OutputCostObservation::start();
         let encoded_bytes = measure_message(&message)?;
         Ok(Self {
             message,
             encoded_bytes,
+            output_cost: OutputCostObservation::measured(observation_started, encoded_bytes),
         })
     }
 
@@ -45,6 +51,37 @@ impl PeerOutput {
     #[must_use]
     pub fn message(&self) -> &tau_proto::HarnessInputMessage {
         &self.message
+    }
+
+    /// Start actual local admission when diagnostics are enabled.
+    pub(crate) fn begin_admission(&self, lane: OutputLane) -> Option<AdmissionObservation> {
+        self.output_cost
+            .as_ref()
+            .map(|observation| observation.begin_admission(lane))
+    }
+
+    /// Start a writer phase only when this output carries enabled diagnostics.
+    pub(crate) fn phase_start(&self) -> Option<Instant> {
+        self.output_cost.as_ref().map(|_| Instant::now())
+    }
+
+    /// Close enabled-only writer wait immediately before transport encoding.
+    pub(crate) fn mark_writer_started(&self) -> bool {
+        self.output_cost
+            .as_ref()
+            .is_none_or(OutputCostObservation::writer_started)
+    }
+
+    /// Finish writer work and emit the enabled-only observation.
+    pub(crate) fn finish_output_cost(
+        &self,
+        encode_elapsed: Duration,
+        flush_elapsed: Duration,
+        outcome: &'static str,
+    ) {
+        if let Some(observation) = &self.output_cost {
+            observation.finish(encode_elapsed, flush_elapsed, outcome);
+        }
     }
 }
 

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time as path_std_time;
 
+use crate::output_cost_observation::SamplerObservation;
 use crate::report_sink::ProviderReportSink;
 
 /// Borrowed cadence and display inputs consumed by the sampler.
@@ -264,6 +265,7 @@ impl ResponsesResponseSampler {
         if !self.is_due(now, current.response_bytes_received, terminal) {
             return;
         }
+        let mut output_cost = SamplerObservation::enabled(terminal);
         let deltas = if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
             Vec::new()
         } else {
@@ -272,6 +274,12 @@ impl ResponsesResponseSampler {
             deltas
         };
         if deltas.is_empty() && current == self.last_sample {
+            if let Some(observation) = &mut output_cost {
+                observation.count_deltas(&deltas);
+            }
+            if let Some(observation) = output_cost {
+                observation.finish("unchanged");
+            }
             return;
         }
         let event = tau_proto::ProviderResponseUpdated {
@@ -289,12 +297,18 @@ impl ResponsesResponseSampler {
             }),
             originator: prompt.originator.clone(),
         };
-        if writer
-            .send_report(tau_proto::HarnessInputMessage::emit_transient(
-                tau_proto::Event::ProviderResponseUpdatedReported(event),
-            ))
-            .is_ok()
-        {
+        if let Some(observation) = &mut output_cost {
+            observation.count_deltas(&event.deltas);
+        }
+        let written = writer
+            .send_sampled_report(
+                tau_proto::HarnessInputMessage::emit_transient(
+                    tau_proto::Event::ProviderResponseUpdatedReported(event),
+                ),
+                output_cost,
+            )
+            .is_ok();
+        if written {
             self.last_sample = current;
             self.last_emitted_at = Some(now);
             self.emitted_non_empty |= current.response_bytes_received > 0;

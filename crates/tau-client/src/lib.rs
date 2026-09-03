@@ -31,6 +31,7 @@ mod handler;
 mod intercept_decision;
 mod logging;
 mod manual_runtime;
+mod output_cost;
 mod peer_output;
 mod protocol_io;
 mod runner;

@@ -17,6 +17,23 @@ construction/emission, dynamic stage traversal, or retained observation state.
 Fixed inert `Option::None` checks/moves inside ordinary provider ownership are
 not diagnostic authority or work.
 
+## Private output-cost diagnostics
+
+The disabled-by-default `provider-builtin.output-cost` TRACE target observes
+only sampler materialization item counts/bytes and durations plus typed worker
+report measurement, queue depth/age, and drain batch size. Its correlation is a
+process-local monotonic scalar and never contains APID, model, profile, account,
+endpoint, response, error, protocol field, or content. Observation state remains
+bounded to one optional scalar record per in-flight typed output and never
+enters an event, journal, capture, wire field, debug JSON, or protocol message.
+Enabled TRACE follows the ordinary extension stderr logging path and can
+therefore enter the owner-private per-session component log and optional
+operational mirror with surrounding extension/session/process attribution.
+Exact sizes, timings, queue shape, and ordinal correlation remain private
+workload metadata and can be heuristically correlated with nearby log records.
+Disabled operation performs no observation clock, allocation, dynamic traversal,
+depth mutation, or trace construction.
+
 ## Quota lifecycle
 
 ChatGPT quota credentials remain in this in-process extension and never enter

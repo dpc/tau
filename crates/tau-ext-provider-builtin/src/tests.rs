@@ -4213,6 +4213,7 @@ fn typed_worker_reports_match_wire_roundtrip_for_every_converted_variant() {
     let mut sink = WorkerReportSink {
         tx,
         waker: waker.clone(),
+        worker_output_depth: None,
         cancel_generation: 7,
         agent_prompt_id: prompt.agent_prompt_id.clone(),
         cooldown_probe: None,
@@ -4228,6 +4229,7 @@ fn typed_worker_reports_match_wire_roundtrip_for_every_converted_variant() {
                 cancel_generation,
                 agent_prompt_id,
                 cooldown_probe,
+                ..
             } = worker
             else {
                 panic!("report sink emitted non-output worker message");
