@@ -341,6 +341,94 @@ fn successful_public_sse_captures(
     std::mem::take(&mut *captures.lock().expect("capture lock"))
 }
 
+/// HTTP/SSE authentication rejection remains a retryable finite attempt so the
+/// owning scheduler can reload a mutable API-key credential.
+#[test]
+fn sse_auth_rejection_is_retryable() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind auth rejection server");
+    let address = listener
+        .local_addr()
+        .expect("auth rejection server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept auth rejection request");
+        let _ = read_http_request(&mut socket);
+        let body = r#"{"error":{"type":"invalid_request_error","code":"invalid_api_key"}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write auth rejection");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: "stale-key".to_owned(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join auth rejection server");
+    let AttemptOutcome::Retryable { decision, progress } = outcome else {
+        panic!("HTTP/SSE authentication rejection must reach credential reload");
+    };
+    assert_eq!(decision.class, RetryClass::Auth);
+    assert!(progress.output_items.is_empty());
+}
+
+/// A structured request-rejection identifier remains terminal even when an
+/// HTTP/SSE endpoint pairs it with an authentication status.
+#[test]
+fn sse_request_rejection_identifier_overrides_auth_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind request rejection server");
+    let address = listener
+        .local_addr()
+        .expect("request rejection server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request rejection");
+        let _ = read_http_request(&mut socket);
+        let body = r#"{"error":{"code":"invalid_request_error"}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write request rejection");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: "stale-key".to_owned(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join request rejection server");
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("structured request rejection must remain terminal");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+}
+
 /// Public Responses usage preserves OpenAI cache reads and writes as separate
 /// ordinary-request observations with unknown expiry confidence. This prevents
 /// counters from promoting observed reuse into a hard TTL or renewal guarantee.
@@ -2426,19 +2514,32 @@ fn explicit_prompt_cache_marks_only_earliest_constructed_input() {
     );
 }
 
-/// Post-upgrade provider errors must terminate known auth/request/context
-/// failures and retain retry classes only for service-side failures.
+/// Post-upgrade provider errors must retry authentication failures so the
+/// scheduler can reload credentials while retaining terminal request/context
+/// classifications.
 #[test]
 fn websocket_provider_errors_classify_retries_and_recovery() {
     let auth = Error::Provider {
         status: Some(401),
         code: Some("invalid_api_key".to_owned()),
     };
-    assert!(auth.retry().is_none());
     assert_eq!(
-        auth.failure_kind(),
-        Some(tau_proto::ProviderFailureKind::RequestRejected)
+        auth.retry().expect("auth failure must retry").class,
+        RetryClass::Auth
     );
+    assert_eq!(auth.failure_kind(), None);
+    let statusless_auth = Error::Provider {
+        status: None,
+        code: Some("invalid_api_key".to_owned()),
+    };
+    assert_eq!(
+        statusless_auth
+            .retry()
+            .expect("status-less auth failure must retry")
+            .class,
+        RetryClass::Auth
+    );
+    assert_eq!(statusless_auth.failure_kind(), None);
     let context = Error::Provider {
         status: None,
         code: Some("context_length_exceeded".to_owned()),
@@ -2460,6 +2561,15 @@ fn websocket_provider_errors_classify_retries_and_recovery() {
         assert!(request.retry().is_none());
         assert_eq!(
             request.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::RequestRejected)
+        );
+        let request_with_auth_status = Error::Provider {
+            status: Some(403),
+            code: Some(code.to_owned()),
+        };
+        assert!(request_with_auth_status.retry().is_none());
+        assert_eq!(
+            request_with_auth_status.failure_kind(),
             Some(tau_proto::ProviderFailureKind::RequestRejected)
         );
     }
@@ -2821,10 +2931,10 @@ fn websocket_capture_cancellation_skips_final_dispatch_observation() {
     assert_eq!(callback_count.load(Ordering::SeqCst), 0);
 }
 
-/// A rejected WebSocket upgrade must remain on the selected transport and
-/// surface the provider's HTTP status without attempting an SSE request.
+/// An auth-rejected WebSocket upgrade must remain on the selected transport
+/// and reach credential reload without attempting an SSE request.
 #[test]
-fn websocket_rejected_upgrade_is_terminal() {
+fn websocket_auth_rejected_upgrade_is_retryable() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind upgrade server");
     let address = listener.local_addr().expect("upgrade server address");
     let server = std::thread::spawn(move || {
@@ -2883,21 +2993,18 @@ fn websocket_rejected_upgrade_is_terminal() {
         )
     });
     join_websocket_peer(server);
-    let AttemptOutcome::Terminal(failure) = outcome else {
-        panic!("authentication rejection must be terminal");
+    let AttemptOutcome::Retryable { decision, progress } = outcome else {
+        panic!("authentication rejection must reach credential reload");
     };
-    assert_eq!(
-        failure.failure_kind,
-        Some(tau_proto::ProviderFailureKind::RequestRejected)
-    );
-    assert_eq!(failure.message, "provider returned HTTP 401");
+    assert_eq!(decision.class, RetryClass::Auth);
+    assert!(progress.output_items.is_empty());
     let trace =
         String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
     assert_eq!(
         trace.matches("provider backend stage observation").count(),
         1
     );
-    assert!(trace.contains("outcome=\"failed\""), "{trace}");
+    assert!(trace.contains("outcome=\"retryable\""), "{trace}");
     assert!(trace.contains("dispatch_count=0"), "{trace}");
     assert!(trace.contains("first_input_seen=false"), "{trace}");
     let captures = captures.lock().expect("capture lock");
@@ -2924,14 +3031,11 @@ fn websocket_rejects_invalid_and_oversized_frames() {
         Message::Text(r#"{"type":"error","status":401,"error":{"code":"invalid_api_key"}}"#.into()),
         &mut || false,
     );
-    let AttemptOutcome::Terminal(failure) = outcome else {
-        panic!("known WebSocket auth error must be terminal");
+    let AttemptOutcome::Retryable { decision, progress } = outcome else {
+        panic!("known WebSocket auth error must reach credential reload");
     };
-    assert_eq!(
-        failure.failure_kind,
-        Some(tau_proto::ProviderFailureKind::RequestRejected)
-    );
-    assert!(failure.message.contains("invalid_api_key"));
+    assert_eq!(decision.class, RetryClass::Auth);
+    assert!(progress.output_items.is_empty());
     let outcome = run_websocket_message(
         Message::Text(
             r#"{"type":"response.incomplete","response":{"error":{"code":"context_length_exceeded"}}}"#

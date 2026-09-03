@@ -268,6 +268,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     writer: &mut S,
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
     let summary_config = resolved_summary_config(model);
     let compact_prompt = if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
@@ -278,12 +279,20 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 provider,
                 "model context window is too small for summary compaction",
                 false,
+                provider_attempt,
             );
         };
         match materialize_summary_prompt(prompt, config) {
             Ok(compact) => Some(compact),
             Err(error) => {
-                return invalid_compaction(agent_prompt_id, prompt, provider, error, false);
+                return invalid_compaction(
+                    agent_prompt_id,
+                    prompt,
+                    provider,
+                    error,
+                    false,
+                    provider_attempt,
+                );
             }
         }
     } else {
@@ -359,6 +368,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                                         provider,
                                         &error,
                                         backend_reached,
+                                        provider_attempt,
                                     );
                                 }
                             };
@@ -375,6 +385,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                             provider,
                             "summary compactor did not complete its output",
                             backend_reached,
+                            provider_attempt,
                         );
                     }
                 }
@@ -391,6 +402,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 success.usage,
                 success.provider_response_id,
                 backend_reached,
+                provider_attempt,
             )))
         }
         tau_provider_responses::AttemptOutcome::Retryable { decision, progress } => {
@@ -401,6 +413,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                     provider,
                     "summary compactor failed after semantic output",
                     backend_reached,
+                    provider_attempt,
                 );
             }
             PromptAttemptOutcome::Retry {
@@ -428,6 +441,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                     None,
                     None,
                     backend_reached,
+                    provider_attempt,
                 )),
                 progress: failure.progress,
             }
@@ -499,6 +513,7 @@ fn invalid_compaction(
     provider: &ResponsesProvider,
     message: &str,
     backend_reached: bool,
+    provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
     PromptAttemptOutcome::Terminal {
         finished: Box::new(finished(
@@ -512,6 +527,7 @@ fn invalid_compaction(
             None,
             None,
             backend_reached,
+            provider_attempt,
         )),
         progress: tau_provider_responses::AttemptProgress {
             output_items: Vec::new(),
@@ -576,6 +592,7 @@ fn finished(
     usage: Option<tau_proto::ProviderTokenUsage>,
     provider_response_id: Option<String>,
     backend_reached: bool,
+    provider_attempt: tau_proto::ProviderAttempt,
 ) -> tau_proto::ProviderResponseFinished {
     tau_proto::ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -602,7 +619,7 @@ fn finished(
         }),
         provider_response_id,
         ws_pool_delta: None,
-        provider_attempt: Default::default(),
+        provider_attempt,
     }
 }
 

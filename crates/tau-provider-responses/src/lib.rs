@@ -22,9 +22,7 @@ use tau_proto::{
     ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope,
     ToolCallItem, ToolChoice, ToolDefinition, ToolType,
 };
-use tau_provider::retry_policy::{
-    RetryClass, RetryDecision, classify_error_code, parse_json_error_code,
-};
+use tau_provider::retry_policy::{RetryClass, RetryDecision, classify_error_code};
 use tau_provider::{
     StreamRepetition, StreamRepetitionGuard, StreamRepetitionKey,
     private_attempt_trace as private_trace,
@@ -477,7 +475,7 @@ impl Error {
                 if failure_kind(*status, body).is_some() {
                     return None;
                 }
-                let class = parse_json_error_code(body)
+                let class = classified_http_identifier(body)
                     .as_deref()
                     .map(classify_error_code)
                     .filter(|class| *class != RetryClass::Unknown)
@@ -509,10 +507,9 @@ impl Error {
                         Some(401 | 403) => RetryClass::Auth,
                         _ => RetryClass::Unknown,
                     });
-                if matches!(class, RetryClass::Auth)
-                    || status.is_some_and(
-                        |status| matches!(status, 400..=407 | 409..=424 | 426..=428 | 430..=499),
-                    )
+                if status.is_some_and(
+                    |status| matches!(status, 400 | 402 | 404..=407 | 409..=424 | 426..=428 | 430..=499),
+                )
                 {
                     None
                 } else {
@@ -538,11 +535,9 @@ impl Error {
             Self::Provider { status, code } => {
                 if let Some(kind) = code.as_deref().and_then(provider_code_failure_kind) {
                     Some(kind)
-                } else if status.is_some_and(|status| matches!(status, 400..=499))
-                    || code
-                        .as_deref()
-                        .is_some_and(|code| classify_error_code(code) == RetryClass::Auth)
-                {
+                } else if status.is_some_and(
+                    |status| matches!(status, 400 | 402 | 404..=407 | 409..=424 | 426..=499),
+                ) {
                     Some(tau_proto::ProviderFailureKind::RequestRejected)
                 } else {
                     None
@@ -567,11 +562,47 @@ fn provider_code_failure_kind(code: &str) -> Option<tau_proto::ProviderFailureKi
 }
 
 fn failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailureKind> {
-    if parse_json_error_code(body).as_deref() == Some("context_length_exceeded") {
-        return Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+    if let Some(kind) = classified_http_identifier(body)
+        .as_deref()
+        .and_then(provider_code_failure_kind)
+    {
+        return Some(kind);
     }
-    matches!(status, 400 | 401 | 403 | 404 | 409 | 413 | 422)
+    matches!(status, 400 | 404 | 409 | 413 | 422)
         .then_some(tau_proto::ProviderFailureKind::RequestRejected)
+}
+
+/// Select the structured HTTP error identifier that owns classification.
+///
+/// Context exhaustion wins across the complete canonical envelope, followed by
+/// the first known retry class and then the first opaque identifier.
+fn classified_http_identifier(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let identifiers = [
+        Some(&value),
+        value.get("error"),
+        value
+            .get("response")
+            .and_then(|response| response.get("error")),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|object| {
+        ["code", "type"]
+            .into_iter()
+            .filter_map(|field| object.get(field).and_then(Value::as_str))
+    })
+    .collect::<Vec<_>>();
+    identifiers
+        .iter()
+        .find(|identifier| **identifier == "context_length_exceeded")
+        .or_else(|| {
+            identifiers
+                .iter()
+                .find(|identifier| classify_error_code(identifier) != RetryClass::Unknown)
+        })
+        .or_else(|| identifiers.first())
+        .map(|identifier| (*identifier).to_owned())
 }
 
 /// Runs one cancellable full-transcript public Responses attempt.

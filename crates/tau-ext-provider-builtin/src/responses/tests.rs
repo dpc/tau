@@ -130,6 +130,7 @@ fn finished_response_uses_public_responses_backend_kind() {
         None,
         None,
         true,
+        tau_proto::ProviderAttempt::ONE,
     );
     assert_eq!(
         response.backend.expect("backend").kind,
@@ -159,6 +160,7 @@ fn production_attempt_backend_metadata_tracks_actual_egress() {
         &mut writer,
         &mut || false,
         &network,
+        tau_proto::ProviderAttempt::ONE,
     );
     assert!(matches!(
         pre_egress,
@@ -179,6 +181,20 @@ fn production_attempt_backend_metadata_tracks_actual_egress() {
             if finished.backend.as_ref().is_some_and(|backend| {
                 backend.kind == tau_proto::ProviderBackendKind::PublicResponses
             })
+    ));
+
+    let auth = run_loopback_attempt(
+        &prompt,
+        &model,
+        "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: 36\r\nconnection: close\r\n\r\n{\"error\":{\"code\":\"invalid_api_key\"}}",
+    );
+    assert!(matches!(
+        auth,
+        PromptAttemptOutcome::Retry {
+            decision,
+            backend_reached: true,
+            ..
+        } if decision.class == tau_provider::retry_policy::RetryClass::Auth
     ));
 
     let body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n";
@@ -235,9 +251,36 @@ fn run_loopback_attempt(
         &mut writer,
         &mut || false,
         &network,
+        tau_proto::ProviderAttempt::ONE,
     );
     server.join().expect("loopback server");
     outcome
+}
+
+/// A successful retried public Responses attempt retains the scheduler's
+/// logical attempt ordinal in the terminal report.
+#[test]
+fn retried_attempt_retains_provider_attempt() {
+    let prompt = crate::openai_tests::prompt();
+    let provider = ResponsesProvider {
+        base_url: "https://api.openai.com/v1".to_owned(),
+        ..ResponsesProvider::default()
+    };
+    let attempt = tau_proto::ProviderAttempt::new(3).expect("provider attempt");
+    let response = finished(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &provider,
+        Vec::new(),
+        tau_proto::ProviderStopReason::EndTurn,
+        None,
+        None,
+        None,
+        None,
+        true,
+        attempt,
+    );
+    assert_eq!(response.provider_attempt, attempt);
 }
 
 /// Generic Responses local summaries expose byte/timing progress without
@@ -914,6 +957,7 @@ fn debug_capture_policy_is_forwarded_to_generic_responses() {
             &mut writer,
             &mut || false,
             &network,
+            tau_proto::ProviderAttempt::ONE,
         );
     }
     assert_eq!(super::take_forwarded_debug_capture_policy(), [true, false]);

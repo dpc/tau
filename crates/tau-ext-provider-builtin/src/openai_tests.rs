@@ -3203,7 +3203,8 @@ fn later_pre_egress_attempt_cancellation_retains_prior_backend() {
         input_event(&frames[0]),
         Some(Event::ProviderResponseFinishedReported(finished))
             if finished.backend.as_ref() == Some(&prior_backend)
-                && finished.provider_attempt == tau_proto::ProviderAttempt::ONE
+                && finished.provider_attempt
+                    == tau_proto::ProviderAttempt::new(2).expect("provider attempt")
                 && finished.error.as_deref() == Some("(cancelled by harness)")
     ));
 }

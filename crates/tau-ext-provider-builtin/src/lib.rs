@@ -8843,7 +8843,6 @@ where
         ),
     }
 }
-
 /// Runs one public Responses attempt and reports its terminal or retry outcome.
 fn handle_public_responses_backend<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
@@ -8864,7 +8863,7 @@ where
             writer,
             false,
             context.prior_backend.cloned(),
-            tau_proto::ProviderAttempt::ONE,
+            context.logical_attempt.provider_attempt(),
         );
     }
     match run_responses_prompt_attempt(
@@ -8876,6 +8875,7 @@ where
         writer,
         &mut || TurnAbort::is_aborted(retry_ctx),
         context.runtime.network(),
+        context.logical_attempt.provider_attempt(),
     ) {
         ResponsesAttemptOutcome::Finished(finished) => finish_backend_attempt(
             agent_prompt_id,
@@ -8929,11 +8929,10 @@ where
                 backend_reached.then(|| responses_backend(provider)),
                 context.prior_backend,
             ),
-            tau_proto::ProviderAttempt::ONE,
+            context.logical_attempt.provider_attempt(),
         ),
     }
 }
-
 /// Emits a successful final response unless a concurrent cancellation won.
 struct CancellationFinishPolicy {
     /// Transient detail emitted when tentative output must be cleared.
