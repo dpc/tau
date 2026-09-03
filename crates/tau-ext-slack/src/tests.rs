@@ -388,8 +388,8 @@ fn cfg() -> RuntimeConfig {
         thread_ts: None,
     };
     RuntimeConfig {
-        app_token: "xapp-test".to_owned(),
-        bot_token: "xoxb-test".to_owned(),
+        app_token: tau_proto::SecretValue::new("xapp-test"),
+        bot_token: tau_proto::SecretValue::new("xoxb-test"),
         allowed_user_ids: ["U123".to_owned()].into_iter().collect(),
         sender_aliases: HashMap::new(),
         security_mode: SecurityMode::Strict,
@@ -2897,13 +2897,12 @@ fn long_successful_slack_api_response_still_parses() {
 /// Slack API failures collapse hostile remote diagnostics to a typed allowlist.
 #[test]
 fn slack_api_error_response_is_redacted_and_bounded() {
-    let cfg = cfg();
     let body = serde_json::json!({
         "ok": false,
         "error": format!(
             "{} {} {}",
-            cfg.app_token,
-            cfg.bot_token,
+            "xapp-test",
+            "xoxb-test",
             "x".repeat(MAX_DIAGNOSTIC_BYTES * 2)
         )
     })
@@ -2911,8 +2910,8 @@ fn slack_api_error_response_is_redacted_and_bounded() {
     let err = parse_slack_api_response(200, &body).expect_err("slack error");
     assert_eq!(err, SlackApiError::RemoteFailure);
     let display = err.to_string();
-    assert!(!display.contains(&cfg.app_token));
-    assert!(!display.contains(&cfg.bot_token));
+    assert!(!display.contains("xapp-test"));
+    assert!(!display.contains("xoxb-test"));
     assert!(display.len() < 128);
 }
 
@@ -5442,6 +5441,74 @@ fn users_info_uses_form_encoding() {
     server.join().expect("users.info test server");
 }
 
+/// Socket startup and installation preflight must send the configured app and
+/// bot secret bytes in the exact authorization header for their distinct APIs.
+#[test]
+fn socket_open_and_auth_test_preserve_exact_authorization_headers() {
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let address = listener.local_addr().expect("test API address");
+    let server = std::thread::spawn(move || {
+        for (method, token, body) in [
+            (
+                "apps.connections.open",
+                "xapp-test",
+                r#"{"ok":true,"url":"wss://example.test/socket"}"#,
+            ),
+            (
+                "auth.test",
+                "xoxb-test",
+                r#"{"ok":true,"user_id":"UBOT123","team_id":"T123"}"#,
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().expect("accept Slack API request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let length = stream.read(&mut chunk).expect("read Slack API request");
+                request.extend_from_slice(&chunk[..length]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(header_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .expect("request content length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with(&format!("POST /api/{method} HTTP/1.1\r\n")));
+            assert!(request.contains(&format!("authorization: Bearer {token}\r\n")));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write Slack API response");
+        }
+    });
+    let cfg = RuntimeConfig {
+        api_base: api_base(format!("http://{address}/api")),
+        ..cfg()
+    };
+    let client = HttpSlackClient::default();
+    assert_eq!(
+        client.open_socket(&cfg),
+        Ok("wss://example.test/socket".to_owned())
+    );
+    assert_eq!(
+        client.auth_test(&cfg),
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
+    );
+    server.join().expect("Socket Mode/auth test server");
+}
+
 /// Production chat.postMessage parsing classifies rate limits, hostile
 /// transient/unknown bodies, and route-integrity mismatches without leaking raw
 /// provider text or granting unsafe retry.
@@ -5483,6 +5550,7 @@ fn post_http_outcomes_are_typed_bounded_and_body_safe() {
             }
             let request = String::from_utf8_lossy(&request);
             assert!(request.starts_with("POST /api/chat.postMessage HTTP/1.1\r\n"));
+            assert!(request.contains("authorization: Bearer xoxb-test\r\n"));
             assert!(request.contains("\"link_names\":false"));
             let reason = match status {
                 200 => "OK",

@@ -995,7 +995,10 @@ impl HttpSlackClient {
         let mut response = self
             .agent
             .post(&url)
-            .header("Authorization", &format!("Bearer {}", cfg.bot_token))
+            .header(
+                "Authorization",
+                &format!("Bearer {}", cfg.bot_token.expose_secret()),
+            )
             .content_type("application/json")
             .send(
                 serde_json::json!({

@@ -347,9 +347,9 @@ struct PostedMessage {
 #[derive(Clone)]
 struct RuntimeConfig {
     /// Resolved Slack app-level token. Never log this value.
-    app_token: String,
+    app_token: tau_proto::SecretValue,
     /// Resolved Slack bot token. Never log this value.
-    bot_token: String,
+    bot_token: tau_proto::SecretValue,
     /// Slack user ids explicitly allowlisted for ingress and bridge-control
     /// commands.
     allowed_user_ids: HashSet<String>,
@@ -680,8 +680,8 @@ impl ExtConfig {
             );
         }
         Ok(RuntimeConfig {
-            app_token: app_token.to_owned(),
-            bot_token: bot_token.to_owned(),
+            app_token,
+            bot_token,
             allowed_user_ids,
             sender_aliases,
             security_mode: self.security_mode,
@@ -806,15 +806,15 @@ struct ParsedSlackCommand<'a> {
     rest: &'a str,
 }
 
-fn secret_value<'a>(
-    secrets: &'a BTreeMap<String, tau_proto::SecretValue>,
+fn secret_value(
+    secrets: &BTreeMap<String, tau_proto::SecretValue>,
     secret_name: &str,
     token_kind: &str,
-) -> Result<&'a str, String> {
+) -> Result<tau_proto::SecretValue, String> {
     secrets
         .get(secret_name)
-        .map(tau_proto::SecretValue::expose_secret)
-        .filter(|token| !token.trim().is_empty())
+        .filter(|token| !token.expose_secret().trim().is_empty())
+        .cloned()
         .ok_or_else(|| {
             format!("slack {token_kind} token secret `{secret_name}` is missing or empty")
         })
@@ -6186,7 +6186,10 @@ impl HttpSlackClient {
         let mut response = self
             .agent
             .post(&url)
-            .header("Authorization", &format!("Bearer {}", cfg.bot_token))
+            .header(
+                "Authorization",
+                &format!("Bearer {}", cfg.bot_token.expose_secret()),
+            )
             .send_form([("user", user_id)])
             .map_err(|error| slack_api_transport_error(&error))?;
         let status = response.status();
@@ -6245,7 +6248,7 @@ impl SlackClient for HttpSlackClient {
         let value = self.post(
             cfg,
             "apps.connections.open",
-            &cfg.app_token,
+            cfg.app_token.expose_secret(),
             serde_json::json!({}),
         )?;
         value
@@ -6256,7 +6259,12 @@ impl SlackClient for HttpSlackClient {
     }
 
     fn auth_test(&self, cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
-        let value = self.post(cfg, "auth.test", &cfg.bot_token, serde_json::json!({}))?;
+        let value = self.post(
+            cfg,
+            "auth.test",
+            cfg.bot_token.expose_secret(),
+            serde_json::json!({}),
+        )?;
         installation_from_response(&value)
     }
 
@@ -6278,7 +6286,10 @@ impl SlackClient for HttpSlackClient {
         let response = self
             .agent
             .post(&url)
-            .header("Authorization", &format!("Bearer {}", cfg.bot_token))
+            .header(
+                "Authorization",
+                &format!("Bearer {}", cfg.bot_token.expose_secret()),
+            )
             .content_type("application/json")
             .send(body.wire_json());
         let mut response = match response {
