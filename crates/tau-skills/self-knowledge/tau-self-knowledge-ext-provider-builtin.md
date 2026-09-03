@@ -472,15 +472,16 @@ quota display updates do not clear inference cooldowns.
 ## Tau-owned summary compaction fallback
 
 Chat Completions, OpenRouter, and public Responses models advertise standalone
-summary compaction by default with conservative context-derived limits and a
-proactive threshold. `local_summary_compaction` remains an optional full
-per-model override. Tau sends the ordinary provider request prefix for the
-immutable cut, including the normal system prompt, tools, history, images, raw
-tool arguments, and cache controls, then appends one harness-authored
-`<tau_internal>` user message. Any tool call fails without execution. Tau accepts
-one nonempty bounded assistant final text, discards reasoning and opaque replay
-data, and stores the exact text once as one synthetic user checkpoint without a
-wrapper or deterministic supplement. Ordinary opted-in debug capture applies.
+summary compaction by default. Its generic profile publishes no prefix byte cap
+or proactive threshold; its output-token cap and narrative byte bound remain
+independent resource limits. `local_summary_compaction` may provide native-domain
+overrides. Tau sends the ordinary provider request prefix for the immutable cut,
+including the normal system prompt, tools, history, images, raw tool arguments,
+and cache controls, then appends one harness-authored `<tau_internal>` user
+message. Any tool call fails without execution. Tau accepts one nonempty bounded
+assistant final text, discards reasoning and opaque replay data, and stores the
+exact text once as one synthetic user checkpoint without a wrapper or
+deterministic supplement. Ordinary opted-in debug capture applies.
 Unsupported output, insufficient context, cancellation, route loss, stale state,
 and post-output failures end the durable transaction without inference fallback
 or ambiguous resend.
