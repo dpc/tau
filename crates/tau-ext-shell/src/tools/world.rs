@@ -134,7 +134,9 @@ impl ShellWorld {
                             .expect("static artifact kind is valid"),
                         &cassette,
                         &side,
-                        crate::shell_output_spool::MAX_SAVED_OUTPUT_BYTES as u64,
+                        tau_vcr::ByteLimit::new(
+                            crate::shell_output_spool::MAX_SAVED_OUTPUT_BYTES as u64,
+                        ),
                     )
                     .map_err(vcr_failure),
                 None => store.put(&key, &cassette).map_err(vcr_failure),
@@ -606,7 +608,7 @@ impl WorldShellOutcome {
             && let Ok(content) = store.get_side(
                 key,
                 &tau_vcr::ArtifactKind::new("shell-output").expect("static artifact kind is valid"),
-                crate::shell_output_spool::MAX_SAVED_OUTPUT_BYTES as u64,
+                tau_vcr::ByteLimit::new(crate::shell_output_spool::MAX_SAVED_OUTPUT_BYTES as u64),
             )
             && content.len() as u64 == saved.bytes
             && blake3::hash(&content).as_bytes() == &saved.digest

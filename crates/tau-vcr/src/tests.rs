@@ -52,6 +52,16 @@ fn artifact_kind_rejects_invalid_values() {
     }
 }
 
+/// Side limits preserve the full raw `u64` domain while constructing a
+/// one-byte read-growth probe wherever that successor is representable.
+#[test]
+fn byte_limit_preserves_raw_values_and_saturates_read_probe() {
+    assert_eq!(ByteLimit::new(0).get(), 0);
+    assert_eq!(ByteLimit::new(3).read_probe(), 4);
+    assert_eq!(ByteLimit::new(u64::MAX).get(), u64::MAX);
+    assert_eq!(ByteLimit::new(u64::MAX).read_probe(), u64::MAX);
+}
+
 /// The store is intentionally schema-agnostic: callers own the cassette shape,
 /// while `tau-vcr` only persists and loads reviewable YAML by stable key.
 #[test]
@@ -389,7 +399,7 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
             &ArtifactKind::new("shell-output").expect("kind"),
             &cassette,
             b"payload",
-            16,
+            ByteLimit::new(16),
         )
         .expect("publish bundle");
     assert_eq!(
@@ -397,7 +407,7 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
             .get_side(
                 "call",
                 &ArtifactKind::new("shell-output").expect("kind"),
-                16
+                ByteLimit::new(16)
             )
             .expect("read side"),
         b"payload"
@@ -408,7 +418,7 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
             &ArtifactKind::new("shell-output").expect("kind"),
             &json!({"value": false}),
             b"other",
-            16,
+            ByteLimit::new(16),
         )
         .expect_err("rewrite must fail");
     assert!(matches!(error, VcrError::Write { .. }));
@@ -422,13 +432,17 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
             .get_side(
                 "call",
                 &ArtifactKind::new("shell-output").expect("kind"),
-                16
+                ByteLimit::new(16)
             )
             .expect("read original side"),
         b"payload"
     );
     let error = store
-        .get_side("call", &ArtifactKind::new("shell-output").expect("kind"), 3)
+        .get_side(
+            "call",
+            &ArtifactKind::new("shell-output").expect("kind"),
+            ByteLimit::new(3),
+        )
         .expect_err("small side limit must fail");
     assert!(matches!(
         error,
@@ -453,7 +467,7 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
             &first_kind,
             &json!({"winner": "first"}),
             b"first-side",
-            16,
+            ByteLimit::new(16),
         )
     });
     let second_store = race_store.clone();
@@ -466,7 +480,7 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
             &second_kind,
             &json!({"winner": "second"}),
             b"second-side",
-            16,
+            ByteLimit::new(16),
         )
     });
     let results = [
@@ -490,7 +504,7 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
         .expect("read bundle winner")
         .expect("bundle winner exists");
     let side = race_store
-        .get_side("race", &kind, 16)
+        .get_side("race", &kind, ByteLimit::new(16))
         .expect("read bundle winner side");
     match winner {
         value if value == json!({"winner": "first"}) => assert_eq!(side, b"first-side"),
@@ -521,7 +535,7 @@ fn bundled_side_artifact_rejects_symlink() {
         store.get_side(
             "call",
             &ArtifactKind::new("shell-output").expect("kind"),
-            16
+            ByteLimit::new(16)
         ),
         Err(VcrError::UnsafePath { .. }) | Err(VcrError::Read { .. })
     ));
@@ -534,14 +548,16 @@ fn bundled_side_artifact_rejects_oversize_before_publication() {
     let store = VcrStore::new(tempdir.path());
     let kind = ArtifactKind::new("shell-output").expect("kind");
     store
-        .put_with_side("exact", &kind, &json!({}), b"123", 3)
+        .put_with_side("exact", &kind, &json!({}), b"123", ByteLimit::new(3))
         .expect("exact side limit publishes");
     assert_eq!(
-        store.get_side("exact", &kind, 3).expect("exact side"),
+        store
+            .get_side("exact", &kind, ByteLimit::new(3))
+            .expect("exact side"),
         b"123"
     );
     let error = store
-        .put_with_side("call", &kind, &json!({}), b"too large", 3)
+        .put_with_side("call", &kind, &json!({}), b"too large", ByteLimit::new(3))
         .expect_err("oversized side must fail");
     assert!(matches!(
         error,
@@ -569,7 +585,7 @@ fn store_creates_private_root_cassette_side_and_lock() {
     let store = VcrStore::new(&root);
     let kind = ArtifactKind::new("shell-output").expect("kind");
     store
-        .put_with_side("call", &kind, &json!({}), b"side", 4)
+        .put_with_side("call", &kind, &json!({}), b"side", ByteLimit::new(4))
         .expect("publish private bundle");
 
     for (path, expected_mode) in [
@@ -605,7 +621,13 @@ fn bundled_side_artifact_recovers_regular_stages_and_rejects_nonregular_stage() 
     )
     .expect("side stage");
     store
-        .put_with_side("call", &kind, &json!({}), b"replacement", 16)
+        .put_with_side(
+            "call",
+            &kind,
+            &json!({}),
+            b"replacement",
+            ByteLimit::new(16),
+        )
         .expect("retry bundle");
     assert!(!tempdir.path().join(".call.yaml.stage").exists());
     assert!(!tempdir.path().join(".call.shell-output.stage").exists());
@@ -613,7 +635,7 @@ fn bundled_side_artifact_recovers_regular_stages_and_rejects_nonregular_stage() 
     std::fs::create_dir(tempdir.path().join(".blocked.shell-output.stage"))
         .expect("nonregular side stage");
     let error = store
-        .put_with_side("blocked", &kind, &json!({}), b"side", 16)
+        .put_with_side("blocked", &kind, &json!({}), b"side", ByteLimit::new(16))
         .expect_err("nonregular stage must fail closed");
     assert!(matches!(error, VcrError::UnsafePath { .. }));
     assert!(!tempdir.path().join("blocked.yaml").exists());
@@ -636,7 +658,7 @@ fn store_rejects_nonregular_final_paths() {
         Err(VcrError::UnsafePath { .. })
     ));
     assert!(matches!(
-        store.get_side("side", &kind, 16),
+        store.get_side("side", &kind, ByteLimit::new(16)),
         Err(VcrError::UnsafePath { .. })
     ));
 }
@@ -663,7 +685,7 @@ fn bundled_side_artifact_cleans_side_when_cassette_publication_fails() {
     let kind = ArtifactKind::new("shell-output").expect("kind");
     assert!(
         store
-            .put_with_side("call", &kind, &json!({}), b"payload", 16)
+            .put_with_side("call", &kind, &json!({}), b"payload", ByteLimit::new(16))
             .is_err()
     );
     assert!(!tempdir.path().join("call.shell-output").exists());
@@ -679,10 +701,43 @@ fn bundled_side_artifact_reclaims_crash_orphan() {
     let store = VcrStore::new(tempdir.path());
     let kind = ArtifactKind::new("shell-output").expect("kind");
     store
-        .put_with_side("call", &kind, &json!({}), b"replacement", 16)
+        .put_with_side(
+            "call",
+            &kind,
+            &json!({}),
+            b"replacement",
+            ByteLimit::new(16),
+        )
         .expect("retry bundle");
     assert_eq!(
-        store.get_side("call", &kind, 16).expect("side"),
+        store
+            .get_side("call", &kind, ByteLimit::new(16))
+            .expect("side"),
         b"replacement"
+    );
+}
+
+/// The maximum accepted limit saturates its extra-byte read probe, so a
+/// nonempty side still replays instead of panicking or appearing empty.
+#[test]
+fn bundled_side_artifact_reads_nonempty_at_max_byte_limit() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let store = VcrStore::new(tempdir.path());
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+    store
+        .put_with_side(
+            "maximum",
+            &kind,
+            &json!({}),
+            b"nonempty",
+            ByteLimit::new(u64::MAX),
+        )
+        .expect("maximum limit accepts side");
+
+    assert_eq!(
+        store
+            .get_side("maximum", &kind, ByteLimit::new(u64::MAX))
+            .expect("maximum limit reads side"),
+        b"nonempty"
     );
 }

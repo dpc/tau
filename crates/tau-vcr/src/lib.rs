@@ -16,6 +16,34 @@ const ENV_MODE: &str = "TAU_VCR";
 const ENV_DIR: &str = "TAU_VCR_DIR";
 const MAX_CASSETTE_BYTES: u64 = 1024 * 1024;
 
+/// A non-validating maximum byte limit for bounded side artifacts.
+///
+/// The wrapper preserves every raw `u64` limit, including zero and
+/// [`u64::MAX`], while owning the saturating extra-byte probe used to detect
+/// read-time growth.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ByteLimit(u64);
+
+impl ByteLimit {
+    /// Wraps a raw maximum byte limit without validating or narrowing it.
+    #[must_use]
+    pub const fn new(bytes: u64) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the raw maximum byte limit.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the bounded read probe, retaining the maximum raw limit.
+    #[must_use]
+    const fn read_probe(self) -> u64 {
+        self.0.saturating_add(1)
+    }
+}
+
 /// VCR operating mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VcrMode {
@@ -268,7 +296,7 @@ impl VcrStore {
         artifact_kind: &ArtifactKind,
         value: &T,
         side: &[u8],
-        max_side_bytes: u64,
+        max_side_bytes: ByteLimit,
     ) -> Result<(), VcrError>
     where
         T: Serialize,
@@ -295,11 +323,11 @@ impl VcrStore {
                 source,
             })?;
         }
-        if max_side_bytes < u64::try_from(side.len()).unwrap_or(u64::MAX) {
+        if max_side_bytes.get() < u64::try_from(side.len()).unwrap_or(u64::MAX) {
             return Err(VcrError::TooLarge {
                 path: side_path,
                 bytes: u64::try_from(side.len()).unwrap_or(u64::MAX),
-                limit: max_side_bytes,
+                limit: max_side_bytes.get(),
             });
         }
         write_bytes_exclusive(&side_path, side)?;
@@ -347,7 +375,7 @@ impl VcrStore {
         &self,
         key: &str,
         artifact_kind: &ArtifactKind,
-        max_bytes: u64,
+        max_bytes: ByteLimit,
     ) -> Result<Vec<u8>, VcrError> {
         let path = self.side_path(key, artifact_kind)?;
         #[cfg(not(unix))]
@@ -371,25 +399,25 @@ impl VcrStore {
         if !metadata.is_file() {
             return Err(VcrError::UnsafePath { path });
         }
-        if max_bytes < metadata.len() {
+        if max_bytes.get() < metadata.len() {
             return Err(VcrError::TooLarge {
                 path,
                 bytes: metadata.len(),
-                limit: max_bytes,
+                limit: max_bytes.get(),
             });
         }
         let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-        file.take(max_bytes + 1)
+        file.take(max_bytes.read_probe())
             .read_to_end(&mut bytes)
             .map_err(|source| VcrError::Read {
                 path: path.clone(),
                 source,
             })?;
-        if max_bytes < u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
+        if max_bytes.get() < u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
             return Err(VcrError::TooLarge {
                 path,
                 bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                limit: max_bytes,
+                limit: max_bytes.get(),
             });
         }
         Ok(bytes)
