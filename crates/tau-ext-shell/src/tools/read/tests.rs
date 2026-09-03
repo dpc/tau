@@ -34,6 +34,25 @@ fn read_ranges_reject_wrong_type_line_arguments() {
 
     assert_eq!(err.message, "argument `start_line` must be an integer");
 }
+
+/// Ensures successful parsing retains validated nonzero coordinates without
+/// changing the original range display that the read tool reports.
+#[test]
+fn read_ranges_retain_validated_line_coordinates_and_display() {
+    let request = parse_read_request(&map(vec![(
+        "ranges",
+        CborValue::Array(vec![map(vec![
+            ("start_line", CborValue::Integer(2.into())),
+            ("end_line", CborValue::Integer(3.into())),
+        ])]),
+    )]))
+    .expect("positive range should parse");
+
+    assert_eq!(request.ranges.len(), 1);
+    assert_eq!(request.ranges[0].start_line.get(), 2);
+    assert_eq!(request.ranges[0].end_line.map(LineNumber::get), Some(3));
+    assert_eq!(request.display_ranges, vec!["2..3"]);
+}
 /// Ensures the read tool refuses inputs above its safety cap before loading
 /// the whole file into memory.
 #[test]

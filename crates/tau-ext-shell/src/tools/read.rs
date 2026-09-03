@@ -1,6 +1,7 @@
 //! `read` tool: read a file (optionally a line slice).
 
 use std::io as path_std_io;
+use std::num::NonZeroUsize;
 
 #[cfg(test)]
 mod tests;
@@ -106,21 +107,54 @@ fn near_sibling_path_suggestion(path: &Path, world: &mut ShellWorld) -> Option<S
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReadLineRange {
     /// 1-based inclusive first line to include.
-    pub(crate) start_line: usize,
+    pub(crate) start_line: LineNumber,
     /// 1-based inclusive final line to include, or `None` for the rest of the
     /// file.
-    pub(crate) end_line: Option<usize>,
+    pub(crate) end_line: Option<LineNumber>,
 }
 
 impl ReadLineRange {
     fn contains_line(&self, line: usize) -> bool {
-        if line < self.start_line {
+        if line < self.start_line.get() {
             return false;
         }
         match self.end_line {
-            Some(end_line) => line <= end_line,
+            Some(end_line) => line <= end_line.get(),
             None => true,
         }
+    }
+}
+
+/// A validated nonzero 1-based line coordinate.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct LineNumber(NonZeroUsize);
+
+impl LineNumber {
+    /// Builds a line coordinate after a caller has established it is nonzero.
+    pub(crate) fn new(value: usize) -> Option<Self> {
+        NonZeroUsize::new(value).map(Self)
+    }
+
+    /// Returns the coordinate as an integer for formatting or indexing.
+    pub(crate) fn get(self) -> usize {
+        self.0.get()
+    }
+
+    /// Returns the preceding coordinate when it remains a valid line number.
+    pub(crate) fn predecessor(self) -> Option<Self> {
+        self.get().checked_sub(1).and_then(Self::new)
+    }
+
+    /// Saturates a coordinate-derived context window at the first line.
+    pub(crate) fn saturating_sub(self, amount: usize) -> Self {
+        Self::new(self.get().saturating_sub(amount).max(1))
+            .expect("the first line is a valid coordinate")
+    }
+
+    /// Expands a coordinate-derived context window without becoming zero.
+    pub(crate) fn saturating_add(self, amount: usize) -> Self {
+        Self::new(self.get().saturating_add(amount))
+            .expect("saturating addition of a nonzero coordinate stays nonzero")
     }
 }
 
@@ -379,8 +413,8 @@ fn parse_read_request(arguments: &CborValue) -> Result<ReadRequest, ToolFailure>
             end_line,
         }],
         display_ranges: vec![format_read_range(
-            start_line_arg.map(|_| start_line),
-            end_line,
+            start_line_arg.map(|_| start_line.get()),
+            end_line.map(LineNumber::get),
         )],
     })
 }
@@ -414,7 +448,10 @@ fn parse_read_ranges(
             start_line,
             end_line: Some(end_line),
         });
-        display_ranges.push(format_read_range(Some(start_line), Some(end_line)));
+        display_ranges.push(format_read_range(
+            Some(start_line.get()),
+            Some(end_line.get()),
+        ));
     }
     Ok(ReadRequest {
         ranges: parsed,
@@ -453,12 +490,12 @@ fn has_argument(arguments: &CborValue, key: &str) -> bool {
         .any(|(entry_key, _)| matches!(entry_key, CborValue::Text(entry_key) if entry_key == key))
 }
 
-fn parse_required_range_line(range: &CborValue, key: &str) -> Result<usize, ToolFailure> {
+fn parse_required_range_line(range: &CborValue, key: &str) -> Result<LineNumber, ToolFailure> {
     match optional_argument_int_strict(range, key).map_err(ToolFailure::new)? {
         Some(value) if value < 1 => Err(ToolFailure::new(format!("{key} must be >= 1"))),
-        Some(value) => {
-            usize::try_from(value).map_err(|_| ToolFailure::new(format!("{key} is too large")))
-        }
+        Some(value) => usize::try_from(value)
+            .map_err(|_| ToolFailure::new(format!("{key} is too large")))
+            .map(|value| LineNumber::new(value).expect("positive validated range line fits usize")),
         None => Err(ToolFailure::new(format!(
             "each range must have an integer {key}"
         ))),
@@ -472,10 +509,10 @@ fn validate_ranges_with_total(
 ) -> Result<(), ToolFailure> {
     let max_read_start_line = total_lines.max(1);
     for range in ranges {
-        if max_read_start_line < range.start_line {
+        if max_read_start_line < range.start_line.get() {
             return Err(ToolFailure::new(format!(
                 "start_line {} is past end of file (total_lines: {total_lines})",
-                range.start_line
+                range.start_line.get()
             ))
             .with_args(display_args.to_owned()));
         }
@@ -483,32 +520,34 @@ fn validate_ranges_with_total(
     Ok(())
 }
 
-fn parse_read_start_line(value: Option<i64>) -> Result<usize, ToolFailure> {
+fn parse_read_start_line(value: Option<i64>) -> Result<LineNumber, ToolFailure> {
     match value {
-        None => Ok(1),
+        None => Ok(LineNumber::new(1).expect("the first line is a valid coordinate")),
         Some(value) if value < 1 => Err(ToolFailure::new("start_line must be >= 1")),
-        Some(value) => {
-            usize::try_from(value).map_err(|_| ToolFailure::new("start_line is too large"))
-        }
+        Some(value) => usize::try_from(value)
+            .map_err(|_| ToolFailure::new("start_line is too large"))
+            .map(|value| LineNumber::new(value).expect("positive validated start line fits usize")),
     }
 }
 
 fn parse_read_end_line(
     value: Option<i64>,
-    start_line: usize,
-) -> Result<Option<usize>, ToolFailure> {
+    start_line: LineNumber,
+) -> Result<Option<LineNumber>, ToolFailure> {
     let Some(value) = value else {
         return Ok(None);
     };
     if value < 1 {
         return Err(ToolFailure::new("end_line must be >= 1"));
     }
-    let end_line = usize::try_from(value).map_err(|_| ToolFailure::new("end_line is too large"))?;
+    let end_line = usize::try_from(value)
+        .map_err(|_| ToolFailure::new("end_line is too large"))
+        .map(|value| LineNumber::new(value).expect("positive validated end line fits usize"))?;
     validate_read_end_line(start_line, end_line)?;
     Ok(Some(end_line))
 }
 
-fn validate_read_end_line(start_line: usize, end_line: usize) -> Result<(), ToolFailure> {
+fn validate_read_end_line(start_line: LineNumber, end_line: LineNumber) -> Result<(), ToolFailure> {
     if end_line < start_line {
         return Err(ToolFailure::new("end_line must be >= start_line"));
     }

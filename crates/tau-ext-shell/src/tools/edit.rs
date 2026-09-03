@@ -1,5 +1,8 @@
 //! `edit` tool: line-oriented replacements on a file.
 
+#[cfg(test)]
+mod tests;
+
 use std::io as path_std_io;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +11,7 @@ use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text};
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput, text_stats};
-use crate::tools::read::{ReadLineRange, slice_line_ranges};
+use crate::tools::read::{LineNumber, ReadLineRange, slice_line_ranges};
 use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
 use crate::truncate::truncate_line_oriented;
 
@@ -70,7 +73,7 @@ pub(crate) fn edit_file(
         result: edit_result_value(
             replacements.len(),
             changed,
-            result_lines.max_valid_start_line(),
+            result_lines.max_valid_start_line().get(),
             result.len(),
         ),
         provider_content: Vec::new(),
@@ -175,8 +178,8 @@ fn edit_display_payload(
 }
 
 struct EditRange {
-    start_line: usize,
-    end_line_exclusive: usize,
+    start_line: LineNumber,
+    end_line_exclusive: LineNumber,
     display: String,
 }
 
@@ -187,8 +190,8 @@ impl EditRange {
 }
 
 struct LineReplacement<'a> {
-    start_line: usize,
-    end_line_exclusive: usize,
+    start_line: LineNumber,
+    end_line_exclusive: LineNumber,
     start_byte: usize,
     end_byte: usize,
     new_text: Vec<u8>,
@@ -220,7 +223,7 @@ fn normalize_new_text_line_ending(
     }
 
     let line_ending = if range.is_empty() {
-        if range.start_line <= original_lines.total_lines() {
+        if range.start_line.get() <= original_lines.total_lines() {
             original_lines
                 .line_ending_for_line(range.start_line, original_bytes)
                 .unwrap_or(b"\n")
@@ -228,7 +231,10 @@ fn normalize_new_text_line_ending(
             b"\n"
         }
     } else {
-        let line = range.end_line_exclusive.saturating_sub(1);
+        let line = range
+            .end_line_exclusive
+            .predecessor()
+            .expect("a nonempty range ends after its first valid line");
         let Some(line_ending) = original_lines.line_ending_for_line(line, original_bytes) else {
             return changed;
         };
@@ -301,11 +307,11 @@ impl LineIndex {
         }
     }
 
-    fn line_ending_for_line<'a>(&self, line: usize, input: &'a [u8]) -> Option<&'a [u8]> {
-        let span = self.spans.get(line.checked_sub(1)?)?;
+    fn line_ending_for_line<'a>(&self, line: LineNumber, input: &'a [u8]) -> Option<&'a [u8]> {
+        let span = self.spans.get(line.get() - 1)?;
         let next_start = self
             .spans
-            .get(line)
+            .get(line.get())
             .map_or(input.len(), |next_span| next_span.start);
         if span.content_end == next_start {
             return None;
@@ -321,24 +327,24 @@ impl LineIndex {
         self.spans.len()
     }
 
-    fn has_line(&self, line: usize) -> bool {
-        line.checked_sub(1)
-            .is_some_and(|index| self.spans.get(index).is_some())
+    fn has_line(&self, line: LineNumber) -> bool {
+        self.spans.get(line.get() - 1).is_some()
     }
 
-    fn max_valid_start_line(&self) -> usize {
-        self.spans.len().saturating_add(1)
+    fn max_valid_start_line(&self) -> LineNumber {
+        LineNumber::new(self.spans.len().saturating_add(1))
+            .expect("a maximum valid start line is always nonzero")
     }
 
-    fn byte_start_for_line(&self, line: usize, eof: usize) -> usize {
+    fn byte_start_for_line(&self, line: LineNumber, eof_byte_offset: usize) -> usize {
         self.spans
-            .get(line.saturating_sub(1))
+            .get(line.get() - 1)
             .map(|span| span.start)
-            .unwrap_or(eof)
+            .unwrap_or(eof_byte_offset)
     }
 
-    fn line_content_text<'a>(&self, line: usize, input: &'a [u8]) -> Option<&'a str> {
-        let Some(span) = self.spans.get(line.saturating_sub(1)) else {
+    fn line_content_text<'a>(&self, line: LineNumber, input: &'a [u8]) -> Option<&'a str> {
+        let Some(span) = self.spans.get(line.get() - 1) else {
             return (line <= self.max_valid_start_line()).then_some("");
         };
         std::str::from_utf8(&input[span.start..span.content_end]).ok()
@@ -372,14 +378,13 @@ fn validate_context_lines(
 ) -> Result<(), ToolFailure> {
     for replacement in replacements {
         let context_line = replacement.context_line;
-        let context_line_number = replacement.start_line;
         let actual_context_line =
-            original_lines.line_content_text(context_line_number, original_bytes);
+            original_lines.line_content_text(replacement.start_line, original_bytes);
         if actual_context_line == Some(context_line) {
             continue;
         }
         let current_context_line_invalid_utf8 =
-            original_lines.has_line(context_line_number) && actual_context_line.is_none();
+            original_lines.has_line(replacement.start_line) && actual_context_line.is_none();
         return Err(context_line_mismatch_failure(
             replacement,
             original_bytes,
@@ -396,13 +401,13 @@ fn context_line_mismatch_failure(
     display_args: &str,
     current_context_line_invalid_utf8: bool,
 ) -> ToolFailure {
-    let start_line = replacement.start_line;
-    let context_line_number = start_line;
-    let context_anchor_line = context_line_number.max(1);
-    let context_start_line = context_anchor_line
-        .saturating_sub(CONTEXT_LINE_MISMATCH_CONTEXT_LINES)
-        .max(1);
-    let context_end_line = context_anchor_line.saturating_add(CONTEXT_LINE_MISMATCH_CONTEXT_LINES);
+    let context_line_number = replacement.start_line.get();
+    let context_start_line = replacement
+        .start_line
+        .saturating_sub(CONTEXT_LINE_MISMATCH_CONTEXT_LINES);
+    let context_end_line = replacement
+        .start_line
+        .saturating_add(CONTEXT_LINE_MISMATCH_CONTEXT_LINES);
     let ranges = vec![ReadLineRange {
         start_line: context_start_line,
         end_line: Some(context_end_line),
@@ -447,7 +452,7 @@ fn context_line_mismatch_failure(
         format!(
             "context_line wrong - current line {context_line_number} is not valid UTF-8, so no context_line string can match it; see current content in the response"
         )
-    } else if !LineIndex::new(original_bytes).has_line(context_line_number) {
+    } else if !LineIndex::new(original_bytes).has_line(replacement.start_line) {
         format!(
             "context_line wrong - must equal \"\" for missing line {context_line_number}, see current content in the response"
         )
@@ -543,12 +548,14 @@ fn parse_half_open_edit_range(
             ToolFailure::new("end_line_exclusive must be at least start_line"),
         ));
     }
-    let max_valid_start_line = original_lines.total_lines().saturating_add(1);
+    let max_valid_start_line = original_lines.max_valid_start_line();
     if max_valid_start_line < start_line {
         return Err(with_display_args(
             display_args,
             ToolFailure::new(format!(
-                "start_line {start_line} is past end of file (max_valid_start_line: {max_valid_start_line})"
+                "start_line {} is past end of file (max_valid_start_line: {})",
+                start_line.get(),
+                max_valid_start_line.get()
             )),
         ));
     }
@@ -556,14 +563,16 @@ fn parse_half_open_edit_range(
         return Err(with_display_args(
             display_args,
             ToolFailure::new(format!(
-                "end_line_exclusive {end_line_exclusive} is past end of file (max_valid_start_line: {max_valid_start_line})"
+                "end_line_exclusive {} is past end of file (max_valid_start_line: {})",
+                end_line_exclusive.get(),
+                max_valid_start_line.get()
             )),
         ));
     }
     Ok(EditRange {
         start_line,
         end_line_exclusive,
-        display: format!("{start_line}..<{end_line_exclusive}"),
+        display: format!("{}..<{}", start_line.get(), end_line_exclusive.get()),
     })
 }
 
@@ -596,18 +605,20 @@ fn parse_required_line(
     edit: &CborValue,
     key: &str,
     display_args: &str,
-) -> Result<usize, ToolFailure> {
+) -> Result<LineNumber, ToolFailure> {
     match cbor_map_int(edit, key) {
         Some(n) if n < 1 => Err(with_display_args(
             display_args,
             ToolFailure::new(format!("{key} must be at least 1")),
         )),
-        Some(n) => usize::try_from(n).map_err(|_| {
-            with_display_args(
-                display_args,
-                ToolFailure::new(format!("{key} is too large")),
-            )
-        }),
+        Some(n) => usize::try_from(n)
+            .map_err(|_| {
+                with_display_args(
+                    display_args,
+                    ToolFailure::new(format!("{key} is too large")),
+                )
+            })
+            .map(|value| LineNumber::new(value).expect("positive validated edit line fits usize")),
         None => Err(with_display_args(
             display_args,
             ToolFailure::new(format!("each edit must have an integer {key}")),
