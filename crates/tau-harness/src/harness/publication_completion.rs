@@ -3134,16 +3134,6 @@ impl Harness {
                         tau_proto::AgentWatchProviderState::RecoveringContext { attempt },
                     );
                 }
-                if matches!(
-                    started.trigger,
-                    tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
-                ) {
-                    self.project_agent_watch_provider_state(
-                        &cid,
-                        started.compact_prompt_id.clone(),
-                        tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
-                    );
-                }
             }
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event
