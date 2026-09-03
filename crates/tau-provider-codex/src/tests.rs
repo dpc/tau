@@ -130,6 +130,122 @@ fn compact_admission_changed_identity_gets_one_fresh_probe() {
     probe.complete(CompactRouteState::Available);
 }
 
+/// Retiring a superseded credential generation removes only its negative
+/// capability observation, bounding live runtime state without disturbing
+/// another generation's admission result.
+#[test]
+fn compact_admission_retires_superseded_negative_identity() {
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let stale = InferenceProfileIdentity(23);
+    let current = InferenceProfileIdentity(24);
+    assert!(runtime.mark_compact_route_unavailable(stale));
+    assert!(runtime.mark_compact_route_unavailable(current));
+
+    runtime.retire_compact_identity(stale);
+
+    assert!(matches!(
+        runtime.acquire_compact_probe(stale, &mut NeverAbort),
+        CompactAdmissionResult::Probe(_)
+    ));
+    assert!(matches!(
+        runtime.acquire_compact_probe(current, &mut NeverAbort),
+        CompactAdmissionResult::Unavailable
+    ));
+}
+
+/// A waiter bound to a retired probe cannot adopt a replacement generation
+/// that installs and completes before the waiter reacquires the admission lock.
+#[test]
+fn compact_admission_waiter_rejects_replacement_probe_generation() {
+    let runtime = Arc::new(CodexRuntime::new(Arc::new(crate::test_network_policy())));
+    let identity = InferenceProfileIdentity(26);
+    let CompactAdmissionResult::Probe(stale_probe) =
+        runtime.acquire_compact_probe(identity, &mut NeverAbort)
+    else {
+        panic!("first probe");
+    };
+    let waiter_runtime = Arc::clone(&runtime);
+    let (entered_tx, entered_rx) = path_std_sync_mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        matches!(
+            waiter_runtime.acquire_compact_probe(identity, &mut AdmissionEntered(entered_tx)),
+            CompactAdmissionResult::Unavailable
+        )
+    });
+    entered_rx.recv().expect("waiter entered compact admission");
+
+    let replacement_generation = stale_probe.generation.saturating_add(1);
+    {
+        let mut routes = runtime
+            .compact_routes
+            .states
+            .lock()
+            .expect("compact admission lock");
+        assert_eq!(
+            routes.remove(&identity),
+            Some(CompactRouteObservation {
+                generation: stale_probe.generation,
+                state: CompactRouteState::Probing,
+            })
+        );
+        routes.insert(
+            identity,
+            CompactRouteObservation {
+                generation: replacement_generation,
+                state: CompactRouteState::Available,
+            },
+        );
+        runtime.compact_routes.changed.notify_all();
+    }
+
+    assert!(
+        waiter.join().expect("retired probe waiter"),
+        "a waiter for retired work must not adopt a replacement result"
+    );
+    assert!(!stale_probe.complete(CompactRouteState::Unavailable));
+    assert!(matches!(
+        runtime.acquire_compact_probe(identity, &mut NeverAbort),
+        CompactAdmissionResult::Admitted
+    ));
+}
+
+/// A late unavailable result created before main-loop retirement cannot remain
+/// after the stale worker message observes that the identity is superseded.
+#[test]
+fn compact_admission_cleans_late_negative_after_retirement() {
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let identity = InferenceProfileIdentity(27);
+    assert!(runtime.mark_compact_route_unavailable(identity));
+    runtime.retire_compact_identity(identity);
+
+    assert!(
+        runtime.mark_compact_route_unavailable(identity),
+        "simulate a late worker result installed before main-loop arbitration"
+    );
+    runtime.retire_compact_identity(identity);
+
+    assert!(matches!(
+        runtime.acquire_compact_probe(identity, &mut NeverAbort),
+        CompactAdmissionResult::Probe(_)
+    ));
+}
+
+/// Negative capability observations are runtime-only: a cold runtime after
+/// restart admits one fresh probe instead of restoring a prior generation.
+#[test]
+fn compact_admission_restart_drops_negative_identity() {
+    let identity = InferenceProfileIdentity(25);
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    assert!(runtime.mark_compact_route_unavailable(identity));
+    drop(runtime);
+
+    let restarted = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    assert!(matches!(
+        restarted.acquire_compact_probe(identity, &mut NeverAbort),
+        CompactAdmissionResult::Probe(_)
+    ));
+}
+
 /// Concurrent requests for one fresh identity wait behind the first probe and
 /// all become admitted after its successful capability result.
 #[test]

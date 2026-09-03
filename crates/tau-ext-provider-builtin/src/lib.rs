@@ -3261,12 +3261,15 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         if let Some(previous) = &self.declared_credential_observations {
-            reconcile_compact_state_after_credential_changes(
+            let superseded_negative_identities = reconcile_compact_state_after_credential_changes(
                 previous,
                 &observations,
                 &mut self.compact_profile_identities,
                 &mut self.unavailable_compact_identities,
             );
+            for identity in superseded_negative_identities {
+                self.codex_runtime.retire_compact_identity(identity);
+            }
         }
         apply_compact_route_downgrades(
             &mut models,
@@ -4964,7 +4967,7 @@ where
                 Ok(WorkerMessage::PromptDone) => {
                     self.active_prompts = self.active_prompts.saturating_sub(1);
                 }
-                Ok(WorkerMessage::CompactRouteUnavailable { provider, identity }) => {
+                Ok(WorkerMessage::CompactRouteUnavailable { identity }) => {
                     let mut profiles = self.load_all_profiles(handle)?;
                     let observes_oauth_refresh = profiles
                         .providers
@@ -4984,7 +4987,10 @@ where
                         }
                     }
                     self.observe_all_oauth_resolutions(observes_oauth_refresh, handle)?;
-                    if self.compact_profile_identities.get(&provider) == Some(&identity) {
+                    if compact_negative_identity_is_owned(
+                        identity,
+                        &self.compact_profile_identities,
+                    ) {
                         let changed = self.unavailable_compact_identities.insert(identity);
                         if !changed {
                             continue;
@@ -4996,6 +5002,8 @@ where
                             &self.unavailable_compact_identities,
                         );
                         self.emit_model_declaration(models, handle)?;
+                    } else {
+                        self.codex_runtime.retire_compact_identity(identity);
                     }
                 }
                 Ok(WorkerMessage::PrewarmDone {
@@ -5502,15 +5510,27 @@ fn reconcile_compact_state_after_credential_changes(
     current: &BTreeMap<ProviderName, CredentialObservation>,
     identities: &mut HashMap<ProviderName, InferenceProfileIdentity>,
     unavailable: &mut HashSet<InferenceProfileIdentity>,
-) {
+) -> Vec<InferenceProfileIdentity> {
+    let mut superseded_negative_identities = Vec::new();
     for provider in previous.keys().chain(current.keys()) {
         if previous.get(provider) != current.get(provider)
             && let Some(identity) = identities.remove(provider)
             && !identities.values().any(|current| current == &identity)
         {
             unavailable.remove(&identity);
+            superseded_negative_identities.push(identity);
         }
     }
+    superseded_negative_identities
+}
+
+/// Returns whether a route-negative result still belongs to any current
+/// provider alias sharing its inference identity.
+fn compact_negative_identity_is_owned(
+    identity: InferenceProfileIdentity,
+    identities: &HashMap<ProviderName, InferenceProfileIdentity>,
+) -> bool {
+    identities.values().any(|current| current == &identity)
 }
 
 /// Returns whether current local route or credential evidence replaces the last
@@ -7191,8 +7211,6 @@ enum WorkerMessage {
     PromptDone,
     /// A canonical v2 unsupported code removed compaction for this generation.
     CompactRouteUnavailable {
-        /// Provider namespace whose current route/account was rejected.
-        provider: ProviderName,
         /// Exact resolved profile generation that observed the rejection.
         identity: InferenceProfileIdentity,
     },
@@ -7577,10 +7595,7 @@ fn production_prompt_executor() -> PromptExecutor {
                     let _ = send_worker_message(
                         &execution.output_tx,
                         &execution.output_waker,
-                        WorkerMessage::CompactRouteUnavailable {
-                            provider: model.provider.clone(),
-                            identity,
-                        },
+                        WorkerMessage::CompactRouteUnavailable { identity },
                     );
                 },
             };

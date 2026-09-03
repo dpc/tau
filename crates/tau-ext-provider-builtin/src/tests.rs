@@ -1959,14 +1959,115 @@ fn credential_rotation_retains_shared_alias_compact_negative_evidence() {
     let mut identities = HashMap::from([(changed, identity), (unchanged, identity)]);
     let mut unavailable = HashSet::from([identity]);
 
-    reconcile_compact_state_after_credential_changes(
+    let superseded = reconcile_compact_state_after_credential_changes(
         &previous,
         &current,
         &mut identities,
         &mut unavailable,
     );
 
+    assert!(superseded.is_empty());
     assert!(unavailable.contains(&identity));
+}
+
+/// Rotating one alias while a shared identity is still probing does not retire
+/// the probe owned by the unchanged alias.
+#[test]
+fn credential_rotation_retains_shared_alias_compact_probe() {
+    let changed = ProviderName::new("changed");
+    let unchanged = ProviderName::new("unchanged");
+    let identity = InferenceProfileIdentity::from_test_value(9);
+    let previous = BTreeMap::from([
+        (
+            changed.clone(),
+            CredentialObservation::Contents(blake3::hash(b"old")),
+        ),
+        (
+            unchanged.clone(),
+            CredentialObservation::Contents(blake3::hash(b"shared")),
+        ),
+    ]);
+    let current = BTreeMap::from([
+        (
+            changed.clone(),
+            CredentialObservation::Contents(blake3::hash(b"new")),
+        ),
+        (
+            unchanged.clone(),
+            CredentialObservation::Contents(blake3::hash(b"shared")),
+        ),
+    ]);
+    let mut identities = HashMap::from([(changed, identity), (unchanged, identity)]);
+    let mut unavailable = HashSet::new();
+
+    let superseded = reconcile_compact_state_after_credential_changes(
+        &previous,
+        &current,
+        &mut identities,
+        &mut unavailable,
+    );
+
+    assert!(superseded.is_empty());
+    assert_eq!(
+        identities
+            .values()
+            .filter(|value| **value == identity)
+            .count(),
+        1
+    );
+}
+
+/// Rotating the last provider alias for a negative inference identity retires
+/// that superseded generation from both extension and Codex runtime ownership.
+#[test]
+fn credential_rotation_evicts_unaliased_compact_negative_evidence() {
+    let provider = ProviderName::new("chatgpt");
+    let identity = InferenceProfileIdentity::from_test_value(8);
+    let previous = BTreeMap::from([(
+        provider.clone(),
+        CredentialObservation::Contents(blake3::hash(b"old")),
+    )]);
+    let current = BTreeMap::from([(
+        provider.clone(),
+        CredentialObservation::Contents(blake3::hash(b"new")),
+    )]);
+    let mut identities = HashMap::from([(provider, identity)]);
+    let mut unavailable = HashSet::from([identity]);
+
+    let superseded = reconcile_compact_state_after_credential_changes(
+        &previous,
+        &current,
+        &mut identities,
+        &mut unavailable,
+    );
+
+    assert_eq!(superseded, vec![identity]);
+    assert!(!unavailable.contains(&identity));
+}
+
+/// A downgrade message queued by a superseded worker does not repopulate the
+/// extension's negative identity cache.
+#[test]
+fn late_superseded_compact_downgrade_is_not_retained() {
+    let provider = ProviderName::new("rotated");
+    let stale = InferenceProfileIdentity::from_test_value(10);
+    let current = InferenceProfileIdentity::from_test_value(11);
+    let identities = HashMap::from([(provider, current)]);
+
+    assert!(!compact_negative_identity_is_owned(stale, &identities));
+}
+
+/// A late downgrade from a rotated origin alias remains authoritative while a
+/// sibling alias still owns the rejected inference identity.
+#[test]
+fn late_rotated_alias_downgrade_is_retained_for_shared_identity() {
+    let rotated = ProviderName::new("rotated");
+    let sibling = ProviderName::new("sibling");
+    let rejected = InferenceProfileIdentity::from_test_value(12);
+    let current = InferenceProfileIdentity::from_test_value(13);
+    let identities = HashMap::from([(rotated, current), (sibling, rejected)]);
+
+    assert!(compact_negative_identity_is_owned(rejected, &identities));
 }
 
 /// Cloneable in-memory sink used to inspect structured tracing output.

@@ -12,6 +12,7 @@ use std::collections as path_std_collections;
 use std::collections::{HashMap, hash_map as path_std_collections_hash_map};
 use std::num::NonZeroU32;
 use std::sync as path_std_sync;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 mod compact_v2;
@@ -588,7 +589,10 @@ pub struct CodexRuntime {
 /// Synchronized generation-scoped compaction route observations.
 struct CompactAdmission {
     /// Current state by resolved profile generation.
-    states: std::sync::Mutex<HashMap<InferenceProfileIdentity, CompactRouteState>>,
+    states: std::sync::Mutex<HashMap<InferenceProfileIdentity, CompactRouteObservation>>,
+    /// Monotonic owner generation for distinguishing replacement probes of the
+    /// same inference identity.
+    next_probe_generation: AtomicU64,
     /// Wakes waiters after probe completion.
     changed: std::sync::Condvar,
 }
@@ -598,6 +602,12 @@ enum CompactRouteState {
     Probing,
     Available,
     Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompactRouteObservation {
+    generation: u64,
+    state: CompactRouteState,
 }
 
 enum CompactAdmissionResult<'a> {
@@ -611,16 +621,32 @@ enum CompactAdmissionResult<'a> {
 struct CompactProbe<'a> {
     runtime: &'a CodexRuntime,
     identity: InferenceProfileIdentity,
+    generation: u64,
     completed: bool,
 }
 
 impl CompactProbe<'_> {
-    fn complete(mut self, state: CompactRouteState) {
-        if let Ok(mut routes) = self.runtime.compact_routes.states.lock() {
-            routes.insert(self.identity, state);
+    fn complete(mut self, state: CompactRouteState) -> bool {
+        let committed = if let Ok(mut routes) = self.runtime.compact_routes.states.lock()
+            && routes.get(&self.identity)
+                == Some(&CompactRouteObservation {
+                    generation: self.generation,
+                    state: CompactRouteState::Probing,
+                }) {
+            routes.insert(
+                self.identity,
+                CompactRouteObservation {
+                    generation: self.generation,
+                    state,
+                },
+            );
             self.runtime.compact_routes.changed.notify_all();
-        }
+            true
+        } else {
+            false
+        };
         self.completed = true;
+        committed
     }
 }
 
@@ -628,6 +654,11 @@ impl Drop for CompactProbe<'_> {
     fn drop(&mut self) {
         if !self.completed
             && let Ok(mut routes) = self.runtime.compact_routes.states.lock()
+            && routes.get(&self.identity)
+                == Some(&CompactRouteObservation {
+                    generation: self.generation,
+                    state: CompactRouteState::Probing,
+                })
         {
             routes.remove(&self.identity);
             self.runtime.compact_routes.changed.notify_all();
@@ -676,15 +707,23 @@ impl CodexRuntime {
         let Ok(mut routes) = self.compact_routes.states.lock() else {
             return CompactAdmissionResult::InternalFailure;
         };
+        let mut waited_for_generation = None;
         loop {
             if abort.is_aborted() {
                 return CompactAdmissionResult::Canceled;
             }
-            match routes.get(&identity) {
+            let observation = routes.get(&identity).copied();
+            if waited_for_generation.is_some()
+                && observation.map(|observation| observation.generation) != waited_for_generation
+            {
+                return CompactAdmissionResult::Unavailable;
+            }
+            match observation.map(|observation| observation.state) {
                 Some(CompactRouteState::Unavailable) => {
                     return CompactAdmissionResult::Unavailable;
                 }
                 Some(CompactRouteState::Probing) => {
+                    waited_for_generation = observation.map(|observation| observation.generation);
                     let Ok(waited) = self
                         .compact_routes
                         .changed
@@ -696,10 +735,21 @@ impl CodexRuntime {
                 }
                 Some(CompactRouteState::Available) => return CompactAdmissionResult::Admitted,
                 None => {
-                    routes.insert(identity, CompactRouteState::Probing);
+                    let generation = self
+                        .compact_routes
+                        .next_probe_generation
+                        .fetch_add(1, Ordering::Relaxed);
+                    routes.insert(
+                        identity,
+                        CompactRouteObservation {
+                            generation,
+                            state: CompactRouteState::Probing,
+                        },
+                    );
                     return CompactAdmissionResult::Probe(CompactProbe {
                         runtime: self,
                         identity,
+                        generation,
                         completed: false,
                     });
                 }
@@ -712,12 +762,44 @@ impl CodexRuntime {
             .states
             .lock()
             .map(|mut routes| {
-                let changed = routes.insert(identity, CompactRouteState::Unavailable)
-                    != Some(CompactRouteState::Unavailable);
+                let previous = routes.get(&identity).copied();
+                if previous
+                    .is_some_and(|observation| observation.state == CompactRouteState::Unavailable)
+                {
+                    return false;
+                }
+                let generation = previous.map_or_else(
+                    || {
+                        self.compact_routes
+                            .next_probe_generation
+                            .fetch_add(1, Ordering::Relaxed)
+                    },
+                    |observation| observation.generation,
+                );
+                routes.insert(
+                    identity,
+                    CompactRouteObservation {
+                        generation,
+                        state: CompactRouteState::Unavailable,
+                    },
+                );
                 self.compact_routes.changed.notify_all();
-                changed
+                true
             })
             .unwrap_or(false)
+    }
+
+    /// Retires compaction admission state for one superseded
+    /// credential/account generation.
+    ///
+    /// A matching in-flight probe loses completion authority, while a later
+    /// probe for the same identity receives a distinct owner generation.
+    pub fn retire_compact_identity(&self, identity: InferenceProfileIdentity) {
+        if let Ok(mut routes) = self.compact_routes.states.lock()
+            && routes.remove(&identity).is_some()
+        {
+            self.compact_routes.changed.notify_all();
+        }
     }
 
     /// Create an empty Codex runtime using one immutable startup network
@@ -729,6 +811,7 @@ impl CodexRuntime {
             network,
             compact_routes: CompactAdmission {
                 states: path_std_sync::Mutex::new(HashMap::new()),
+                next_probe_generation: AtomicU64::new(0),
                 changed: path_std_sync::Condvar::new(),
             },
         }
@@ -1089,8 +1172,7 @@ impl CodexRuntime {
             Err(error) => {
                 if error.is_compaction_route_unavailable() {
                     let newly_downgraded = if let Some(probe) = probe {
-                        probe.complete(CompactRouteState::Unavailable);
-                        true
+                        probe.complete(CompactRouteState::Unavailable)
                     } else {
                         self.mark_compact_route_unavailable(identity)
                     };
