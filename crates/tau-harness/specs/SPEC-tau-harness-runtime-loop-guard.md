@@ -17,11 +17,14 @@ A provider `repetition_detected` response triggers the same lifecycle with a fix
 harness-authored reason. Provider error prose is display-only and never becomes
 trusted pivot text.
 
-New non-internal user input resets the guard even when queued. Successful
-foreground or background tool results also reset detector and breaker history and
-remove stale queued pivots, while retaining unresolved in-flight argument
-signatures so a successful sibling in a multi-tool turn cannot make later failures
-argument-insensitive. Non-linear branch or head movement invalidates all
+New non-internal user input resets the guard even when queued. Ordinary
+successful foreground or background tool results also reset detector and breaker
+history and remove stale queued pivots, while retaining unresolved in-flight
+argument signatures so a successful sibling in a multi-tool turn cannot make
+later failures argument-insensitive. Successful self-compaction instead counts
+as another no-progress cycle. When that repeated cycle exhausts the guard, the
+committed terminal remains visible but its already-owned post-commit standalone
+continuation is suppressed. Non-linear branch or head movement invalidates all
 branch-local guard state, including in-flight signatures and queued pivots.
 
 The separate repeated-wait guard counts consecutive activating-input waits that

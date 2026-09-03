@@ -196,11 +196,13 @@ traces are bounded metadata for logs/UI, not prompt-surface examples.
 The loop guard is runtime-only per loaded agent branch. It records compact recent
 assistant/tool-failure signatures, injects one hidden pivot prompt for obvious
 cycles, and surfaces a mandatory notice instead of continuing automatically if the
-same cycle persists. New user prompts and successful tool results reset detector
-history and remove pending loop-guard pivots, but preserve unresolved in-flight
-tool-call argument signatures for sibling calls in the same turn. Branch/head
-moves invalidate the whole guard, including in-flight signatures, and remove
-pending loop-guard pivots.
+same cycle persists. New user prompts and ordinary successful tool results reset
+detector history and remove pending loop-guard pivots, but preserve unresolved
+in-flight tool-call argument signatures for sibling calls in the same turn.
+Successful self-compaction instead counts as another no-progress cycle; once that
+cycle exhausts the guard, its committed terminal does not dispatch the already-owned
+standalone continuation. Branch/head moves invalidate the whole guard, including
+in-flight signatures, and remove pending loop-guard pivots.
 
 Provider-side `repetition_detected` final responses feed this same lifecycle with
 a fixed harness-authored reason: first occurrence queues the pivot, recurrence

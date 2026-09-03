@@ -990,6 +990,24 @@ impl Harness {
         if !complete_on_commit {
             return;
         }
+        if self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| {
+                agent.execution.loop_guard.cycle_state("self-compaction")
+                    == Some(LoopCycleState::Blocked)
+            })
+        {
+            self.set_agent_turn_state(cid, AgentTurnState::Idle);
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+                agent.dispatch.activation_dispatch =
+                    path_crate_agent::ActivationDispatchState::None;
+            }
+            self.try_advance_queue();
+            return;
+        }
         if self.start_rolling_compaction_pass(cid, &model, through)
             != RollingCompactionPass::NotNeeded
         {
@@ -2385,7 +2403,16 @@ impl Harness {
                         })
                         .cloned()
                     {
-                        self.reset_loop_guard_for_progress(&cid);
+                        if self
+                            .tool_routing
+                            .tool_runtime
+                            .self_compaction_results_without_progress
+                            .remove(call_id)
+                        {
+                            self.record_self_compaction_loop_signature(&cid);
+                        } else {
+                            self.reset_loop_guard_for_progress(&cid);
+                        }
                     }
                     self.finish_non_durable_tool_tracking_after_terminal(call_id);
                 }
@@ -2456,7 +2483,19 @@ impl Harness {
                 )),
             );
             self.record_wait_background_result(result.clone(), Some(append_outcome.observation_id));
+            let self_compaction_without_progress = self
+                .tool_routing
+                .tool_runtime
+                .self_compaction_results_without_progress
+                .contains(call_id);
             self.finish_committed_background_completion(&cid, call_id, mode);
+            if self_compaction_without_progress {
+                self.tool_routing
+                    .tool_runtime
+                    .self_compaction_results_without_progress
+                    .remove(call_id);
+                self.record_self_compaction_loop_signature(&cid);
+            }
             return;
         }
         if let Event::ToolBackgroundError(error) = event {
@@ -2497,7 +2536,16 @@ impl Harness {
         }
         match event {
             Event::ProviderToolResult(result) => {
-                self.reset_loop_guard_for_progress(&cid);
+                if self
+                    .tool_routing
+                    .tool_runtime
+                    .self_compaction_results_without_progress
+                    .remove(call_id)
+                {
+                    self.record_self_compaction_loop_signature(&cid);
+                } else {
+                    self.reset_loop_guard_for_progress(&cid);
+                }
                 self.record_wait_tool_result(result, Some(append_outcome.observation_id));
             }
             Event::ProviderToolError(error) => {
@@ -3448,6 +3496,12 @@ impl Harness {
         {
             let self_request = pending.caller_agent_id == pending.target_agent_id;
             let call_id = pending.call_id.clone();
+            if self_request {
+                self.tool_routing
+                    .tool_runtime
+                    .self_compaction_results_without_progress
+                    .insert(call_id.clone());
+            }
             let direct_prompt = self_request.then(|| {
                 self_compaction_terminal_pending_prompt(tau_proto::SelfCompactionTerminal {
                     request_id: pending.request_id.clone(),

@@ -3,6 +3,7 @@
 use proptest::prelude::*;
 
 use super::*;
+use crate::agent::LoopCycleState;
 use crate::harness::tool_runtime::{MAX_UTF8_BYTES_PER_SCALAR, tool_call_loop_signature};
 use crate::harness::{LOOP_GUARD_TOOL_ARGUMENT_CHARS, bounded_loop_text};
 
@@ -700,6 +701,82 @@ fn loop_guard_resets_on_successful_terminal_tool_result() {
         .expect("agent");
     assert_eq!(conv.execution.loop_guard.consecutive_tool_failures(), 0);
     assert!(conv.dispatch.pending_prompts.is_empty());
+}
+
+/// Publish one committed synthetic terminal through the same no-progress
+/// classification used by successful self-compaction.
+fn publish_self_compaction_result(h: &mut Harness, cid: &AgentId, call_id: ToolCallId) {
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_routing
+        .tool_runtime
+        .self_compaction_results_without_progress
+        .insert(call_id.clone());
+    h.publish_terminal_tool_result(
+        Some(cid),
+        None,
+        tau_proto::ToolResult {
+            presentation: Default::default(),
+            call_id,
+            tool_name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("compacted".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+    );
+}
+
+/// Successful self-compaction is the one successful tool terminal that does
+/// not erase prior no-progress history; three consecutive cycles queue the
+/// existing pivot and a fourth cycle after dispatch blocks continuation.
+#[test]
+fn loop_guard_counts_repeated_self_compaction_as_no_progress() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    for index in 0..3 {
+        publish_self_compaction_result(
+            &mut h,
+            &cid,
+            ToolCallId::from(format!("self-compact-{index}")),
+        );
+    }
+
+    let conv = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("agent");
+    assert!(matches!(
+        conv.execution.loop_guard.cycle_state("self-compaction"),
+        Some(LoopCycleState::BreakerPending | LoopCycleState::BreakerDispatched)
+    ));
+    assert!(!conv.execution.loop_guard.stop_automatic_continuation());
+
+    if h.agent_runtime.agent_registry.agents[&cid]
+        .execution
+        .loop_guard
+        .cycle_state("self-compaction")
+        == Some(LoopCycleState::BreakerPending)
+    {
+        h.mark_loop_guard_breakers_dispatched(&cid);
+    }
+    publish_self_compaction_result(&mut h, &cid, ToolCallId::from("self-compact-after-breaker"));
+
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .loop_guard
+            .stop_automatic_continuation()
+    );
 }
 
 #[test]

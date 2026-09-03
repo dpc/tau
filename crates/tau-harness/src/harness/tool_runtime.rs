@@ -164,6 +164,10 @@ pub(crate) struct ToolRuntimeState {
     pub(crate) tool_turn: ToolTurnMachine,
     /// Calls whose background terminal suppresses a generic completion prompt.
     pub(super) suppressed_background_completion_prompts: HashSet<ToolCallId>,
+    /// Successful self-compaction results that must count as another loop cycle
+    /// rather than generic successful-tool progress when their terminal
+    /// commits.
+    pub(super) self_compaction_results_without_progress: HashSet<ToolCallId>,
     /// Owning agents for background completions that can outlive a foreground
     /// turn.
     pub(super) background_completion_targets: HashMap<ToolCallId, AgentId>,
@@ -672,7 +676,14 @@ impl Harness {
             .tool_runtime
             .background_completion_targets
             .insert(call_id.clone(), cid.clone());
-        self.reset_loop_guard_for_progress(cid);
+        if !self
+            .tool_routing
+            .tool_runtime
+            .self_compaction_results_without_progress
+            .contains(call_id)
+        {
+            self.reset_loop_guard_for_progress(cid);
+        }
         match completion_prompt_mode {
             BackgroundCompletionPromptMode::QueueAndAdvance => {
                 self.queue_background_completion_prompt(cid, call_id);
@@ -1545,6 +1556,14 @@ impl Harness {
                     )
                 })
             }
+            LoopTurnSignature::SelfCompaction => guard
+                .recent_repeats(&signature, LOOP_GUARD_ASSISTANT_REPEAT_THRESHOLD)
+                .then(|| {
+                    (
+                        "self-compaction".to_owned(),
+                        "repeated self-compaction without substantive progress".to_owned(),
+                    )
+                }),
             LoopTurnSignature::ToolFailure(failure) => {
                 let repeated =
                     guard.repeated_tool_failure(failure, LOOP_GUARD_TOOL_FAILURE_REPEAT_THRESHOLD);
@@ -1667,6 +1686,14 @@ impl Harness {
         if let Some(trigger) =
             self.record_loop_signature(cid, LoopTurnSignature::AssistantText(signature_text))
         {
+            self.handle_loop_guard_trigger(cid, trigger.cycle_key, trigger.reason);
+        }
+    }
+
+    /// Count one committed self-compaction result as a loop cycle without
+    /// treating its transcript replacement as substantive progress.
+    pub(super) fn record_self_compaction_loop_signature(&mut self, cid: &AgentId) {
+        if let Some(trigger) = self.record_loop_signature(cid, LoopTurnSignature::SelfCompaction) {
             self.handle_loop_guard_trigger(cid, trigger.cycle_key, trigger.reason);
         }
     }

@@ -2,6 +2,7 @@
 
 use super::super::lifecycle::seed_restored_compaction_checkpoint;
 use super::*;
+use crate::agent::LoopCycleState;
 
 fn append_byte_fit_text(h: &mut Harness, cid: &AgentId, text: String) {
     let agent_id = durable_agent_id_for_conversation(h, cid);
@@ -2691,20 +2692,14 @@ fn manual_self_compaction_cold_failure_before_delivery() {
     assert!(!resumed.wait_completion_is_retained_for_test(&resumed_cid, &call_id));
 }
 
-/// Live self-compaction success resumes from the replacement window with one
-/// typed terminal and no retained wait result or generic notice.
-#[test]
-fn manual_self_compaction_success_delivers_directly() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.provider_runtime
-        .model_info
-        .get_mut(&"echo/model".into())
-        .expect("echo model")
-        .supports_standalone_compaction = true;
-    let cid = ensure_test_user_agent(&mut h);
-    let call_id = ToolCallId::from("call-success-self-compact");
-    seed_assistant_tool_round(&mut h, &cid, &[(call_id.as_str(), "compact")]);
+/// Start one self-compaction from a complete seeded tool round and return its
+/// standalone provider prompt.
+fn start_seeded_self_compaction(
+    h: &mut Harness,
+    cid: &AgentId,
+    call_id: ToolCallId,
+) -> tau_proto::AgentPromptCreated {
+    seed_assistant_tool_round(h, cid, &[(call_id.as_str(), "compact")]);
     h.tool_routing
         .tool_runtime
         .tool_agents
@@ -2726,7 +2721,7 @@ fn manual_self_compaction_success_delivers_directly() {
         .prompt_runtime
         .record_tool_call_prompt(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
     h.request_agent_tool_compaction(
-        &cid,
+        cid,
         &AgentToolCall {
             call_ref: None,
             id: call_id.clone(),
@@ -2737,7 +2732,25 @@ fn manual_self_compaction_success_delivers_directly() {
         ToolName::new("compact"),
         None,
     );
-    let compact_prompt = read_nth_prompt_created(&h, 0);
+    read_nth_prompt_created(h, 0)
+}
+
+/// Live self-compaction success resumes from the replacement window with one
+/// typed terminal and no retained wait result or generic notice.
+#[test]
+fn manual_self_compaction_success_delivers_directly() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_runtime
+        .model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    h.record_self_compaction_loop_signature(&cid);
+    h.record_self_compaction_loop_signature(&cid);
+    let call_id = ToolCallId::from("call-success-self-compact");
+    let compact_prompt = start_seeded_self_compaction(&mut h, &cid, call_id.clone());
     h.handle_provider_response_finished(provider_text_response(
         &compact_prompt.agent_prompt_id,
         compact_prompt.agent_id,
@@ -2773,6 +2786,84 @@ fn manual_self_compaction_success_delivers_directly() {
             .expect("context")
             .contains("compacted summary")
     );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .loop_guard
+            .cycle_state("self-compaction"),
+        Some(LoopCycleState::BreakerPending | LoopCycleState::BreakerDispatched)
+    ));
+}
+
+/// A successful self-compaction after its breaker was dispatched commits the
+/// typed terminal but suppresses the already-owned inference continuation.
+#[test]
+fn repeated_self_compaction_blocks_post_commit_continuation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_runtime
+        .model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    for _ in 0..3 {
+        h.record_self_compaction_loop_signature(&cid);
+    }
+    h.mark_loop_guard_breakers_dispatched(&cid);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_prompts
+        .retain(|prompt| !prompt.is_loop_guard());
+
+    let call_id = ToolCallId::from("call-blocked-self-compact");
+    let compact_prompt = start_seeded_self_compaction(&mut h, &cid, call_id.clone());
+    h.handle_provider_response_finished(provider_text_response(
+        &compact_prompt.agent_prompt_id,
+        compact_prompt.agent_id,
+        "compacted summary",
+    ))
+    .expect("accept compaction");
+
+    let events = event_log_events(&h);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if matches!(
+                steered.self_compaction_terminal.as_ref(),
+                Some(tau_proto::SelfCompactionTerminal {
+                    tool_call_id,
+                    outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
+                    ..
+                }) if tool_call_id == &call_id
+            )
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.transaction_id.is_some()
+    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .activation_dispatch,
+        path_crate_agent::ActivationDispatchState::None
+    ));
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+        AgentTurnState::Idle
+    ));
 }
 
 /// Cold recovery from compact-success-before-background-terminal reconstructs

@@ -22,6 +22,31 @@ fn progress_reset_preserves_in_flight_tool_signatures() {
     assert!(guard.cycles.is_empty());
 }
 
+/// Repeated successful self-compaction uses the existing three-cycle breaker
+/// threshold and blocks only after the dispatched breaker fails to change the
+/// cycle.
+#[test]
+fn repeated_self_compaction_uses_existing_breaker_lifecycle() {
+    let mut guard = LoopGuardState::default();
+    let signature = LoopTurnSignature::SelfCompaction;
+
+    for _ in 0..2 {
+        guard.push_recent(signature.clone(), 8);
+        assert!(!guard.recent_repeats(&signature, 3));
+    }
+    guard.push_recent(signature.clone(), 8);
+    assert!(guard.recent_repeats(&signature, 3));
+
+    guard.remember_cycle_pending("self-compaction".to_owned(), 8);
+    guard.mark_pending_breakers_dispatched();
+    guard.mark_cycle_blocked("self-compaction");
+    assert_eq!(
+        guard.cycle_state("self-compaction"),
+        Some(LoopCycleState::Blocked)
+    );
+    assert!(guard.stop_automatic_continuation());
+}
+
 /// Ensures a branch/head invalidation drops unresolved signatures because
 /// they were captured against the previous branch cursor.
 #[test]

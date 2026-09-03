@@ -74,6 +74,9 @@ pub(crate) struct LoopGuardTrigger {
 pub(crate) enum LoopTurnSignature {
     /// Normalized assistant text when a response contains no concrete action.
     AssistantText(String),
+    /// One completed self-compaction cycle without independent user or tool
+    /// progress.
+    SelfCompaction,
     /// Normalized terminal tool failure signature.
     ToolFailure(String),
 }

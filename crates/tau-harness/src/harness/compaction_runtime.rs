@@ -2441,6 +2441,17 @@ impl Harness {
             self.restore_manual_tool_runtime(&caller_cid, &request);
             match outcome.map(|outcome| *outcome) {
                 Some(tau_core::ManualCompactionOutcome::Succeeded(_)) => {
+                    if request.required_tool_source().resume_inference {
+                        self.tool_routing
+                            .tool_runtime
+                            .self_compaction_results_without_progress
+                            .insert(
+                                request
+                                    .required_tool_source()
+                                    .initiating_tool_call_id
+                                    .clone(),
+                            );
+                    }
                     self.finish_prebuilt_internal_tool_result_with_mode(
                         ToolResult {
                             presentation: Default::default(),
