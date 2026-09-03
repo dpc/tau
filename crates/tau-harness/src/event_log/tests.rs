@@ -137,8 +137,8 @@ fn shared_egress_ownership_is_deduplicated_across_attachments() {
         let estimate =
             tau_delivery_memory::DecodedMemoryEstimate::from_serializable_encoding(&payload.frame)
                 .expect("serializable routed frame");
-        assert!(estimate.logical_payload_bytes >= 2_048);
-        assert!(estimate.requested_capacity_estimate >= estimate.logical_payload_bytes);
+        assert!(estimate.logical_payload_bytes.get() >= 2_048);
+        assert!(estimate.requested_capacity_estimate.get() >= estimate.logical_payload_bytes.get());
     }
 
     let pending = log.next_egress(first).expect("first writer ownership");

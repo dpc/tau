@@ -115,11 +115,11 @@ struct DeliveryMemoryState {
     /// Immutable per-frame estimates cached by live position.
     estimates: HashMap<EgressPosition, tau_delivery_memory::DecodedMemoryEstimate>,
     /// Largest encoded retained-byte estimate.
-    high_encoded_bytes: u64,
+    high_encoded_bytes: tau_delivery_memory::EncodedBytes,
     /// Largest decoded logical-byte estimate.
-    high_logical_bytes: u64,
+    high_logical_bytes: tau_delivery_memory::LogicalPayloadBytes,
     /// Largest decoded requested-capacity estimate.
-    high_requested_capacity: u64,
+    high_requested_capacity: tau_delivery_memory::RequestedCapacityEstimateBytes,
     /// Largest retained shared-allocation count.
     high_shared_allocations: u64,
     /// Largest aggregate strong-reference fanout.
@@ -673,18 +673,18 @@ impl EventLog {
             cut = "live_suffix",
             items = shared_allocations,
             owners = inner.consumers.len() as u64,
-            encoded_bytes = total.encoded_bytes,
-            decoded_logical_bytes_estimate = total.logical_payload_bytes,
-            decoded_requested_capacity_estimate = total.requested_capacity_estimate,
+            encoded_bytes = total.encoded_bytes.get(),
+            decoded_logical_bytes_estimate = total.logical_payload_bytes.get(),
+            decoded_requested_capacity_estimate = total.requested_capacity_estimate.get(),
             decoded_containers = total.container_count,
             expansion_milli = total.expansion_milli(),
             shared_allocations,
             shared_fanout,
             pending_target_fanout,
             overlap_fanout = shared_fanout.saturating_sub(shared_allocations),
-            high_water_encoded_bytes = measurement.high_encoded_bytes,
-            high_water_decoded_logical_bytes_estimate = measurement.high_logical_bytes,
-            high_water_decoded_requested_capacity_estimate = measurement.high_requested_capacity,
+            high_water_encoded_bytes = measurement.high_encoded_bytes.get(),
+            high_water_decoded_logical_bytes_estimate = measurement.high_logical_bytes.get(),
+            high_water_decoded_requested_capacity_estimate = measurement.high_requested_capacity.get(),
             high_water_shared_allocations = measurement.high_shared_allocations,
             high_water_shared_fanout = measurement.high_shared_fanout,
             high_water_pending_target_fanout = measurement.high_pending_target_fanout,
