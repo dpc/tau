@@ -5781,8 +5781,9 @@ fn validate_event_rejects_blank_display_names() {
     );
 }
 
-/// Ensures an accepted manual request is durable before start and exactly one
-/// matching transaction can claim it after replay.
+/// Ensures an accepted manual request is durable before start, its latest
+/// recovery lookup borrows rather than clones it, and exactly one matching
+/// transaction can claim it after replay.
 #[test]
 fn manual_compaction_request_is_durable_and_uniquely_claimed() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
@@ -5790,6 +5791,18 @@ fn manual_compaction_request_is_durable_and_uniquely_claimed() {
     tree.validate_event(&Event::AgentManualCompactionRequested(request.clone()))
         .expect("request is valid");
     tree.apply_event(&Event::AgentManualCompactionRequested(request.clone()));
+    let stored_request = &tree
+        .manual_compaction_requests
+        .get(&request.request_id)
+        .expect("stored request")
+        .requested;
+    let latest_request = tree
+        .latest_manual_compaction_recovery_request()
+        .expect("waiting request is recoverable");
+    assert!(
+        std::ptr::eq(latest_request, stored_request),
+        "the latest-recovery lookup must borrow the stored request"
+    );
     assert_eq!(
         tree.manual_compaction_recoveries(),
         vec![ManualCompactionRecovery::Waiting(request.clone())]
@@ -5808,6 +5821,18 @@ fn manual_compaction_request_is_durable_and_uniquely_claimed() {
     tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
         .expect("matching transaction claim is valid");
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    let stored_request = &tree
+        .manual_compaction_requests
+        .get(&request.request_id)
+        .expect("stored started request")
+        .requested;
+    let latest_request = tree
+        .latest_manual_compaction_recovery_request()
+        .expect("started request is recoverable");
+    assert!(
+        std::ptr::eq(latest_request, stored_request),
+        "the latest-recovery lookup must keep borrowing after the request starts"
+    );
     assert_eq!(
         tree.manual_compaction_recoveries(),
         vec![ManualCompactionRecovery::Started {

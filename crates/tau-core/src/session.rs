@@ -1341,6 +1341,29 @@ impl AgentTree {
             .collect()
     }
 
+    /// Returns the accepted request for the latest recoverable manual
+    /// compaction without materializing the full recovery projection.
+    #[must_use]
+    pub fn latest_manual_compaction_recovery_request(
+        &self,
+    ) -> Option<&tau_proto::AgentManualCompactionRequested> {
+        self.manual_compaction_request_order
+            .iter()
+            .rev()
+            .find_map(|id| {
+                let request = self.manual_compaction_requests.get(id)?;
+                match &request.state {
+                    ManualCompactionRequestState::Waiting
+                    | ManualCompactionRequestState::Failed(_) => Some(&request.requested),
+                    ManualCompactionRequestState::Started(transaction_id) => self
+                        .compaction_transactions
+                        .contains_key(transaction_id)
+                        .then_some(&request.requested),
+                    ManualCompactionRequestState::Satisfied(_) => None,
+                }
+            })
+    }
+
     /// Returns every durable manual request, including already satisfied UI
     /// intents, for collision-free request-id allocation.
     #[must_use]

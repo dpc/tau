@@ -778,19 +778,8 @@ impl Harness {
             .session_runtime
             .agent_store
             .agent(target_public_id.as_str())
-            .and_then(|tree| tree.manual_compaction_recoveries().into_iter().last())
-            .is_some_and(|recovery| {
-                let previous = match recovery {
-                    tau_core::ManualCompactionRecovery::Waiting(request)
-                    | tau_core::ManualCompactionRecovery::Started {
-                        requested: request, ..
-                    }
-                    | tau_core::ManualCompactionRecovery::Failed {
-                        requested: request, ..
-                    } => request,
-                };
-                target_generation <= previous.target_generation
-            });
+            .and_then(tau_core::AgentTree::latest_manual_compaction_recovery_request)
+            .is_some_and(|previous| target_generation <= previous.target_generation);
         let may_bypass_repeat_guard = repeated_generation
             && self
                 .matching_durable_failed_recovery(target_public_id.as_str(), &model, target_head)
@@ -810,7 +799,7 @@ impl Harness {
             .session_runtime
             .agent_store
             .agent(target_public_id.as_str())
-            .map_or(0, |tree| tree.manual_compaction_recoveries().len());
+            .map_or(0, tau_core::AgentTree::manual_compaction_request_count);
         let request_id = tau_proto::CompactionRequestId::parse(format!(
             "cr-{}-{request_ordinal}",
             target.dispatch.next_prompt_index
