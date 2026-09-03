@@ -1,4 +1,5 @@
 use reqwest::header::{HeaderMap, HeaderValue};
+use tau_provider::retry_policy::{RetryClass, classify_error_code};
 use tokio::runtime::Builder;
 use tungstenite::protocol::frame::Frame;
 use tungstenite::protocol::frame::coding::{Data, OpCode};
@@ -70,9 +71,9 @@ fn borrowed_request_envelope_matches_value_reference_bytes() {
     assert_matches_reference(&body);
 }
 
-/// Post-upgrade errors must retain bounded codes from every documented
-/// envelope location so callers can distinguish retryable transport/service
-/// failures from terminal request and context failures.
+/// Post-upgrade errors must retain status and bounded details from documented
+/// envelope locations so later recovery and terminal classification keep their
+/// existing ownership.
 #[test]
 fn terminal_error_extracts_status_and_nested_codes() {
     for (event, expected_status, expected_code) in [
@@ -113,7 +114,7 @@ fn terminal_error_extracts_status_and_nested_codes() {
         assert_eq!(status, expected_status);
         assert_eq!(code.as_deref(), Some(expected_code));
     }
-    let oversized = "x".repeat(256);
+    let oversized = "🦀".repeat(256);
     let event = serde_json::json!({"type": "error", "code": oversized});
     let Some(Error::Provider {
         code: Some(code), ..
@@ -121,7 +122,185 @@ fn terminal_error_extracts_status_and_nested_codes() {
     else {
         panic!("bounded provider code");
     };
-    assert_eq!(code.len(), 128);
+    assert_eq!(code, "🦀".repeat(128));
+    assert_eq!(code.chars().count(), 128);
+}
+
+/// Context exhaustion anywhere in the full canonical detail family must
+/// override earlier opaque and known retry details, preserving the shared
+/// context-window terminal classification.
+#[test]
+fn terminal_error_prefers_context_across_complete_detail_family() {
+    let event = serde_json::json!({
+        "type": "error",
+        "code": "root-opaque",
+        "error": {
+            "code": "invalid_api_key",
+            "type": "rate_limit_exceeded"
+        },
+        "response": {
+            "error": {
+                "code": "context_length_exceeded",
+                "type": "server_error"
+            },
+            "incomplete_details": {
+                "reason": "content_filter"
+            }
+        }
+    });
+    let Some(Error::Provider {
+        code: Some(code), ..
+    }) = provider_terminal_error(&event)
+    else {
+        panic!("terminal provider event");
+    };
+    assert_eq!(code, "context_length_exceeded");
+}
+
+/// An earlier opaque detail must not mask a later identifier that the shared
+/// retry classifier recognizes; every classifier-supported detail class stays
+/// selectable without inventing a Responses-specific transport identifier.
+#[test]
+fn terminal_error_prefers_later_known_details_over_earlier_opaque() {
+    for (event, expected_code, expected_class) in [
+        (
+            serde_json::json!({
+                "type": "error",
+                "code": "root-opaque",
+                "error": {"code": "invalid_api_key"}
+            }),
+            "invalid_api_key",
+            RetryClass::Auth,
+        ),
+        (
+            serde_json::json!({
+                "type": "error",
+                "code": "root-opaque",
+                "error": {
+                    "code": "error-opaque",
+                    "type": "rate_limit_exceeded"
+                }
+            }),
+            "rate_limit_exceeded",
+            RetryClass::Throttle,
+        ),
+        (
+            serde_json::json!({
+                "type": "error",
+                "code": "root-opaque",
+                "error": {
+                    "code": "error-opaque",
+                    "type": "error-type-opaque"
+                },
+                "response": {
+                    "error": {"code": "usage_limit_reached"}
+                }
+            }),
+            "usage_limit_reached",
+            RetryClass::UsageWindow,
+        ),
+        (
+            serde_json::json!({
+                "type": "error",
+                "code": "root-opaque",
+                "error": {
+                    "code": "error-opaque",
+                    "type": "error-type-opaque"
+                },
+                "response": {
+                    "error": {
+                        "code": "response-error-opaque",
+                        "type": "server_error"
+                    }
+                }
+            }),
+            "server_error",
+            RetryClass::Overload,
+        ),
+        (
+            serde_json::json!({
+                "type": "response.incomplete",
+                "code": "root-opaque",
+                "error": {
+                    "code": "error-opaque",
+                    "type": "error-type-opaque"
+                },
+                "response": {
+                    "error": {
+                        "code": "response-error-opaque",
+                        "type": "response-error-type-opaque"
+                    },
+                    "incomplete_details": {"reason": "quota_exceeded"}
+                }
+            }),
+            "quota_exceeded",
+            RetryClass::Account,
+        ),
+    ] {
+        let Some(Error::Provider {
+            code: Some(code), ..
+        }) = provider_terminal_error(&event)
+        else {
+            panic!("terminal provider event");
+        };
+        assert_eq!(code, expected_code);
+        assert_eq!(classify_error_code(&code), expected_class);
+    }
+}
+
+/// The selector must preserve canonical family order when neither context nor a
+/// known retry detail appears, so diagnostics remain deterministic.
+#[test]
+fn terminal_error_keeps_first_opaque_detail_in_canonical_order() {
+    let event = serde_json::json!({
+        "type": "error",
+        "code": "root-opaque",
+        "error": {
+            "code": "error-code-opaque",
+            "type": "error-type-opaque"
+        },
+        "response": {
+            "error": {
+                "code": "response-error-code-opaque",
+                "type": "response-error-type-opaque"
+            },
+            "incomplete_details": {"reason": "content_filter"}
+        }
+    });
+    let Some(Error::Provider {
+        code: Some(code), ..
+    }) = provider_terminal_error(&event)
+    else {
+        panic!("terminal provider event");
+    };
+    assert_eq!(code, "root-opaque");
+}
+
+/// The first recognized retry detail must win over later recognized details
+/// when context exhaustion is absent, preserving stable recovery ownership.
+#[test]
+fn terminal_error_keeps_first_known_detail_in_canonical_order() {
+    let event = serde_json::json!({
+        "type": "error",
+        "code": "root-opaque",
+        "error": {
+            "code": "invalid_api_key",
+            "type": "rate_limit_exceeded"
+        },
+        "response": {
+            "error": {
+                "code": "usage_limit_reached",
+                "type": "server_error"
+            }
+        }
+    });
+    let Some(Error::Provider {
+        code: Some(code), ..
+    }) = provider_terminal_error(&event)
+    else {
+        panic!("terminal provider event");
+    };
+    assert_eq!(code, "invalid_api_key");
 }
 
 /// Provider terminal classification must precede strict sidecar indexing, as
@@ -154,8 +333,9 @@ fn websocket_preparser_decodes_event_once() {
     assert_eq!(test_counts(), (1, 1));
 }
 
-/// The WebSocket pre-parser must pass only the exact max-output incomplete
-/// terminal to the shared assembler; unknown incomplete reasons remain errors.
+/// The WebSocket pre-parser must bypass only the exact nested max-output
+/// incomplete terminal; non-max incomplete reasons remain retained provider
+/// detail rather than the structural event discriminator.
 #[test]
 fn max_output_incomplete_bypasses_websocket_error_classification_only() {
     let max_output = serde_json::json!({
@@ -173,10 +353,13 @@ fn max_output_incomplete_bypasses_websocket_error_classification_only() {
             "incomplete_details": {"reason": "content_filter"}
         }
     });
-    assert!(matches!(
-        provider_terminal_error(&unknown),
-        Some(Error::Provider { .. })
-    ));
+    let Some(Error::Provider {
+        code: Some(code), ..
+    }) = provider_terminal_error(&unknown)
+    else {
+        panic!("non-max incomplete must be a provider error");
+    };
+    assert_eq!(code, "content_filter");
 
     let top_level_only = serde_json::json!({
         "type": "response.incomplete",
@@ -185,10 +368,13 @@ fn max_output_incomplete_bypasses_websocket_error_classification_only() {
             "incomplete_details": {"reason": "content_filter"}
         }
     });
-    assert!(matches!(
-        provider_terminal_error(&top_level_only),
-        Some(Error::Provider { .. })
-    ));
+    let Some(Error::Provider {
+        code: Some(code), ..
+    }) = provider_terminal_error(&top_level_only)
+    else {
+        panic!("only the exact nested reason may bypass classification");
+    };
+    assert_eq!(code, "content_filter");
 }
 
 /// A server may not negotiate extensions or subprotocols the client did not

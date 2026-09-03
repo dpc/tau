@@ -3114,6 +3114,39 @@ fn websocket_rejects_invalid_and_oversized_frames() {
     );
 }
 
+/// The production WebSocket path must apply canonical detail precedence before
+/// retry and failure-kind ownership, so earlier opaque details cannot mask
+/// later authentication or context identifiers.
+#[test]
+fn websocket_provider_detail_precedence_reaches_retry_and_failure_outcomes() {
+    let auth = run_websocket_message(
+        Message::Text(
+            r#"{"type":"error","code":"opaque","response":{"error":{"code":"invalid_api_key"}}}"#
+                .into(),
+        ),
+        &mut || false,
+    );
+    let AttemptOutcome::Retryable { decision, .. } = auth else {
+        panic!("later known auth detail must remain retryable");
+    };
+    assert_eq!(decision.class, RetryClass::Auth);
+
+    let context = run_websocket_message(
+        Message::Text(
+            r#"{"type":"error","code":"opaque","error":{"code":"invalid_api_key"},"response":{"error":{"code":"context_length_exceeded"}}}"#
+                .into(),
+        ),
+        &mut || false,
+    );
+    let AttemptOutcome::Terminal(failure) = context else {
+        panic!("later context detail must terminalize");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
 /// A WebSocket max-output terminal must complete once, preserve a truncated
 /// call for inspection, and expose `Length` so the harness suppresses
 /// execution.
