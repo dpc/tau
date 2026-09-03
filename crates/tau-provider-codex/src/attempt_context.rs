@@ -92,12 +92,6 @@ impl ProviderAttemptContext {
         }
     }
 
-    /// Return whether an actual provider request crossed the egress boundary.
-    #[must_use]
-    pub(crate) fn backend_reached(&self) -> bool {
-        0 < self.correlation.snapshot().wire_dispatches()
-    }
-
     /// Return immutable attempt correlation for terminal reporting.
     #[must_use]
     pub(crate) fn snapshot(&self) -> AttemptCaptureSnapshot {

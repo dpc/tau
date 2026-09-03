@@ -923,22 +923,25 @@ fn compact_pre_progress_failure_remains_retryable() {
     let context = compact_trigger_context();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
 
-    assert!(matches!(
-        runtime.compact(
-            "ap-compact-pre-progress",
-            &config,
-            &request,
-            &mut NeverAbort
-        ),
-        CompactOutcome::Retry(_)
-    ));
+    let CompactOutcome::Retry {
+        backend_reached, ..
+    } = runtime.compact(
+        "ap-compact-pre-progress",
+        &config,
+        &request,
+        &mut NeverAbort,
+    )
+    else {
+        panic!("pre-dispatch compact failure must remain retryable");
+    };
+    assert!(!backend_reached);
     assert!(
         server
             .counts()
             .ws_upgrade_requests
             .load(std::sync::atomic::Ordering::SeqCst)
             >= 1,
-        "the retryable outcome follows real provider egress"
+        "the retryable outcome follows an upgrade that failed before response.create dispatch"
     );
 }
 
@@ -956,8 +959,10 @@ fn compact_same_event_error_first_remains_retryable() {
     let context = compact_trigger_context();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
 
-    let CompactOutcome::Retry(decision) =
-        runtime.compact("ap-compact-error-first", &config, &request, &mut NeverAbort)
+    let CompactOutcome::Retry {
+        decision,
+        backend_reached,
+    } = runtime.compact("ap-compact-error-first", &config, &request, &mut NeverAbort)
     else {
         panic!("error-first event must remain retryable");
     };
@@ -966,6 +971,7 @@ fn compact_same_event_error_first_remains_retryable() {
         tau_provider::retry_policy::RetryClass::Overload,
         "the embedded overloaded frame, not a later socket close, owns retry"
     );
+    assert!(backend_reached);
 }
 
 /// Once the parser accepts a canonical compact item, a later retryable

@@ -11,7 +11,7 @@ use std::{
 
 use tau_proto::{
     Effort, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
-    Verbosity,
+    ProviderBackendKind, Verbosity,
 };
 
 use super::*;
@@ -1160,6 +1160,7 @@ pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
         pinned_chatgpt_identity: None,
         profile_identity: None,
         retry_state: PromptRetryState::default(),
+        observed_backend: None,
         cancel_generation: 0,
         manual_cooldown_bypass: false,
         cooldown_probe: None,
@@ -2339,14 +2340,18 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     })
     .expect("queue target clear");
     for (id, text) in [(&target, "stale success"), (&peer, "peer success")] {
+        let mut finished = simple_finished(id.clone(), agent_id.clone(), originator.clone(), text);
+        if id == &target {
+            finished.backend = Some(ProviderBackend {
+                kind: ProviderBackendKind::PublicResponses,
+                base_url: "https://responses.example/v1".to_owned(),
+                transport: ProviderBackendTransport::HttpSse,
+                stale_chain_fallback: false,
+            });
+        }
         tx.send(WorkerMessage::Output {
             output: prepare_worker_report(HarnessInputMessage::emit_transient(
-                Event::ProviderResponseFinishedReported(simple_finished(
-                    id.clone(),
-                    agent_id.clone(),
-                    originator.clone(),
-                    text,
-                )),
+                Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("prepare terminal"),
             cancel_generation: 0,
@@ -2429,6 +2434,16 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         1,
         "target lifecycle must close exactly once as canceled"
     );
+    assert!(committed.iter().any(|message| matches!(
+        input_event(message.message()),
+        Some(Event::ProviderResponseFinishedReported(finished))
+            if finished.agent_prompt_id == target
+                && finished.error.as_deref() == Some("(cancelled by harness)")
+                && finished.backend.as_ref().is_some_and(|backend| {
+                    backend.kind == ProviderBackendKind::PublicResponses
+                })
+                && finished.provider_attempt == tau_proto::ProviderAttempt::ONE
+    )));
     assert!(committed.iter().any(|message| matches!(
         input_event(message.message()),
         Some(Event::ProviderResponseFinishedReported(finished))
@@ -3029,7 +3044,7 @@ fn standalone_compaction_retry_policy_terminalizes_after_five_attempts() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let executor_attempts = Arc::clone(&attempts);
     let executor: PromptExecutor = Arc::new(move |execution| {
-        executor_attempts.fetch_add(1, Ordering::SeqCst);
+        let attempt = executor_attempts.fetch_add(1, Ordering::SeqCst);
         send_worker_message(
             &execution.output_tx,
             &execution.output_waker,
@@ -3038,7 +3053,7 @@ fn standalone_compaction_retry_policy_terminalizes_after_five_attempts() {
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
                 canonical_unauthorized: false,
-                terminal_backend: Some(ProviderBackend {
+                terminal_backend: (attempt == 0).then(|| ProviderBackend {
                     kind: ProviderBackendKind::ChatCompletions,
                     base_url: "https://chat.example/v1".to_owned(),
                     transport: ProviderBackendTransport::HttpSse,
@@ -3138,6 +3153,58 @@ fn pre_egress_chat_cancellation_retains_attempt_without_backend() {
         input_event(&frames[0]),
         Some(Event::ProviderResponseFinishedReported(finished))
             if finished.provider_attempt.get() == 3 && finished.backend.is_none()
+    ));
+}
+
+/// A later public Responses attempt canceled before dispatch retains backend
+/// identity observed by an earlier finite attempt in the same logical turn.
+#[test]
+fn later_pre_egress_attempt_cancellation_retains_prior_backend() {
+    let prompt = prompt();
+    let prior_backend = ProviderBackend {
+        kind: ProviderBackendKind::PublicResponses,
+        base_url: "https://responses.example/v1".to_owned(),
+        transport: ProviderBackendTransport::HttpSse,
+        stale_chain_fallback: false,
+    };
+    let cancellation = Arc::new(CancellationState::default());
+    cancellation.cancel(prompt.agent_prompt_id.clone());
+    let mut retry_ctx = SharedRetryContext {
+        cancellation,
+        current_apid: prompt.agent_prompt_id.clone(),
+        cancel_generation: 0,
+    };
+    let runtime = CodexRuntime::new(Arc::new(test_network_policy()));
+    let provider = ResponsesProvider::default();
+    let model: ResponsesModel =
+        serde_json::from_value(serde_json::json!({"id": "test-model"})).expect("model");
+    let mut bytes = Vec::new();
+    {
+        let mut writer = PeerOutputWriter::new(&mut bytes);
+        handle_public_responses_backend(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &provider,
+            &model,
+            &mut writer,
+            &mut retry_ctx,
+            ChatGptPromptExecutionContext {
+                debug_provider_requests: false,
+                runtime: &runtime,
+                prior_backend: Some(&prior_backend),
+                logical_attempt: tau_provider_codex::LogicalAttempt::new(2),
+                compact_route_unavailable: &|_| {},
+            },
+        )
+        .expect("finish later pre-egress cancellation");
+    }
+    let frames = decode_frames(&bytes);
+    assert!(matches!(
+        input_event(&frames[0]),
+        Some(Event::ProviderResponseFinishedReported(finished))
+            if finished.backend.as_ref() == Some(&prior_backend)
+                && finished.provider_attempt == tau_proto::ProviderAttempt::ONE
+                && finished.error.as_deref() == Some("(cancelled by harness)")
     ));
 }
 
@@ -5184,7 +5251,12 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                             .with_retry_after(Some(Duration::from_secs(86_400))),
                         live_detail: None,
                         canonical_unauthorized: false,
-                        terminal_backend: None,
+                        terminal_backend: Some(ProviderBackend {
+                            kind: ProviderBackendKind::PublicResponses,
+                            base_url: "https://responses.example/v1".to_owned(),
+                            transport: ProviderBackendTransport::HttpSse,
+                            stale_chain_fallback: false,
+                        }),
                     },
                 )
                 .expect("park delayed prompt");
@@ -5399,6 +5471,15 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
             1
         );
     }
+    assert!(frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseFinishedReported(finished))
+            if finished.agent_prompt_id.as_str() == "mixed-delayed"
+                && finished.error.as_deref() == Some("(cancelled by harness)")
+                && finished.backend.as_ref().is_some_and(|backend| {
+                    backend.kind == ProviderBackendKind::PublicResponses
+                })
+    )));
     assert_eq!(
         calls
             .lock()
@@ -6103,7 +6184,12 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
                 canonical_unauthorized: false,
-                terminal_backend: None,
+                terminal_backend: Some(ProviderBackend {
+                    kind: ProviderBackendKind::PublicResponses,
+                    base_url: "https://responses.example/v1".to_owned(),
+                    transport: ProviderBackendTransport::HttpSse,
+                    stale_chain_fallback: false,
+                }),
             },
         )
         .expect("return late retry");
@@ -6165,16 +6251,27 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
     let frames = decode_frames(&output.bytes());
     let canceled = frames
         .iter()
-        .filter(|frame| {
-            matches!(
-                input_event(frame),
-                Some(Event::ProviderResponseFinishedReported(finished))
-                    if finished.agent_prompt_id.as_str() == "sp-1"
-                        && finished.error.as_deref() == Some("(cancelled by harness)")
-            )
+        .filter_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseFinishedReported(finished))
+                if finished.agent_prompt_id.as_str() == "sp-1"
+                    && finished.error.as_deref() == Some("(cancelled by harness)") =>
+            {
+                Some(finished)
+            }
+            _ => None,
         })
-        .count();
-    assert_eq!(canceled, 1, "targeted cancel must finish exactly once");
+        .collect::<Vec<_>>();
+    assert_eq!(
+        canceled.len(),
+        1,
+        "targeted cancel must finish exactly once"
+    );
+    assert!(
+        canceled[0]
+            .backend
+            .as_ref()
+            .is_some_and(|backend| { backend.kind == ProviderBackendKind::PublicResponses })
+    );
     input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
         tau_proto::Disconnect {
             reason: Some("done".to_owned()),
@@ -6182,6 +6279,136 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
     )]));
     input.close();
     runtime.join().expect("runtime join");
+}
+
+/// A reached retry queued behind an active worker retains its backend when
+/// targeted cancellation wins before the next attempt starts.
+#[test]
+fn queued_reached_retry_cancellation_retains_backend() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
+    let input = BlockingInput::default();
+    let mut target = prompt();
+    target.agent_prompt_id = "queued-reached-retry"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("target prompt id");
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(target),
+    )]));
+    let (blocker_started_tx, blocker_started_rx) = mpsc::sync_channel(1);
+    let (release_blocker_tx, release_blocker_rx) = mpsc::sync_channel(1);
+    let release_blocker_rx = Mutex::new(release_blocker_rx);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        if execution.job.agent_prompt_id.as_str() == "queued-reached-retry" {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Transport),
+                    live_detail: None,
+                    canonical_unauthorized: false,
+                    terminal_backend: Some(ProviderBackend {
+                        kind: ProviderBackendKind::PublicResponses,
+                        base_url: "https://responses.example/v1".to_owned(),
+                        transport: ProviderBackendTransport::HttpSse,
+                        stale_chain_fallback: false,
+                    }),
+                },
+            )
+            .expect("park reached retry");
+            return;
+        }
+        blocker_started_tx.send(()).expect("blocker started");
+        release_blocker_rx
+            .lock()
+            .expect("blocker release lock")
+            .recv()
+            .expect("release blocker");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors_and_clock(
+            runtime_input,
+            writer,
+            profiles,
+            move |_| prompt_profiles.clone(),
+            1,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
+        )
+        .expect("run queued retry cancellation");
+    });
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdatedReported(update))
+                    if update.agent_prompt_id.as_str() == "queued-reached-retry"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    let mut blocker = prompt();
+    blocker.agent_prompt_id = "queued-retry-blocker"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("blocker prompt id");
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::AgentPromptCreated(blocker),
+    )]));
+    blocker_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("blocker occupies worker slot");
+    clock.advance(Duration::from_secs(60 * 60));
+    input.wait_for_reader_waiting(Duration::from_secs(1));
+    input.push(encode_frames(&[live_event(
+        13,
+        Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::parse("test-session").expect("session id"),
+            target_agent_id: None,
+            agent_prompt_id: Some(
+                "queued-reached-retry"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("target prompt id"),
+            ),
+        }),
+    )]));
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "queued-reached-retry"
+                        && finished.error.as_deref() == Some("(cancelled by harness)")
+                        && finished.backend.as_ref().is_some_and(|backend| {
+                            backend.kind == ProviderBackendKind::PublicResponses
+                        })
+            )
+        })
+    });
+    assert!(frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseFinishedReported(finished))
+            if finished.agent_prompt_id.as_str() == "queued-reached-retry"
+                && finished.provider_attempt == tau_proto::ProviderAttempt::ONE
+    )));
+    release_blocker_tx.send(()).expect("release blocker");
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("queued retry runtime joins");
 }
 
 /// Ensures worker output wakes the provider loop without waiting for worker

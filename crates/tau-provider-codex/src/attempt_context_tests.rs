@@ -25,17 +25,17 @@ fn semantic_progress_is_sticky() {
     assert_eq!(attempt.progress(), SemanticProgress::Parsed);
 }
 
-/// Backend reachability begins false and changes only after allocation of an
-/// actual wire dispatch, preserving pre-egress `backend=None` authority.
+/// Correlation allocation retains logical and wire attempt numbering without
+/// serving as provider-egress authority.
 #[test]
-fn backend_reachability_tracks_real_wire_dispatch() {
+fn correlation_allocation_tracks_wire_dispatch_index() {
     let mut attempt =
         ProviderAttemptContext::new(AttemptOperation::Compact, LogicalAttempt::new(3));
-    assert!(!attempt.backend_reached());
+    assert_eq!(attempt.snapshot().wire_dispatches(), 0);
     let dispatch = attempt.correlation().next_dispatch();
     assert_eq!(dispatch.logical_attempt(), 3);
     assert_eq!(dispatch.wire_dispatch_index(), 1);
-    assert!(attempt.backend_reached());
+    assert_eq!(attempt.snapshot().wire_dispatches(), 1);
 }
 
 /// Compact finalization must serialize correlation-observed sticky progress,

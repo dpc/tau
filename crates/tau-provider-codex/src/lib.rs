@@ -496,9 +496,17 @@ pub enum CompactOutcome {
         usage: Option<tau_proto::ProviderTokenUsage>,
     },
     /// The outer scheduler may retry according to the typed decision.
-    Retry(tau_provider::retry_policy::RetryDecision),
+    Retry {
+        /// Provider-owned retry classification.
+        decision: tau_provider::retry_policy::RetryDecision,
+        /// Whether a request crossed the provider egress boundary.
+        backend_reached: bool,
+    },
     /// Trusted local cancellation ended the joined operation.
-    Canceled,
+    Canceled {
+        /// Whether a request crossed the provider egress boundary.
+        backend_reached: bool,
+    },
     /// A proven terminal failure ended the operation.
     Terminal {
         /// Sanitized typed backend error.
@@ -956,6 +964,7 @@ impl CodexRuntime {
             private_trace::Transport::Websocket,
         );
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Inference, logical_attempt);
+        let mut backend_reached = false;
         let result = self.stream(
             agent_prompt_id,
             config.wire(),
@@ -963,7 +972,12 @@ impl CodexRuntime {
             ResponseMode::Ordinary,
             attempt.correlation(),
             abort,
-            on_update,
+            &mut |update| {
+                if matches!(update, StreamUpdate::Dispatched(_)) {
+                    backend_reached = true;
+                }
+                on_update(update);
+            },
             &mut private_trace,
         );
         if let Ok(result) = &result {
@@ -1014,7 +1028,7 @@ impl CodexRuntime {
                 None => AttemptOutcome::Terminal {
                     error: CodexError(error),
                     progress,
-                    backend_reached: attempt.backend_reached(),
+                    backend_reached,
                 },
             },
         }
@@ -1106,7 +1120,11 @@ impl CodexRuntime {
         let probe = match self.acquire_compact_probe(identity, abort) {
             CompactAdmissionResult::Probe(probe) => Some(probe),
             CompactAdmissionResult::Admitted => None,
-            CompactAdmissionResult::Canceled => return CompactOutcome::Canceled,
+            CompactAdmissionResult::Canceled => {
+                return CompactOutcome::Canceled {
+                    backend_reached: false,
+                };
+            }
             CompactAdmissionResult::InternalFailure => {
                 return CompactOutcome::Terminal {
                     error: CodexError(common::LlmError::InvalidResponse(
@@ -1129,7 +1147,9 @@ impl CodexRuntime {
         };
         if let Err(error) = self.ws_pool.invalidate(config.wire(), request) {
             return if abort.is_aborted() {
-                CompactOutcome::Canceled
+                CompactOutcome::Canceled {
+                    backend_reached: false,
+                }
             } else {
                 CompactOutcome::Terminal {
                     error: CodexError(error.into_llm_error()),
@@ -1138,9 +1158,12 @@ impl CodexRuntime {
             };
         }
         if abort.is_aborted() {
-            return CompactOutcome::Canceled;
+            return CompactOutcome::Canceled {
+                backend_reached: false,
+            };
         }
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Compact, logical_attempt);
+        let mut backend_reached = false;
         let mut private_trace = private_trace::AttemptTrace::selected(
             private_trace::Backend::Codex,
             private_trace::Transport::Websocket,
@@ -1152,7 +1175,11 @@ impl CodexRuntime {
             ResponseMode::Compact,
             attempt.correlation(),
             abort,
-            &mut |_| {},
+            &mut |update| {
+                if matches!(update, StreamUpdate::Dispatched(_)) {
+                    backend_reached = true;
+                }
+            },
             &mut private_trace,
         );
         let (state, usage) = match compact_result {
@@ -1167,7 +1194,7 @@ impl CodexRuntime {
                 if let Some(trace) = private_trace.take() {
                     trace.finish(private_trace::Outcome::Canceled);
                 }
-                return CompactOutcome::Canceled;
+                return CompactOutcome::Canceled { backend_reached };
             }
             Err(error) => {
                 if error.is_compaction_route_unavailable() {
@@ -1183,7 +1210,7 @@ impl CodexRuntime {
                         error: CodexError(error),
                         newly_downgraded,
                         profile_identity: identity,
-                        backend_reached: attempt.backend_reached(),
+                        backend_reached,
                     };
                 }
                 if let Some(probe) = probe {
@@ -1199,15 +1226,18 @@ impl CodexRuntime {
                             access_token: config.wire().api_key.as_str(),
                             account_id: config.wire().account_id.as_deref(),
                         });
-                        CompactOutcome::Retry(decision)
+                        CompactOutcome::Retry {
+                            decision,
+                            backend_reached,
+                        }
                     }
                     _ => CompactOutcome::Terminal {
                         error: CodexError(error),
-                        backend_reached: attempt.backend_reached(),
+                        backend_reached,
                     },
                 };
                 if let Some(trace) = private_trace.take() {
-                    let class = if matches!(outcome, CompactOutcome::Retry(_)) {
+                    let class = if matches!(outcome, CompactOutcome::Retry { .. }) {
                         private_trace::Outcome::Retryable
                     } else {
                         private_trace::Outcome::Failed
@@ -1226,7 +1256,7 @@ impl CodexRuntime {
                     "compaction response did not contain exactly one canonical compaction item"
                         .to_owned(),
                 )),
-                backend_reached: attempt.backend_reached(),
+                backend_reached,
             };
         };
         let output = build_v2_compacted_window(
@@ -1237,7 +1267,7 @@ impl CodexRuntime {
             if let Some(trace) = private_trace.take() {
                 trace.finish(private_trace::Outcome::Canceled);
             }
-            CompactOutcome::Canceled
+            CompactOutcome::Canceled { backend_reached }
         } else {
             if let Some(trace) = private_trace.take() {
                 trace.finish(private_trace::Outcome::Completed);

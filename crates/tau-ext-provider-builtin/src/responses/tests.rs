@@ -1,5 +1,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
-use std::{io as path_std_io, time as path_std_time};
+use std::{
+    io as path_std_io, net as path_std_net, thread as path_std_thread, time as path_std_time,
+};
 
 use super::sampling::ResponsesResponseSampler;
 use super::*;
@@ -127,11 +129,115 @@ fn finished_response_uses_public_responses_backend_kind() {
         None,
         None,
         None,
+        true,
     );
     assert_eq!(
         response.backend.expect("backend").kind,
         tau_proto::ProviderBackendKind::PublicResponses
     );
+}
+
+/// The production public Responses adapter omits backend identity before
+/// dispatch and retains it for both failed and successful reached requests.
+#[test]
+fn production_attempt_backend_metadata_tracks_actual_egress() {
+    let prompt = crate::openai_tests::prompt();
+    let model: ResponsesModel =
+        serde_json::from_value(serde_json::json!({"id": "test-model"})).expect("model");
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(Default::default(), None);
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    let pre_egress = run_prompt_attempt(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &ResponsesProvider {
+            base_url: "not a URL".to_owned(),
+            ..ResponsesProvider::default()
+        },
+        &model,
+        false,
+        &mut writer,
+        &mut || false,
+        &network,
+    );
+    assert!(matches!(
+        pre_egress,
+        PromptAttemptOutcome::Retry {
+            backend_reached: false,
+            ..
+        }
+    ));
+
+    let failed = run_loopback_attempt(
+        &prompt,
+        &model,
+        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: 63\r\nconnection: close\r\n\r\n{\"error\":{\"code\":\"invalid_request_error\",\"message\":\"rejected\"}}",
+    );
+    assert!(matches!(
+        failed,
+        PromptAttemptOutcome::Terminal { finished, .. }
+            if finished.backend.as_ref().is_some_and(|backend| {
+                backend.kind == tau_proto::ProviderBackendKind::PublicResponses
+            })
+    ));
+
+    let body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n";
+    let succeeded = run_loopback_attempt(
+        &prompt,
+        &model,
+        &format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(matches!(
+        succeeded,
+        PromptAttemptOutcome::Finished(finished)
+            if finished.backend.as_ref().is_some_and(|backend| {
+                backend.kind == tau_proto::ProviderBackendKind::PublicResponses
+            })
+    ));
+}
+
+/// Run the production public Responses adapter against one finite loopback
+/// response.
+fn run_loopback_attempt(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &ResponsesModel,
+    response: &str,
+) -> PromptAttemptOutcome {
+    use path_std_io::{Read as _, Write as _};
+
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("loopback address");
+    let response = response.to_owned();
+    let server = path_std_thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).expect("read request");
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+    });
+    let provider = ResponsesProvider {
+        base_url: format!("http://{address}/v1"),
+        ..ResponsesProvider::default()
+    };
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(Default::default(), None);
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    let outcome = run_prompt_attempt(
+        &prompt.agent_prompt_id,
+        prompt,
+        &provider,
+        model,
+        false,
+        &mut writer,
+        &mut || false,
+        &network,
+    );
+    server.join().expect("loopback server");
+    outcome
 }
 
 /// Generic Responses local summaries expose byte/timing progress without

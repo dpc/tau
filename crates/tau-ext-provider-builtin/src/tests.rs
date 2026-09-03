@@ -4,6 +4,7 @@ use std::fs::File;
 use std::sync::{Condvar, atomic as path_std_sync_atomic};
 use std::{io as path_std_io, time as path_std_time};
 
+use tau_proto::ProviderBackendKind;
 use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
 
 mod compatibility;

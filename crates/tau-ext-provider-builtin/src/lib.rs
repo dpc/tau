@@ -9,6 +9,7 @@
 use std::collections::hash_map as path_std_collections_hash_map;
 use std::io as path_std_io;
 
+mod backend_observation;
 mod cache_contract;
 mod chat_completions;
 mod credential_record;
@@ -38,6 +39,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use backend_observation::{
+    chat_completions_backend, codex_backend as backend_descriptor, observed_backend,
+    responses_backend,
+};
 pub use cache_contract::ProviderCacheContract;
 pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
@@ -90,10 +95,10 @@ use tau_config::settings::BuiltinComponentIdentity;
 use tau_proto::PeerOutputWriter;
 use tau_proto::{
     ClientKind, ContextItem, Event, EventName, HarnessInputMessage, ModelId, ModelName,
-    ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderCacheMissDiagnostic,
-    ProviderModelInfo, ProviderModelsDeclared, ProviderName, ProviderPromptSubmitted,
-    ProviderResponseFinished, ProviderResponseStats, ProviderResponseStatusUpdate,
-    ProviderResponseUpdated, ProviderStopReason, SecretValue, ServerOffsetMillis, UnixMillis,
+    ProviderBackend, ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
+    ProviderModelsDeclared, ProviderName, ProviderPromptSubmitted, ProviderResponseFinished,
+    ProviderResponseStats, ProviderResponseStatusUpdate, ProviderResponseUpdated,
+    ProviderStopReason, SecretValue, ServerOffsetMillis, UnixMillis,
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
@@ -3944,18 +3949,34 @@ where
         Ok(())
     }
 
+    /// Finish a canceled retry job with any backend observed by an earlier
+    /// finite attempt in the same logical turn.
+    fn finish_canceled_job(&mut self, job: &PromptJob, handle: &ClientHandle) -> ClientResult<()> {
+        let mut frame_writer = handle_report_sink(handle);
+        emit_canceled_correlated(
+            &job.agent_prompt_id,
+            &job.prompt,
+            &mut frame_writer,
+            job.observed_backend.clone(),
+            tau_proto::ProviderAttempt::ONE,
+        )
+        .map_err(|error| ClientError::handler(error.to_string()))
+    }
+
     fn finish_identity_changed_prompt(
         &mut self,
         job: &PromptJob,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
+        let mut finished = simple_finished(
+            job.agent_prompt_id.clone(),
+            job.prompt.agent_id.clone(),
+            job.prompt.originator.clone(),
+            "ChatGPT identity changed; automatic retry refused",
+        );
+        finished.backend = job.observed_backend.clone();
         handle.send(HarnessInputMessage::emit_transient(
-            Event::ProviderResponseFinishedReported(simple_finished(
-                job.agent_prompt_id.clone(),
-                job.prompt.agent_id.clone(),
-                job.prompt.originator.clone(),
-                "ChatGPT identity changed; automatic retry refused",
-            )),
+            Event::ProviderResponseFinishedReported(finished),
         ))
     }
 
@@ -3966,11 +3987,16 @@ where
         admission: &PendingPromptAdmission,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        self.finish_canceled_prompt(
-            admission.kind.agent_prompt_id(),
-            admission.kind.prompt(),
-            handle,
-        )?;
+        match &admission.kind {
+            PendingPromptAdmissionKind::Initial {
+                agent_prompt_id,
+                prompt,
+            } => self.finish_canceled_prompt(agent_prompt_id, prompt, handle)?,
+            PendingPromptAdmissionKind::RetryDue(job)
+            | PendingPromptAdmissionKind::Manual { job, .. } => {
+                self.finish_canceled_job(job, handle)?;
+            }
+        }
         if let PendingPromptAdmissionKind::Manual { job, request_id } = &admission.kind {
             handle.emit_transient(Event::ProviderRetryPromptResultReported(
                 tau_proto::ProviderRetryPromptResult {
@@ -4087,6 +4113,7 @@ where
             pinned_chatgpt_identity,
             profile_identity,
             retry_state: PromptRetryState::default(),
+            observed_backend: None,
             cancel_generation: self.cancel_generation,
             manual_cooldown_bypass: false,
             cooldown_probe: None,
@@ -4806,7 +4833,7 @@ where
             }
             while let Some(mut job) = self.prompt_queue.pop_front() {
                 finish_receipt_canceled(&mut job.receipt_observation);
-                self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                self.finish_canceled_job(&job, handle)?;
             }
             while let Some(mut admission) = self.credential_admission.admissions.pop_front() {
                 if let (Some(deadlines), Some(request_id)) = (
@@ -5023,13 +5050,16 @@ where
                     canonical_unauthorized,
                     terminal_backend,
                 }) => {
+                    if terminal_backend.is_some() {
+                        job.observed_backend = terminal_backend;
+                    }
                     if self.input_closed
                         || job.cancel_generation != self.cancel_generation
                         || self.cancellation.is_canceled(&job.agent_prompt_id)
                     {
                         self.cancellation.take_canceled(&job.agent_prompt_id);
                         finish_receipt_canceled(&mut job.receipt_observation);
-                        self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                        self.finish_canceled_job(&job, handle)?;
                         continue;
                     }
                     if canonical_unauthorized && let Some(identity) = job.profile_identity {
@@ -5097,7 +5127,7 @@ where
                             "provider retry budget exhausted during standalone compaction",
                         );
                         finished.provider_attempt = attempt;
-                        finished.backend = terminal_backend;
+                        finished.backend = job.observed_backend;
                         handle.send(HarnessInputMessage::emit_transient(
                             Event::ProviderResponseFinishedReported(finished),
                         ))?;
@@ -5132,7 +5162,7 @@ where
                         || self.cancellation.take_canceled(&job.agent_prompt_id)
                     {
                         finish_receipt_canceled(&mut job.receipt_observation);
-                        self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                        self.finish_canceled_job(&job, handle)?;
                         continue;
                     }
                     let Some(PendingPromptAdmissionKind::RetryDue(mut job)) = self
@@ -5178,11 +5208,7 @@ where
                             || self.cancellation.take_canceled(&owned_job.agent_prompt_id)
                         {
                             finish_receipt_canceled(&mut owned_job.receipt_observation);
-                            self.finish_canceled_prompt(
-                                &owned_job.agent_prompt_id,
-                                &owned_job.prompt,
-                                handle,
-                            )?;
+                            self.finish_canceled_job(&owned_job, handle)?;
                             tau_proto::RetryPromptStatus::NotParked
                         } else {
                             let Some(PendingPromptAdmissionKind::Manual {
@@ -5248,7 +5274,7 @@ where
                     }
                     self.cancellation.take_canceled(&job.agent_prompt_id);
                     finish_receipt_canceled(&mut job.receipt_observation);
-                    self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                    self.finish_canceled_job(&job, handle)?;
                 }
                 Ok(WorkerMessage::QuotaRolling {
                     model,
@@ -5646,15 +5672,15 @@ fn validate_worker_output_for_commit(
         return Ok(None);
     };
     cancellation.take_canceled(agent_prompt_id);
+    let mut canceled = simple_finished(
+        finished.agent_prompt_id.clone(),
+        finished.agent_id.clone(),
+        finished.originator.clone(),
+        "(cancelled by harness)",
+    );
+    canceled.backend = finished.backend.clone();
     Ok(Some(tau_client::PeerOutput::prepare(
-        HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(
-            simple_finished(
-                finished.agent_prompt_id.clone(),
-                finished.agent_id.clone(),
-                finished.originator.clone(),
-                "(cancelled by harness)",
-            ),
-        )),
+        HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(canceled)),
     )?))
 }
 
@@ -5769,6 +5795,8 @@ struct PromptJob {
     /// Inference profile identity used by the next finite attempt.
     profile_identity: Option<BackendProfileIdentity>,
     retry_state: PromptRetryState,
+    /// Backend reached by any finite attempt in this logical provider turn.
+    observed_backend: Option<ProviderBackend>,
     /// Runtime global-cancel generation at logical prompt creation.
     cancel_generation: u64,
     /// Lets one manually released job pass a still-active shared cooldown once.
@@ -7588,6 +7616,7 @@ fn production_prompt_executor() -> PromptExecutor {
             let prompt_context = ChatGptPromptExecutionContext {
                 debug_provider_requests: execution.job.debug_provider_requests,
                 runtime: &execution.codex_runtime,
+                prior_backend: execution.job.observed_backend.as_ref(),
                 logical_attempt: tau_provider_codex::LogicalAttempt::new(
                     execution.job.retry_state.attempts.saturating_add(1),
                 ),
@@ -7712,8 +7741,14 @@ fn start_queued_prompts(
                 observation.finished_before_worker(ReceiptOutcome::Canceled);
             }
             let mut frame_writer = handle_report_sink(handle);
-            finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
-                .map_err(|error| ClientError::handler(error.to_string()))?;
+            emit_canceled_correlated(
+                &job.agent_prompt_id,
+                &job.prompt,
+                &mut frame_writer,
+                job.observed_backend,
+                tau_proto::ProviderAttempt::ONE,
+            )
+            .map_err(|error| ClientError::handler(error.to_string()))?;
             continue;
         }
         job.manual_cooldown_bypass = false;
@@ -7738,8 +7773,14 @@ fn finish_queued_canceled(
     };
     finish_receipt_canceled(&mut job.receipt_observation);
     let mut frame_writer = handle_report_sink(handle);
-    finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
-        .map_err(|error| ClientError::handler(error.to_string()))?;
+    emit_canceled_correlated(
+        &job.agent_prompt_id,
+        &job.prompt,
+        &mut frame_writer,
+        job.observed_backend,
+        tau_proto::ProviderAttempt::ONE,
+    )
+    .map_err(|error| ClientError::handler(error.to_string()))?;
     Ok(true)
 }
 
@@ -8731,7 +8772,7 @@ where
             prompt,
             writer,
             false,
-            None,
+            context.prior_backend.cloned(),
             context.logical_attempt.provider_attempt(),
         );
     }
@@ -8759,13 +8800,19 @@ where
                 retain_correlation: true,
             },
         ),
-        ChatCompletionsAttemptOutcome::Terminal { finished, progress } => finish_terminal_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            *finished,
-            progress == tau_provider_chat_completions::SemanticProgress::Parsed,
-        ),
+        ChatCompletionsAttemptOutcome::Terminal {
+            mut finished,
+            progress,
+        } => {
+            finished.backend = observed_backend(finished.backend.take(), context.prior_backend);
+            finish_terminal_attempt(
+                agent_prompt_id,
+                prompt,
+                writer,
+                *finished,
+                progress == tau_provider_chat_completions::SemanticProgress::Parsed,
+            )
+        }
         ChatCompletionsAttemptOutcome::Retry {
             decision,
             progress,
@@ -8776,28 +8823,24 @@ where
             writer,
             decision,
             progress == tau_provider_chat_completions::SemanticProgress::Parsed,
-            backend_reached.then(|| chat_completions_backend(provider)),
+            observed_backend(
+                backend_reached.then(|| chat_completions_backend(provider)),
+                context.prior_backend,
+            ),
         ),
         ChatCompletionsAttemptOutcome::Canceled { progress, facts } => finish_canceled_attempt(
             agent_prompt_id,
             prompt,
             writer,
             progress == tau_provider_chat_completions::SemanticProgress::Parsed,
-            facts
-                .backend_reached
-                .then(|| chat_completions_backend(provider)),
+            observed_backend(
+                facts
+                    .backend_reached
+                    .then(|| chat_completions_backend(provider)),
+                context.prior_backend,
+            ),
             facts.provider_attempt,
         ),
-    }
-}
-
-/// Build terminal routing metadata for a reached Chat Completions backend.
-fn chat_completions_backend(provider: &ChatCompletionsProvider) -> ProviderBackend {
-    ProviderBackend {
-        kind: ProviderBackendKind::ChatCompletions,
-        base_url: provider.base_url.clone(),
-        transport: ProviderBackendTransport::HttpSse,
-        stale_chain_fallback: false,
     }
 }
 
@@ -8815,8 +8858,14 @@ where
     R: TurnAbort,
 {
     if TurnAbort::is_aborted(retry_ctx) {
-        finish_canceled(agent_prompt_id, prompt, writer)?;
-        return Ok(None);
+        return finish_canceled_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            false,
+            context.prior_backend.cloned(),
+            tau_proto::ProviderAttempt::ONE,
+        );
     }
     match run_responses_prompt_attempt(
         agent_prompt_id,
@@ -8837,30 +8886,49 @@ where
             true,
             CancellationFinishPolicy {
                 detail: "request canceled; discarding tentative provider output",
-                retain_correlation: false,
+                retain_correlation: true,
             },
         ),
-        ResponsesAttemptOutcome::Terminal { finished, progress } => finish_terminal_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            *finished,
-            progress.has_timed_semantic_output,
-        ),
-        ResponsesAttemptOutcome::Retry { decision, progress } => finish_retry_attempt(
+        ResponsesAttemptOutcome::Terminal {
+            mut finished,
+            progress,
+        } => {
+            finished.backend = observed_backend(finished.backend.take(), context.prior_backend);
+            finish_terminal_attempt(
+                agent_prompt_id,
+                prompt,
+                writer,
+                *finished,
+                progress.has_timed_semantic_output,
+            )
+        }
+        ResponsesAttemptOutcome::Retry {
+            decision,
+            progress,
+            backend_reached,
+        } => finish_retry_attempt(
             agent_prompt_id,
             prompt,
             writer,
             decision,
             progress.has_timed_semantic_output,
-            None,
+            observed_backend(
+                backend_reached.then(|| responses_backend(provider)),
+                context.prior_backend,
+            ),
         ),
-        ResponsesAttemptOutcome::Canceled { progress } => finish_canceled_attempt(
+        ResponsesAttemptOutcome::Canceled {
+            progress,
+            backend_reached,
+        } => finish_canceled_attempt(
             agent_prompt_id,
             prompt,
             writer,
             progress.has_timed_semantic_output,
-            None,
+            observed_backend(
+                backend_reached.then(|| responses_backend(provider)),
+                context.prior_backend,
+            ),
             tau_proto::ProviderAttempt::ONE,
         ),
     }
@@ -9052,6 +9120,8 @@ struct ChatGptPromptExecutionContext<'a> {
     debug_provider_requests: bool,
     /// Shared ChatGPT transport runtime and WebSocket pool.
     runtime: &'a CodexRuntime,
+    /// Backend reached by an earlier finite attempt in this logical turn.
+    prior_backend: Option<&'a ProviderBackend>,
     /// One-based finite-attempt ordinal owned by this prompt execution.
     logical_attempt: tau_provider_codex::LogicalAttempt,
     /// Publishes a process-local capability downgrade to the main loop.
@@ -9107,25 +9177,44 @@ where
             ))?;
             Ok(None)
         }
-        CompactOutcome::Retry(decision) => Ok(Some(PromptAttemptRetry {
+        CompactOutcome::Retry {
+            decision,
+            backend_reached,
+        } => Ok(Some(PromptAttemptRetry {
             decision,
             live_detail: None,
             canonical_unauthorized: false,
-            terminal_backend: None,
+            terminal_backend: observed_backend(
+                backend_reached.then(|| {
+                    backend_descriptor(config, ProviderBackendTransport::Websocket, false)
+                }),
+                execution.prior_backend,
+            ),
         })),
-        CompactOutcome::Canceled => {
-            finish_canceled(agent_prompt_id, prompt, writer)?;
-            Ok(None)
-        }
+        CompactOutcome::Canceled { backend_reached } => finish_canceled_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            false,
+            observed_backend(
+                backend_reached.then(|| {
+                    backend_descriptor(config, ProviderBackendTransport::Websocket, false)
+                }),
+                execution.prior_backend,
+            ),
+            tau_proto::ProviderAttempt::ONE,
+        ),
         CompactOutcome::Terminal {
             error,
             backend_reached,
         } => {
             let backend = backend_descriptor(config, ProviderBackendTransport::Websocket, false);
+            let observed =
+                observed_backend(backend_reached.then_some(backend), execution.prior_backend);
             finish_error(
                 agent_prompt_id,
                 prompt,
-                backend_reached.then_some(&backend),
+                observed.as_ref(),
                 error,
                 None,
                 execution.debug_provider_requests,
@@ -9144,10 +9233,12 @@ where
                 (execution.compact_route_unavailable)(profile_identity);
             }
             let backend = backend_descriptor(config, ProviderBackendTransport::Websocket, false);
+            let observed =
+                observed_backend(backend_reached.then_some(backend), execution.prior_backend);
             finish_error(
                 agent_prompt_id,
                 prompt,
-                backend_reached.then_some(&backend),
+                observed.as_ref(),
                 error,
                 None,
                 execution.debug_provider_requests,
@@ -9232,6 +9323,7 @@ where
 
     let originator = prompt.originator.clone();
     let transport_taken = ProviderBackendTransport::Websocket;
+    let mut backend_reached = false;
     let mut ws_pool_delta = None;
     let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
     let mut on_update = |update: StreamUpdate<'_>| match update {
@@ -9239,6 +9331,7 @@ where
             emit_chatgpt_connecting_update(agent_prompt_id, &prompt.agent_id, &originator, writer);
         }
         StreamUpdate::Dispatched(at) => {
+            backend_reached = true;
             response_update_emitter.mark_dispatched(at);
         }
         StreamUpdate::Response(state) => {
@@ -9302,7 +9395,19 @@ where
                     writer,
                 )?;
             }
-            finish_canceled(agent_prompt_id, prompt, writer)?
+            return finish_canceled_attempt(
+                agent_prompt_id,
+                prompt,
+                writer,
+                false,
+                observed_backend(
+                    backend_reached.then(|| {
+                        backend_descriptor(config, ProviderBackendTransport::Websocket, false)
+                    }),
+                    execution.prior_backend,
+                ),
+                tau_proto::ProviderAttempt::ONE,
+            );
         }
         CodexAttemptOutcome::Terminal {
             error,
@@ -9326,10 +9431,12 @@ where
                 writer,
             );
             let backend = backend_descriptor(config, transport_taken, false);
+            let observed =
+                observed_backend(backend_reached.then_some(backend), execution.prior_backend);
             finish_error(
                 agent_prompt_id,
                 prompt,
-                backend_reached.then_some(&backend),
+                observed.as_ref(),
                 error,
                 ws_pool_delta,
                 execution.debug_provider_requests,
@@ -9355,7 +9462,12 @@ where
                 decision,
                 live_detail,
                 canonical_unauthorized,
-                terminal_backend: None,
+                terminal_backend: observed_backend(
+                    backend_reached.then(|| {
+                        backend_descriptor(config, ProviderBackendTransport::Websocket, false)
+                    }),
+                    execution.prior_backend,
+                ),
             }));
         }
         CodexAttemptOutcome::Terminal {
@@ -9372,10 +9484,12 @@ where
                 )?;
             }
             let backend = backend_descriptor(config, transport_taken, false);
+            let observed =
+                observed_backend(backend_reached.then_some(backend), execution.prior_backend);
             finish_error(
                 agent_prompt_id,
                 prompt,
-                backend_reached.then_some(&backend),
+                observed.as_ref(),
                 error,
                 ws_pool_delta,
                 execution.debug_provider_requests,
@@ -9603,19 +9717,6 @@ fn emit_chatgpt_stream_update<S: ProviderReportSink>(
         return false;
     };
     true
-}
-
-fn backend_descriptor(
-    config: &ResolvedConfig,
-    transport: ProviderBackendTransport,
-    stale_chain_fallback: bool,
-) -> ProviderBackend {
-    ProviderBackend {
-        kind: ProviderBackendKind::Responses,
-        base_url: config.base_url().to_owned(),
-        transport,
-        stale_chain_fallback,
-    }
 }
 
 fn maybe_debug_submit_provider_response(

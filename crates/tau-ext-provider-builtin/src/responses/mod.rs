@@ -277,11 +277,14 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 prompt,
                 provider,
                 "model context window is too small for summary compaction",
+                false,
             );
         };
         match materialize_summary_prompt(prompt, config) {
             Ok(compact) => Some(compact),
-            Err(error) => return invalid_compaction(agent_prompt_id, prompt, provider, error),
+            Err(error) => {
+                return invalid_compaction(agent_prompt_id, prompt, provider, error, false);
+            }
         }
     } else {
         None
@@ -319,6 +322,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
         id: model.id.clone(),
     };
     let mut sampler = ResponsesResponseSampler::new();
+    let mut backend_reached = false;
     let outcome =
         forward_debug_capture_policy(debug_provider_requests, |debug_provider_requests| {
             tau_provider_responses::run_attempt_with_debug(
@@ -328,6 +332,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 debug_provider_requests,
                 &mut |update| match update {
                     tau_provider_responses::AttemptUpdate::Dispatched(dispatched_at) => {
+                        backend_reached = true;
                         sampler.mark_dispatched(dispatched_at);
                     }
                     tau_provider_responses::AttemptUpdate::Progress(progress) => {
@@ -353,6 +358,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                                         prompt,
                                         provider,
                                         &error,
+                                        backend_reached,
                                     );
                                 }
                             };
@@ -368,6 +374,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                             prompt,
                             provider,
                             "summary compactor did not complete its output",
+                            backend_reached,
                         );
                     }
                 }
@@ -383,6 +390,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 None,
                 success.usage,
                 success.provider_response_id,
+                backend_reached,
             )))
         }
         tau_provider_responses::AttemptOutcome::Retryable { decision, progress } => {
@@ -392,12 +400,20 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                     prompt,
                     provider,
                     "summary compactor failed after semantic output",
+                    backend_reached,
                 );
             }
-            PromptAttemptOutcome::Retry { decision, progress }
+            PromptAttemptOutcome::Retry {
+                decision,
+                progress,
+                backend_reached,
+            }
         }
         tau_provider_responses::AttemptOutcome::Canceled { progress } => {
-            PromptAttemptOutcome::Canceled { progress }
+            PromptAttemptOutcome::Canceled {
+                progress,
+                backend_reached,
+            }
         }
         tau_provider_responses::AttemptOutcome::Terminal(failure) => {
             PromptAttemptOutcome::Terminal {
@@ -411,6 +427,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                     failure.failure_kind,
                     None,
                     None,
+                    backend_reached,
                 )),
                 progress: failure.progress,
             }
@@ -481,6 +498,7 @@ fn invalid_compaction(
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,
     message: &str,
+    backend_reached: bool,
 ) -> PromptAttemptOutcome {
     PromptAttemptOutcome::Terminal {
         finished: Box::new(finished(
@@ -493,6 +511,7 @@ fn invalid_compaction(
             Some(tau_proto::ProviderFailureKind::RequestRejected),
             None,
             None,
+            backend_reached,
         )),
         progress: tau_provider_responses::AttemptProgress {
             output_items: Vec::new(),
@@ -529,10 +548,14 @@ pub enum PromptAttemptOutcome {
     Retry {
         decision: tau_provider::retry_policy::RetryDecision,
         progress: tau_provider_responses::AttemptProgress,
+        /// Whether this attempt crossed the backend dispatch boundary.
+        backend_reached: bool,
     },
     /// Cancellation won the finite attempt.
     Canceled {
         progress: tau_provider_responses::AttemptProgress,
+        /// Whether this attempt crossed the backend dispatch boundary.
+        backend_reached: bool,
     },
     /// A permanent failure ended the prompt.
     Terminal {
@@ -552,6 +575,7 @@ fn finished(
     failure_kind: Option<tau_proto::ProviderFailureKind>,
     usage: Option<tau_proto::ProviderTokenUsage>,
     provider_response_id: Option<String>,
+    backend_reached: bool,
 ) -> tau_proto::ProviderResponseFinished {
     tau_proto::ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -570,7 +594,7 @@ fn finished(
         usage,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
-        backend: Some(tau_proto::ProviderBackend {
+        backend: backend_reached.then_some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::PublicResponses,
             base_url: provider.base_url.clone(),
             transport: backend_transport(provider),
