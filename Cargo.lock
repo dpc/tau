@@ -6006,6 +6006,8 @@ dependencies = [
  "blake3",
  "futures-util",
  "rand 0.8.6",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tau-client",

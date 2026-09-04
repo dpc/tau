@@ -12,6 +12,7 @@ mod send_delivery_tests;
 use std::io::{Read, Write};
 use std::sync::{Condvar, Mutex};
 
+use rustls::crypto::{aws_lc_rs as path_rustls_crypto_aws_lc, ring as path_rustls_crypto_ring};
 use tau_proto::{ContentPart, HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 use tokio_tungstenite::tungstenite::protocol::frame::Frame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
@@ -7190,4 +7191,31 @@ fn readme_reaction_target_activation_matches_spec() {
 fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
     tau_proto::ExtensionName::parse(value.as_ref())
         .expect("test extension name must satisfy the identifier grammar")
+}
+
+/// Slack TLS construction must remain independent of rustls' process-wide
+/// provider inference when the unified Tau binary links ring and AWS-LC.
+#[test]
+fn socket_tls_config_selects_ring_under_unified_provider_linkage() {
+    let config =
+        socket_tls_config(rustls::RootCertStore::empty()).expect("explicit ring TLS configuration");
+    let selected = config.crypto_provider();
+    let ring = path_rustls_crypto_ring::default_provider();
+    let aws_lc = path_rustls_crypto_aws_lc::default_provider();
+    assert!(std::ptr::eq(selected.secure_random, ring.secure_random));
+    assert!(std::ptr::eq(selected.key_provider, ring.key_provider));
+    assert!(!std::ptr::eq(selected.secure_random, aws_lc.secure_random));
+    assert!(!std::ptr::eq(selected.key_provider, aws_lc.key_provider));
+}
+
+/// Permitted loopback plaintext sockets must not construct TLS state or depend
+/// on the host native certificate store.
+#[test]
+fn socket_connector_keeps_loopback_ws_plain() {
+    let url = SlackSocketUrl::parse_exact("ws://127.0.0.1:1234/socket".to_owned())
+        .expect("valid loopback Socket URL");
+    assert!(matches!(
+        socket_connector(&url).expect("plain connector"),
+        Connector::Plain
+    ));
 }

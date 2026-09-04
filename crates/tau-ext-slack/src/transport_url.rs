@@ -91,6 +91,11 @@ impl SlackSocketUrl {
     pub(super) fn raw(&self) -> &str {
         &self.raw
     }
+
+    /// Return whether this validated socket URL requires TLS.
+    pub(super) fn uses_tls(&self) -> bool {
+        self._parsed.scheme() == "wss"
+    }
 }
 
 /// Return whether one parsed URL host is local loopback.

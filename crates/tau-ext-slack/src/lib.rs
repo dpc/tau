@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine as path_base64_engine};
 use futures_util::{SinkExt, StreamExt};
+use rustls::crypto::ring as path_rustls_crypto_ring;
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder, ManualRuntimePoll,
     ManualRuntimeWaker, TauExtension,
@@ -37,7 +38,7 @@ use tau_proto::{
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync, time as path_tokio_time};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use ureq::tls as path_ureq_tls;
 
 mod admission;
@@ -167,6 +168,57 @@ fn socket_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_frame_size(Some(MAX_SOCKET_FRAME_BYTES))
         .max_message_size(Some(MAX_SOCKET_FRAME_BYTES))
+}
+
+/// Build the Slack Socket Mode TLS connector with Tau's explicit ring policy
+/// and the same native trust roots used by tokio-tungstenite's default.
+fn socket_tls_connector() -> Result<Connector, &'static str> {
+    let rustls_native_certs::CertificateResult { certs, errors, .. } =
+        rustls_native_certs::load_native_certs();
+    if !errors.is_empty() {
+        tracing::warn!(
+            target: LOG_TARGET,
+            error_count = errors.len(),
+            "some native root CA certificates could not be loaded"
+        );
+    }
+    if certs.is_empty() {
+        return Err("no native root CA certificates found");
+    }
+
+    let mut roots = rustls::RootCertStore::empty();
+    let total = certs.len();
+    let (added, ignored) = roots.add_parsable_certificates(certs);
+    tracing::debug!(
+        target: LOG_TARGET,
+        total,
+        added,
+        ignored,
+        "loaded native root CA certificates"
+    );
+    let config = socket_tls_config(roots)?;
+    Ok(Connector::Rustls(Arc::new(config)))
+}
+
+/// Select a connector for an already validated Socket Mode URL without
+/// consulting native roots for permitted loopback plaintext sockets.
+fn socket_connector(url: &SlackSocketUrl) -> Result<Connector, &'static str> {
+    if url.uses_tls() {
+        socket_tls_connector()
+    } else {
+        Ok(Connector::Plain)
+    }
+}
+
+/// Build Slack's rustls client configuration without consulting the ambiguous
+/// process-wide default provider.
+fn socket_tls_config(roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, &'static str> {
+    rustls::ClientConfig::builder_with_provider(Arc::new(
+        path_rustls_crypto_ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| "Slack TLS protocol configuration failed")
+    .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
 }
 
 /// Socket Mode heartbeat timing used to detect silently stale connections.
@@ -4439,10 +4491,12 @@ async fn socket_worker_once_with_heartbeat(
             ws_url
         }
     };
-    let (mut ws, _response) = tokio_tungstenite::connect_async_with_config(
+    let connector = socket_connector(&ws_url).map_err(str::to_owned)?;
+    let (mut ws, _response) = tokio_tungstenite::connect_async_tls_with_config(
         ws_url.raw(),
         Some(socket_websocket_config()),
         false,
+        Some(connector),
     )
     .await
     .map_err(|_| "Slack websocket connection failed".to_owned())?;
