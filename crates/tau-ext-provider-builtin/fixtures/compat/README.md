@@ -13,6 +13,9 @@ JSON is canonical `BuiltinProviderProfile` output. The routing snapshot excludes
 credentials, normalizes loopback ports and elapsed microseconds, and otherwise
 records complete published models, resolved controls, and ordered events emitted
 through the production Responses and Chat Completions seams.
+The September 4, 2026 user-approved `gpt-6-astra` catalog addition refreshes
+that routing snapshot with Astra's conservative fallback metadata; it does not
+change the recorded routing or event semantics.
 The approved runtime-cache-contract change 590b extends the routing snapshot
 with the private ChatGPT/Codex model's conservative, content-free response-chain
 contract; generic profiles remain absent unless explicitly configured.

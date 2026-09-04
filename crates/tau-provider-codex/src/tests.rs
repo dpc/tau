@@ -1229,11 +1229,27 @@ fn publishes_chatgpt_model_metadata() {
             "work-chatgpt/gpt-5.6-sol",
             "work-chatgpt/gpt-5.6-terra",
             "work-chatgpt/gpt-5.6-luna",
+            "work-chatgpt/gpt-6-astra",
             "work-chatgpt/gpt-5.5",
             "work-chatgpt/gpt-5.4",
             "work-chatgpt/gpt-5.4-mini",
             "work-chatgpt/gpt-5.3-codex",
         ],
+    );
+    let astra = models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-6-astra")
+        .expect("gpt-6-astra model");
+    assert_eq!(astra.default_affinity, 0);
+    assert_eq!(
+        models
+            .iter()
+            .max_by_key(|model| model.default_affinity)
+            .expect("published model")
+            .id
+            .model
+            .as_str(),
+        "gpt-5.6-sol"
     );
     assert!(
         models

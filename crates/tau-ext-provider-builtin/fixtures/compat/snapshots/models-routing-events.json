@@ -594,6 +594,98 @@
         }
       },
       "context_window": 272000,
+      "efforts": {
+        "control": {
+          "kind": "mapped",
+          "mapping": [
+            {
+              "from": "0.0",
+              "level": "none"
+            },
+            {
+              "from": "0.1",
+              "level": "minimal"
+            },
+            {
+              "from": "0.2",
+              "level": "low"
+            },
+            {
+              "from": "0.3",
+              "level": "medium"
+            },
+            {
+              "from": "0.7",
+              "level": "high"
+            }
+          ]
+        }
+      },
+      "est_output_cost_1m_usd": "30",
+      "est_uncached_input_cost_1m_usd": "5",
+      "hosted_tool_capabilities": [
+        {
+          "access_modes": [
+            "cached",
+            "live"
+          ],
+          "kind": "web_search",
+          "supports_allowed_domains": true,
+          "supports_context_size": true
+        }
+      ],
+      "id": "chatgpt/gpt-6-astra",
+      "input_modalities": [
+        "text"
+      ],
+      "max_input_tokens": 258400,
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": true,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": false,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text"
+      ],
+      "verbosities": [
+        "medium"
+      ]
+    },
+    {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
+      "context_window": 272000,
       "default_affinity": 400,
       "efforts": {
         "control": {
