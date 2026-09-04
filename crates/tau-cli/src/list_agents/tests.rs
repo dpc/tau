@@ -203,6 +203,94 @@ fn picker_work_status_symbols_are_complete() {
     );
 }
 
+/// Ensures the built-in CLI UI skill keeps its status-indicator legend aligned
+/// with the renderer's complete work-status and current-activity mappings.
+#[test]
+fn cli_ui_skill_documents_status_indicator_symbols() {
+    const CLI_UI_SKILL: &str =
+        include_str!("../../../tau-skills/self-knowledge/tau-self-knowledge-cli-ui.md");
+
+    let work_status_cases = [
+        (
+            None,
+            "❓",
+            "no status is reported, or a previous status is no longer reliable",
+        ),
+        (
+            Some(tau_proto::AgentWorkStatusPhase::Working),
+            "🚀",
+            "working",
+        ),
+        (Some(tau_proto::AgentWorkStatusPhase::Done), "✅", "done"),
+        (
+            Some(tau_proto::AgentWorkStatusPhase::Blocked),
+            "⛔️",
+            "blocked pending external intervention",
+        ),
+        (
+            Some(tau_proto::AgentWorkStatusPhase::Waiting),
+            "⏳",
+            "waiting for an expected self-resolving event",
+        ),
+    ];
+    for (phase, glyph, description) in work_status_cases {
+        assert_eq!(work_status_symbol(phase), glyph);
+        assert!(
+            CLI_UI_SKILL.contains(&format!("| `{glyph}` | {description} |")),
+            "skill must document {glyph} as {description}"
+        );
+    }
+    assert_eq!(
+        work_status_symbol(Some(tau_proto::AgentWorkStatusPhase::Unreported)),
+        "❓"
+    );
+    assert_eq!(
+        work_status_symbol(Some(tau_proto::AgentWorkStatusPhase::Unknown)),
+        "❓"
+    );
+
+    let turn_activity_cases = [
+        (
+            tau_proto::AgentTurnActivity::Responding,
+            "✨",
+            "the provider is generating a response",
+        ),
+        (
+            tau_proto::AgentTurnActivity::Manipulating,
+            "🔨",
+            "an active tool is mutating state or has no more-specific category",
+        ),
+        (
+            tau_proto::AgentTurnActivity::Fetching,
+            "🌐",
+            "an active tool is fetching data",
+        ),
+        (
+            tau_proto::AgentTurnActivity::Waiting,
+            "⏳",
+            "an active tool is waiting",
+        ),
+        (
+            tau_proto::AgentTurnActivity::TimerScheduled,
+            "🕔",
+            "no higher-priority work is active and a timer is scheduled",
+        ),
+        (
+            tau_proto::AgentTurnActivity::Idle,
+            "💤",
+            "idle: no response, tool call, or ambient activity is active",
+        ),
+    ];
+    for (activity, glyph, description) in turn_activity_cases {
+        assert_eq!(turn_activity_symbol(activity), glyph);
+        assert!(
+            CLI_UI_SKILL.contains(&format!("| `{glyph}` | {description} |")),
+            "skill must document {glyph} as {description}"
+        );
+    }
+    assert!(CLI_UI_SKILL.contains("`⏳⏳` means"));
+}
+
 /// Picker membership uses live lifecycle authority even when independent
 /// creation-fact enrichment is missing, invalid, or unreadable.
 #[test]

@@ -59,6 +59,36 @@ keeps its session-wide scope, counts unique recursively effective watch targets,
 excludes the selected agent, and retains active-prompt fallback for agents
 outside every watch edge.
 
+## Status-indicator legend
+
+Selected-agent and watched-agent rows start with two adjacent indicators:
+`<work-status><current-activity>`. The first reports the agent's task status;
+the second reports its transient current turn activity. They are independent, so
+they can repeat the same glyph: `⏳⏳` means the agent reported its task as
+waiting for an expected self-resolving event, and its current activity is also a
+waiting tool.
+
+The work-status indicator is:
+
+| Glyph | Reported task status |
+| --- | --- |
+| `❓` | no status is reported, or a previous status is no longer reliable |
+| `🚀` | working |
+| `✅` | done |
+| `⛔️` | blocked pending external intervention |
+| `⏳` | waiting for an expected self-resolving event |
+
+The current-activity indicator is:
+
+| Glyph | Current execution state |
+| --- | --- |
+| `✨` | the provider is generating a response |
+| `🔨` | an active tool is mutating state or has no more-specific category |
+| `🌐` | an active tool is fetching data |
+| `⏳` | an active tool is waiting |
+| `🕔` | no higher-priority work is active and a timer is scheduled |
+| `💤` | idle: no response, tool call, or ambient activity is active |
+
 ## All-agent overview
 
 The no-agent-selected screen is both the start-new-agent input target and an
