@@ -44,10 +44,12 @@ pub struct Hello {
     pub client_name: ExtensionName,
     /// Authority class requested by the connecting peer.
     pub client_kind: ClientKind,
-    /// Session a UI expects this connection to enter.
+    /// Immutable session a runtime socket client expects to reach.
     ///
-    /// The harness rejects a UI connection when this value does not match its
-    /// current session. Non-UI peers must omit it.
+    /// Shared runtime UI and External clients must supply the exact
+    /// daemon-bound session. The harness rejects missing or mismatched
+    /// admission before accepting semantic traffic. Private embedded
+    /// transports may omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_session_id: Option<SessionId>,
     /// Optional protocol authorities declared for this connection.
@@ -55,10 +57,11 @@ pub struct Hello {
     pub capabilities: Vec<PeerCapability>,
 }
 
-/// Harness acknowledgement that binds an admitted UI connection to a session.
+/// Harness acknowledgement that binds an admitted socket connection to a
+/// session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiSessionAccepted {
-    /// Session identity verified during UI connection admission.
+pub struct SessionAccepted {
+    /// Session identity verified during socket connection admission.
     pub session_id: SessionId,
 }
 
@@ -462,7 +465,7 @@ pub struct ExternalAgentMessageResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalAgentMessageFailure {
-    /// The target switched away from the requested session.
+    /// The connected endpoint did not own the requested session.
     TargetSessionChanged,
     /// The target has no configured or eligible bare inter-session receiver.
     NoInterSessionReceiver,
@@ -481,7 +484,7 @@ pub enum ExternalAgentMessageFailure {
 pub struct PeerSessionProbe {
     /// Caller-generated correlation id.
     pub request_id: String,
-    /// Active session id advertised by runtime metadata.
+    /// Exact session id being probed.
     pub session_id: SessionId,
 }
 
@@ -1299,13 +1302,6 @@ pub struct UiDebugEventStatsRequest {
     pub extension_name: ExtensionName,
 }
 
-/// Dedicated UI input requesting that the daemon outlive this UI connection.
-///
-/// The harness consumes this connection-control request directly. It is not a
-/// session fact and must not be broadcast to extensions.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiDetachRequest {}
-
 /// Dedicated UI input requesting unconditional harness session shutdown.
 ///
 /// The harness consumes this lifecycle request directly. It is not a session
@@ -1401,7 +1397,6 @@ pub enum HarnessInputMessage {
     GetCurrentSession(GetCurrentSession),
     GetSessionAgentList(GetSessionAgentList),
     UiDebugEventStatsRequest(UiDebugEventStatsRequest),
-    UiDetachRequest(UiDetachRequest),
     UiShutdownRequest(UiShutdownRequest),
     UiTreeRequest(UiTreeRequest),
     ProviderDebugCapture(ProviderDebugCapture),
@@ -1441,7 +1436,7 @@ impl HarnessInputMessage {
 #[serde(tag = "message", content = "payload", rename_all = "snake_case")]
 pub enum HarnessOutputMessage {
     Configure(Configure),
-    UiSessionAccepted(UiSessionAccepted),
+    SessionAccepted(SessionAccepted),
     Disconnect(Disconnect),
     Deliver(EventDelivery),
     InterceptRequest(InterceptRequest),

@@ -207,15 +207,6 @@ pub struct ServeOptions {
     /// Hard cap on total served clients before the serve loop exits.
     /// Used mainly in tests to bound a run. `None` = unbounded.
     pub max_clients: Option<usize>,
-    /// When set, the daemon exits as soon as the last attached UI
-    /// socket disconnects. When clear, the daemon keeps running with
-    /// no attached UIs — a later `tau attach SESSION` can pick up the
-    /// session. The `ui_detach_request` message flips this at runtime.
-    ///
-    /// Default `false`: daemon is long-lived unless explicitly told
-    /// otherwise.
-    #[builder(default)]
-    pub exit_on_disconnect: bool,
     /// Session lifecycle status announced to UI clients for the eager
     /// session.
     #[builder(default = SessionLaunchStatus::New)]
@@ -243,23 +234,17 @@ pub struct ServeOptions {
     /// and delegated extension storage while retaining lifecycle runtime files.
     #[builder(default)]
     pub storage_mode: HarnessStorageMode,
-    /// Reject every in-process session switch and keep discovery bound to the
-    /// eager session.
-    #[builder(default)]
-    pub pin_session: bool,
 }
 
 impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             max_clients: None,
-            exit_on_disconnect: false,
             session_status: SessionLaunchStatus::New,
             dirs: None,
             ignore_startup_environment: false,
             allowed_extensions: None,
             storage_mode: HarnessStorageMode::Durable,
-            pin_session: false,
         }
     }
 }
@@ -866,9 +851,8 @@ fn disable_echo_tool_context_gate_for_tests(harness: &mut Harness) {
 
 /// Runs a foreground daemon that accepts socket clients.
 ///
-/// `eager_session_id` is the session the harness pre-warms (AGENTS.md +
-/// skill discovery) and where `events.jsonl` lands. Subsequent prompts for
-/// other session ids lazy-init.
+/// `eager_session_id` is the sole session this harness initializes and serves.
+/// All operational socket clients must be admitted against that exact identity.
 pub fn run_daemon(
     socket_path: impl Into<PathBuf>,
     state_dir: impl Into<PathBuf>,
@@ -940,17 +924,18 @@ pub fn run_daemon_with_internal_tools(
             memory_only_agent_store: false,
             project_root,
             extension_stderr_mirror: None,
+            #[cfg(test)]
+            before_session_init: None,
         },
         &mut initial_client_error_stream,
     )?;
-    harness.session_runtime.session_pinned = options.pin_session;
     // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(initial_client_id.is_none());
 
     let tx = harness.runtime_io.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
-    let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    let result = harness.run_event_loop(options.max_clients);
     drop(forwarder);
     drop(listener_handle);
     let _ = harness.shutdown();
@@ -1031,7 +1016,7 @@ fn run_daemon_with_echo_on_listener_handle(
     let tx = harness.runtime_io.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
-    let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    let result = harness.run_event_loop(options.max_clients);
     drop(forwarder);
     drop(listener_handle);
     let _ = harness.shutdown();
@@ -1055,15 +1040,18 @@ pub fn send_daemon_message_with_trace(
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
     let ctx_id = next_ctx_id();
-    let mut peer = connect_daemon_message_peer(socket_path)?;
-    send_daemon_message_prompt(&mut peer, session_id, message, &ctx_id)?;
+    let session_id = tau_proto::SessionId::parse(session_id)
+        .map_err(|error| HarnessError::Participant(error.to_string()))?;
+    let mut peer = connect_daemon_message_peer(socket_path, &session_id)?;
+    send_daemon_message_prompt(&mut peer, session_id.as_str(), message, &ctx_id)?;
     wait_for_daemon_trace_outcome(peer, ctx_id)
 }
 
 fn connect_daemon_message_peer(
     socket_path: impl Into<PathBuf>,
+    session_id: &tau_proto::SessionId,
 ) -> Result<SocketPeer, HarnessError> {
-    let mut peer = connect_daemon_helper(socket_path, "tau-cli")?;
+    let mut peer = connect_daemon_helper(socket_path, "tau-cli", session_id)?;
     let selectors = daemon_message_event_selectors();
     peer.send(&HarnessInputMessage::Subscribe(Subscribe {
         historical_selectors: selectors.clone(),
@@ -1331,10 +1319,11 @@ pub fn send_daemon_message(
 /// daemon.
 pub fn get_daemon_rendered_system_prompt(
     socket_path: impl Into<PathBuf>,
+    session_id: &tau_proto::SessionId,
     role: &str,
 ) -> Result<String, HarnessError> {
     let request_id = next_render_request_id("tau-rendered-system-prompt");
-    let mut peer = connect_daemon_helper(socket_path, "tau-print-prompt")?;
+    let mut peer = connect_daemon_helper(socket_path, "tau-print-prompt", session_id)?;
     peer.send(&HarnessInputMessage::GetRenderedSystemPrompt(
         tau_proto::GetRenderedSystemPrompt {
             request_id: request_id.clone(),
@@ -1385,10 +1374,11 @@ pub fn get_daemon_rendered_system_prompt(
 /// running harness daemon.
 pub fn get_daemon_rendered_tool_definitions(
     socket_path: impl Into<PathBuf>,
+    session_id: &tau_proto::SessionId,
     role: &str,
 ) -> Result<Vec<tau_proto::ToolDefinition>, HarnessError> {
     let request_id = next_render_request_id("tau-rendered-tools");
-    let mut peer = connect_daemon_helper(socket_path, "tau-print-tools")?;
+    let mut peer = connect_daemon_helper(socket_path, "tau-print-tools", session_id)?;
     peer.send(&HarnessInputMessage::GetRenderedToolDefinitions(
         tau_proto::GetRenderedToolDefinitions {
             request_id: request_id.clone(),
@@ -1438,6 +1428,7 @@ pub fn get_daemon_rendered_tool_definitions(
 fn connect_daemon_helper(
     socket_path: impl Into<PathBuf>,
     client_name: &str,
+    session_id: &tau_proto::SessionId,
 ) -> Result<SocketPeer, HarnessError> {
     let mut peer = SocketPeer::connect(socket_path)?;
     peer.send(&HarnessInputMessage::Hello(Hello {
@@ -1445,9 +1436,28 @@ fn connect_daemon_helper(
         client_name: tau_proto::ExtensionName::parse(client_name)
             .expect("validated daemon client name must remain canonical"),
         client_kind: ClientKind::Ui,
-        expected_session_id: None,
+        expected_session_id: Some(session_id.clone()),
         capabilities: Default::default(),
     }))?;
+    match peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+        SocketReceive::Message {
+            message: HarnessOutputMessage::SessionAccepted(accepted),
+        } if accepted.session_id == *session_id => {}
+        SocketReceive::Message {
+            message: HarnessOutputMessage::Disconnect(disconnect),
+        } => {
+            return Err(HarnessError::Participant(
+                disconnect
+                    .reason
+                    .unwrap_or_else(|| "session admission rejected".to_owned()),
+            ));
+        }
+        _ => {
+            return Err(HarnessError::Participant(
+                "daemon did not confirm exact session admission".to_owned(),
+            ));
+        }
+    }
     Ok(peer)
 }
 
@@ -1490,7 +1500,7 @@ fn run_bootstrap_client(
     request_id: String,
     prompt: String,
 ) -> Result<tau_proto::AgentId, HarnessError> {
-    let mut peer = connect_daemon_helper(socket_path, "tau-bootstrap")?;
+    let mut peer = connect_daemon_helper(socket_path, "tau-bootstrap", &session_id)?;
     wait_at_bootstrap_connected_test_barrier();
     peer.send(&HarnessInputMessage::Subscribe(Subscribe {
         historical_selectors: Vec::new(),
@@ -1625,8 +1635,6 @@ fn next_render_request_id(prefix: &str) -> String {
 
 /// Runtime-path identity and optional initial-client transport for one daemon.
 struct RuntimeHarnessLaunch<'a> {
-    /// Random discriminator shared with a spawning CLI when present.
-    runtime_instance_id: runtime_dir::HarnessInstanceId,
     /// Initial UI accepted directly over inherited stdio when present.
     initial_client: Option<InitialClient>,
     /// Best-effort startup error transport for the initial UI.
@@ -1651,7 +1659,6 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     launch: RuntimeHarnessLaunch<'_>,
 ) -> Result<(), HarnessError> {
     let RuntimeHarnessLaunch {
-        runtime_instance_id,
         initial_client,
         mut initial_client_error_stream,
         introduction_notice_eligible,
@@ -1663,18 +1670,16 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     validate_pre_resolved_serve_options(&options, config)?;
     let startup_started_at = Instant::now();
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
-    let mut harness_paths = notify_startup_error(
-        runtime_dir::prepare_harness_paths_for_instance(
-            &project_root,
-            eager_session_id,
-            &runtime_instance_id,
-        ),
+    let session_id = tau_proto::SessionId::parse(eager_session_id)
+        .map_err(|error| HarnessError::Participant(error.to_string()))?;
+    let mut session_claim = notify_startup_error(
+        runtime_dir::claim_session(&project_root, &session_id),
         &mut initial_client_error_stream,
     )?;
-    tracing::debug!(target: "tau_harness::startup", harness_path = %harness_paths.path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "prepared harness paths");
-    let socket_path = harness_paths.socket_path();
+    session_claim.reclaim_stale_socket()?;
+    let socket_path = session_claim.socket_path().to_path_buf();
     let listener = notify_startup_error(
-        bind_listener(&socket_path),
+        SocketListener::bind_fresh(&socket_path).map_err(HarnessError::from),
         &mut initial_client_error_stream,
     )?;
 
@@ -1698,14 +1703,14 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
                 memory_only_agent_store: std::env::var_os(MEMORY_ONLY_AGENT_STORE_ENV).is_some(),
                 project_root,
                 extension_stderr_mirror,
+                #[cfg(test)]
+                before_session_init: None,
             },
             &mut initial_client_error_stream,
         ),
         &mut initial_client_error_stream,
     )?;
-    harness.session_runtime.session_pinned = options.pin_session;
-    harness.set_runtime_harness_path(harness_paths.path().to_path_buf());
-    harness_paths.set_peer_entrypoint(harness.has_peer_entrypoint());
+    harness.session_runtime.exact_socket_session_required = true;
     if let Some(signals) = termination_signals {
         spawn_termination_signal_forwarder(signals, harness.runtime_io.tx.clone())?;
     }
@@ -1713,7 +1718,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
 
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "writing daemon ready markers");
     notify_startup_error_after_accept(
-        harness_paths.write_metadata(),
+        session_claim.publish(harness.has_peer_entrypoint()),
         &mut initial_client_error_stream,
         &mut harness,
         initial_client_id.as_ref(),
@@ -1735,7 +1740,6 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
                 drop(forwarder);
                 drop(listener_handle);
                 let _ = harness.shutdown();
-                harness_paths.cleanup();
                 return Err(error);
             }
         },
@@ -1744,7 +1748,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     if introduction_notice_eligible {
         harness.send_introduction_notice_to_initial_client(initial_client_id.as_ref());
     }
-    let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    let result = harness.run_event_loop(options.max_clients);
     let shutdown_cause = harness.ui_runtime.shutdown_cause;
     let shutdown = retire_listener_before_transport_shutdown(
         forwarder,
@@ -1752,8 +1756,9 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         || verify_listener_admission_retired(&socket_path),
         || harness.shutdown(),
     );
-    harness_paths.cleanup();
     shutdown?;
+    drop(harness);
+    session_claim.retire()?;
     if shutdown_cause == Some(ShutdownCause::BootstrapFailure) {
         let receiver = bootstrap_result.expect("bootstrap failure owns a result receiver");
         return match receiver.recv() {
@@ -1874,8 +1879,8 @@ pub type CreateOrExistingSessionServeOptions<'a> = FixedSessionServeOptions<'a>;
 
 /// Serves one strict existing session in the foreground without an initial UI.
 ///
-/// The daemon remains discoverable through the ordinary runtime socket and
-/// metadata, accepts later stock UI attachments, and rejects session switches.
+/// The daemon remains discoverable through its session-keyed runtime claim and
+/// socket and accepts later exact-session UI attachments.
 pub fn run_existing_session_component_with_internal_tools(
     options: ExistingSessionServeOptions<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1950,15 +1955,12 @@ fn run_fixed_session_component_with_internal_tools(
         &config,
         session_id.as_ref(),
         ServeOptions {
-            exit_on_disconnect: false,
             session_status,
-            pin_session: true,
             ..Default::default()
         },
         session_launch_mode,
         internal_tool_handlers,
         RuntimeHarnessLaunch {
-            runtime_instance_id: runtime_dir::HarnessInstanceId::mint(),
             initial_client: None,
             initial_client_error_stream: None,
             introduction_notice_eligible: false,
@@ -2002,27 +2004,6 @@ impl ComponentLaunch {
             Self::SpawnedInitialUiStdio => {
                 crate::settings::parse_extension_cli_overrides_transport(transport)
             }
-        }
-    }
-
-    /// Resolves the runtime identity used by this component launch.
-    fn runtime_instance_id(
-        &self,
-        transport: Option<std::ffi::OsString>,
-    ) -> Result<runtime_dir::HarnessInstanceId, std::io::Error> {
-        match self {
-            Self::Direct(_) => Ok(runtime_dir::HarnessInstanceId::mint()),
-            Self::SpawnedInitialUiStdio => match transport {
-                Some(value) => {
-                    runtime_dir::HarnessInstanceId::parse(value.into_string().map_err(|_| {
-                        path_std_io::Error::new(
-                            path_std_io::ErrorKind::InvalidInput,
-                            "harness runtime instance id is not UTF-8",
-                        )
-                    })?)
-                }
-                None => Ok(runtime_dir::HarnessInstanceId::mint()),
-            },
         }
     }
 }
@@ -2079,17 +2060,11 @@ fn run_component_with_internal_tools_and_initial_client(
         } else {
             HarnessStorageMode::Durable
         };
-        let runtime_instance_id =
-            launch.runtime_instance_id(std::env::var_os(runtime_dir::HARNESS_INSTANCE_ID_ENV))?;
         run_harness_daemon_with_internal_tools_and_initial_client(
             &project_root,
             &config,
             &eager_session_id,
-            // Exit once the spawning UI leaves. A UI that wants the
-            // daemon to outlive it sends `ui_detach_request`, which
-            // flips this to `false` at runtime.
             ServeOptions {
-                exit_on_disconnect: true,
                 session_status,
                 storage_mode,
                 ..Default::default()
@@ -2097,7 +2072,6 @@ fn run_component_with_internal_tools_and_initial_client(
             HarnessSessionLaunchMode::from_status(session_status),
             internal_tool_handlers,
             RuntimeHarnessLaunch {
-                runtime_instance_id,
                 initial_client,
                 initial_client_error_stream: initial_client_error_output.take(),
                 introduction_notice_eligible: std::env::var_os(INITIAL_UI_INTRODUCTION_NOTICE_ENV)

@@ -52,7 +52,9 @@ pub(crate) fn run_print_prompt(
         harness_config_overrides,
     )?;
 
-    let prompt = get_rendered_prompt(&mut daemon, role, enable_agents_md)?;
+    let result = get_rendered_prompt(&mut daemon, role, enable_agents_md);
+    daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
+    let prompt = result?;
     print_prompt(&prompt)
 }
 
@@ -74,7 +76,9 @@ pub(crate) fn run_print_system_prompt(
         harness_config_overrides,
     )?;
 
-    let prompt = get_rendered_system_prompt(&mut daemon, role)?;
+    let result = get_rendered_system_prompt(&mut daemon, role);
+    daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
+    let prompt = result?;
     print_prompt(&prompt)
 }
 
@@ -94,7 +98,7 @@ fn launch_render_daemon(
         storage_mode,
         tau_harness::SessionLaunchStatus::New,
     )?;
-    let mut daemon = resolve_daemon(
+    let daemon = resolve_daemon(
         false,
         &session_id,
         SessionLaunchStatus::New,
@@ -110,7 +114,6 @@ fn launch_render_daemon(
         },
         storage_mode,
     )?;
-    daemon.ensure_runtime_pair_cleanup_after_reap();
     Ok(daemon)
 }
 

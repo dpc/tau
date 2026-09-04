@@ -513,24 +513,13 @@ impl Harness {
     pub(crate) fn run_event_loop(
         &mut self,
         max_clients: Option<usize>,
-        mut exit_on_disconnect: bool,
     ) -> Result<(), HarnessError> {
         let mut served_clients = 0_usize;
-        if self.ui_runtime.startup_detach_requested {
-            exit_on_disconnect = false;
-        }
-        let mut ever_attached = !self.ui_runtime.client_writers.is_empty();
         loop {
             if self.ui_runtime.shutdown_requested {
                 break;
             }
-            if Self::should_stop_run_loop(
-                max_clients,
-                served_clients,
-                exit_on_disconnect,
-                ever_attached,
-                self.ui_runtime.client_writers.is_empty(),
-            ) {
+            if Self::should_stop_run_loop(max_clients, served_clients) {
                 break;
             }
             let harness_evt = match self.next_runtime_event() {
@@ -543,31 +532,13 @@ impl Harness {
                 break;
             }
             self.log_event(&harness_evt);
-            self.handle_runtime_event(
-                harness_evt,
-                &mut served_clients,
-                &mut exit_on_disconnect,
-                &mut ever_attached,
-            )?;
+            self.handle_runtime_event(harness_evt, &mut served_clients)?;
         }
         Ok(())
     }
 
-    pub(super) fn should_stop_run_loop(
-        max_clients: Option<usize>,
-        served_clients: usize,
-        exit_on_disconnect: bool,
-        ever_attached: bool,
-        no_clients_attached: bool,
-    ) -> bool {
-        if max_clients.is_some_and(|max| max <= served_clients) {
-            return true;
-        }
-        // `exit_on_disconnect`: once at least one UI has been attached, exiting
-        // the moment the last one leaves lets `tau` behave like a normal
-        // foreground command. Before any UI attaches we wait — otherwise a
-        // slightly late first connect would race us into immediate exit.
-        exit_on_disconnect && ever_attached && no_clients_attached
+    pub(super) fn should_stop_run_loop(max_clients: Option<usize>, served_clients: usize) -> bool {
+        max_clients.is_some_and(|max| max <= served_clients)
     }
 
     pub(super) fn next_runtime_event(&mut self) -> RuntimeEventWait {
@@ -871,8 +842,6 @@ impl Harness {
         &mut self,
         harness_evt: HarnessEvent,
         served_clients: &mut usize,
-        exit_on_disconnect: &mut bool,
-        ever_attached: &mut bool,
     ) -> Result<(), HarnessError> {
         match harness_evt {
             HarnessEvent::FromConnection {
@@ -885,7 +854,6 @@ impl Harness {
                 message,
                 frame_bytes,
                 served_clients,
-                exit_on_disconnect,
             )?,
             HarnessEvent::Disconnected { connection_id } => {
                 self.handle_runtime_disconnect(connection_id, served_clients)?;
@@ -905,7 +873,6 @@ impl Harness {
             }
             HarnessEvent::NewClient(stream) => {
                 self.accept_client(stream)?;
-                *ever_attached = true;
             }
             HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
                 self.handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())?;
@@ -924,12 +891,15 @@ impl Harness {
         message: Box<HarnessInputMessage>,
         frame_bytes: tau_proto::ProtocolMessageBytes,
         served_clients: &mut usize,
-        exit_on_disconnect: &mut bool,
     ) -> Result<(), HarnessError> {
         if matches!(
             message.as_ref(),
             HarnessInputMessage::UiDebugEventStatsRequest(_)
-        ) && !self.extensions.entries.contains_key(&connection_id)
+        ) && !self
+            .ui_runtime
+            .pending_socket_admission
+            .contains(&connection_id)
+            && !self.extensions.entries.contains_key(&connection_id)
         {
             let _disposition = self.handle_client_message_disposition(&connection_id, *message)?;
             return Ok(());
@@ -941,10 +911,41 @@ impl Harness {
             .map(|m| m.origin.clone());
         match origin {
             Some(ConnectionOrigin::Socket) => {
-                // `:detach` → stay alive even after this UI leaves; a later
-                // `tau attach SESSION` can pick up right here.
-                if self.is_authorized_ui_detach_request(&connection_id, &message) {
-                    *exit_on_disconnect = false;
+                if self
+                    .ui_runtime
+                    .pending_socket_admission
+                    .contains(&connection_id)
+                {
+                    if !matches!(message.as_ref(), HarnessInputMessage::Hello(_)) {
+                        let _ = self.runtime_io.bus.send_to(
+                            &connection_id,
+                            None,
+                            HarnessOutputMessage::Disconnect(Disconnect {
+                                reason: Some(
+                                    "socket clients must complete exact Hello admission before semantic messages"
+                                        .to_owned(),
+                                ),
+                            }),
+                        );
+                        self.drain_client_writer(&connection_id);
+                        self.handle_disconnect(&connection_id);
+                        *served_clients += 1;
+                        return Ok(());
+                    }
+                    let disposition =
+                        self.handle_client_message_disposition(&connection_id, *message)?;
+                    if matches!(disposition, ClientMessageDisposition::Continue) {
+                        self.ui_runtime
+                            .pending_socket_admission
+                            .remove(&connection_id);
+                    } else {
+                        if matches!(disposition, ClientMessageDisposition::CloseAfterReply) {
+                            self.drain_client_writer(&connection_id);
+                        }
+                        self.handle_disconnect(&connection_id);
+                        *served_clients += 1;
+                    }
+                    return Ok(());
                 }
                 if self.is_authorized_ui_shutdown_request(&connection_id, &message) {
                     self.ui_runtime.shutdown_requested = true;
@@ -960,8 +961,12 @@ impl Harness {
                     }
                 };
                 if close {
+                    let was_runtime_probe =
+                        self.ui_runtime.runtime_probe_peers.remove(&connection_id);
                     self.handle_disconnect(&connection_id);
-                    *served_clients += 1;
+                    if !was_runtime_probe {
+                        *served_clients += 1;
+                    }
                 }
             }
             Some(_) => {
@@ -974,15 +979,6 @@ impl Harness {
             None => {}
         }
         Ok(())
-    }
-
-    pub(super) fn is_authorized_ui_detach_request(
-        &self,
-        connection_id: &tau_proto::ConnectionId,
-        message: &HarnessInputMessage,
-    ) -> bool {
-        matches!(message, HarnessInputMessage::UiDetachRequest(_))
-            && self.is_attached_socket_ui(connection_id)
     }
 
     pub(super) fn is_authorized_ui_shutdown_request(
@@ -1000,13 +996,14 @@ impl Harness {
         served_clients: &mut usize,
     ) -> Result<(), HarnessError> {
         let was_provider = self.is_provider_extension(&connection_id);
+        let was_runtime_probe = self.ui_runtime.runtime_probe_peers.remove(&connection_id);
         let was_socket = self
             .runtime_io
             .bus
             .connection(&connection_id)
             .is_some_and(|m| m.origin == ConnectionOrigin::Socket);
         self.handle_disconnect(&connection_id);
-        if was_socket {
+        if was_socket && !was_runtime_probe {
             *served_clients += 1;
         }
         if was_provider {
@@ -1071,6 +1068,7 @@ impl Harness {
         )
         .map_err(|error| HarnessError::Io(io::Error::other(error)))?;
         let consumer = sink.handle();
+        let socket_origin = origin == ConnectionOrigin::Socket;
         let connected_id = self.runtime_io.bus.connect(Connection::new(
             PendingConnectionMetadata {
                 id: Some(conn_id.clone()),
@@ -1089,6 +1087,11 @@ impl Harness {
         self.ui_runtime
             .client_writers
             .insert(conn_id.clone(), lifecycle);
+        if socket_origin && self.session_runtime.exact_socket_session_required {
+            self.ui_runtime
+                .pending_socket_admission
+                .insert(conn_id.clone());
+        }
         spawn_reader_thread(
             conn_id.clone(),
             read,

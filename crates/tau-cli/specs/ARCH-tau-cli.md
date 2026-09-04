@@ -11,10 +11,10 @@ absent canonical path or strictly resumes valid exact-ID state; malformed,
 partial (including torn journal tails), symlinked, or locked state fails
 unchanged without deletion, repair, truncation, replacement, or overwrite.
 `--create` likewise leaves every rejected pre-existing directory unchanged.
-All modes start no UI, keep the ordinary runtime
-discovery socket and metadata available for `tau session list` and
-`tau attach ID`, remain alive across UI disconnects, pin the selected session,
-and reject every in-process session switch.
+All modes start no UI, hold the session-keyed runtime claim, expose the
+session-keyed socket for `tau session list` and `tau attach ID`, and remain
+alive across zero or many UI connections. Every daemon incarnation is
+permanently bound to its construction session.
 
 `tau serve` alone accepts the default-off `--mirror-extension-stderr` operator
 sink choice. When enabled, each supervised child's stderr still reaches its
@@ -42,13 +42,12 @@ literally through the ordinary authenticated local UI create path, and never
 printed. Admission ends at correlated `Created` plus `Queued`; the bootstrap UI
 disconnects while the foreground service remains available.
 
-Interactive UI exit and session shutdown are separate. `:quit` exits only the
-invoking UI, leaving session lifetime to the harness's exit-on-disconnect
-policy. Ordinary `tau` launches enable that policy as a foreground convenience;
-attach and supervised serve do not change it. `:detach` additionally disables
-the policy for the daemon lifetime. `:quit-session` sends an attached-UI-only
-shutdown request, then exits; the harness performs its normal shutdown lifecycle
-and disconnects every other attached UI.
+Interactive UI exit and session shutdown are separate. `:quit` and `:detach`
+are local aliases that close only the invoking UI. The daemon survives with no
+attached UIs. `:quit-session` sends the sole attached-UI shutdown request, then
+exits; the harness performs canonical shutdown and disconnects every other UI.
+`:session new` is not an in-daemon operation; another top-level Tau invocation
+creates and serves another session.
 
 The CLI consumes harness-validated provider-neutral quota snapshots and applies
 the fixed weekly pacing classifier from
@@ -278,8 +277,8 @@ presentation.
 See [SPEC-tau-cli-notice-filtering](SPEC-tau-cli-notice-filtering.md).
 
 The visible, hidden, and no-agent presentation models and retroactive-render
-caches retain accepted transcript data until an explicit new-session reset or
-interactive UI process exit. They have no aggregate item or byte eviction.
+caches retain accepted transcript data until interactive UI process exit. They
+have no aggregate item or byte eviction.
 `redraw_history_size`, cold-attach staging, and renderer FIFO limits do not
 bound retained presentation state. Long-running or high-volume UIs can
 therefore consume increasing memory and make selection, resize, and
@@ -466,10 +465,11 @@ sender/recipient projections or prompt routing. It is renderer-local: attachment
 catch-up is limited to projections replayed for currently loaded agents, not a
 new durable session-wide message index.
 
-`tau session list` uses runtime paths only to locate socket candidates. Each
-responsive harness returns its in-memory current session id and immutable
-canonical startup project root through a directed local control RPC; persisted
-directories and runtime metadata never supply records or fields. Bare output
+`tau session list` traverses bounded session-keyed lifetime claims. Each locked
+claim must have a digest-matching basename and an exact admitted responder at
+the deterministic session socket; the responder returns its immutable session id
+and canonical startup project root through a directed local control RPC. PIDs and
+diagnostic claim contents never decide routing or liveness. Bare output
 sorts, deduplicates, and escapes ids into line- and ANSI-control-safe records.
 `--dir` canonicalizes an existing caller directory and filters by exact root
 identity. `--json` emits one complete array with one two-field record per

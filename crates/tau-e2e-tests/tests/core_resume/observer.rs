@@ -118,9 +118,20 @@ impl SideObserver {
             client_name: tau_proto::ExtensionName::parse("tau-e2e-side-observer")
                 .expect("test extension name must satisfy the identifier grammar"),
             client_kind: ClientKind::Ui,
-            expected_session_id: None,
+            expected_session_id: Some(expected_session.clone()),
             capabilities: Default::default(),
         }))?;
+        match peer.recv_timeout(deadline.saturating_duration_since(Instant::now()))? {
+            SocketReceive::Message {
+                message: HarnessOutputMessage::SessionAccepted(accepted),
+            } if accepted.session_id == *expected_session => {}
+            other => {
+                return Err(format!(
+                    "expected exact session acceptance for `{expected_session}`, got {other:?}"
+                )
+                .into());
+            }
+        }
         let selectors = selectors(observe_prompt_drafts);
         peer.send(&HarnessInputMessage::Subscribe(Subscribe {
             historical_selectors: selectors.clone(),
@@ -414,13 +425,14 @@ pub(super) fn discover_daemon(
     expected_session: Option<&SessionId>,
     deadline: Instant,
 ) -> Result<(PathBuf, SessionId), Box<dyn std::error::Error>> {
-    let harnesses = runtime_root.join("tau/harnesses");
+    let claims = runtime_root.join("tau/harnesses/claims");
+    let sockets = runtime_root.join("tau/harnesses/sockets");
     loop {
         let mut matches = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&harnesses) {
+        if let Ok(entries) = std::fs::read_dir(&claims) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                if path.extension().and_then(|value| value.to_str()) != Some("lock") {
                     continue;
                 }
                 let Ok(bytes) = std::fs::read(&path) else {
@@ -430,7 +442,9 @@ pub(super) fn discover_daemon(
                     continue;
                 };
                 if expected_session.is_none_or(|expected| expected == &metadata.session_id) {
-                    let socket = path.with_extension("sock");
+                    let socket = sockets
+                        .join(path.file_stem().expect("runtime claim key"))
+                        .with_extension("sock");
                     if socket.exists() {
                         matches.push((socket, metadata.session_id));
                     }

@@ -1005,7 +1005,7 @@ async fn restarted_worker_restores_session_admission_from_catch_up() {
     );
     assert!(
         subscribe.live_selectors.contains(&session_started),
-        "live session rollover handling must remain subscribed"
+        "live session lifecycle handling must remain subscribed"
     );
 }
 

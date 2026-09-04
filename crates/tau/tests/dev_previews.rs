@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::{Arc, Barrier};
 
-use support::isolated_tau_command;
+use support::{isolated_runtime_dir, isolated_tau_command};
 use tempfile::TempDir;
 
 /// A portable-on-Unix configured extension command and its external launch
@@ -174,17 +174,21 @@ profiles:
 }
 
 fn assert_no_runtime_pairs(home: &Path) {
-    let harnesses = home.join(".runtime/tau/harnesses");
+    let harnesses = isolated_runtime_dir(home).join("tau/harnesses");
     if !harnesses.exists() {
         return;
     }
-    assert_eq!(
-        std::fs::read_dir(harnesses)
-            .expect("harness runtime directory")
-            .count(),
-        0,
-        "preview must not leave a lifecycle pair"
-    );
+    for directory in ["claims", "sockets"] {
+        let path = harnesses.join(directory);
+        assert!(
+            !path.exists()
+                || std::fs::read_dir(path)
+                    .expect("harness runtime leaf")
+                    .next()
+                    .is_none(),
+            "preview must not leave a runtime claim or socket"
+        );
+    }
 }
 
 fn assert_no_durable_preview_artifacts(home: &Path) {

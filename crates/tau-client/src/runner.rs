@@ -368,7 +368,7 @@ pub(crate) fn dispatch_message<State>(
             Ok(DispatchOutcome::Disconnect(disconnect))
         }
         tau_proto::HarnessOutputMessage::AgentPromptCreatedResult(_)
-        | tau_proto::HarnessOutputMessage::UiSessionAccepted(_)
+        | tau_proto::HarnessOutputMessage::SessionAccepted(_)
         | tau_proto::HarnessOutputMessage::RenderedSystemPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedToolDefinitionsResult(_)

@@ -3,11 +3,12 @@
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, poll};
+use tau_e2e_tests::bounded_runtime_tempdir;
 use tau_proto::{
     HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, SessionId,
 };
@@ -20,8 +21,8 @@ pub(super) struct FakeExternalSender {
     listener: tau_socket::SocketListener,
     /// Nonblocking clone used for absolute-deadline accept readiness.
     raw_listener: UnixListener,
-    /// Published runtime metadata removed by [`Self::finish`] or [`Drop`].
-    metadata: Option<PathBuf>,
+    /// Lifetime session-keyed runtime claim.
+    _claim: tau_harness::runtime_dir::SessionClaim,
     /// Sole callback request this endpoint authorizes.
     expected: tau_proto::ExternalAgentMessageRequest,
 }
@@ -33,27 +34,17 @@ impl FakeExternalSender {
         sender_session: &SessionId,
         expected: tau_proto::ExternalAgentMessageRequest,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let harnesses = runtime_home.join("tau/harnesses");
-        std::fs::create_dir_all(&harnesses)?;
-        let stem = harnesses.join(std::process::id().to_string());
-        let listener = tau_socket::SocketListener::bind(stem.with_extension("sock"))?;
+        let mut claim =
+            tau_harness::runtime_dir::claim_session_in(runtime_home, runtime_home, sender_session)?;
+        claim.reclaim_stale_socket()?;
+        let listener = tau_socket::SocketListener::bind_fresh(claim.socket_path())?;
         let raw_listener = listener.try_clone_raw_listener()?;
         raw_listener.set_nonblocking(true)?;
-        let metadata = stem.with_extension("json");
-        std::fs::write(
-            &metadata,
-            serde_json::to_vec(&tau_harness::runtime_dir::DaemonMetadata {
-                version: 0,
-                pid: std::process::id(),
-                project_root: None,
-                session_id: sender_session.to_string(),
-                peer_entrypoint: false,
-            })?,
-        )?;
+        claim.publish(false)?;
         Ok(Self {
             listener,
             raw_listener,
-            metadata: Some(metadata),
+            _claim: claim,
             expected,
         })
     }
@@ -77,13 +68,34 @@ impl FakeExternalSender {
                         // Targeted discovery first opens a payload-free liveness
                         // connection. Ignore only that clean empty connection.
                         None => continue,
+                        Some(HarnessInputMessage::Hello(hello))
+                            if hello.client_name.as_str() == "tau-runtime-probe" =>
+                        {
+                            serve_runtime_probe(
+                                stream,
+                                &mut reader,
+                                &self.expected.sender_session_id,
+                                deadline,
+                            )?;
+                            continue;
+                        }
                         Some(HarnessInputMessage::Hello(hello)) => {
-                            assert_callback_hello(&hello)?;
+                            assert_callback_hello(&hello, &self.expected.sender_session_id)?;
                         }
                         Some(other) => {
                             return Err(format!("expected callback hello, got {other:?}").into());
                         }
                     }
+                    let mut writer = HarnessOutputWriter::new(BufWriter::new(DeadlineUnixWriter {
+                        stream: stream.try_clone()?,
+                        deadline,
+                    }));
+                    writer.write_message(&HarnessOutputMessage::SessionAccepted(
+                        tau_proto::SessionAccepted {
+                            session_id: self.expected.sender_session_id.clone(),
+                        },
+                    ))?;
+                    writer.flush()?;
                     let auth = match reader.read_message()? {
                         Some(HarnessInputMessage::ExternalAgentMessageAuth(auth)) => auth,
                         other => {
@@ -111,23 +123,40 @@ impl FakeExternalSender {
         }
     }
 
-    /// Removes the published metadata after successful callback use.
-    pub(super) fn finish(mut self) -> Result<(), std::io::Error> {
-        self.remove_metadata()
-    }
-
-    fn remove_metadata(&mut self) -> Result<(), std::io::Error> {
-        if let Some(path) = self.metadata.take() {
-            std::fs::remove_file(path)?;
-        }
+    /// Finishes successful callback use and releases runtime ownership.
+    pub(super) fn finish(self) -> Result<(), std::io::Error> {
         Ok(())
     }
 }
 
-impl Drop for FakeExternalSender {
-    fn drop(&mut self) {
-        let _ = self.remove_metadata();
-    }
+/// Serves the resolver's exact, read-only current-session probe.
+fn serve_runtime_probe(
+    stream: UnixStream,
+    reader: &mut HarnessInputReader<BufReader<DeadlineUnixReader>>,
+    session_id: &SessionId,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer =
+        HarnessOutputWriter::new(BufWriter::new(DeadlineUnixWriter { stream, deadline }));
+    writer.write_message(&HarnessOutputMessage::SessionAccepted(
+        tau_proto::SessionAccepted {
+            session_id: session_id.clone(),
+        },
+    ))?;
+    writer.flush()?;
+    let request = match reader.read_message()? {
+        Some(HarnessInputMessage::GetCurrentSession(request)) => request,
+        other => return Err(format!("expected current-session probe, got {other:?}").into()),
+    };
+    writer.write_message(&HarnessOutputMessage::CurrentSessionResult(
+        tau_proto::CurrentSessionResult {
+            request_id: request.request_id,
+            session_id: session_id.clone(),
+            project_root: std::env::current_dir()?,
+        },
+    ))?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// Waits for one listener notification without polling or exceeding `deadline`.
@@ -212,8 +241,11 @@ impl Write for DeadlineUnixWriter {
     }
 }
 
-fn assert_callback_hello(hello: &tau_proto::Hello) -> Result<(), Box<dyn std::error::Error>> {
-    let expected = callback_hello();
+fn assert_callback_hello(
+    hello: &tau_proto::Hello,
+    session_id: &SessionId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expected = callback_hello(session_id);
     if hello != &expected {
         return Err(format!("unexpected callback hello: {hello:?}").into());
     }
@@ -239,45 +271,43 @@ fn assert_callback_auth(
     Ok(())
 }
 
-fn callback_hello() -> tau_proto::Hello {
+fn callback_hello(session_id: &SessionId) -> tau_proto::Hello {
     tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
             .expect("callback client name must satisfy the identifier grammar"),
         client_kind: tau_proto::ClientKind::External,
-        expected_session_id: None,
+        expected_session_id: Some(session_id.clone()),
         capabilities: Default::default(),
     }
 }
 
-/// Missing callbacks stop at the deadline and RAII removes sender metadata.
+/// Missing callbacks stop at the deadline and release the session claim.
 #[test]
 fn no_callback_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::error::Error>> {
-    let root = tempfile::tempdir()?;
+    let root = bounded_runtime_tempdir()?;
     let session = SessionId::parse("no-callback").expect("known-safe SessionId must be valid");
     let mut sender = FakeExternalSender::start(root.path(), &session, fixture_request(&session))?;
-    let metadata = sender.metadata.clone().ok_or("missing sender metadata")?;
     let result = sender.authorize(Instant::now() + Duration::from_millis(20));
     assert!(result.is_err());
     drop(sender);
-    assert!(!metadata.exists());
+    assert!(tau_harness::runtime_dir::find_harness_for_session(session.as_str())?.is_none());
     Ok(())
 }
 
 /// A complete Hello without its auth frame stops at the same absolute deadline.
 #[test]
 fn post_hello_stall_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::error::Error>> {
-    let root = tempfile::tempdir()?;
+    let root = bounded_runtime_tempdir()?;
     let session = SessionId::parse("stalled-callback").expect("known-safe SessionId must be valid");
     let mut sender = FakeExternalSender::start(root.path(), &session, fixture_request(&session))?;
-    let metadata = sender.metadata.clone().ok_or("missing sender metadata")?;
     let mut stalled = tau_socket::SocketPeer::connect(sender.listener.path())?;
-    stalled.send(&HarnessInputMessage::Hello(callback_hello()))?;
+    stalled.send(&HarnessInputMessage::Hello(callback_hello(&session)))?;
     let result = sender.authorize(Instant::now() + Duration::from_millis(20));
     assert!(result.is_err());
     drop(stalled);
     drop(sender);
-    assert!(!metadata.exists());
+    assert!(tau_harness::runtime_dir::find_harness_for_session(session.as_str())?.is_none());
     Ok(())
 }
 

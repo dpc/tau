@@ -235,11 +235,6 @@ impl RendererHandle {
         }
     }
 
-    /// Resets the current target to an empty output model.
-    pub(crate) fn clear_output(&self) {
-        self.replace_output_snapshot(tau_cli_term::OutputSnapshot::default());
-    }
-
     /// Starts mutation accounting for one socket-delivered renderer handler.
     pub(crate) fn begin_selected_delivery(&self, track: bool) {
         self.selected_delivery_mutated.set(false);

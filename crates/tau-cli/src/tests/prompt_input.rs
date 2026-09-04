@@ -358,59 +358,6 @@ fn content_free_prompt_drafts_do_not_add_gmail_redaction_text() {
     let (_, draft) = slot.pending.as_ref().expect("pending draft");
     assert_eq!(draft.text, None);
 }
-
-#[test]
-fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
-    // Regression: the first prompt created for the default conversation carries
-    // the new agent id; seeing it from the empty state selects that agent. A
-    // later `:session new` returns to the empty start-new-agent state.
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s1"),
-        reason: SessionStartReason::Initial,
-    }));
-    assert_eq!(
-        *renderer
-            .current_agent_state()
-            .lock()
-            .expect("current agent"),
-        None
-    );
-
-    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
-        agent_id: agent_id("engineer_abc12345"),
-        ..agent_prompt_created("sp1", "s1")
-    }));
-    sync(&handle);
-    assert_eq!(
-        renderer
-            .current_agent_state()
-            .lock()
-            .expect("current agent")
-            .as_deref(),
-        Some("engineer_abc12345")
-    );
-    assert!(vt.screen_contains(80, "@engineer_abc12345"));
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
-    }));
-    assert_eq!(
-        *renderer
-            .current_agent_state()
-            .lock()
-            .expect("current agent"),
-        None
-    );
-}
-
 #[test]
 fn extension_prompt_with_target_does_not_select_from_empty_state() {
     // Regression: extension side prompts now carry target_agent_id for routing,
@@ -686,41 +633,6 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
     assert!(vt.screen_contains(100, "extension submitted payload"));
     assert!(vt.screen_contains(100, "extension steered payload"));
 }
-
-/// A new session must discard hidden prompt slots before block identifiers are
-/// reused, so enabling diagnostics cannot disclose prior-session prompt text.
-#[test]
-fn internal_prompt_toggle_does_not_reproject_previous_session_history() {
-    let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = marker_test_renderer(handle.clone());
-    let internal = |text: &str| {
-        Event::AgentPromptSubmitted(AgentPromptSubmitted {
-            inference_activation: false,
-            agent_id: agent_id("engineer_abc12345"),
-            text: text.to_owned(),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::Internal,
-            internal_kind: None,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-            display_name: None,
-            ctx_id: None,
-        })
-    };
-
-    renderer.handle(&internal("session one hidden prompt"));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
-    }));
-    renderer.handle(&internal("session two hidden prompt"));
-    renderer.apply_setting("show-internal-prompts", "on");
-    sync(&handle);
-
-    assert!(!vt.screen_contains(100, "session one hidden prompt"));
-    assert!(vt.screen_contains(100, "session two hidden prompt"));
-}
-
 /// Timer and context-alert presentation own their canonical prompt facts before
 /// the diagnostic toggle, so enabling it cannot append generic notice blocks.
 #[test]

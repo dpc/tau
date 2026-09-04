@@ -897,7 +897,7 @@ impl AgentStore {
         Ok(())
     }
 
-    /// Releases every managed agent generation before a session switch.
+    /// Releases every managed agent generation before shutdown.
     pub fn release_managed_agents(
         &mut self,
         timeout: std::time::Duration,

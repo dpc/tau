@@ -113,7 +113,7 @@ reconnect while the agent remains loaded in the same daemon session. Successfull
 submitting a visible prompt to an existing target implicitly makes it `active`;
 an authenticated inter-session message that starts a bare peer-entrypoint
 recipient also makes only that new recipient `active`;
-selection alone does not. Unload, session switch, and daemon exit forget both
+selection alone does not. Unload and daemon exit forget both
 explicit and implicit writes, and cold restore recomputes defaults.
 Running sessions also expose a bounded, pipe-friendly `tau agent list` roster.
 `tau session list` similarly prints one line- and ANSI-control-safe row per
@@ -300,5 +300,5 @@ overview to an identity-pinned Tau Swarm peer. It accepts correlated prompts
 and blocker answers and provides agent-scoped `task_info`, `task_update`, and
 `task_blocker` tools. Command deduplication, replaceable task metadata, blocker
 history, updates, and acknowledgements are
-process-memory-only and reset on session switch or extension restart.
+process-memory-only and reset on extension restart.
 See [Configuring extensions: Tau Swarm](docs/extensions.md#tau-swarm).

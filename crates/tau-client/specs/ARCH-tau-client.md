@@ -266,7 +266,8 @@ errors map to feature behavior. Generic helper requests omit
 `expected_session_id`; for Session scope, the harness therefore binds them to the
 frame-admission session. Session-aware request helpers instead put one exact
 `expected_session_id` on the existing frame; the harness remains the sole
-validator and rejects admission after a concurrent session switch.
+validator and rejects admission when it names a different session than the
+daemon's immutable session.
 
 Manual-loop receive results distinguish timeout, clean input EOF, and protocol
 `Disconnect`. Non-blocking `try_recv` has separate message, input-closed, and

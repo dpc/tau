@@ -265,88 +265,6 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
     );
 }
 
-/// Provider disconnect and session rollover each resolve a pending retry once
-/// to its requester; a provider's subsequent late result cannot revive it or
-/// leak a completion to another UI.
-#[test]
-fn retry_pending_requests_resolve_on_disconnect_and_session_rollover() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let _provider = connect_ready_configured_extension(
-        &mut h,
-        "provider",
-        "provider",
-        tau_proto::ClientKind::Provider,
-    );
-    let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
-    let observer = connect_test_client(&mut h, "observer", tau_proto::ClientKind::Ui);
-    add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
-
-    h.handle_client_event_inner(
-        &crate::test_connection_id("requester"),
-        retry_request("disconnect", "s1", Some("agent")),
-    )
-    .expect("disconnect request");
-    h.handle_disconnect(&crate::test_connection_id("provider"));
-    assert_eq!(
-        matching_events(&requester, |event| matches!(
-            event,
-            Event::UiRetryPromptResult(result) if result.request_id.as_str() == "disconnect"
-                && result.status.is_none()
-        )),
-        1
-    );
-
-    let _provider = connect_ready_configured_extension(
-        &mut h,
-        "provider",
-        "provider",
-        tau_proto::ClientKind::Provider,
-    );
-    h.provider_runtime.pending_prompts.insert(
-        "prompt"
-            .parse::<tau_proto::AgentPromptId>()
-            .expect("known-safe AgentPromptId must be valid"),
-        crate::test_connection_id("provider"),
-    );
-    h.handle_client_event_inner(
-        &crate::test_connection_id("requester"),
-        retry_request("rollover", &crate::test_connection_id("s1"), Some("agent")),
-    )
-    .expect("rollover request");
-    let rollover_token = provider_request_id(&h, "rollover");
-    h.switch_session(
-        "s2".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("session rollover");
-    h.handle_extension_event(
-        "provider",
-        TestProtocolItem::Event(retry_result(
-            rollover_token,
-            "prompt",
-            tau_proto::RetryPromptStatus::Accepted,
-        )),
-    )
-    .expect("late result");
-    assert_eq!(
-        matching_events(&requester, |event| matches!(
-            event,
-            Event::UiRetryPromptResult(result) if result.request_id.as_str() == "rollover"
-                && result.status.is_none()
-        )),
-        1
-    );
-    assert_eq!(
-        matching_events(&observer, |event| matches!(
-            event,
-            Event::UiRetryPromptResult(_)
-        )),
-        0
-    );
-}
-
 /// Replay tombstones remain bounded even under high-cardinality rejected
 /// requests; wire-level identifier validation is covered by `tau-proto`.
 #[test]
@@ -522,6 +440,46 @@ fn retry_tombstone_eviction_does_not_reuse_provider_token() {
         matching_events(&requester, |event| matches!(
             event,
             Event::UiRetryPromptResult(result) if result.request_id.as_str() == "reuse"
+        )),
+        0
+    );
+}
+
+/// Provider disconnect must resolve each pending UI retry exactly once and only
+/// to its requester.
+#[test]
+fn retry_pending_requests_resolve_once_on_provider_disconnect() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _provider = connect_ready_configured_extension(
+        &mut h,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
+    let observer = connect_test_client(&mut h, "observer", tau_proto::ClientKind::Ui);
+    add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
+
+    h.handle_client_event_inner(
+        &crate::test_connection_id("requester"),
+        retry_request("disconnect", "s1", Some("agent")),
+    )
+    .expect("disconnect request");
+    h.handle_disconnect(&crate::test_connection_id("provider"));
+    assert_eq!(
+        matching_events(&requester, |event| matches!(
+            event,
+            Event::UiRetryPromptResult(result) if result.request_id.as_str() == "disconnect"
+                && result.status.is_none()
+        )),
+        1
+    );
+
+    assert_eq!(
+        matching_events(&observer, |event| matches!(
+            event,
+            Event::UiRetryPromptResult(_)
         )),
         0
     );

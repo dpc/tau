@@ -365,62 +365,6 @@ fn manually_created_agent_has_no_default_display_name() {
     h.shutdown().expect("shutdown");
 }
 
-/// `:session new` reuses the daemon process, so the daemon's runtime discovery
-/// metadata must advertise the new active session and stop matching the stale
-/// old session after `switch_session` succeeds.
-#[test]
-fn switch_session_updates_runtime_metadata_active_session() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let harness_path = td.path().join("runtime-harness");
-    std::fs::write(
-        crate::runtime_dir::metadata_path(&harness_path),
-        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 0,
-            pid: std::process::id(),
-            project_root: Some(td.path().to_path_buf()),
-            session_id: "s1".to_owned(),
-            peer_entrypoint: false,
-        })
-        .expect("metadata json"),
-    )
-    .expect("write metadata");
-    h.set_runtime_harness_path(harness_path.clone());
-
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-
-    assert_eq!(
-        crate::runtime_dir::read_session_id(&harness_path)
-            .expect("session id")
-            .as_str(),
-        "s2"
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Runtime metadata update is discovery-only and must not leave the harness
-/// half-switched if the metadata file is missing or unreadable.
-#[test]
-fn switch_session_continues_when_runtime_metadata_update_fails() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    h.set_runtime_harness_path(td.path().join("missing-runtime-harness"));
-
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session should continue after metadata update failure");
-
-    assert_eq!(h.session_runtime.current_session_id.as_str(), "s2");
-    assert!(event_log_contains_any_source(&h, |event| {
-        matches!(event, Event::SessionStarted(started) if started.session_id.as_str() == "s2")
-    }));
-
-    h.shutdown().expect("shutdown");
-}
-
 /// Explicit names remain authoritative even when their text equals the agent's
 /// role, and restoration must not mistake them for an old synthesized default.
 #[test]

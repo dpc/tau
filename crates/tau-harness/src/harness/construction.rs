@@ -193,6 +193,8 @@ impl Harness {
                 reason: eager_session_start_reason,
                 storage_mode,
                 internal_tool_handlers: Vec::new(),
+                #[cfg(test)]
+                before_session_init: None,
             },
         )
     }
@@ -209,6 +211,8 @@ impl Harness {
             reason: eager_session_start_reason,
             storage_mode,
             internal_tool_handlers,
+            #[cfg(test)]
+            before_session_init,
         } = startup;
         let launch = HarnessSessionLaunch {
             mode: HarnessSessionLaunchMode::from_reason(eager_session_start_reason),
@@ -434,12 +438,11 @@ impl Harness {
                 store,
                 agent_store,
                 storage_mode,
-                runtime_harness_path: None,
+                exact_socket_session_required: false,
                 project_root,
                 current_session_id: eager_session_id
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                session_pinned: false,
                 current_session_generation: SessionGeneration::default(),
                 current_session_start_reason: launch.mode.reason(),
                 shutdown_published: false,
@@ -496,6 +499,10 @@ impl Harness {
         harness.publish_delegate_roles_context();
         harness.check_config_exists();
         harness.emit_missing_default_role(missing_default_role);
+        #[cfg(test)]
+        if let Some(before_session_init) = before_session_init {
+            before_session_init(&mut harness);
+        }
 
         // Eager session init for the default session. INTENTIONAL —
         // do NOT "simplify" this to lazy-on-first-prompt.
@@ -560,6 +567,8 @@ impl Harness {
                 memory_only_agent_store: false,
                 project_root: std::env::current_dir()?.canonicalize()?,
                 extension_stderr_mirror: None,
+                #[cfg(test)]
+                before_session_init: None,
             },
             &mut initial_client_error_stream,
         )
@@ -592,6 +601,8 @@ impl Harness {
                 memory_only_agent_store: false,
                 project_root: std::env::current_dir()?.canonicalize()?,
                 extension_stderr_mirror: None,
+                #[cfg(test)]
+                before_session_init: None,
             },
             &mut initial_client_error_stream,
         )
@@ -635,6 +646,8 @@ impl Harness {
             memory_only_agent_store,
             project_root,
             extension_stderr_mirror,
+            #[cfg(test)]
+            before_session_init,
         } = startup_inputs;
         let (mut harness, startup) = Self::build_configured_harness(
             config,
@@ -687,6 +700,10 @@ impl Harness {
         harness.check_config_exists();
         harness.emit_missing_default_role(startup.missing_default_role);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "config checks complete");
+        #[cfg(test)]
+        if let Some(before_session_init) = before_session_init {
+            before_session_init(&mut harness);
+        }
 
         harness.start_session_init(
             eager_session_id
@@ -996,13 +1013,12 @@ impl Harness {
                 store: parts.store,
                 agent_store: parts.agent_store,
                 storage_mode: parts.launch.storage_mode,
-                runtime_harness_path: None,
+                exact_socket_session_required: false,
                 project_root: parts.project_root,
                 current_session_id: parts
                     .eager_session_id
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                session_pinned: false,
                 current_session_generation: SessionGeneration::default(),
                 current_session_start_reason: parts.launch.mode.reason(),
                 shutdown_published: false,

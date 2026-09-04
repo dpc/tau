@@ -453,6 +453,8 @@ struct State {
     /// Whether the current session's replay boundary authorized route
     /// activation.
     registration_replay_complete: bool,
+    /// Whether the immutable session-start boundary has been consumed.
+    session_start_observed: bool,
     /// Local registration calls that have reserved update-stream ownership
     /// while checking Telegram webhook status without holding the state mutex.
     pending_local_registrations: usize,
@@ -3036,14 +3038,38 @@ fn handle_configure_message(
 /// Accumulates only membership and labels needed for restart reconciliation.
 fn handle_replayed_event_value(runtime: &TelegramRuntime, event: Event) -> Result<(), String> {
     if let Event::SessionStarted(started) = &event {
-        runtime.ext.load_desired_registrations(
-            &runtime.desired_registration_storage,
-            &started.session_id,
-        )?;
+        let state = runtime.ext.state.lock();
+        match state.current_session_id.as_ref() {
+            Some(current) if current != &started.session_id => {
+                return Err(format!(
+                    "immutable session mismatch: expected `{current}`, received `{}`",
+                    started.session_id
+                ));
+            }
+            Some(_) if state.session_start_observed => {}
+            None => {
+                drop(state);
+                runtime.ext.load_desired_registrations(
+                    &runtime.desired_registration_storage,
+                    &started.session_id,
+                )?;
+            }
+            Some(_) => {
+                drop(state);
+                runtime.ext.load_desired_registrations(
+                    &runtime.desired_registration_storage,
+                    &started.session_id,
+                )?;
+            }
+        }
+        runtime.ext.state.lock().session_start_observed = true;
     }
     let mut state = runtime.ext.state.lock();
     match event {
-        Event::SessionStarted(started) => state.current_session_id = Some(started.session_id),
+        Event::SessionStarted(started) if state.current_session_id.is_none() => {
+            state.current_session_id = Some(started.session_id);
+        }
+        Event::SessionStarted(_) => {}
         Event::SessionAgentLoaded(loaded) => {
             state.replayed_loaded_agents.insert(loaded.agent_id);
         }
@@ -3105,24 +3131,29 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) -> Result<()
             }
         }
         Event::SessionStarted(started) => {
+            let state = runtime.ext.state.lock();
+            match state.current_session_id.as_ref() {
+                Some(current) if current != &started.session_id => {
+                    return Err(format!(
+                        "immutable session mismatch: expected `{current}`, received `{}`",
+                        started.session_id
+                    ));
+                }
+                Some(_) if state.session_start_observed => return Ok(()),
+                Some(_) => {}
+                None => {}
+            }
+            drop(state);
             runtime.ext.load_desired_registrations(
                 &runtime.desired_registration_storage,
                 &started.session_id,
             )?;
             let mut state = runtime.ext.state.lock();
-            let session_changed = state
-                .current_session_id
-                .as_ref()
-                .is_some_and(|current| current != &started.session_id);
             state.current_session_id = Some(started.session_id);
+            state.session_start_observed = true;
             state.registration_replay_complete = false;
             state.mark_coordination_changed();
             runtime.ext.state.notify_all();
-            drop(state);
-            if session_changed && let Some(gateway) = runtime.ext.gateway_client() {
-                fail_gateway_client_if_current(&runtime.ext.gateway, &runtime.ext.state, &gateway);
-                gateway.disconnect();
-            }
         }
         Event::AgentStarted(started) => {
             if let Some(display_name) = started.display_name.clone() {
@@ -3190,12 +3221,16 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) -> Result<()
                 &complete.session_id,
             )?;
         }
-        Event::SessionShutdown(_) => {
+        Event::SessionShutdown(shutdown) => {
             let (session_id, agents) = {
                 let mut state = runtime.ext.state.lock();
+                if state.current_session_id.as_ref() != Some(&shutdown.session_id) {
+                    return Err(
+                        "Telegram session shutdown does not match immutable binding".to_owned()
+                    );
+                }
                 let session_id = state.current_session_id.clone();
                 let agents = state.registered_agents.iter().cloned().collect::<Vec<_>>();
-                state.current_session_id = None;
                 state.registered_agents.clear();
                 state.desired_registrations.clear();
                 state.replayed_loaded_agents.clear();

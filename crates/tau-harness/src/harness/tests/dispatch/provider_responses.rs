@@ -631,8 +631,6 @@ fn provider_loss_human_ui_supersession_coalesces_and_retries_exact_stale() {
     ));
 
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
     h.session_runtime
         .persistence_owner
         .as_ref()
@@ -641,8 +639,6 @@ fn provider_loss_human_ui_supersession_coalesces_and_retries_exact_stale() {
     h.handle_runtime_event(
         HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("retry retained Stale from capacity progress");
     h.drain_publish_idle_dispatches();
@@ -1070,13 +1066,9 @@ fn assert_retired_exact_provider_report_redrives_cancel(replace: bool) {
         .expect("persistence owner")
         .signal_capacity_ready_for_test();
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
     h.handle_runtime_event(
         HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("capacity progress retries exact cancellation");
 
@@ -1282,13 +1274,9 @@ fn replay_uncertain_stale_owner_coalesces_human_ui_during_initialization_cut() {
         .expect("persistence owner")
         .signal_capacity_ready_for_test();
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
     h.handle_runtime_event(
         HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("capacity progress retries replay Stale");
     assert_eq!(

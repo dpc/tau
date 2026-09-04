@@ -429,7 +429,6 @@ impl EventName {
         Self::from_static(EventCategory::Ui, "agent_model_select");
     pub const UI_ROLE_UPDATE: Self = Self::from_static(EventCategory::Ui, "role_update");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
-    pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_CREATE_AGENT: Self = Self::from_static(EventCategory::Ui, "create_agent");
     /// Requester-directed terminal result of an agent-creation request.
     pub const UI_CREATE_AGENT_RESULT: Self =

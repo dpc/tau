@@ -6202,50 +6202,6 @@ fn invalid_tool_example_registration_is_rejected_with_notice() {
     )));
 }
 
-#[test]
-fn shown_tool_failure_examples_are_session_and_agent_scoped() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    h.config.selected_model = Some("test/model".into());
-    let cid = ensure_test_user_agent(&mut h);
-    h.prompt_coordination
-        .prompt_runtime
-        .shown_tool_failure_examples
-        .insert((
-            cid.clone(),
-            ToolName::new("example_tool"),
-            "hint".to_owned(),
-        ));
-
-    h.remove_agent(&cid);
-
-    assert!(
-        h.prompt_coordination
-            .prompt_runtime
-            .shown_tool_failure_examples
-            .is_empty()
-    );
-
-    let cid = ensure_test_user_agent(&mut h);
-    h.prompt_coordination
-        .prompt_runtime
-        .shown_tool_failure_examples
-        .insert((cid, ToolName::new("example_tool"), "hint".to_owned()));
-    h.switch_session(
-        test_session_id("session-after-example-hint"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
-
-    assert!(
-        h.prompt_coordination
-            .prompt_runtime
-            .shown_tool_failure_examples
-            .is_empty()
-    );
-}
-
 /// A rejected tool call can synchronously dispatch the side agent's automatic
 /// continuation. The rejection path must preserve that new running state so
 /// request completion cannot unload the agent before the continuation finishes.
@@ -7173,4 +7129,31 @@ fn assert_post_tool_automatic_policy_crash_cut_repairs_owed_suffix_once(cut_name
         drop(restored);
         wait_for_session_unlock(&state, "s1");
     }
+}
+
+#[test]
+fn shown_tool_failure_examples_are_agent_scoped() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    h.prompt_coordination
+        .prompt_runtime
+        .shown_tool_failure_examples
+        .insert((
+            cid.clone(),
+            ToolName::new("example_tool"),
+            "hint".to_owned(),
+        ));
+
+    h.remove_agent(&cid);
+
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .shown_tool_failure_examples
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
 }

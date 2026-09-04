@@ -207,7 +207,8 @@ fn runtime_with_timezone_provider(
         reported_timer_agents: HashSet::new(),
         timer_tool_name: None,
         papercut_tool_name: None,
-        session_id: None,
+        bound_session_id: None,
+        session_active: false,
         papercut_storage: None,
     }
 }
@@ -825,8 +826,7 @@ fn live_timer_schedule_can_fire_without_prior_boundary() {
     assert_eq!(fires[0].ctx_id, "timer:live:1");
 }
 
-/// Session lifecycle clears session-scoped timer state before a new session
-/// can fire it.
+/// Final session shutdown clears session-scoped timer state before exit.
 #[test]
 fn session_lifecycle_clears_session_scoped_timers() {
     let mut rt = runtime();
@@ -1677,7 +1677,8 @@ fn papercut_schema_and_validation_bound_report() {
 #[test]
 fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
     let mut rt = runtime();
-    rt.session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
+    rt.bound_session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
+    rt.session_active = true;
     let storage = FakePapercutStorage::default();
     let lines = Rc::clone(&storage.lines);
     rt.papercut_storage = Some(Box::new(storage));
@@ -1720,7 +1721,8 @@ fn papercut_without_active_session_does_not_append() {
 #[test]
 fn papercut_append_failure_does_not_distract_the_primary_task() {
     let mut rt = runtime();
-    rt.session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
+    rt.bound_session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
+    rt.session_active = true;
     let storage = FakePapercutStorage {
         fail: true,
         ..Default::default()
@@ -1744,7 +1746,8 @@ fn papercut_append_failure_does_not_distract_the_primary_task() {
 #[test]
 fn replayed_papercut_does_not_duplicate_append() {
     let mut rt = runtime();
-    rt.session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
+    rt.bound_session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
+    rt.session_active = true;
     let storage = FakePapercutStorage::default();
     let lines = Rc::clone(&storage.lines);
     rt.papercut_storage = Some(Box::new(storage));

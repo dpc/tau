@@ -16,77 +16,6 @@ fn disconnected_event() -> HarnessEvent {
     disconnected_event_named("ingress-test")
 }
 
-/// Prompt ingress classification must expose only two fixed classes, never
-/// prompt canaries, and must exclude drafts and non-emission traffic.
-#[test]
-fn prompt_traffic_classes_are_fixed_content_free_and_prompt_only() {
-    let canary = "prompt-canary-must-not-appear";
-    let session_id = tau_proto::SessionId::parse("s1").expect("session id");
-    let submitted =
-        HarnessInputMessage::emit(Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-            literal: false,
-            session_id: session_id.clone(),
-            text: canary.to_owned(),
-            agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }));
-    let created = HarnessInputMessage::emit(Event::UiCreateAgent(tau_proto::UiCreateAgent {
-        request_id: "request".to_owned(),
-        literal: false,
-        parent_agent: None,
-        session_id: session_id.clone(),
-        role: "engineer".to_owned(),
-        model_override: None,
-        metadata: Vec::new(),
-        initial_prompt: Some(canary.to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        ephemeral: false,
-    }));
-    let draft = HarnessInputMessage::emit(Event::UiPromptDraft(tau_proto::UiPromptDraft {
-        session_id,
-        target_agent_id: None,
-        text: Some(canary.to_owned()),
-    }));
-    let create_without_prompt =
-        HarnessInputMessage::emit(Event::UiCreateAgent(tau_proto::UiCreateAgent {
-            request_id: "request-without-prompt".to_owned(),
-            literal: false,
-            parent_agent: None,
-            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
-            role: "engineer".to_owned(),
-            model_override: None,
-            metadata: Vec::new(),
-            initial_prompt: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-            ephemeral: false,
-        }));
-
-    let submitted_class =
-        prompt_traffic_class_for_message(&submitted).expect("submitted prompt class");
-    let created_class = prompt_traffic_class_for_message(&created).expect("created prompt class");
-    assert_eq!(submitted_class, "ui_prompt_submitted");
-    assert_eq!(created_class, "ui_create_agent");
-    assert!(!submitted_class.contains(canary));
-    assert!(!created_class.contains(canary));
-    assert_eq!(prompt_traffic_class_for_message(&draft), None);
-    assert_eq!(
-        prompt_traffic_class_for_message(&create_without_prompt),
-        None
-    );
-    assert_eq!(
-        prompt_traffic_class_for_message(&HarnessInputMessage::UiDetachRequest(
-            tau_proto::UiDetachRequest {}
-        )),
-        None
-    );
-}
-
 /// Capacity zero must rendezvous with harness consumption rather than using
 /// timing or a hidden forwarding queue as correctness authority.
 #[test]
@@ -417,8 +346,7 @@ fn decoded_output_count(writer: &SharedWriter) -> usize {
 }
 
 /// An initial-stdio UI follower failure must retire its cursor without
-/// overtaking an ordered detach request its independent ingress reader may
-/// hold.
+/// overtaking the independent ingress reader's ordered disconnect.
 #[test]
 fn initial_stdio_follower_failure_waits_for_ingress_disconnect() {
     let log = EventLog::new();
@@ -809,4 +737,69 @@ fn writer_records_protocol_io_after_successful_flush() {
     let event_stats = stats.downlink.get("term.bell").expect("term bell stats");
     assert_eq!(event_stats.count, 1);
     assert!(0 < event_stats.bytes);
+}
+
+/// Prompt traffic diagnostics must classify only real prompt-bearing frames
+/// without retaining content.
+#[test]
+fn prompt_traffic_classes_are_fixed_content_free_and_prompt_only() {
+    let canary = "prompt-canary-must-not-appear";
+    let session_id = tau_proto::SessionId::parse("s1").expect("session id");
+    let submitted =
+        HarnessInputMessage::emit(Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            literal: false,
+            session_id: session_id.clone(),
+            text: canary.to_owned(),
+            agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }));
+    let created = HarnessInputMessage::emit(Event::UiCreateAgent(tau_proto::UiCreateAgent {
+        request_id: "request".to_owned(),
+        literal: false,
+        parent_agent: None,
+        session_id: session_id.clone(),
+        role: "engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: Some(canary.to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        ephemeral: false,
+    }));
+    let draft = HarnessInputMessage::emit(Event::UiPromptDraft(tau_proto::UiPromptDraft {
+        session_id,
+        target_agent_id: None,
+        text: Some(canary.to_owned()),
+    }));
+    let create_without_prompt =
+        HarnessInputMessage::emit(Event::UiCreateAgent(tau_proto::UiCreateAgent {
+            request_id: "request-without-prompt".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: None,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+            ephemeral: false,
+        }));
+
+    let submitted_class =
+        prompt_traffic_class_for_message(&submitted).expect("submitted prompt class");
+    let created_class = prompt_traffic_class_for_message(&created).expect("created prompt class");
+    assert_eq!(submitted_class, "ui_prompt_submitted");
+    assert_eq!(created_class, "ui_create_agent");
+    assert!(!submitted_class.contains(canary));
+    assert!(!created_class.contains(canary));
+    assert_eq!(prompt_traffic_class_for_message(&draft), None);
+    assert_eq!(
+        prompt_traffic_class_for_message(&create_without_prompt),
+        None
+    );
 }

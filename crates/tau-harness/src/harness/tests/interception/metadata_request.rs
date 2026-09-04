@@ -86,56 +86,6 @@ fn configured_extension_request_precedes_canonical_fact() {
     ));
 }
 
-/// A metadata request active in interception at rollover keeps its raw
-/// observation but cannot mutate replacement-session metadata from stale
-/// admission. The memory-only fixture keeps this oracle on the rollover
-/// generation cut instead of coupling it to asynchronous filesystem scheduling.
-#[test]
-fn rollover_metadata_request_is_observation_only() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness_memory_only(tmp.path()).expect("harness");
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    connect_ready_configured_extension(
-        &mut h,
-        "requester",
-        "stable-requester",
-        tau_proto::ClientKind::Action,
-    );
-    connect_test_tool(&mut h, "metadata-interceptor");
-    h.handle_extension_event(
-        "metadata-interceptor",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_METADATA_SET_REQUEST,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register interceptor");
-    h.handle_extension_event_inner_with_persist(
-        &crate::test_connection_id("requester"),
-        set_request(&agent_id, "stale rollover", None),
-        Some(true),
-    )
-    .expect("park metadata request");
-
-    h.switch_session(
-        "replacement"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
-
-    assert!(matches!(
-        metadata_commits(&h).as_slice(),
-        [(Some(source), Event::AgentMetadataSetRequest(request))]
-            if source == "requester"
-                && request.value == CborValue::Text("stale rollover".to_owned())
-    ));
-}
-
 /// Configured extensions and attached socket UI peers have request authority,
 /// while unconfigured/non-UI peers and peer-authored canonical facts do not.
 #[test]

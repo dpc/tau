@@ -5,7 +5,7 @@
 
 use std::io::{self, BufWriter};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
@@ -216,6 +216,40 @@ pub struct SocketListener {
 }
 
 impl SocketListener {
+    /// Binds a listener at an absent path without probing or removing anything.
+    ///
+    /// The caller owns parent-directory preparation and any stale-path
+    /// reclamation under its own stronger coordination boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path already exists, binding fails, or the
+    /// created socket cannot be inspected.
+    pub fn bind_fresh(path: impl Into<PathBuf>) -> Result<Self, SocketTransportError> {
+        let path = path.into();
+        let listener = UnixListener::bind(&path).map_err(|source| SocketTransportError::Bind {
+            path: path.clone(),
+            source,
+        })?;
+        let metadata = fs::symlink_metadata(&path).map_err(|source| {
+            SocketTransportError::BoundSocketMetadata {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            SocketTransportError::BoundSocketMetadata {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        Ok(Self {
+            path,
+            listener,
+            socket_identity: SocketIdentity::from_metadata(&metadata),
+        })
+    }
+
     /// Binds a Unix socket listener at the given path.
     ///
     /// Parent directories are created if needed. An inactive stale Unix socket
@@ -237,21 +271,7 @@ impl SocketListener {
         create_socket_parent_if_needed(&path)?;
         remove_inactive_stale_socket(&path)?;
 
-        let listener = UnixListener::bind(&path).map_err(|source| SocketTransportError::Bind {
-            path: path.clone(),
-            source,
-        })?;
-        let metadata = fs::symlink_metadata(&path).map_err(|source| {
-            SocketTransportError::BoundSocketMetadata {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        Ok(Self {
-            path,
-            listener,
-            socket_identity: SocketIdentity::from_metadata(&metadata),
-        })
+        Self::bind_fresh(path)
     }
 
     /// Returns the filesystem path of the listener socket.

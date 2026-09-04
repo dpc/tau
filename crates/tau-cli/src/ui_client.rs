@@ -42,6 +42,7 @@ pub(crate) fn connect_ui_client(
 pub(crate) fn connect_ui_client_until(
     socket_path: &Path,
     client_name: impl AsRef<str>,
+    expected_session_id: &tau_proto::SessionId,
     deadline: std::time::Instant,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     let timeout = deadline.saturating_duration_since(path_std_time::Instant::now());
@@ -64,7 +65,7 @@ pub(crate) fn connect_ui_client_until(
         },
         DeadlineUnixWriter { stream, deadline },
         client_name,
-        None,
+        Some(expected_session_id),
     )
 }
 
@@ -241,17 +242,6 @@ pub(crate) fn connect_daemon_ui_client_with_timeout(
     }
 }
 
-pub(crate) fn connect_ui_writer(
-    socket_path: &Path,
-    client_name: impl AsRef<str>,
-) -> io::Result<UiOutputWriter> {
-    let stream = UnixStream::connect(socket_path)?;
-    let mut writer =
-        PeerOutputWriter::new(BufWriter::new(Box::new(stream) as Box<dyn Write + Send>));
-    send_hello(&mut writer, client_name, None)?;
-    Ok(writer)
-}
-
 pub(crate) fn hello_message(
     client_name: tau_proto::ExtensionName,
     expected_session_id: Option<&tau_proto::SessionId>,
@@ -407,12 +397,12 @@ pub(crate) fn verify_ui_session_admission<R: Read>(
     expected_session_id: &tau_proto::SessionId,
 ) -> io::Result<()> {
     match reader.read_message().map_err(io::Error::other)? {
-        Some(tau_proto::HarnessOutputMessage::UiSessionAccepted(accepted))
+        Some(tau_proto::HarnessOutputMessage::SessionAccepted(accepted))
             if accepted.session_id == *expected_session_id =>
         {
             Ok(())
         }
-        Some(tau_proto::HarnessOutputMessage::UiSessionAccepted(accepted)) => {
+        Some(tau_proto::HarnessOutputMessage::SessionAccepted(accepted)) => {
             Err(io::Error::other(format!(
                 "session target mismatch: requested `{expected_session_id}`, but the connected \
                  harness admitted `{}`",

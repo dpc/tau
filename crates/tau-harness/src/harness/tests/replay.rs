@@ -3848,146 +3848,6 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     h.shutdown().expect("shutdown");
 }
 
-/// Peers that subscribed before a resumed session finished initializing must
-/// end up with the same view as a late subscriber: `SessionStarted(Resume)`
-/// live, then the loaded-agent roster and replay-marked transcript facts at
-/// init completion. Without the init-completion catch-up, the durable history
-/// of a resumed session — which predates the process and is never published
-/// live — would be visible only to peers that subscribed after init.
-#[test]
-fn resumed_session_init_catches_up_subscribers_that_joined_before_init() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-
-    let past_text = "remembered before resume";
-    {
-        let mut h = echo_harness_for("s1", &sp).expect("start");
-        h.config.selected_model = Some("test/model".into());
-        h.send_user_message("s1", past_text, None)
-            .expect("seed past message");
-        h.shutdown().expect("shutdown");
-        drop(h);
-        wait_for_session_unlock(&sp, "s1");
-    }
-
-    // Fresh harness bound to a different session; the extension subscribes
-    // while no s1 state is in play, mirroring a startup extension that is
-    // already subscribed when a resume initializes.
-    let mut h = echo_harness_for("s2", &sp).expect("start");
-    let extension_events = connect_test_tool(&mut h, "early-extension");
-    h.handle_extension_message(
-        &crate::test_connection_id("early-extension"),
-        TestMessage::Subscribe(Subscribe {
-            historical_selectors: Vec::new(),
-            live_selectors: vec![
-                EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
-                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
-                EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
-            ],
-        }),
-    )
-    .expect("extension subscribe");
-    extension_events.lock().expect("sink").clear();
-
-    h.switch_session(
-        "s1".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::Resume,
-    )
-    .expect("switch to resumed session");
-
-    let events = extension_events.lock().expect("sink");
-    let started_count = events
-        .iter()
-        .filter(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionStarted(started)) if started.session_id.as_str() == "s1"
-            )
-        })
-        .count();
-    assert_eq!(
-        started_count, 1,
-        "already-subscribed peer should see exactly one live SessionStarted, not a duplicate from catch-up",
-    );
-    assert!(
-        events.iter().any(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionAgentLoaded(loaded)) if loaded.session_id.as_str() == "s1"
-            )
-        }),
-        "already-subscribed peer should learn the resumed session's loaded agents at init completion",
-    );
-    assert!(
-        events.iter().any(|routed| {
-            peel_delivery(&routed.frame).is_some_and(|delivery| {
-                delivery.is_replay()
-                    && matches!(
-                        delivery.event(),
-                        Event::ProviderResponseFinished(finished)
-                            if provider_response_contains_text(finished, past_text)
-                    )
-            })
-        }),
-        "already-subscribed peer should receive the resumed transcript as replay-marked frames",
-    );
-    drop(events);
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Resume repair appends its synthetic tool errors to the durable log as it
-/// publishes them live. Init-completion catch-up therefore runs before
-/// repair, so a peer subscribed before init sees each synthetic error exactly
-/// once — live — and not again as a replay-marked frame.
-#[test]
-fn resumed_session_repair_errors_are_not_duplicated_for_pre_init_subscribers() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_restored_tool_round(&sp, &["call-restored"], &[]);
-
-    let mut h = echo_harness_for("s2", &sp).expect("start");
-    let extension_events = connect_test_tool(&mut h, "early-extension");
-    h.handle_extension_message(
-        &crate::test_connection_id("early-extension"),
-        TestMessage::Subscribe(Subscribe {
-            historical_selectors: Vec::new(),
-            live_selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_ERROR)],
-        }),
-    )
-    .expect("extension subscribe");
-    extension_events.lock().expect("sink").clear();
-
-    h.switch_session(
-        "s1".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::Resume,
-    )
-    .expect("switch to resumed session");
-
-    let events = extension_events.lock().expect("sink");
-    let deliveries: Vec<bool> = events
-        .iter()
-        .filter_map(|routed| {
-            peel_delivery(&routed.frame).and_then(|delivery| match delivery.event() {
-                Event::ToolError(error) if error.call_id.as_str() == "call-restored" => {
-                    Some(delivery.is_replay())
-                }
-                _ => None,
-            })
-        })
-        .collect();
-    assert_eq!(
-        deliveries,
-        vec![false],
-        "synthetic repair error must arrive exactly once, live (got live/replay flags: {deliveries:?})",
-    );
-    drop(events);
-
-    h.shutdown().expect("shutdown");
-}
-
 #[test]
 fn replay_emits_latest_agent_metadata_without_stale_values() {
     let td = TempDir::new().expect("tempdir");
@@ -4082,6 +3942,153 @@ fn replay_emits_latest_agent_metadata_without_stale_values() {
         event,
         Event::AgentMetadataSet(set) if set.value == CborValue::Text("/first".to_owned())
     )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Direct fixed-session resume must deliver one coherent catch-up view to a
+/// subscriber.
+#[test]
+fn resumed_session_init_catches_up_subscriber_already_bound_to_same_session() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+
+    let past_text = "remembered before resume";
+    {
+        let mut h = echo_harness_for("s1", &sp).expect("start");
+        h.config.selected_model = Some("test/model".into());
+        h.send_user_message("s1", past_text, None)
+            .expect("seed past message");
+        h.shutdown().expect("shutdown");
+        drop(h);
+        wait_for_session_unlock(&sp, "s1");
+    }
+
+    let event_slot = Arc::new(Mutex::new(None));
+    let callback_slot = Arc::clone(&event_slot);
+    let mut h = echo_harness_with_start_reason_before_session_init(
+        "s1",
+        &sp,
+        tau_proto::SessionStartReason::Resume,
+        Box::new(move |h| {
+            let events = connect_test_tool(h, "early-extension");
+            h.handle_extension_message(
+                &crate::test_connection_id("early-extension"),
+                TestMessage::Subscribe(Subscribe {
+                    historical_selectors: Vec::new(),
+                    live_selectors: vec![
+                        EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
+                        EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+                        EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
+                    ],
+                }),
+            )
+            .expect("extension subscribe");
+            events.lock().expect("sink").clear();
+            *callback_slot.lock().expect("event slot") = Some(events);
+        }),
+    )
+    .expect("resume");
+    let extension_events = event_slot
+        .lock()
+        .expect("event slot")
+        .take()
+        .expect("pre-init subscriber");
+
+    let events = extension_events.lock().expect("sink");
+    let started_count = events
+        .iter()
+        .filter(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::SessionStarted(started)) if started.session_id.as_str() == "s1"
+            )
+        })
+        .count();
+    assert_eq!(
+        started_count, 1,
+        "already-subscribed peer should see exactly one live SessionStarted, not a duplicate from catch-up",
+    );
+    assert!(
+        events.iter().any(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::SessionAgentLoaded(loaded)) if loaded.session_id.as_str() == "s1"
+            )
+        }),
+        "already-subscribed peer should learn the resumed session's loaded agents at init completion",
+    );
+    assert!(
+        events.iter().any(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::ProviderResponseFinished(finished)
+                            if provider_response_contains_text(finished, past_text)
+                    )
+            })
+        }),
+        "already-subscribed peer should receive the resumed transcript as replay-marked frames",
+    );
+    drop(events);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Direct fixed-session resume must deliver one coherent catch-up view to a
+/// subscriber.
+#[test]
+fn resumed_session_repair_errors_are_not_duplicated_for_same_session_subscribers() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    seed_restored_tool_round(&sp, &["call-restored"], &[]);
+
+    let event_slot = Arc::new(Mutex::new(None));
+    let callback_slot = Arc::clone(&event_slot);
+    let mut h = echo_harness_with_start_reason_before_session_init(
+        "s1",
+        &sp,
+        tau_proto::SessionStartReason::Resume,
+        Box::new(move |h| {
+            let events = connect_test_tool(h, "early-extension");
+            h.handle_extension_message(
+                &crate::test_connection_id("early-extension"),
+                TestMessage::Subscribe(Subscribe {
+                    historical_selectors: Vec::new(),
+                    live_selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_ERROR)],
+                }),
+            )
+            .expect("extension subscribe");
+            events.lock().expect("sink").clear();
+            *callback_slot.lock().expect("event slot") = Some(events);
+        }),
+    )
+    .expect("resume");
+    let extension_events = event_slot
+        .lock()
+        .expect("event slot")
+        .take()
+        .expect("pre-init subscriber");
+
+    let events = extension_events.lock().expect("sink");
+    let deliveries: Vec<bool> = events
+        .iter()
+        .filter_map(|routed| {
+            peel_delivery(&routed.frame).and_then(|delivery| match delivery.event() {
+                Event::ToolError(error) if error.call_id.as_str() == "call-restored" => {
+                    Some(delivery.is_replay())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    assert_eq!(
+        deliveries,
+        vec![false],
+        "synthetic repair error must arrive exactly once, live (got live/replay flags: {deliveries:?})",
+    );
+    drop(events);
 
     h.shutdown().expect("shutdown");
 }

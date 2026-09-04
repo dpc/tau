@@ -107,7 +107,7 @@ impl ResultDedupMap {
 
     /// Replace contents from a freshly walked branch. Called after
     /// [`Self::needs_rebuild`] reports a mismatch, or eagerly on
-    /// session resume / session switch. `branch` must walk from tip to root;
+    /// session resume. `branch` must walk from tip to root;
     /// reverse candidate lookup then preserves the oldest canonical anchor.
     pub(crate) fn rebuild_from_branch<'a>(
         &mut self,

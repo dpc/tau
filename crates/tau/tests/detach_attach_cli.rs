@@ -20,6 +20,7 @@ mod owned_process_group;
 mod sigterm_worker_action;
 #[path = "detach_attach_cli/subreaper_controller.rs"]
 mod subreaper_controller;
+mod support;
 
 use owned_process_group::{
     OwnedProcessGroup, child_reap_poll_survives_transient_none, group_exists,
@@ -32,11 +33,14 @@ use subreaper_controller::{
     BrokeredCleanupWorker, require_group_absent, require_group_filtered_echild,
     set_isolated_child_subreaper,
 };
+use support::bounded_runtime_tempdir;
 
 /// Isolated process environment shared by every CLI in one lifecycle test.
 struct TestEnvironment {
     /// Scratch root that owns every test artifact.
     temp: tempfile::TempDir,
+    /// Short scratch owner required by Unix-domain socket path limits.
+    _runtime_temp: tempfile::TempDir,
     /// Isolated configuration home.
     config_home: PathBuf,
     /// Isolated persistent state home.
@@ -54,9 +58,10 @@ impl TestEnvironment {
     /// Creates a minimal configuration with every bundled extension disabled.
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("temporary test root");
+        let runtime_temp = bounded_runtime_tempdir();
         let config_home = temp.path().join("config");
         let state_home = temp.path().join("state");
-        let runtime_dir = temp.path().join("runtime");
+        let runtime_dir = runtime_temp.path().to_path_buf();
         std::fs::create_dir_all(config_home.join("tau")).expect("create config directory");
         std::fs::create_dir_all(&state_home).expect("create state directory");
         std::fs::create_dir_all(&runtime_dir).expect("create runtime directory");
@@ -67,6 +72,7 @@ impl TestEnvironment {
         .expect("write minimal harness configuration");
         Self {
             temp,
+            _runtime_temp: runtime_temp,
             config_home,
             state_home,
             runtime_dir,
@@ -88,9 +94,9 @@ impl TestEnvironment {
         command
     }
 
-    /// Returns the sole runtime metadata path once the harness publishes it.
+    /// Returns the sole runtime claim path once the harness publishes it.
     fn wait_for_metadata(&self) -> PathBuf {
-        let harnesses = self.runtime_dir.join("tau/harnesses");
+        let harnesses = self.runtime_dir.join("tau/harnesses/claims");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let metadata = std::fs::read_dir(&harnesses).ok().and_then(|entries| {
@@ -99,18 +105,26 @@ impl TestEnvironment {
                     .map(|entry| entry.path())
                     .find(|path| {
                         path.extension()
-                            .is_some_and(|extension| extension == "json")
+                            .is_some_and(|extension| extension == "lock")
+                            && std::fs::read(path).ok().is_some_and(|bytes| {
+                                serde_json::from_slice::<serde_json::Value>(&bytes).is_ok()
+                            })
                     })
             });
             if let Some(metadata) = metadata {
                 return metadata;
             }
-            assert!(
-                Instant::now() < deadline,
-                "harness metadata was not published"
-            );
+            assert!(Instant::now() < deadline, "harness claim was not published");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Derives the deterministic socket paired with one runtime claim.
+    fn socket_for_claim(&self, claim: &Path) -> PathBuf {
+        self.runtime_dir
+            .join("tau/harnesses/sockets")
+            .join(claim.file_stem().expect("claim key"))
+            .with_extension("sock")
     }
 
     /// Waits until the requested number of UI processes have entered input.
@@ -333,13 +347,17 @@ impl TestEnvironment {
         )
     }
 
-    /// Requires the runtime harness directory to contain no socket or metadata.
+    /// Requires both runtime coordination directories to contain no files.
     fn assert_runtime_discovery_empty(&self) {
         let harnesses = self.runtime_dir.join("tau/harnesses");
-        let count = std::fs::read_dir(harnesses)
-            .ok()
+        let count = ["claims", "sockets"]
             .into_iter()
-            .flatten()
+            .flat_map(|directory| {
+                std::fs::read_dir(harnesses.join(directory))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+            })
             .filter_map(Result::ok)
             .count();
         assert_eq!(count, 0, "runtime discovery files leaked");
@@ -625,7 +643,7 @@ fn owned_process_group_cleanup_worker() {
         })
         .expect("spawn cleanup worker stderr reader");
     let metadata = environment.wait_for_metadata();
-    let socket = metadata.with_extension("sock");
+    let socket = environment.socket_for_claim(&metadata);
     let first_pid =
         std::fs::read_to_string(first_started).expect("read first worker extension PID");
     let identities = wait_for_owned_fixture_members(server.pgid(), first_pid.trim());
@@ -1727,16 +1745,8 @@ fn assert_cleanup_readiness_absent(readiness: &CleanupReadiness, mode: &str) {
         assert_identity_gone(*identity, &format!("{mode} fixture[{index}]"));
     }
     assert_identity_gone(readiness.watchdog, &format!("{mode} watchdog"));
-    assert!(
-        !readiness.metadata.exists(),
-        "runtime metadata survived {mode}: {}",
-        readiness.metadata.display()
-    );
-    assert!(
-        !readiness.socket.exists(),
-        "runtime socket survived {mode}: {}",
-        readiness.socket.display()
-    );
+    // A forced cut may leave unlocked claim/socket pathnames. Runtime routing
+    // treats those as crash residue; the next lock winner reclaims the socket.
     assert!(
         !readiness.temp_root.exists(),
         "temporary root survived {mode}: {}",
@@ -1755,9 +1765,9 @@ struct CleanupReadiness {
     /// Exact temporary root owned by the fixture.
     temp_root: PathBuf,
     /// Exact runtime metadata path.
-    metadata: PathBuf,
+    _metadata: PathBuf,
     /// Exact runtime socket path.
-    socket: PathBuf,
+    _socket: PathBuf,
     /// Every process captured in the Tau process group at readiness.
     identities: Vec<ProcessIdentity>,
 }
@@ -1786,8 +1796,8 @@ fn parse_cleanup_readiness(line: &str) -> CleanupReadiness {
         pgid,
         watchdog,
         temp_root,
-        metadata,
-        socket,
+        _metadata: metadata,
+        _socket: socket,
         identities,
     }
 }
@@ -1946,50 +1956,6 @@ struct PtyChild {
     accumulated_output: Vec<u8>,
 }
 
-/// Best-effort cleanup for a daemon intentionally detached by the test.
-struct DetachedDaemonGuard {
-    /// Process identifier parsed from Tau's runtime metadata name.
-    pid: String,
-    /// Whether unwind cleanup must still stop the daemon.
-    armed: bool,
-}
-
-impl DetachedDaemonGuard {
-    /// Tracks the daemon owning one runtime metadata path.
-    fn from_metadata(metadata: &Path) -> Self {
-        let pid = metadata
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.split_once('-'))
-            .map(|(pid, _)| pid)
-            .expect("metadata process id")
-            .to_owned();
-        Self { pid, armed: true }
-    }
-
-    /// Disarms cleanup after policy-driven shutdown removed the discovery pair.
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for DetachedDaemonGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = Command::new("kill").arg("-KILL").arg(&self.pid).status();
-        }
-    }
-}
-
-impl Drop for PtyChild {
-    fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
 impl PtyChild {
     /// Starts a Tau command with all three standard streams attached to one
     /// PTY.
@@ -2112,7 +2078,6 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
     let environment = TestEnvironment::new();
     let mut owner = PtyChild::spawn(environment.command());
     let metadata = environment.wait_for_metadata();
-    let _daemon = DetachedDaemonGuard::from_metadata(&metadata);
     environment.wait_for_ready_uis(1);
     let metadata_value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&metadata).expect("read metadata"))
@@ -2121,7 +2086,7 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
         .as_str()
         .expect("metadata session id")
         .to_owned();
-    let socket = metadata.with_extension("sock");
+    let socket = environment.socket_for_claim(&metadata);
     let (stop_reader_tx, stop_reader_rx) = mpsc::channel();
     let (reader_ready_tx, reader_ready_rx) = mpsc::sync_channel(0);
     let observed_metadata = metadata.clone();
@@ -2180,18 +2145,101 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
     }
     let _ = stop_reader_tx.send(());
     metadata_reader.join().expect("concurrent metadata reader");
+    let mut shutdown = environment.command();
+    shutdown.args(["attach", &session_id]);
+    let mut shutdown = PtyChild::spawn(shutdown);
+    environment.wait_for_ready_uis(5);
+    shutdown.line(":quit-session");
+    shutdown.wait_success(&environment.state_home);
+    environment.wait_for_runtime_pair_gone(&metadata, &socket);
 }
 
-/// Ctrl-D on the owning initial UI disconnects without disabling the launch's
-/// independent exit-on-disconnect policy, which then stops the daemon.
+/// Discovery and exact routing use shared runtime-directory inodes rather than
+/// process visibility. A client that is PID 1 in a private PID/proc namespace
+/// can still list a daemon running in the parent namespace.
+#[cfg(target_os = "linux")]
 #[test]
-fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
+fn session_discovery_crosses_pid_and_proc_namespaces() {
     let environment = TestEnvironment::new();
     let mut owner = PtyChild::spawn(environment.command());
-    let metadata = environment.wait_for_metadata();
-    let mut daemon = DetachedDaemonGuard::from_metadata(&metadata);
+    let claim = environment.wait_for_metadata();
     environment.wait_for_ready_uis(1);
-    let socket = metadata.with_extension("sock");
+    let claim_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&claim).expect("read runtime claim"))
+            .expect("parse runtime claim");
+    let session_id = claim_value["session_id"]
+        .as_str()
+        .expect("claim session id")
+        .to_owned();
+    let socket = environment.socket_for_claim(&claim);
+
+    owner.line(":detach");
+    owner.wait_success(&environment.state_home);
+
+    let tau = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
+    let output = Command::new("unshare")
+        .args([
+            "--user",
+            "--map-root-user",
+            "--pid",
+            "--fork",
+            "--mount-proc",
+            "sh",
+            "-c",
+            "test \"$$\" -eq 1 && exec \"$@\"",
+            "sh",
+            &tau,
+            "session",
+            "list",
+            "--json",
+        ])
+        .env_clear()
+        .env("HOME", environment.temp.path().join("home"))
+        .env("XDG_CONFIG_HOME", &environment.config_home)
+        .env("XDG_STATE_HOME", &environment.state_home)
+        .env("XDG_RUNTIME_DIR", &environment.runtime_dir)
+        .env("LANG", "C.UTF-8")
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .expect("run namespaced session discovery");
+    assert!(
+        output.status.success(),
+        "namespaced discovery failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sessions: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("namespaced session list JSON");
+    assert!(
+        sessions
+            .as_array()
+            .expect("session list array")
+            .iter()
+            .any(|session| session["session_id"] == session_id),
+        "namespaced discovery omitted fixed session: {sessions}"
+    );
+
+    let mut shutdown = environment.command();
+    shutdown.args(["attach", &session_id]);
+    let mut shutdown = PtyChild::spawn(shutdown);
+    environment.wait_for_ready_uis(2);
+    shutdown.line(":quit-session");
+    shutdown.wait_success(&environment.state_home);
+    environment.wait_for_runtime_pair_gone(&claim, &socket);
+}
+
+/// Ctrl-D closes only the owning UI; the fixed session remains available until
+/// an explicit attached UI requests canonical shutdown.
+#[test]
+fn owned_cli_eof_preserves_daemon_until_explicit_shutdown() {
+    let environment = TestEnvironment::new();
+    let mut owner = PtyChild::spawn(environment.command());
+    let claim = environment.wait_for_metadata();
+    environment.wait_for_ready_uis(1);
+    let claim_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&claim).expect("read runtime claim"))
+            .expect("parse runtime claim");
+    let session_id = claim_value["session_id"].as_str().expect("session id");
+    let socket = environment.socket_for_claim(&claim);
 
     owner
         .controller
@@ -2199,11 +2247,16 @@ fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
         .expect("write terminal EOF");
     owner.controller.flush().expect("flush terminal EOF");
     owner.wait_success(&environment.state_home);
-    environment.wait_for_runtime_pair_gone(&metadata, &socket);
+    assert!(claim.exists(), "EOF retired the live session claim");
+    assert!(socket.exists(), "EOF retired the live session socket");
 
-    assert!(!metadata.exists(), "EOF left harness metadata behind");
-    assert!(!socket.exists(), "EOF left harness socket behind");
-    daemon.disarm();
+    let mut attached = environment.command();
+    attached.args(["attach", session_id]);
+    let mut attached = PtyChild::spawn(attached);
+    environment.wait_for_ready_uis(2);
+    attached.line(":quit-session");
+    attached.wait_success(&environment.state_home);
+    environment.wait_for_runtime_pair_gone(&claim, &socket);
 }
 
 /// Exact-ID creation remains discoverable across a stock attachment, pins
@@ -2236,7 +2289,7 @@ fn assert_created_session_server_handles_stock_attach_signal_and_strict_resume(s
         .spawn()
         .expect("spawn foreground server");
     let metadata = environment.wait_for_metadata();
-    let socket = metadata.with_extension("sock");
+    let socket = environment.socket_for_claim(&metadata);
     let children_path = PathBuf::from(format!(
         "/proc/{}/task/{}/children",
         server.id(),
@@ -2266,7 +2319,7 @@ fn assert_created_session_server_handles_stock_attach_signal_and_strict_resume(s
     environment.wait_for_ready_uis(1);
     attach.clear_output();
     attach.line(":session new");
-    attach.wait_for_text("pinned by the foreground server");
+    attach.wait_for_text("start another Tau invocation in a new terminal");
     attach.wait_for_text(&format!("&{session_id}"));
     attach.line(":cancel");
     let events_path = environment
@@ -2362,7 +2415,7 @@ fn assert_created_session_server_handles_stock_attach_signal_and_strict_resume(s
         .spawn()
         .expect("strictly resume created session");
     let resumed_metadata = environment.wait_for_metadata();
-    let resumed_socket = resumed_metadata.with_extension("sock");
+    let resumed_socket = environment.socket_for_claim(&resumed_metadata);
     let signaled = Command::new("kill")
         .args(["-TERM", &resumed.id().to_string()])
         .status()
@@ -2444,7 +2497,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
         .spawn()
         .expect("start bootstrapped server");
     let first_metadata = environment.wait_for_metadata();
-    let first_socket = first_metadata.with_extension("sock");
+    let first_socket = environment.socket_for_claim(&first_metadata);
     let first_rows = wait_for_agents(&environment, session_id, 1);
     let first_output = stop_server(&environment, first, &first_metadata, &first_socket);
     assert!(!String::from_utf8_lossy(&first_output.stdout).contains(secret));
@@ -2495,7 +2548,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
         .spawn()
         .expect("restart bootstrapped server");
     let restart_metadata = environment.wait_for_metadata();
-    let restart_socket = restart_metadata.with_extension("sock");
+    let restart_socket = environment.socket_for_claim(&restart_metadata);
     let restart_rows = wait_for_agents(&environment, session_id, 1);
     assert_eq!(
         restart_rows.split('\t').next(),
@@ -2524,7 +2577,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
         .spawn()
         .expect("start next bootstrap generation");
     let next_metadata = environment.wait_for_metadata();
-    let next_socket = next_metadata.with_extension("sock");
+    let next_socket = environment.socket_for_claim(&next_metadata);
     let _ = wait_for_agents(&environment, session_id, 2);
     let _ = stop_server(&environment, next, &next_metadata, &next_socket);
 }
@@ -2553,7 +2606,7 @@ fn serve_bootstrap_stdin_wait_is_signal_interruptible() {
         .expect("start stdin bootstrap server");
     let _stdin_guard = server.stdin.take().expect("retain bootstrap stdin");
     let metadata = environment.wait_for_metadata();
-    let socket = metadata.with_extension("sock");
+    let socket = environment.socket_for_claim(&metadata);
     let probe = environment
         .command()
         .args(["agent", "list", "serve-bootstrap-stdin"])
@@ -2610,7 +2663,7 @@ fn serve_bootstrap_connected_wait_is_signal_interruptible() {
         .spawn()
         .expect("start connected bootstrap server");
     let metadata = environment.wait_for_metadata();
-    let socket = metadata.with_extension("sock");
+    let socket = environment.socket_for_claim(&metadata);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !connected.exists() {
         assert!(

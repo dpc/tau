@@ -11,7 +11,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
-use tau_e2e_tests::ScenarioV2;
+use tau_e2e_tests::{ScenarioV2, bounded_runtime_tempdir};
 use tempfile::TempDir;
 
 use super::DEADLINE;
@@ -20,6 +20,8 @@ use super::DEADLINE;
 pub(super) struct GateFixture {
     /// Temporary private root retained only on failure or explicit opt-in.
     tempdir: Option<TempDir>,
+    /// Short private runtime root retained for the fixture lifetime.
+    _runtime_tempdir: TempDir,
     /// Exact canonical universal Tau executable.
     tau_bin: PathBuf,
     /// Private HOME.
@@ -90,11 +92,14 @@ impl GateFixture {
         let tempdir = TempDir::new()?;
         std::fs::set_permissions(tempdir.path(), path_std_fs::Permissions::from_mode(0o700))?;
         let root = tempdir.path();
+        let runtime_tempdir = bounded_runtime_tempdir()?;
         let home = root.join("home");
         let config_home = root.join("xdg-config");
         let state_home = root.join("xdg-state");
         let cache_home = root.join("xdg-cache");
-        let runtime_home = root.join("xdg-runtime");
+        // Keep the runtime root shallow enough for Linux's 107-byte Unix
+        // socket pathname limit after the fixed 64-byte session key.
+        let runtime_home = runtime_tempdir.path().to_path_buf();
         let cwd = root.join("cwd");
         let artifacts = root.join("artifacts");
         for directory in [
@@ -102,7 +107,6 @@ impl GateFixture {
             &config_home,
             &state_home,
             &cache_home,
-            &runtime_home,
             &cwd,
             &artifacts,
         ] {
@@ -259,6 +263,7 @@ impl GateFixture {
         )?;
         Ok(Self {
             tempdir: Some(tempdir),
+            _runtime_tempdir: runtime_tempdir,
             tau_bin,
             home,
             config_home,
@@ -381,15 +386,11 @@ impl GateFixture {
         let harnesses = self.runtime_home.join("tau/harnesses");
         let deadline = Instant::now() + DEADLINE;
         loop {
-            let runtime_pair_exists = harnesses.exists()
-                && std::fs::read_dir(&harnesses)?
-                    .filter_map(Result::ok)
-                    .any(|entry| {
-                        matches!(
-                            entry.path().extension().and_then(|value| value.to_str()),
-                            Some("sock" | "json")
-                        )
-                    });
+            let runtime_pair_exists = ["claims", "sockets"].into_iter().any(|directory| {
+                std::fs::read_dir(harnesses.join(directory))
+                    .ok()
+                    .is_some_and(|mut entries| entries.next().is_some())
+            });
             if !runtime_pair_exists {
                 break;
             }

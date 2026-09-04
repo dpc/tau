@@ -653,6 +653,9 @@ impl Harness {
         &mut self,
         authority: RestoredCheckpointAuthority<'_>,
     ) {
+        if !self.session_initialized(&self.session_runtime.current_session_id) {
+            return;
+        }
         let all_absence_is_authoritative =
             matches!(authority, RestoredCheckpointAuthority::DiscoveryComplete);
         let authoritatively_removed_models = match authority {
@@ -1510,7 +1513,6 @@ impl Harness {
                         | HarnessInputMessage::ProviderDebugCapture(_)
                         | HarnessInputMessage::ExtensionDataRequest(_)
                         | HarnessInputMessage::UiDebugEventStatsRequest(_)
-                        | HarnessInputMessage::UiDetachRequest(_)
                         | HarnessInputMessage::UiShutdownRequest(_)
                         | HarnessInputMessage::UiTreeRequest(_)
                 )
@@ -1531,7 +1533,6 @@ impl Harness {
                                 | HarnessInputMessage::ProviderDebugCapture(_)
                                 | HarnessInputMessage::ExtensionDataRequest(_)
                                 | HarnessInputMessage::UiDebugEventStatsRequest(_)
-                                | HarnessInputMessage::UiDetachRequest(_)
                                 | HarnessInputMessage::UiShutdownRequest(_)
                                 | HarnessInputMessage::UiTreeRequest(_),
                             ExtensionState::Handshaking | ExtensionState::Ready,
@@ -1551,7 +1552,6 @@ impl Harness {
         if matches!(
             &message,
             HarnessInputMessage::UiDebugEventStatsRequest(_)
-                | HarnessInputMessage::UiDetachRequest(_)
                 | HarnessInputMessage::UiShutdownRequest(_)
                 | HarnessInputMessage::UiTreeRequest(_)
         ) && self.extensions.entries.contains_key(source_id)
@@ -1761,7 +1761,6 @@ impl Harness {
             | HarnessInputMessage::GetCurrentSession(_)
             | HarnessInputMessage::GetSessionAgentList(_)
             | HarnessInputMessage::UiDebugEventStatsRequest(_)
-            | HarnessInputMessage::UiDetachRequest(_)
             | HarnessInputMessage::UiShutdownRequest(_)
             | HarnessInputMessage::UiTreeRequest(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
@@ -1793,6 +1792,15 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         capture: &tau_proto::ProviderDebugCapture,
     ) -> Option<(PathBuf, tau_proto::ExtensionName)> {
+        if capture.session_id != self.session_runtime.current_session_id {
+            tracing::warn!(
+                source_id = %source_id,
+                expected_session_id = %self.session_runtime.current_session_id,
+                received_session_id = %capture.session_id,
+                "rejected provider debug capture for another session"
+            );
+            return None;
+        }
         let provider_instance = self.extensions.entries.get(source_id).and_then(|entry| {
             (entry.kind == ClientKind::Provider
                 && entry.state == ExtensionState::Ready

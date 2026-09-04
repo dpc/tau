@@ -52,6 +52,8 @@ pub(super) struct ShellRuntime {
     /// so production freezes the process cwd only after initial configuration.
     startup_cwd_source: StartupCwdSource,
     start_agent_owners: HashMap<String, tau_proto::AgentId>,
+    /// Immutable session identity observed from the first lifecycle fact.
+    bound_session_id: Option<tau_proto::SessionId>,
     runtime_started: bool,
 }
 
@@ -119,6 +121,7 @@ impl ShellRuntime {
             cwd_state,
             startup_cwd_source,
             start_agent_owners: HashMap::new(),
+            bound_session_id: None,
             runtime_started: false,
         }
     }
@@ -245,6 +248,16 @@ impl ShellRuntime {
                 self.handle_tool_started(invoke, &local_tool_name, is_replay)?;
             }
             Event::SessionStarted(started) => {
+                match self.bound_session_id.as_ref() {
+                    Some(bound) if bound != &started.session_id => {
+                        return Err(tau_client::ClientError::handler(format!(
+                            "immutable session mismatch: expected `{bound}`, received `{}`",
+                            started.session_id
+                        )));
+                    }
+                    Some(_) => return Ok(()),
+                    None => self.bound_session_id = Some(started.session_id.clone()),
+                }
                 dispatch_session_started(started, &self.tx, self.discovery_policy)?;
             }
             Event::SessionAgentLoaded(loaded) => {
@@ -266,7 +279,14 @@ impl ShellRuntime {
                 self.handle_agent_metadata_unset(unset, is_replay)?
             }
             Event::AgentReplayComplete(done) => self.handle_agent_replay_complete(done)?,
-            Event::SessionShutdown(_) => self.shutdown_session(),
+            Event::SessionShutdown(shutdown) => {
+                if self.bound_session_id.as_ref() != Some(&shutdown.session_id) {
+                    return Err(tau_client::ClientError::handler(
+                        "session shutdown does not match immutable binding",
+                    ));
+                }
+                self.shutdown_session();
+            }
             Event::StartAgentAccepted(accepted) => {
                 self.start_agent_owners
                     .insert(accepted.query_id, accepted.agent_id);

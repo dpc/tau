@@ -37,7 +37,7 @@ queue time. These limits bound memory and head-of-line denial of service but do
 not bound `tau-client`'s separate output queue.
 
 Registration generations now revoke local authority synchronously before remote
-cleanup for explicit unregister, unload, session rollover/shutdown, disconnect,
+cleanup for explicit unregister, unload, session shutdown, disconnect,
 and output-loss retirement. Cleanup is best effort and may fail without
 restoring routes. Configuration and generalized output/executor generations
 remain prospective. Frozen plaintext bodies remain

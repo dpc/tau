@@ -617,7 +617,7 @@ fn handle_harness_message(
         | HarnessOutputMessage::ExternalAgentMessageResult(_)
         | HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
         | HarnessOutputMessage::PeerSessionProbeResult(_)
-        | HarnessOutputMessage::UiSessionAccepted(_) => Ok(false),
+        | HarnessOutputMessage::SessionAccepted(_) => Ok(false),
     }
 }
 

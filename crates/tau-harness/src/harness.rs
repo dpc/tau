@@ -449,9 +449,7 @@ fn session_dir_status_from_reason(
     reason: tau_proto::SessionStartReason,
 ) -> tau_proto::SessionDirStatus {
     match reason {
-        tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => {
-            tau_proto::SessionDirStatus::New
-        }
+        tau_proto::SessionStartReason::Initial => tau_proto::SessionDirStatus::New,
         tau_proto::SessionStartReason::Resume => tau_proto::SessionDirStatus::Resumed,
     }
 }
@@ -1543,7 +1541,15 @@ pub(crate) struct HarnessStartupInputs {
     /// Optional process-local mirror selected only by fixed-session serve.
     pub(crate) extension_stderr_mirror:
         Option<crate::extension_stderr_mirror::ExtensionStderrMirror>,
+    /// Test-only callback invoked after extensions are ready and before session
+    /// initialization publishes its first lifecycle fact.
+    #[cfg(test)]
+    pub(crate) before_session_init: Option<BeforeSessionInitHook>,
 }
+
+#[cfg(test)]
+/// Test callback invoked at the last startup cut before session initialization.
+pub(crate) type BeforeSessionInitHook = Box<dyn FnOnce(&mut Harness)>;
 
 #[cfg(any(test, feature = "echo-agent"))]
 /// Inputs used to construct a harness around an in-process test provider.
@@ -1556,6 +1562,9 @@ pub(crate) struct TestProviderHarnessStartup<'a> {
     pub(crate) storage_mode: crate::HarnessStorageMode,
     /// Harness-owned handlers installed before session restoration.
     pub(crate) internal_tool_handlers: InternalToolHandlers,
+    /// Test-only callback invoked before the first session lifecycle fact.
+    #[cfg(test)]
+    pub(crate) before_session_init: Option<BeforeSessionInitHook>,
 }
 
 /// Output path used before an initial UI has been accepted by the normal bus.
@@ -1583,9 +1592,7 @@ impl HarnessSessionLaunchMode {
     pub(crate) const fn from_reason(reason: tau_proto::SessionStartReason) -> Self {
         match reason {
             tau_proto::SessionStartReason::Resume => Self::Resume,
-            tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => {
-                Self::New
-            }
+            tau_proto::SessionStartReason::Initial => Self::New,
         }
     }
 
@@ -2484,17 +2491,24 @@ impl Harness {
         }
         if !self.session_runtime.shutdown_published {
             self.fail_start_operations_for_session_shutdown();
+            self.fail_all_pending_initial_prompts(
+                tau_proto::AgentPromptFailureStage::LifecycleTeardown,
+                "the session shut down before the initial prompt materialized",
+            );
+            self.fail_all_pending_ui_shell_commands(
+                "the session shut down before the shell command completed",
+            );
             // Revoke old-session admission before forcing all already accepted
-            // publications through their terminal rollover path.
+            // publications through their terminal shutdown path.
             self.session_runtime.current_session_generation = self
                 .session_runtime
                 .current_session_generation
                 .saturating_next();
             self.cancel_ui_prompt_publications_for_shutdown();
-            self.quiesce_synchronized_publications_for_rollover();
+            self.quiesce_synchronized_publications_for_shutdown();
         }
         let _published = self.publish_current_session_shutdown();
-        self.quiesce_synchronized_publications_for_rollover();
+        self.quiesce_synchronized_publications_for_shutdown();
         let final_ui_closes = std::mem::take(&mut self.ui_runtime.client_writers)
             .into_values()
             .filter_map(|writer| writer.start_bounded_close(FINAL_UI_DISCONNECT_GRACE))
@@ -2790,6 +2804,14 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
     ) -> Result<ClientMessageDisposition, HarnessError> {
+        if self.ui_runtime.runtime_probe_peers.contains(client_id)
+            && !matches!(
+                &message,
+                HarnessInputMessage::GetCurrentSession(_) | HarnessInputMessage::Disconnect(_)
+            )
+        {
+            return Ok(ClientMessageDisposition::Close);
+        }
         if self
             .peer_messaging
             .external_message_peers
@@ -2816,13 +2838,21 @@ impl Harness {
                     );
                     return Ok(ClientMessageDisposition::CloseAfterReply);
                 }
-                if hello.client_kind != ClientKind::Ui && hello.expected_session_id.is_some() {
+                let socket_connection = self
+                    .runtime_io
+                    .bus
+                    .connection(client_id)
+                    .is_some_and(|connection| connection.origin == ConnectionOrigin::Socket);
+                if socket_connection
+                    && self.session_runtime.exact_socket_session_required
+                    && hello.expected_session_id.is_none()
+                {
                     let _ = self.runtime_io.bus.send_to(
                         client_id,
                         None,
                         HarnessOutputMessage::Disconnect(Disconnect {
                             reason: Some(
-                                "only UI clients may declare an expected session".to_owned(),
+                                "socket clients must declare an expected session".to_owned(),
                             ),
                         }),
                     );
@@ -2847,7 +2877,7 @@ impl Harness {
                     self.runtime_io.bus.send_to(
                         client_id,
                         None,
-                        HarnessOutputMessage::UiSessionAccepted(tau_proto::UiSessionAccepted {
+                        HarnessOutputMessage::SessionAccepted(tau_proto::SessionAccepted {
                             session_id: self.session_runtime.current_session_id.clone(),
                         }),
                     )?;
@@ -2857,6 +2887,13 @@ impl Harness {
                 {
                     self.peer_messaging
                         .external_message_peers
+                        .insert(client_id.clone());
+                }
+                if hello.client_kind == ClientKind::Ui
+                    && hello.client_name.as_str() == "tau-runtime-probe"
+                {
+                    self.ui_runtime
+                        .runtime_probe_peers
                         .insert(client_id.clone());
                 }
                 Ok(ClientMessageDisposition::Continue)
@@ -2924,9 +2961,6 @@ impl Harness {
                 self.handle_ui_debug_event_stats_request(client_id, request);
                 Ok(ClientMessageDisposition::Continue)
             }
-            // Connection-control behavior is applied only by startup/runtime
-            // routing after exact attached-socket-UI authorization.
-            HarnessInputMessage::UiDetachRequest(_) => Ok(ClientMessageDisposition::Continue),
             // Lifecycle behavior is applied only by runtime routing after exact
             // attached-socket-UI authorization.
             HarnessInputMessage::UiShutdownRequest(_) => Ok(ClientMessageDisposition::Continue),

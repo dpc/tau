@@ -112,17 +112,16 @@ task-ID, title, and description bytes. Change-history limits count
 logical UTF-8 fields; `publication_bytes` separately bounds each encoded change
 and current encoded snapshot. Falling behind retained changes forces a new
 snapshot. Projection overflow or malformed lifecycle replay invalidates and
-clears the projection; mutating tools reject until a new session replay rebuilds
-it. A terminal worker or panic unwind likewise makes publication health
+clears the projection; mutating tools reject until the extension restarts and
+replays the same bound session. A terminal worker or panic unwind likewise makes publication health
 indeterminate immediately; panic-abort builds terminate the extension process.
 The `task_info`, `task_blocker`, and `task_update` tools then reject before mutation rather than
 reporting success for state that no live worker can publish.
 
 All command deduplication, task metadata, blocker history, updates, and acknowledgements live
 only in extension process memory. Iroh reconnect within that process preserves
-them. Session switches clear session-specific task metadata, blocker history, updates, and
-acknowledgements but retain the process command table. Extension restart clears
-all of them. The extension generates one Tau Swarm application-incarnation ID at
+them. Extension restart clears all of them. The extension generates one Tau
+Swarm application-incarnation ID at
 process startup and retains it across ordinary reconnects. A replacement process
 declares a new incarnation, so the server fences ambiguous commands and lifecycle
 state owned by the old process.
@@ -132,7 +131,7 @@ state owned by the old process.
 Unit tests cover strict config, exact tool names/group/prefixes and no aliases,
 task-info schema and canonicalization, transactional entry/content/encoded
 bounds, shared revision order, coherent snapshot/live views, cancellation-safe
-change waits, session switching, and reconnect convergence after an
+change waits, initial session replay, and reconnect convergence after an
 indeterminate live submission. Existing focused coverage retains blocker and
 update lifecycle, acknowledgement, replay, and capacity invariants. A real
 `TauExtensionRunner` test verifies registration and paired historical/live

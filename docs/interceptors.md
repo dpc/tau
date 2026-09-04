@@ -189,7 +189,7 @@ away mid-reply. If the harness cannot deliver an `intercept_request` to the
 selected interceptor, it logs the failure, removes/skips that interceptor
 registration, and continues the chain instead of parking the publish.
 
-Agent unload, session rollover, or canceled peer receive can destructively
+Agent unload, final session shutdown, or canceled peer receive can destructively
 cancel a publication after its `intercept_request` was delivered. The harness
 keeps the interceptor registration but suspends the entire connection from
 matching new publications until it consumes that request's uncorrelated stale

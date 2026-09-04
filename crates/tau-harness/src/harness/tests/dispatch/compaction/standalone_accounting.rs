@@ -762,407 +762,7 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
     h.shutdown().expect("shutdown");
 }
 
-/// Session switch and process shutdown must fail before invalidating an
-/// accounting fact parked at an interceptor, then succeed after that exact fact
-/// commits.
-#[test]
-fn parked_standalone_accounting_blocks_lifecycle_teardown_until_committed() {
-    for lifecycle in ["switch", "shutdown"] {
-        let td = TempDir::new().expect("tempdir");
-        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-        enable_remote_compaction_for_test_model(&mut h);
-        let info = h
-            .provider_runtime
-            .model_info
-            .get_mut(&"test/model".into())
-            .expect("test model");
-        info.supports_compaction = false;
-        info.supports_standalone_compaction = true;
-        let cid = ensure_test_user_agent(&mut h);
-        let agent_id = durable_agent_id_for_conversation(&h, &cid);
-        h.handle_compact_request(
-            crate::harness::harness_connection_id(),
-            test_session_id("s1"),
-            Some(agent_id.as_str()),
-        );
-        let compact = read_nth_prompt_created(&h, 0);
-        let interceptor = format!("parked-accounting-{lifecycle}");
-        connect_test_tool(&mut h, &interceptor);
-        h.handle_extension_event(
-            &interceptor,
-            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-                selectors: vec![EventSelector::Exact(
-                    tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED,
-                )],
-                priority: InterceptionPriority::new(0),
-            })),
-        )
-        .expect("register accounting interceptor");
-        h.handle_provider_response_finished(
-            strict_fake_compact_response(&compact).expect("valid compact response"),
-        )
-        .expect("park accounting publication");
-        assert!(h.has_unsettled_standalone_accounting_publication());
-
-        let error = if lifecycle == "switch" {
-            h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-                .expect_err("switch must not discard parked accounting")
-        } else {
-            h.shutdown()
-                .expect_err("shutdown must not discard parked accounting")
-        };
-        assert!(
-            error.to_string().contains("accounting remains uncommitted"),
-            "{lifecycle}: {error}"
-        );
-        assert_eq!(
-            h.session_runtime.current_session_id,
-            test_session_id("s1"),
-            "failed lifecycle must preserve the accounting session"
-        );
-
-        h.handle_extension_event(
-            &interceptor,
-            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-                action: InterceptAction::Pass(None),
-            })),
-        )
-        .expect("commit parked accounting");
-        assert!(!h.has_unsettled_standalone_accounting_publication());
-        assert_eq!(
-            event_log_events(&h)
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    Event::ProviderStandaloneExecutionAccounted(accounted)
-                        if accounted.agent_prompt_id == compact.agent_prompt_id
-                ))
-                .count(),
-            1
-        );
-        if lifecycle == "switch" {
-            h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-                .expect("switch after accounting commit");
-        }
-        h.shutdown().expect("shutdown after accounting commit");
-    }
-}
-
-/// Restore filters a shared durable agent journal by required session identity
-/// and remains idempotent across repeated scans and finalization.
-#[test]
-fn standalone_accounting_restore_is_session_scoped_and_idempotent() {
-    let td = TempDir::new().expect("tempdir");
-    let state = td.path().join("state");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
-    store
-        .append_agent_event_at(
-            "parent",
-            None,
-            tau_core::AgentEventParent::InheritHead,
-            Event::AgentStarted(tau_proto::AgentStarted {
-                creator: Some(tau_proto::AgentCreator::User),
-                parent_agent: None,
-                agent_id: crate::parse_agent_id("parent"),
-                role: "engineer".to_owned(),
-                display_name: None,
-                metadata: Vec::new(),
-                ephemeral: false,
-            }),
-            tau_proto::UnixMicros::now(),
-        )
-        .expect("seed parent");
-    append_seed_agent_event(
-        &mut store,
-        Event::AgentStarted(tau_proto::AgentStarted {
-            creator: Some(tau_proto::AgentCreator::Agent {
-                session_id: test_session_id("s1"),
-                agent_id: crate::parse_agent_id("parent"),
-            }),
-            parent_agent: None,
-            agent_id: crate::parse_agent_id("main"),
-            role: "engineer".to_owned(),
-            display_name: None,
-            metadata: Vec::new(),
-            ephemeral: false,
-        }),
-    );
-    append_seed_standalone_accounting(&mut store, "s1", "one", 101);
-    append_seed_standalone_accounting(&mut store, "s2", "two", 202);
-    drop(store);
-
-    let mut h = quiet_provider_harness(&state).expect("start");
-    for (session, expected_cost) in [("s1", 101), ("s2", 202)] {
-        if h.session_runtime.current_session_id.as_str() != session {
-            h.switch_session(test_session_id(session), tau_proto::SessionStartReason::New)
-                .expect("switch session");
-        }
-        h.publish_event(
-            None,
-            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
-                    "init-{session}"
-                ))
-                .expect("valid initialization id"),
-                session_id: test_session_id(session),
-                agent_id: crate::parse_agent_id("main"),
-                ephemeral: false,
-            }),
-        );
-        if session == "s1" {
-            h.publish_event(
-                None,
-                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::parse(
-                        "init-memory-only-history",
-                    )
-                    .expect("valid initialization id"),
-                    session_id: test_session_id("s1"),
-                    agent_id: crate::parse_agent_id("memory-only-history"),
-                    ephemeral: true,
-                }),
-            );
-            h.publish_event(
-                None,
-                Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-                    session_id: test_session_id("s1"),
-                    agent_id: crate::parse_agent_id("memory-only-history"),
-                }),
-            );
-            h.publish_event(
-                None,
-                Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-                    session_id: test_session_id("s1"),
-                    agent_id: crate::parse_agent_id("main"),
-                }),
-            );
-            h.publish_event(
-                None,
-                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::parse("init-parent")
-                        .expect("valid initialization id"),
-                    session_id: test_session_id("s1"),
-                    agent_id: crate::parse_agent_id("parent"),
-                    ephemeral: false,
-                }),
-            );
-        }
-        h.restore_standalone_execution_accounting();
-        h.restore_standalone_execution_accounting();
-        h.finalize_restored_standalone_costs();
-        h.finalize_restored_standalone_costs();
-        if session == "s1" {
-            tau_core::AgentJournalSnapshot::capture(
-                &state.join("agents"),
-                [crate::parse_agent_id("main")],
-            )
-            .expect("historical accounting snapshot must release its journal lock");
-            let collision = tau_proto::ProviderStandaloneExecutionAccounted {
-                session_id: test_session_id("s1"),
-                agent_id: crate::parse_agent_id("other-journal"),
-                agent_prompt_id: test_agent_prompt_id("accounting-one"),
-                logical_attempt: tau_proto::ProviderAttempt::ONE,
-                transaction_id: tau_proto::CompactionTransactionId::parse("ct-one")
-                    .expect("valid transaction"),
-                model: "test/model".into(),
-                backend: None,
-                usage: tau_proto::StandaloneExecutionUsage::Known(tau_proto::ProviderTokenUsage {
-                    prompt_sent_tokens: 999,
-                    ..Default::default()
-                }),
-                estimated_api_cost_rates: Some(tau_proto::ESTIMATED_API_COST_FALLBACK),
-                estimated_api_cost_increment: Some(tau_proto::EstimatedApiCost::from_picodollars(
-                    999,
-                )),
-                output: tau_proto::StandaloneExecutionOutput::Rejected,
-                finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
-            };
-            h.fold_committed_standalone_accounting(&collision, None, false);
-            h.finalize_restored_standalone_costs();
-        }
-
-        assert_eq!(
-            h.session_runtime
-                .current_session_state
-                .token_usage
-                .total
-                .requests,
-            1,
-            "{session}"
-        );
-        if session == "s1" {
-            assert_eq!(
-                h.agent_runtime
-                    .agent_registry
-                    .cost_ledger
-                    .creator_subtree_cost(&crate::parse_agent_id("parent"))
-                    .as_picodollars(),
-                expected_cost,
-                "unloaded child cost propagates to its loaded creator"
-            );
-        }
-        assert_eq!(
-            h.agent_runtime
-                .agent_registry
-                .cost_ledger
-                .self_cost(&crate::parse_agent_id("main"))
-                .as_picodollars(),
-            expected_cost,
-            "{session}"
-        );
-    }
-    h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::New)
-        .expect("sequence-continuing New restores first session accounting");
-    assert_eq!(
-        h.session_runtime
-            .current_session_state
-            .token_usage
-            .total
-            .requests,
-        1
-    );
-    enable_remote_compaction_for_test_model(&mut h);
-    let info = h
-        .provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model");
-    info.supports_compaction = false;
-    info.supports_standalone_compaction = true;
-    let new_cid = ensure_test_user_agent(&mut h);
-    let new_agent_id = durable_agent_id_for_conversation(&h, &new_cid);
-    h.handle_compact_request(
-        crate::harness::harness_connection_id(),
-        test_session_id("s1"),
-        Some(new_agent_id.as_str()),
-    );
-    let new_compact = read_nth_prompt_created(&h, 0);
-    h.handle_provider_response_finished(
-        strict_fake_compact_response(&new_compact).expect("new accounting terminal"),
-    )
-    .expect("commit new accounting");
-    assert_eq!(
-        h.session_runtime
-            .current_session_state
-            .token_usage
-            .total
-            .requests,
-        2,
-        "New appends accounting after restoring its predecessor prefix"
-    );
-    h.switch_session(test_session_id("s3"), tau_proto::SessionStartReason::New)
-        .expect("switch away");
-    h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
-        .expect("resume after sequence-continuing New");
-    assert_eq!(
-        h.session_runtime
-            .current_session_state
-            .token_usage
-            .total
-            .requests,
-        2
-    );
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .cost_ledger
-            .self_cost(&crate::parse_agent_id("main"))
-            .as_picodollars(),
-        101,
-        "warm switch/resume finalizes restored costs"
-    );
-    h.shutdown().expect("shutdown");
-}
-
 /// Seed one terminal standalone transaction and its session-correlated spend.
-fn append_seed_standalone_accounting(
-    store: &mut tau_core::AgentStore,
-    session: &str,
-    suffix: &str,
-    picodollars: u64,
-) {
-    let agent_id = crate::parse_agent_id("main");
-    let session_id = test_session_id(session);
-    let prompt_id = test_agent_prompt_id(format!("accounting-{suffix}"));
-    let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{suffix}"))
-        .expect("valid transaction id");
-    let model: tau_proto::ModelId = "test/model".into();
-    let rates = tau_proto::EstimatedApiCostRates {
-        uncached_input: tau_proto::EstimatedUsdPerMillion::from_micro_usd(1),
-        cached_input: tau_proto::EstimatedUsdPerMillion::from_micro_usd(1),
-        cache_write_input: None,
-        output: tau_proto::EstimatedUsdPerMillion::from_micro_usd(1),
-        storage_per_million_token_hour: None,
-    };
-    let usage = tau_proto::ProviderTokenUsage {
-        model: Some(model.clone()),
-        prompt_sent_tokens: picodollars,
-        ..Default::default()
-    };
-    append_seed_agent_event(
-        store,
-        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-            agent_id: agent_id.clone(),
-            transaction_id: transaction_id.clone(),
-            compact_prompt_id: prompt_id.clone(),
-            cut: tau_proto::AgentHead::Root,
-            resume_through: Some(tau_proto::AgentHead::Root),
-            model: model.clone(),
-            operation: tau_proto::PromptOperation::StandaloneCompaction,
-            originator: tau_proto::PromptOriginator::User,
-            supersedes: None,
-            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
-        }),
-    );
-    append_seed_agent_event(
-        store,
-        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-            agent_prompt_id: prompt_id.clone(),
-            agent_id: agent_id.clone(),
-            session_id: session_id.clone(),
-            model: model.clone(),
-            model_params: None,
-            outer_turn_id: None,
-            operation: tau_proto::PromptOperation::StandaloneCompaction,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
-    append_seed_agent_event(
-        store,
-        Event::ProviderStandaloneExecutionAccounted(
-            tau_proto::ProviderStandaloneExecutionAccounted {
-                session_id,
-                agent_id: agent_id.clone(),
-                agent_prompt_id: prompt_id,
-                logical_attempt: tau_proto::ProviderAttempt::ONE,
-                transaction_id: transaction_id.clone(),
-                model,
-                backend: None,
-                usage: tau_proto::StandaloneExecutionUsage::Known(usage.clone()),
-                estimated_api_cost_rates: Some(rates),
-                estimated_api_cost_increment: Some(tau_proto::EstimatedApiCost::for_usage(
-                    &usage, rates,
-                )),
-                output: tau_proto::StandaloneExecutionOutput::Rejected,
-                finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
-            },
-        ),
-    );
-    append_seed_agent_event(
-        store,
-        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
-            agent_id,
-            transaction_id,
-            cut: tau_proto::AgentHead::Root,
-            reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
-            resume_through: Some(tau_proto::AgentHead::Root),
-            context_retreat: None,
-            incomplete_response: None,
-        }),
-    );
-}
-
 /// UI cancellation during reactive compaction publishes one durable Cancelled
 /// outcome; a late provider terminal and cold replay cannot duplicate it.
 #[test]
@@ -1852,4 +1452,258 @@ fn unload_waits_for_dual_retained_accounting_retry_batch() {
         2
     );
     h.shutdown().expect("shutdown");
+}
+
+/// Final shutdown must fail before invalidating an accounting fact parked at an
+/// interceptor, then succeed after that exact fact commits.
+#[test]
+fn parked_standalone_accounting_blocks_shutdown_until_committed() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    let interceptor = "parked-accounting-shutdown";
+    connect_test_tool(&mut h, interceptor);
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register accounting interceptor");
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact).expect("valid compact response"),
+    )
+    .expect("park accounting publication");
+    assert!(h.has_unsettled_standalone_accounting_publication());
+
+    let error = h
+        .shutdown()
+        .expect_err("shutdown must not discard parked accounting");
+    assert!(
+        error.to_string().contains("accounting remains uncommitted"),
+        "{error}"
+    );
+    assert_eq!(
+        h.session_runtime.current_session_id,
+        test_session_id("s1"),
+        "failed shutdown must preserve the accounting session"
+    );
+
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit parked accounting");
+    assert!(!h.has_unsettled_standalone_accounting_publication());
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown after accounting commit");
+}
+
+/// Seed one terminal standalone transaction and its session-correlated spend.
+fn append_seed_standalone_accounting(
+    store: &mut tau_core::AgentStore,
+    session: &str,
+    suffix: &str,
+    picodollars: u64,
+) {
+    let agent_id = crate::parse_agent_id("main");
+    let session_id = test_session_id(session);
+    let prompt_id = test_agent_prompt_id(format!("accounting-{suffix}"));
+    let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{suffix}"))
+        .expect("valid transaction id");
+    let model: tau_proto::ModelId = "test/model".into();
+    let rates = tau_proto::EstimatedApiCostRates {
+        uncached_input: tau_proto::EstimatedUsdPerMillion::from_micro_usd(1),
+        cached_input: tau_proto::EstimatedUsdPerMillion::from_micro_usd(1),
+        cache_write_input: None,
+        output: tau_proto::EstimatedUsdPerMillion::from_micro_usd(1),
+        storage_per_million_token_hour: None,
+    };
+    let usage = tau_proto::ProviderTokenUsage {
+        model: Some(model.clone()),
+        prompt_sent_tokens: picodollars,
+        ..Default::default()
+    };
+    append_seed_agent_event(
+        store,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: transaction_id.clone(),
+            compact_prompt_id: prompt_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: Some(tau_proto::AgentHead::Root),
+            model: model.clone(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+        }),
+    );
+    append_seed_agent_event(
+        store,
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id: prompt_id.clone(),
+            agent_id: agent_id.clone(),
+            session_id: session_id.clone(),
+            model: model.clone(),
+            model_params: None,
+            outer_turn_id: None,
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    append_seed_agent_event(
+        store,
+        Event::ProviderStandaloneExecutionAccounted(
+            tau_proto::ProviderStandaloneExecutionAccounted {
+                session_id,
+                agent_id: agent_id.clone(),
+                agent_prompt_id: prompt_id,
+                logical_attempt: tau_proto::ProviderAttempt::ONE,
+                transaction_id: transaction_id.clone(),
+                model,
+                backend: None,
+                usage: tau_proto::StandaloneExecutionUsage::Known(usage.clone()),
+                estimated_api_cost_rates: Some(rates),
+                estimated_api_cost_increment: Some(tau_proto::EstimatedApiCost::for_usage(
+                    &usage, rates,
+                )),
+                output: tau_proto::StandaloneExecutionOutput::Rejected,
+                finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+            },
+        ),
+    );
+    append_seed_agent_event(
+        store,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id,
+            transaction_id,
+            cut: tau_proto::AgentHead::Root,
+            reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
+            resume_through: Some(tau_proto::AgentHead::Root),
+            context_retreat: None,
+            incomplete_response: None,
+        }),
+    );
+}
+
+/// Sequential fixed-session daemons restore only their own accounting and
+/// repeated folds stay idempotent.
+#[test]
+fn standalone_accounting_restore_is_session_scoped_and_idempotent() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    store
+        .append_agent_event_at(
+            "parent",
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::User),
+                parent_agent: None,
+                agent_id: crate::parse_agent_id("parent"),
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("seed parent");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::Agent {
+                session_id: test_session_id("s1"),
+                agent_id: crate::parse_agent_id("parent"),
+            }),
+            parent_agent: None,
+            agent_id: crate::parse_agent_id("main"),
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    );
+    append_seed_standalone_accounting(&mut store, "s1", "one", 101);
+    append_seed_standalone_accounting(&mut store, "s2", "two", 202);
+    drop(store);
+
+    for (session, expected_cost) in [("s1", 101), ("s2", 202)] {
+        let mut h = quiet_provider_harness_for_with_start_reason_and_storage_mode(
+            session,
+            &state,
+            tau_proto::SessionStartReason::Initial,
+            crate::HarnessStorageMode::Durable,
+        )
+        .expect("start fixed-session incarnation");
+        h.publish_event(
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
+                    "init-{session}"
+                ))
+                .expect("valid initialization id"),
+                session_id: test_session_id(session),
+                agent_id: crate::parse_agent_id("main"),
+                ephemeral: false,
+            }),
+        );
+        h.restore_standalone_execution_accounting();
+        h.restore_standalone_execution_accounting();
+        h.finalize_restored_standalone_costs();
+        h.finalize_restored_standalone_costs();
+        assert_eq!(
+            h.session_runtime
+                .current_session_state
+                .token_usage
+                .total
+                .requests,
+            1,
+            "{session}"
+        );
+        assert_eq!(
+            h.agent_runtime
+                .agent_registry
+                .cost_ledger
+                .self_cost(&crate::parse_agent_id("main"))
+                .as_picodollars(),
+            expected_cost,
+            "{session}"
+        );
+        h.shutdown().expect("shutdown fixed-session incarnation");
+        wait_for_session_unlock(&state, session);
+    }
 }

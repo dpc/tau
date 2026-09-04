@@ -72,21 +72,12 @@ clears the suspension; normal interception resumes after reply consumption or a
 new connection.
 Deferred publications removed by teardown run the same
 reservation, ACK, and ephemeral-marker cleanup as an interceptor Drop.
-Rollover advances the admission generation before quiescing publication.
-Configured-extension frames retain their original admission session/generation
-through pre-Ready and global activation staging. Documented session-bound raw
-observation families still commit and broadcast across rollover: tool requests,
-start-agent requests, internal-prompt requests, and every per-agent-context and
-session-discovery declaration/readiness event. One common post-commit boundary
-rejects their stale-generation semantics, including tool routing, prompt
-submission, canonical message projection, metadata mutation, and
-context/discovery projection, while releasing any activation reservation.
-Tool declarations, prompt-fragment declarations, provider-model declarations,
-and provider-quota reports are process-global exceptions: rollover retains them
-and their semantic consumer runs only when the captured connection and extension
-instance still exactly match the live generation. The family-specific linked
-specifications are the source of truth for whether a committed peer event is
-session-bound observation or process-global current state.
+Configured-extension frames retain their immutable admitted session and
+connection generation through pre-Ready and global activation staging.
+Session-bound semantic consumers reject any frame whose captured session or
+connection no longer matches. Process-global tool, prompt-fragment,
+provider-model, and provider-quota consumers still require the captured
+connection and configured extension instance to remain exact.
 Declarations are excluded from semantic persistence and replay for either
 caller-supplied `persist` value; see
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
@@ -242,27 +233,13 @@ non-extension client receives exactly one requester-directed, content-free
 `ui.command_error`; configured extensions are silently denied without a response,
 warning, or disconnection.
 
-UI detach is a payload-free `ui_detach_request` input message from an attached
-socket UI. During startup it records that the initial UI requested detach;
-during the runtime serve loop it clears `exit_on_disconnect`. The request does
-not enter publication, interception, subscriptions, semantic persistence, or
-replay. It remains visible as a point-to-point input frame in local debug JSONL
-and is metered as `message.ui_detach_request`.
-
-Detach authority uses the same exact `is_attached_socket_ui` classification as
-UI diagnostics. Other client origins are silently denied without changing
-connection-control state or publishing a diagnostic. Configured extensions are
-also silently denied after normal phase validation and metering but before
-activation staging, so repeated requests cannot consume activation quota,
-disconnect the extension, or fail required startup.
-
 UI shutdown is a payload-free `ui_shutdown_request` input message. During
 startup it records a pending shutdown; during the runtime serve loop it requests
 unconditional harness shutdown. The loop then follows the same canonical shutdown path as a
 termination signal: it retires admission, publishes the harness-authored
 `session.shutdown` fact, disconnects all attached UIs and extensions, settles
 semantic persistence, and cleans owned runtime discovery artifacts. The request
-does not alter `exit_on_disconnect` and does not enter publication,
+does not enter publication,
 interception, subscriptions, semantic persistence, or replay. It remains
 visible as a point-to-point input frame in local debug JSONL and is metered as
 `message.ui_shutdown_request`.
@@ -318,7 +295,7 @@ Runtime notification deadlines are process-monotonic and generation-scoped.
 The event loop processes due notification readiness before an equal
 activating-input timeout, then background/tool deadlines and lower-priority
 operational deadlines. It drains a bounded cohort before returning to ingress.
-Session rollover, unload, and shutdown discard the runtime schedules; no
+Unload and final shutdown discard the runtime schedules; no
 deadline metadata is persisted.
 
 ## Lifecycle events

@@ -71,21 +71,18 @@ receiving harness performs only bounded syntax and claimed-session checks before
 it authenticates caller-supplied sender identity plus message/watch-response kind
 by calling back to the claimed sender
 harness with a sender-minted per-message capability bound to the message body and
-routing fields. Runtime daemon metadata is discovery data only: `session_id`
-means the daemon's current active session and is updated on `:session new`; stale
-or ambiguous metadata must fail discovery rather than silently choosing a target.
-A discovery scan never deletes runtime files: even a dead-pid and file-identity
-check cannot be atomic with PID reuse and a replacement daemon binding the same
-pathname. Daemons remove their own pair after graceful shutdown. Targeted
-session lookup scans a larger bounded raw catalog than general peer listing,
-while retaining a candidate cap, deadline, live probe, incomplete-scan failure,
-and true-ambiguity rejection.
+routing fields. Runtime routing derives one lifetime claim and socket from the
+exact immutable session id. PIDs, process generations, and a global catalog are
+not authority. An absent or safely unlocked claim is not running; a contended
+claim must admit the exact expected session or resolution fails incomplete.
+Only the claim owner may reclaim or retire the deterministic socket. Bounded
+listing scans claims, but targeted routing never scans unrelated daemons.
 The binding carries a tagged exact-agent or bare-entrypoint recipient. Bare
 selection and exact-agent inventory validation happen only after callback
 authentication and target-policy/session revalidation; exact known-address
 behavior remains independent of entrypoint advertisement. Runtime lookup,
 connection, callback, and send work is bounded by shared absolute deadlines and
-non-queued process/connection admission. Disconnect or session rollover cancels
+non-queued process/connection admission. Disconnect or daemon shutdown cancels
 the associated work, and stale-generation completions cannot publish projections.
 Callback correlation precedes peer input admission and any auto-start creation.
 The target event loop owns bounded live single-flight selection, and revalidates

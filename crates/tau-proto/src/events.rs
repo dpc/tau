@@ -3917,18 +3917,6 @@ pub enum UiRoleUpdateAction {
     },
 }
 
-/// The user requests switching to a different session within the same
-/// daemon. Harness emits `SessionShutdown` for the current session,
-/// then `SessionStarted { reason: New | Resume }` for the new one,
-/// and waits for extensions to acknowledge re-init.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiSwitchSession {
-    pub new_session_id: SessionId,
-    /// `New` if the id was just minted, `Resume` if it points at an
-    /// existing session on disk.
-    pub reason: SessionStartReason,
-}
-
 /// The UI requests creation of an agent and may include the first prompt
 /// that should be submitted to it. This is the explicit boundary between
 /// pre-agent UI state (role/cwd can still change freely) and agent state.
@@ -5164,22 +5152,18 @@ pub struct AgentUserMessageInjected {
 // Session lifecycle/membership events
 // ---------------------------------------------------------------------------
 
-/// Why a `SessionStarted` was published. Lets extensions distinguish
-/// "first session of this harness's life" from "user switched to a new
-/// session" (e.g. so they can clear caches).
+/// Why a `SessionStarted` was published.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStartReason {
     /// The harness eagerly initialized this session at startup.
     Initial,
-    /// The user requested a fresh session via `:session new`.
-    New,
     /// The user resumed an existing session by id.
     Resume,
 }
 
-/// The harness created or switched to a session. Extensions that subscribe
-/// react by performing per-session setup (e.g. discovering AGENTS.md) and
+/// The harness initialized its immutable bound session. Extensions that
+/// subscribe react by performing session setup (e.g. discovering AGENTS.md) and
 /// signal completion with `ExtensionSessionContextReady`. Per-agent providers
 /// instead react to `SessionAgentLoaded` and use `ExtensionContextReady`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -5193,9 +5177,7 @@ fn default_session_start_reason() -> SessionStartReason {
     SessionStartReason::Initial
 }
 
-/// The harness is leaving the current session. Fired before
-/// `SessionStarted` for the next one when the user switches sessions, or
-/// before final harness teardown.
+/// The harness is shutting down its immutable session before final teardown.
 /// Extensions that hold per-session state subscribe to flush or drop it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionShutdown {
@@ -6954,8 +6936,6 @@ pub enum Event {
     UiRoleUpdate(UiRoleUpdate),
     #[serde(rename = "ui.shell_command")]
     UiShellCommand(UiShellCommand),
-    #[serde(rename = "ui.switch_session")]
-    UiSwitchSession(UiSwitchSession),
     #[serde(rename = "ui.create_agent")]
     UiCreateAgent(UiCreateAgent),
     #[serde(rename = "ui.create_agent_result")]
@@ -7431,7 +7411,6 @@ impl Event {
             Self::UiAgentModelSelect(_) => EventName::UI_AGENT_MODEL_SELECT,
             Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
-            Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
             Self::UiCreateAgentResult(_) => EventName::UI_CREATE_AGENT_RESULT,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,

@@ -74,7 +74,7 @@ enum TestMessage {
     GetCurrentSession(tau_proto::GetCurrentSession),
     GetSessionAgentList(tau_proto::GetSessionAgentList),
     Configure(tau_proto::Configure),
-    UiSessionAccepted(tau_proto::UiSessionAccepted),
+    SessionAccepted(tau_proto::SessionAccepted),
     InterceptRequest(tau_proto::InterceptRequest),
     LiveDelivery(EventDelivery),
     AgentPromptCreatedResult(Box<tau_proto::AgentPromptCreatedResult>),
@@ -114,8 +114,8 @@ impl TestProtocolItem {
             HarnessOutputMessage::Configure(message) => {
                 Self::Message(TestMessage::Configure(message))
             }
-            HarnessOutputMessage::UiSessionAccepted(message) => {
-                Self::Message(TestMessage::UiSessionAccepted(message))
+            HarnessOutputMessage::SessionAccepted(message) => {
+                Self::Message(TestMessage::SessionAccepted(message))
             }
             HarnessOutputMessage::Disconnect(message) => {
                 Self::Message(TestMessage::Disconnect(message))
@@ -198,7 +198,7 @@ impl TestMessage {
             Self::GetCurrentSession(message) => HarnessInputMessage::GetCurrentSession(message),
             Self::GetSessionAgentList(message) => HarnessInputMessage::GetSessionAgentList(message),
             Self::Configure(_)
-            | Self::UiSessionAccepted(_)
+            | Self::SessionAccepted(_)
             | Self::InterceptRequest(_)
             | Self::LiveDelivery(_)
             | Self::AgentPromptCreatedResult(_)
@@ -362,17 +362,6 @@ fn set_test_agent_context_wait(
                 waiting_on,
             },
         );
-}
-
-fn test_agent_context_waits<'a>(
-    h: &'a Harness,
-    agent_id: &tau_proto::AgentId,
-) -> Option<&'a std::collections::HashSet<tau_proto::ConnectionId>> {
-    h.prompt_coordination
-        .context_discovery
-        .pending_agents
-        .get(agent_id)
-        .map(|pending| &pending.waiting_on)
 }
 
 fn finish_test_agent_context_wait(h: &mut Harness, agent_id: &tau_proto::AgentId) {
@@ -1275,10 +1264,51 @@ fn echo_harness_with_dirs_and_start_reason(
     start_reason: tau_proto::SessionStartReason,
     storage_mode: crate::HarnessStorageMode,
 ) -> Result<Harness, HarnessError> {
+    echo_harness_with_dirs_start_reason_and_hook(
+        session_id,
+        state_dir,
+        dirs,
+        start_reason,
+        storage_mode,
+        None,
+    )
+}
+
+/// Builds an echo harness whose test callback can subscribe immediately before
+/// immutable-session initialization publishes lifecycle and replay facts.
+fn echo_harness_with_start_reason_before_session_init(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+    before_session_init: Box<dyn FnOnce(&mut Harness)>,
+) -> Result<Harness, HarnessError> {
+    let state_dir = state_dir.into();
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state_dir.join("config")),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+    echo_harness_with_dirs_start_reason_and_hook(
+        session_id,
+        state_dir,
+        dirs,
+        start_reason,
+        crate::HarnessStorageMode::Durable,
+        Some(before_session_init),
+    )
+}
+
+fn echo_harness_with_dirs_start_reason_and_hook(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    dirs: tau_config::settings::TauDirs,
+    start_reason: tau_proto::SessionStartReason,
+    storage_mode: crate::HarnessStorageMode,
+    before_session_init: Option<crate::harness::BeforeSessionInitHook>,
+) -> Result<Harness, HarnessError> {
     fn shell_runner(r: UnixStream, w: UnixStream, project_root: PathBuf) -> Result<(), String> {
         tau_ext_shell::run_for_test_harness(r, w, project_root).map_err(|e| e.to_string())
     }
-    let mut h = Harness::new_with_provider(
+    let mut h = Harness::new_with_provider_and_internal_tools(
         state_dir,
         dirs,
         echo_runner,
@@ -1286,9 +1316,13 @@ fn echo_harness_with_dirs_and_start_reason(
             name: "shell",
             runner: shell_runner,
         }],
-        session_id,
-        start_reason,
-        storage_mode,
+        crate::harness::TestProviderHarnessStartup {
+            session_id,
+            reason: start_reason,
+            storage_mode,
+            internal_tool_handlers: Vec::new(),
+            before_session_init,
+        },
     )?;
     h.agent_runtime.agent_registry.id_rng = super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
@@ -1460,16 +1494,6 @@ fn quiet_provider_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, Harn
 
 /// Builds the quiet-provider fixture without persistent session or agent stores
 /// for tests whose assertions do not cover durability.
-fn quiet_provider_harness_memory_only(
-    state_dir: impl Into<PathBuf>,
-) -> Result<Harness, HarnessError> {
-    quiet_provider_harness_with_start_reason_and_storage_mode(
-        state_dir,
-        tau_proto::SessionStartReason::Initial,
-        crate::HarnessStorageMode::MemoryOnly,
-    )
-}
-
 fn quiet_provider_harness_with_start_reason(
     state_dir: impl Into<PathBuf>,
     start_reason: tau_proto::SessionStartReason,
@@ -1509,6 +1533,22 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
     state_dir: impl Into<PathBuf>,
     start_reason: tau_proto::SessionStartReason,
     storage_mode: crate::HarnessStorageMode,
+) -> Result<Harness, HarnessError> {
+    quiet_provider_harness_for_with_start_reason_storage_mode_and_hook(
+        session_id,
+        state_dir,
+        start_reason,
+        storage_mode,
+        None,
+    )
+}
+
+fn quiet_provider_harness_for_with_start_reason_storage_mode_and_hook(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+    storage_mode: crate::HarnessStorageMode,
+    before_session_init: Option<crate::harness::BeforeSessionInitHook>,
 ) -> Result<Harness, HarnessError> {
     fn quiet_provider_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         fn inner(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
@@ -1582,14 +1622,130 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    let mut h = Harness::new_with_provider(
+    let mut h = Harness::new_with_provider_and_internal_tools(
         state_dir,
         dirs,
         quiet_provider_runner,
         Vec::new(),
+        crate::harness::TestProviderHarnessStartup {
+            session_id,
+            reason: start_reason,
+            storage_mode,
+            internal_tool_handlers: Vec::new(),
+            before_session_init,
+        },
+    )?;
+    h.agent_runtime.agent_registry.id_rng = super::deterministic_agent_id_rng();
+    make_notification_delivery_immediate(&mut h);
+    Ok(h)
+}
+
+fn quiet_standalone_provider_harness_for_with_start_reason_and_storage_mode(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+    storage_mode: crate::HarnessStorageMode,
+) -> Result<Harness, HarnessError> {
+    quiet_standalone_provider_harness_for_with_start_reason_storage_mode_and_hook(
         session_id,
+        state_dir,
         start_reason,
         storage_mode,
+        None,
+    )
+}
+
+fn quiet_standalone_provider_harness_for_with_start_reason_storage_mode_and_hook(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+    storage_mode: crate::HarnessStorageMode,
+    before_session_init: Option<crate::harness::BeforeSessionInitHook>,
+) -> Result<Harness, HarnessError> {
+    fn quiet_provider_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
+        fn inner(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
+            let mut reader = TestOutputReader::new(BufReader::new(r));
+            let mut writer = TestInputWriter::new(BufWriter::new(w));
+
+            writer.write_frame(&TestProtocolItem::Message(TestMessage::Hello(
+                tau_proto::Hello {
+                    protocol_version: tau_proto::PROTOCOL_VERSION,
+                    client_name: crate::test_extension_name("tau-quiet-provider"),
+                    client_kind: tau_proto::ClientKind::Provider,
+                    expected_session_id: None,
+                    capabilities: Default::default(),
+                },
+            )))?;
+            writer.write_frame(&TestProtocolItem::Event(Event::ProviderModelsDeclared(
+                tau_proto::ProviderModelsDeclared {
+                    models: vec![tau_proto::ProviderModelInfo {
+                        id: "test/model".into(),
+                        display_name: Some("Test".to_owned()),
+                        tags: Vec::new(),
+                        hosted_tool_capabilities: Vec::new(),
+                        supported_tool_types: vec![tau_proto::ToolType::Function],
+                        input_modalities: Vec::new(),
+                        tool_result_modalities: Vec::new(),
+                        supports_parallel_tool_calls: true,
+                        default_affinity: 0,
+                        context_window: tau_proto::TokenCount::new(1_000),
+                        max_input_tokens: None,
+                        max_output_tokens: None,
+                        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                            tau_proto::NativeReasoningEffort::Medium,
+                        ]),
+                        verbosities: vec![tau_proto::Verbosity::Medium],
+                        thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
+                        supports_compaction: false,
+                        supports_standalone_compaction: true,
+                        standalone_compaction_generation_negative: false,
+                        standalone_compaction_threshold: None,
+                        standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(1_000)),
+                        cache_policy: None,
+                        est_uncached_input_cost_1m_usd: Default::default(),
+                        est_cached_input_cost_1m_usd: Default::default(),
+                        est_cache_write_input_cost_1m_usd: Default::default(),
+                        est_output_cost_1m_usd: Default::default(),
+                        est_cache_storage_cost_1m_token_hour_usd: None,
+                    }],
+                },
+            )))?;
+            writer.write_frame(&TestProtocolItem::Message(TestMessage::Ready(
+                tau_proto::Ready {
+                    message: Some("quiet provider ready".to_owned()),
+                },
+            )))?;
+            writer.flush()?;
+
+            while let Some(frame) = reader.read_frame()? {
+                let frame = frame.into_event_frame();
+                if matches!(frame, TestProtocolItem::Message(TestMessage::Disconnect(_))) {
+                    return Ok(());
+                }
+            }
+            Ok(())
+        }
+
+        inner(r, w).map_err(|e| e.to_string())
+    }
+
+    let state_dir = state_dir.into();
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state_dir.join("config")),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+    let mut h = Harness::new_with_provider_and_internal_tools(
+        state_dir,
+        dirs,
+        quiet_provider_runner,
+        Vec::new(),
+        crate::harness::TestProviderHarnessStartup {
+            session_id,
+            reason: start_reason,
+            storage_mode,
+            internal_tool_handlers: Vec::new(),
+            before_session_init,
+        },
     )?;
     h.agent_runtime.agent_registry.id_rng = super::deterministic_agent_id_rng();
     make_notification_delivery_immediate(&mut h);

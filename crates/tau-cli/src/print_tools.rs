@@ -67,9 +67,10 @@ pub(crate) fn run_print_tools(
         },
         tau_harness::HarnessStorageMode::SessionEphemeral,
     )?;
-    daemon.ensure_runtime_pair_cleanup_after_reap();
 
-    let tools = get_rendered_tool_definitions(&mut daemon, role)?
+    let result = get_rendered_tool_definitions(&mut daemon, role);
+    daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
+    let tools = result?
         .into_iter()
         .map(ModelVisibleToolDefinition::from)
         .collect::<Vec<_>>();

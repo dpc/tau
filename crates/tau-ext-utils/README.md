@@ -117,8 +117,8 @@ One accepted call makes one `AppendFile` RPC and writes one trailing-newline
 record. The harness serializes User-scope appends across harness processes that
 share this Tau state root and configured instance, then synchronously
 `sync_all`s the file. Papercuts are best-effort and non-transactional:
-memory-only mode, a full file, an RPC failure, and the rare session rollover
-timing mismatch can leave a report unrecorded. Ephemeral sessions use the same
+memory-only mode, a full file, an RPC failure, and a final-shutdown timing
+race can leave a report unrecorded. Ephemeral sessions use the same
 durable per-instance file. The tool returns a concise recorded/not-recorded outcome
 and tells the agent to continue its primary task without retrying.
 

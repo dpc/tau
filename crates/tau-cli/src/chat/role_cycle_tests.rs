@@ -26,7 +26,7 @@ fn routing_state(
         );
     }
     InputRoutingState::new(
-        Arc::new(Mutex::new(None.into())),
+        Arc::new(Mutex::new(SelectionIntent::default())),
         known,
         Arc::new(Mutex::new(navigation)),
         Arc::new(Mutex::new(path_std_collections::HashSet::new())),
@@ -62,23 +62,6 @@ fn agent_completer_offers_subcommands_first() {
             ("auto", "Make a loaded agent eligible only while running"),
             ("name", "Set an agent display name"),
         ]
-    );
-}
-
-#[test]
-fn session_completer_offers_new_subcommand() {
-    // `:session new` is the session-level fresh-start command; `:new` is
-    // reserved as an alias for `:agent new`.
-    let completer = build_session_arg_completer();
-
-    let entries: Vec<_> = completer(&[""])
-        .into_iter()
-        .map(|item| (item.value, item.description))
-        .collect();
-
-    assert_eq!(
-        entries,
-        vec![("new".to_owned(), "Start a fresh chat session".to_owned())]
     );
 }
 
@@ -188,7 +171,7 @@ fn active_auto_completion_follows_runtime_state() {
     );
     let navigation = Arc::new(Mutex::new(navigation));
     let routing = InputRoutingState::new(
-        Arc::new(Mutex::new(None.into())),
+        Arc::new(Mutex::new(SelectionIntent::default())),
         Arc::new(Mutex::new(vec!["helper".to_owned()])),
         navigation.clone(),
         Arc::new(Mutex::new(Default::default())),

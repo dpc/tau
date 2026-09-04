@@ -74,8 +74,8 @@ fn ui_session_admission_preserves_coalesced_followup() {
     let expected = tau_proto::SessionId::parse("session-1").expect("valid session id");
     let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(server));
     writer
-        .write_message(&HarnessOutputMessage::UiSessionAccepted(
-            tau_proto::UiSessionAccepted {
+        .write_message(&HarnessOutputMessage::SessionAccepted(
+            tau_proto::SessionAccepted {
                 session_id: expected.clone(),
             },
         ))
@@ -1359,38 +1359,6 @@ fn debug_show_event_stats_command_sends_dedicated_request_frame() {
     assert!(usage.is_empty());
 }
 
-/// `:detach` selects the daemon-preserving exit path and writes exactly one
-/// dedicated connection-control frame rather than an emitted event.
-#[test]
-fn detach_command_sends_dedicated_request_frame() {
-    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
-    harness_stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("read timeout");
-    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
-
-    assert_eq!(
-        handle_ui_detach_command_text(":detach", &writer),
-        Some(InputLoopExit::Detach)
-    );
-
-    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
-    assert_eq!(
-        reader.read_message().expect("read request"),
-        Some(HarnessInputMessage::UiDetachRequest(
-            tau_proto::UiDetachRequest {},
-        ))
-    );
-    match reader.read_message() {
-        Err(tau_proto::DecodeError::Io(error))
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            ) => {}
-        other => panic!("unexpected second detach frame: {other:?}"),
-    }
-}
-
 /// `:quit-session` selects canonical session shutdown and writes exactly one
 /// dedicated lifecycle request rather than an emitted event.
 #[test]
@@ -1419,72 +1387,24 @@ fn quit_session_command_sends_dedicated_request_frame() {
     );
 }
 
-/// `:quit` exits only the invoking UI and leaves daemon lifetime to the
-/// harness's independently configured disconnect policy.
+/// `:quit` and `:detach` are UI-local aliases. Neither writes a harness frame,
+/// and both leave the fixed-session daemon running.
 #[test]
-fn quit_uses_policy_owned_daemon_disposition() {
+fn quit_and_detach_are_frame_free_local_exits() {
+    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+
+    assert_eq!(
+        handle_ui_detach_command_text(":detach"),
+        Some(InputLoopExit::Quit)
+    );
     assert_eq!(
         InputLoopExit::Quit.daemon_disposition(),
         DaemonDisposition::KeepRunning
     );
-}
-
-/// Foreground-ownership fail-stop sends daemon-preservation authorization
-/// before the production shutdown sequence disconnects the affected attachment.
-#[test]
-fn foreground_fail_stop_sequences_detach_before_disconnect() {
-    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
-    harness_stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("read timeout");
-    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
-
-    send_ui_exit_frames(InputLoopExit::ForegroundOwnershipUnconfirmed, &writer);
-
+    drop(writer);
     let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
-    assert_eq!(
-        reader.read_message().expect("read request"),
-        Some(HarnessInputMessage::UiDetachRequest(
-            tau_proto::UiDetachRequest {},
-        ))
-    );
-    assert_eq!(
-        reader.read_message().expect("read disconnect"),
-        Some(HarnessInputMessage::Disconnect(Disconnect {
-            reason: Some("detach".to_owned()),
-        }))
-    );
-}
-
-/// Terminal output failure must use the same attachment-only detach protocol as
-/// an explicit detach, leaving an owned harness available for reattachment.
-#[test]
-fn output_failure_sequences_detach_before_disconnect() {
-    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
-    harness_stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("read timeout");
-    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
-
-    send_ui_exit_frames(InputLoopExit::TerminalOutputFailed, &writer);
-
-    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
-    assert_eq!(
-        reader.read_message().expect("read request"),
-        Some(HarnessInputMessage::UiDetachRequest(
-            tau_proto::UiDetachRequest {},
-        ))
-    );
-    assert_eq!(
-        reader.read_message().expect("read disconnect"),
-        Some(HarnessInputMessage::Disconnect(Disconnect {
-            reason: Some("detach".to_owned()),
-        }))
-    );
-    assert_eq!(
-        InputLoopExit::TerminalOutputFailed.daemon_disposition(),
-        DaemonDisposition::KeepRunning
-    );
+    assert_eq!(reader.read_message().expect("read EOF"), None);
 }
 
 /// Bare `:tree`'s production command boundary writes exactly one dedicated
@@ -1537,7 +1457,7 @@ fn handshake_write_error_reads_pending_startup_disconnect() {
 
     let mut harness_writer = HarnessOutputWriter::new(&mut harness_stdout);
     harness_writer
-        .write_message(&HarnessOutputMessage::Disconnect(Disconnect {
+        .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
             reason: Some("harness startup failed: missing secret".to_owned()),
         }))
         .expect("write disconnect");

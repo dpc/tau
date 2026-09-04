@@ -109,7 +109,7 @@ thread_local! {
 /// session.
 ///
 /// Provider response and publication coordination remain separate because they
-/// have independent lifecycles and commit authority. Session rollover clears
+/// have independent lifecycles and commit authority. Final shutdown clears
 /// live ownership, scheduler state, and same-session completion tombstones
 /// explicitly; canonical terminals remove individual calls only after commit.
 /// This type has no drop side effects. Explicit provider-disconnect, session,

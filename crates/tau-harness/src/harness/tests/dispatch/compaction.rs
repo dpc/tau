@@ -5112,116 +5112,6 @@ fn staged_model_acceptance_excludes_ui_and_preserves_call_correlation() {
     );
 }
 
-/// Caller/target teardown and session rollover discard a model-tool acceptance
-/// that has not committed, without ACKing or retaining stale quota ownership.
-#[test]
-fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
-    for teardown in ["target_unload", "caller_unload", "session_switch"] {
-        let (_td, mut h, caller_cid, target_cid, call, target_id) =
-            setup_manual_cross_compaction_test();
-        let interceptor = match teardown {
-            "target_unload" => "model-acceptance-target-unload",
-            "caller_unload" => "model-acceptance-caller-unload",
-            "session_switch" => "model-acceptance-session-switch",
-            _ => unreachable!("fixed teardown cases"),
-        };
-        connect_test_tool(&mut h, interceptor);
-        h.handle_extension_event(
-            interceptor,
-            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-                selectors: vec![EventSelector::Exact(
-                    tau_proto::EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
-                )],
-                priority: InterceptionPriority::new(0),
-            })),
-        )
-        .expect("register acceptance interceptor");
-        h.request_agent_tool_compaction(
-            &caller_cid,
-            &call,
-            ToolName::new("agent_compact"),
-            Some(&target_id),
-        );
-        assert_eq!(
-            h.prompt_coordination
-                .compaction_runtime
-                .pending_manual_acceptances
-                .len(),
-            1
-        );
-        let request_key = h
-            .prompt_coordination
-            .compaction_runtime
-            .pending_manual_acceptances
-            .keys()
-            .next()
-            .cloned()
-            .expect("staged request id");
-        let request_id = request_key.request_id().clone();
-        if teardown == "caller_unload" {
-            reject_next_semantic_admission(&h);
-            h.handle_extension_event(
-                interceptor,
-                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-                    action: InterceptAction::Pass(None),
-                })),
-            )
-            .expect("retain append-rejected acceptance");
-            assert!(
-                h.prompt_coordination
-                    .prompt_runtime
-                    .pending_publish_completions
-                    .contains_key(&target_cid)
-            );
-        }
-        match teardown {
-            "target_unload" => h.remove_agent_expected(&target_cid),
-            "caller_unload" => h.remove_agent_expected(&caller_cid),
-            "session_switch" => h
-                .switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-                .expect("switch session"),
-            _ => unreachable!("fixed teardown cases"),
-        }
-        assert!(
-            h.prompt_coordination
-                .compaction_runtime
-                .pending_manual_acceptances
-                .is_empty()
-                && !h
-                    .tool_routing
-                    .tool_runtime
-                    .tool_turn
-                    .is_backgrounded(&call.id),
-            "teardown={teardown}"
-        );
-        assert!(
-            h.runtime_io.publication.pending_intercept.is_none()
-                && h.runtime_io.publication.deferred.iter().all(|pending| {
-                    !matches!(
-                        pending.event(),
-                        Event::AgentManualCompactionRequested(request)
-                            if request.request_id == request_id
-                    )
-                }),
-            "teardown={teardown}"
-        );
-        assert!(
-            h.prompt_coordination
-                .compaction_runtime
-                .accepted_manual_tools
-                .is_empty()
-                && h.prompt_coordination
-                    .compaction_runtime
-                    .active_manual_starts_is_empty()
-                && h.prompt_coordination
-                    .prompt_runtime
-                    .pending_publish_completions
-                    .is_empty(),
-            "teardown={teardown}"
-        );
-    }
-}
-
 /// Possession of the cross-agent capability authorizes an unrelated loaded
 /// agent without ancestry, watch, or message relationships.
 #[test]
@@ -5911,56 +5801,6 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
             .compaction_runtime
             .pending_ui_after_wait
             .contains_key(&cid)
-    );
-}
-
-/// Session rollover clears a parked wait-preemption request and cannot leak a
-/// late compaction start into the replacement session.
-#[test]
-fn session_rollover_while_wait_preemption_is_parked_never_compacts() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
-    h.provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model")
-        .supports_standalone_compaction = true;
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let wait = wait_input_call("wait-preempt-rollover");
-    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
-    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
-    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
-        .expect("install input wait");
-    connect_test_tool(&mut h, "wait-rollover-interceptor");
-    h.handle_extension_event(
-        "wait-rollover-interceptor",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register cancellation interceptor");
-    h.handle_compact_request(
-        crate::harness::harness_connection_id(),
-        test_session_id("s1"),
-        Some(agent_id.as_str()),
-    );
-
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("roll over session");
-
-    assert!(
-        h.prompt_coordination
-            .compaction_runtime
-            .pending_ui_after_wait
-            .is_empty()
-    );
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
     );
 }
 
@@ -7558,298 +7398,6 @@ fn reactive_context_overflow_claimed_crash_is_not_redispatched() {
     resumed.shutdown().expect("shutdown");
 }
 
-/// Discovery-complete absence after compact success commits one exact
-/// continuation checkpoint, terminalizes it without remote inference, and does
-/// not resend if the captured model later appears or the session replays.
-#[test]
-fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
-    let td = TempDir::new().expect("tempdir");
-    let state = td.path().join("state");
-    seed_main_agent_loaded(&state);
-    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
-    append_seed_agent_event(
-        &mut store,
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            agent_id: agent_id.clone(),
-            inference_activation: true,
-            text: "owed".to_owned(),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
-            display_name: None,
-            ctx_id: None,
-        }),
-    );
-    let through = tau_proto::AgentHead::Node(
-        store
-            .agent("main")
-            .and_then(tau_core::AgentTree::head)
-            .expect("head"),
-    );
-    let failed_prompt_id = test_agent_prompt_id("ap-main-overflow-success-cut");
-    append_seed_agent_event(
-        &mut store,
-        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
-            output_length_continuation: None,
-            agent_id: agent_id.clone(),
-            transaction_id: None,
-            agent_prompt_id: failed_prompt_id.clone(),
-            through,
-            model: Some("provider-b/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
-        }),
-    );
-    append_seed_agent_event(
-        &mut store,
-        Event::ProviderResponseFinished(ProviderResponseFinished {
-            automatic_compaction_decision: None,
-            output_length_disposition: tau_proto::OutputLengthDisposition::None,
-            estimated_api_cost_rates: None,
-            estimated_api_cost_increment: None,
-
-            agent_prompt_id: failed_prompt_id.clone(),
-            agent_id: agent_id.clone(),
-            output_items: Vec::new(),
-            stop_reason: tau_proto::ProviderStopReason::Error,
-            error: Some("bounded".to_owned()),
-            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
-            context_limit_telemetry: None,
-            recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
-            originator: tau_proto::PromptOriginator::User,
-            usage: None,
-            compaction_original_input_tokens: None,
-            compaction_output_tokens: None,
-            backend: None,
-            provider_attempt: Default::default(),
-            provider_response_id: None,
-            ws_pool_delta: None,
-        }),
-    );
-    let transaction_id =
-        tau_proto::CompactionTransactionId::parse("ct-reactive-success-cut").expect("id");
-    let compact_prompt_id = test_agent_prompt_id("ap-main-compact-success-cut");
-    append_seed_agent_event(
-        &mut store,
-        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-            agent_id: agent_id.clone(),
-            transaction_id: transaction_id.clone(),
-            compact_prompt_id: compact_prompt_id.clone(),
-            cut: tau_proto::AgentHead::Root,
-            resume_through: Some(through),
-            model: "provider-b/model".into(),
-            operation: tau_proto::PromptOperation::StandaloneCompaction,
-            originator: tau_proto::PromptOriginator::User,
-            supersedes: None,
-            trigger: tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
-                failed_agent_prompt_id: failed_prompt_id,
-            },
-        }),
-    );
-    let suffix_end = tau_proto::AgentHead::Node(
-        store
-            .agent("main")
-            .and_then(tau_core::AgentTree::head)
-            .expect("suffix head"),
-    );
-    append_seed_agent_event(
-        &mut store,
-        Event::AgentCompacted(tau_proto::AgentCompacted {
-            original_input_tokens: None,
-            compaction_output_tokens: None,
-            agent_id,
-            transaction_id: Some(transaction_id.clone()),
-            cut: Some(tau_proto::AgentHead::Root),
-            suffix_end: Some(suffix_end),
-            compact_prompt_id: Some(compact_prompt_id),
-            model: Some("provider-b/model".into()),
-            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
-            replacement_window: vec![ContextItem::Message(MessageItem {
-                role: ContextRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: "summary".to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-        }),
-    );
-    drop(store);
-
-    {
-        let mut h = quiet_provider_harness_for_with_start_reason_and_storage_mode(
-            "s2",
-            &state,
-            tau_proto::SessionStartReason::Initial,
-            crate::HarnessStorageMode::Durable,
-        )
-        .expect("start warm harness");
-        assert!(
-            h.provider_runtime
-                .model_info
-                .contains_key(&"test/model".into()),
-            "provider state is populated before warm resume"
-        );
-        h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
-            .expect("warm resume success cut");
-        assert_eq!(
-            h.session_runtime
-                .agent_store
-                .agent_events("main")
-                .expect("agent events")
-                .iter()
-                .filter(|entry| matches!(
-                    entry.event,
-                    Event::AgentInferenceDispatchStarted(
-                        tau_proto::AgentInferenceDispatchStarted {
-                            output_length_continuation: None,
-                            transaction_id: Some(_),
-                            ..
-                        }
-                    )
-                ))
-                .count(),
-            1,
-            "authoritative session initialization must checkpoint the exact missing-model work before terminalizing it"
-        );
-        let checkpoint = h
-            .session_runtime
-            .agent_store
-            .agent_events("main")
-            .expect("agent events")
-            .iter()
-            .find_map(|entry| match &entry.event {
-                Event::AgentInferenceDispatchStarted(checkpoint)
-                    if checkpoint.transaction_id.is_some() =>
-                {
-                    Some(checkpoint.clone())
-                }
-                _ => None,
-            })
-            .expect("qualified terminal checkpoint");
-        assert_eq!(checkpoint.model, Some("provider-b/model".into()));
-        assert_eq!(checkpoint.activation_cut, Some(tau_proto::AgentHead::Root));
-        assert_eq!(
-            checkpoint.operation,
-            Some(tau_proto::PromptOperation::Inference)
-        );
-        assert!(
-            h.session_runtime
-                .agent_store
-                .agent("main")
-                .expect("agent")
-                .contains_head_ancestry(
-                    checkpoint.activation_cut.expect("activation cut"),
-                    checkpoint.through,
-                ),
-            "checkpoint watermark must remain on the captured compacted branch"
-        );
-        assert_eq!(checkpoint.transaction_id.as_ref(), Some(&transaction_id));
-        assert!(
-            h.session_runtime
-                .agent_store
-                .agent_events("main")
-                .expect("events")
-                .iter()
-                .any(|entry| matches!(
-                    &entry.event,
-                    Event::ProviderResponseFinished(response)
-                        if response.agent_prompt_id == checkpoint.agent_prompt_id
-                            && response.stop_reason == tau_proto::ProviderStopReason::Error
-                            && response.failure_kind
-                                == Some(tau_proto::ProviderFailureKind::Unknown)
-                ))
-        );
-        let cid = h.agent_runtime.agent_registry.agent_routes["main"].clone();
-        h.agent_runtime
-            .agent_registry
-            .agents
-            .get_mut(&cid)
-            .expect("agent")
-            .identity
-            .model_override = Some("provider-b/model".into());
-        let owner = h.provider_runtime.model_routes[&"test/model".into()].to_string();
-        let mut model = h.provider_runtime.model_info[&"test/model".into()].clone();
-        model.id = "provider-b/model".into();
-        h.publish_provider_models_update(
-            &crate::test_connection_id(&owner),
-            crate::test_extension_name(owner.clone()),
-            tau_proto::ProviderModelsDeclared {
-                models: vec![model],
-            },
-        );
-        assert_eq!(
-            h.session_runtime
-                .agent_store
-                .agent_events("main")
-                .expect("agent events")
-                .iter()
-                .filter(|entry| matches!(
-                    entry.event,
-                    Event::AgentInferenceDispatchStarted(
-                        tau_proto::AgentInferenceDispatchStarted {
-                            output_length_continuation: None,
-                            transaction_id: Some(_),
-                            ..
-                        }
-                    )
-                ))
-                .count(),
-            1
-        );
-        assert_eq!(
-            event_log_events(&h)
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    Event::AgentPromptCreated(prompt)
-                        if prompt.operation == tau_proto::PromptOperation::Inference
-                ))
-                .count(),
-            0,
-            "later discovery must not resend work that was durably terminalized as unavailable"
-        );
-        h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-            .expect("switch away");
-        h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
-            .expect("warm resume with provider state already populated");
-        assert_eq!(
-            h.session_runtime
-                .agent_store
-                .agent_events("main")
-                .expect("warm resumed events")
-                .iter()
-                .filter(|entry| matches!(
-                    entry.event,
-                    Event::AgentInferenceDispatchStarted(
-                        tau_proto::AgentInferenceDispatchStarted {
-                            output_length_continuation: None,
-                            transaction_id: Some(_),
-                            ..
-                        }
-                    )
-                ))
-                .count(),
-            1,
-            "warm resume must not duplicate terminalized continuation ownership"
-        );
-        h.shutdown().expect("shutdown");
-    }
-    wait_for_session_unlock(&state, "s1");
-    let mut resumed =
-        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
-            .expect("second resume");
-    assert!(!event_log_events(&resumed).iter().any(|event| matches!(
-        event,
-        Event::AgentPromptCreated(prompt)
-            if prompt.operation == tau_proto::PromptOperation::Inference
-    )));
-    resumed.shutdown().expect("shutdown");
-}
-
 /// Facts committed while reactive compaction is pending stay in the suffix,
 /// while the durable start retains the original pre-activation cut.
 #[test]
@@ -8237,78 +7785,6 @@ fn reactive_context_overflow_delegate_cancel_is_terminal_once() {
         Event::StartAgentResult(result)
             if result.query_id == "q-delegate-reactive" && result.error.is_some()
     )));
-    h.shutdown().expect("shutdown");
-}
-
-/// Switching sessions terminalizes reactive compaction and clears all
-/// old-session semantic-output, routing, and recovery watcher state.
-#[test]
-fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
-    h.provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model")
-        .supports_standalone_compaction = true;
-    let cid = ensure_test_user_agent(&mut h);
-    seed_reactive_compaction_prefix(&mut h, &cid);
-    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .agent_id
-        .clone()
-        .expect("agent id");
-    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
-        .expect("dispatch inference");
-    let inference = read_nth_prompt_created(&h, 0);
-    h.handle_provider_response_finished(context_overflow_response(&inference))
-        .expect("start recovery");
-    let compact = read_nth_prompt_created(&h, 1);
-    h.prompt_coordination
-        .prompt_runtime
-        .semantic_output
-        .insert(compact.agent_prompt_id.clone());
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    assert_eq!(
-        event_log_events(&h)
-            .iter()
-            .filter(|event| matches!(
-                event,
-                Event::AgentStandaloneCompactionFailed(failed)
-                    if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
-            ))
-            .count(),
-        1
-    );
-    assert!(
-        h.prompt_coordination
-            .prompt_runtime
-            .semantic_output
-            .is_empty()
-    );
-    assert!(
-        !h.prompt_coordination
-            .prompt_runtime
-            .agents
-            .contains_key(&compact.agent_prompt_id)
-    );
-    assert!(
-        !h.agent_runtime
-            .agent_watch
-            .provider_status
-            .contains_key(agent_id.as_str())
-    );
-    h.handle_provider_response_finished(context_overflow_response(&compact))
-        .expect("late old-session response is ignored");
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(started)
-                if started.compact_prompt_id != compact.agent_prompt_id
-                    && matches!(started.trigger, tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. })))
-    );
     h.shutdown().expect("shutdown");
 }
 
@@ -9787,4 +9263,374 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
         2
     );
     h.shutdown().expect("shutdown");
+}
+
+/// not resend if the captured model later appears or the session replays.
+#[test]
+fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_main_agent_loaded(&state);
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id.clone(),
+            inference_activation: true,
+            text: "owed".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let through = tau_proto::AgentHead::Node(
+        store
+            .agent("main")
+            .and_then(tau_core::AgentTree::head)
+            .expect("head"),
+    );
+    let failed_prompt_id = test_agent_prompt_id("ap-main-overflow-success-cut");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            output_length_continuation: None,
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: failed_prompt_id.clone(),
+            through,
+            model: Some("provider-b/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        }),
+    );
+    append_seed_agent_event(
+        &mut store,
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
+            agent_prompt_id: failed_prompt_id.clone(),
+            agent_id: agent_id.clone(),
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::Error,
+            error: Some("bounded".to_owned()),
+            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-reactive-success-cut").expect("id");
+    let compact_prompt_id = test_agent_prompt_id("ap-main-compact-success-cut");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: transaction_id.clone(),
+            compact_prompt_id: compact_prompt_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: Some(through),
+            model: "provider-b/model".into(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                failed_agent_prompt_id: failed_prompt_id,
+            },
+        }),
+    );
+    let suffix_end = tau_proto::AgentHead::Node(
+        store
+            .agent("main")
+            .and_then(tau_core::AgentTree::head)
+            .expect("suffix head"),
+    );
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compaction_output_tokens: None,
+            agent_id,
+            transaction_id: Some(transaction_id.clone()),
+            cut: Some(tau_proto::AgentHead::Root),
+            suffix_end: Some(suffix_end),
+            compact_prompt_id: Some(compact_prompt_id),
+            model: Some("provider-b/model".into()),
+            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }),
+    );
+    drop(store);
+
+    {
+        let mut h = quiet_provider_harness_for_with_start_reason_and_storage_mode(
+            "s1",
+            &state,
+            tau_proto::SessionStartReason::Resume,
+            crate::HarnessStorageMode::Durable,
+        )
+        .expect("start warm harness");
+        assert!(
+            h.provider_runtime
+                .model_info
+                .contains_key(&"test/model".into()),
+            "provider state is populated before warm resume"
+        );
+        assert_eq!(
+            h.session_runtime
+                .agent_store
+                .agent_events("main")
+                .expect("agent events")
+                .iter()
+                .filter(|entry| matches!(
+                    entry.event,
+                    Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            output_length_continuation: None,
+                            transaction_id: Some(_),
+                            ..
+                        }
+                    )
+                ))
+                .count(),
+            1,
+            "authoritative session initialization must checkpoint the exact missing-model work before terminalizing it"
+        );
+        let checkpoint = h
+            .session_runtime
+            .agent_store
+            .agent_events("main")
+            .expect("agent events")
+            .iter()
+            .find_map(|entry| match &entry.event {
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.transaction_id.is_some() =>
+                {
+                    Some(checkpoint.clone())
+                }
+                _ => None,
+            })
+            .expect("qualified terminal checkpoint");
+        assert_eq!(checkpoint.model, Some("provider-b/model".into()));
+        assert_eq!(checkpoint.activation_cut, Some(tau_proto::AgentHead::Root));
+        assert_eq!(
+            checkpoint.operation,
+            Some(tau_proto::PromptOperation::Inference)
+        );
+        assert!(
+            h.session_runtime
+                .agent_store
+                .agent("main")
+                .expect("agent")
+                .contains_head_ancestry(
+                    checkpoint.activation_cut.expect("activation cut"),
+                    checkpoint.through,
+                ),
+            "checkpoint watermark must remain on the captured compacted branch"
+        );
+        assert_eq!(checkpoint.transaction_id.as_ref(), Some(&transaction_id));
+        assert!(
+            h.session_runtime
+                .agent_store
+                .agent_events("main")
+                .expect("events")
+                .iter()
+                .any(|entry| matches!(
+                    &entry.event,
+                    Event::ProviderResponseFinished(response)
+                        if response.agent_prompt_id == checkpoint.agent_prompt_id
+                            && response.stop_reason == tau_proto::ProviderStopReason::Error
+                            && response.failure_kind
+                                == Some(tau_proto::ProviderFailureKind::Unknown)
+                ))
+        );
+        let cid = h.agent_runtime.agent_registry.agent_routes["main"].clone();
+        h.agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .identity
+            .model_override = Some("provider-b/model".into());
+        let owner = h.provider_runtime.model_routes[&"test/model".into()].to_string();
+        let mut model = h.provider_runtime.model_info[&"test/model".into()].clone();
+        model.id = "provider-b/model".into();
+        h.publish_provider_models_update(
+            &crate::test_connection_id(&owner),
+            crate::test_extension_name(owner.clone()),
+            tau_proto::ProviderModelsDeclared {
+                models: vec![model],
+            },
+        );
+        assert_eq!(
+            h.session_runtime
+                .agent_store
+                .agent_events("main")
+                .expect("agent events")
+                .iter()
+                .filter(|entry| matches!(
+                    entry.event,
+                    Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            output_length_continuation: None,
+                            transaction_id: Some(_),
+                            ..
+                        }
+                    )
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentPromptCreated(prompt)
+                        if prompt.operation == tau_proto::PromptOperation::Inference
+                ))
+                .count(),
+            0,
+            "later discovery must not resend work that was durably terminalized as unavailable"
+        );
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("second resume");
+    assert!(!event_log_events(&resumed).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.operation == tau_proto::PromptOperation::Inference
+    )));
+    resumed.shutdown().expect("shutdown");
+}
+
+/// Agent unload must retire staged manual-compaction acceptance without leaking
+/// deferred work.
+#[test]
+fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
+    for teardown in ["target_unload", "caller_unload"] {
+        let (_td, mut h, caller_cid, target_cid, call, target_id) =
+            setup_manual_cross_compaction_test();
+        let interceptor = match teardown {
+            "target_unload" => "model-acceptance-target-unload",
+            "caller_unload" => "model-acceptance-caller-unload",
+            _ => unreachable!("fixed teardown cases"),
+        };
+        connect_test_tool(&mut h, interceptor);
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register acceptance interceptor");
+        h.request_agent_tool_compaction(
+            &caller_cid,
+            &call,
+            ToolName::new("agent_compact"),
+            Some(&target_id),
+        );
+        assert_eq!(
+            h.prompt_coordination
+                .compaction_runtime
+                .pending_manual_acceptances
+                .len(),
+            1
+        );
+        let request_key = h
+            .prompt_coordination
+            .compaction_runtime
+            .pending_manual_acceptances
+            .keys()
+            .next()
+            .cloned()
+            .expect("staged request id");
+        let request_id = request_key.request_id().clone();
+        if teardown == "caller_unload" {
+            reject_next_semantic_admission(&h);
+            h.handle_extension_event(
+                interceptor,
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("retain append-rejected acceptance");
+            assert!(
+                h.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .contains_key(&target_cid)
+            );
+        }
+        match teardown {
+            "target_unload" => h.remove_agent_expected(&target_cid),
+            "caller_unload" => h.remove_agent_expected(&caller_cid),
+            _ => unreachable!("fixed teardown cases"),
+        }
+        assert!(
+            h.prompt_coordination
+                .compaction_runtime
+                .pending_manual_acceptances
+                .is_empty()
+                && !h
+                    .tool_routing
+                    .tool_runtime
+                    .tool_turn
+                    .is_backgrounded(&call.id),
+            "teardown={teardown}"
+        );
+        assert!(
+            h.runtime_io.publication.pending_intercept.is_none()
+                && h.runtime_io.publication.deferred.iter().all(|pending| {
+                    !matches!(
+                        pending.event(),
+                        Event::AgentManualCompactionRequested(request)
+                            if request.request_id == request_id
+                    )
+                }),
+            "teardown={teardown}"
+        );
+        assert!(
+            h.prompt_coordination
+                .compaction_runtime
+                .accepted_manual_tools
+                .is_empty()
+                && h.prompt_coordination
+                    .compaction_runtime
+                    .active_manual_starts_is_empty()
+                && h.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .is_empty(),
+            "teardown={teardown}"
+        );
+    }
 }

@@ -131,14 +131,14 @@ completion does not. Event-loop order decides the final-member, activation,
 cancellation, and manual-compaction races once. Wait-call cancellation and a
 manual-compaction claim preserve set atomicity; rollback restores every
 reservation, FIFO position, and only still-undelivered suppressed notice.
-Unload, rollover, shutdown, and cold restart drop the runtime reservation. Cold
+Unload, final shutdown, and cold restart drop the runtime reservation. Cold
 restart does not recreate the wait and uses ordinary interrupted-tool repair,
 while every member terminal remains recoverable by its original owner.
 
 The foreground wait keeps `AgentTurnState::ToolsRunning`; it introduces no
 suspended lifecycle state, watcher idle notification, or idle/running watch
 edge. Live UI reconnect does not
-affect it. Unload, cancellation, rollover, or shutdown drops it, with event-loop
+affect it. Unload, cancellation, or final shutdown drops it, with event-loop
 ordering deciding races exactly once. Cold restore does not recreate a waiter:
 the unresolved foreground tool follows standard interrupted-tool repair while
 durably accepted prompt activation remains available through normal replay.
@@ -174,7 +174,7 @@ described above. External payload, sender, and provenance remain
 in ordinary recorded message-fact context and are never rewrapped as
 harness-authored tool output.
 Wait registration is runtime-only harness state: cancellation, target unload,
-session rollover, and shutdown remove it, and cold recovery uses ordinary
+and final shutdown remove it, and cold recovery uses ordinary
 unresolved-tool repair rather than reviving stale scheduling authority.
 
 The harness also writes content-free, best-effort observations for installed

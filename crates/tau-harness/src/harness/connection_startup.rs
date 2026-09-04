@@ -9,11 +9,6 @@ use crate::debug_log::DebugEventSensitivity;
 use crate::event::StartupFrameKind;
 
 impl Harness {
-    /// Record the runtime harness metadata path stem owned by the daemon.
-    pub(crate) fn set_runtime_harness_path(&mut self, path: PathBuf) {
-        self.session_runtime.runtime_harness_path = Some(path);
-    }
-
     /// Return whether this harness accepts bare inter-session messages.
     pub(crate) fn has_peer_entrypoint(&self) -> bool {
         !self.config.inter_session_receivers.is_empty()
@@ -343,14 +338,9 @@ impl Harness {
             .map(|m| m.origin.clone());
         let subscribed = match origin {
             Some(ConnectionOrigin::Socket) => {
-                let detach_requested =
-                    self.is_authorized_ui_detach_request(connection_id, &message);
                 let shutdown_requested =
                     self.is_authorized_ui_shutdown_request(connection_id, &message);
                 let subscribed = matches!(&message, HarnessInputMessage::Subscribe(_));
-                if detach_requested {
-                    self.ui_runtime.startup_detach_requested = true;
-                }
                 if shutdown_requested {
                     self.ui_runtime.shutdown_requested = true;
                 }
@@ -365,13 +355,9 @@ impl Harness {
                 };
                 if close {
                     self.handle_disconnect(connection_id);
-                    if self.ui_runtime.startup_detach_requested {
-                        false
-                    } else {
-                        return Err(HarnessError::Participant(
-                            "initial UI disconnected during startup handshake".to_owned(),
-                        ));
-                    }
+                    return Err(HarnessError::Participant(
+                        "initial UI disconnected during startup handshake".to_owned(),
+                    ));
                 } else {
                     subscribed
                 }
@@ -429,9 +415,6 @@ impl Harness {
         }
         self.handle_disconnect(connection_id);
         if was_socket {
-            if self.ui_runtime.startup_detach_requested {
-                return Ok(());
-            }
             return Err(HarnessError::Participant(format!(
                 "{name} disconnected during startup"
             )));

@@ -582,104 +582,6 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
     sender.shutdown().expect("shutdown sender");
 }
 
-/// Discovery probes a real opted-in Harness event loop, ignores a second
-/// non-opted daemon record, and returns only the basename project label.
-#[test]
-fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
-    let td = TempDir::new().expect("tempdir");
-    let _runtime = crate::runtime_dir::override_test_runtime_dir(td.path());
-    std::fs::create_dir_all(crate::runtime_dir::harnesses_dir()).expect("harnesses dir");
-    let mut target = echo_harness(td.path().join("target-state")).expect("target harness");
-    configure_inter_session_receivers(&mut target, &[("engineer", false)]);
-    let target_path = crate::runtime_dir::harnesses_dir().join("real-target");
-    let target_listener =
-        path_std_os_unix_net::UnixListener::bind(crate::runtime_dir::socket_path(&target_path))
-            .expect("target listener");
-    std::fs::write(
-        crate::runtime_dir::metadata_path(&target_path),
-        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 0,
-            pid: std::process::id(),
-            project_root: Some(PathBuf::from("/secret/root/redacted-project")),
-            session_id: target.session_runtime.current_session_id.to_string(),
-            peer_entrypoint: true,
-        })
-        .expect("target metadata"),
-    )
-    .expect("write target metadata");
-    let target_tx = target.runtime_io.tx.clone();
-    let forwarder = std::thread::spawn(move || {
-        let (stream, _) = target_listener.accept().expect("accept discovery probe");
-        target_tx
-            .send(HarnessEvent::NewClient(stream))
-            .expect("forward discovery probe");
-    });
-    let private_path = crate::runtime_dir::harnesses_dir().join("private-target");
-    let _private_listener =
-        path_std_os_unix_net::UnixListener::bind(crate::runtime_dir::socket_path(&private_path))
-            .expect("private listener");
-    std::fs::write(
-        crate::runtime_dir::metadata_path(&private_path),
-        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 0,
-            pid: std::process::id(),
-            project_root: Some(PathBuf::from("/secret/root/private-project")),
-            session_id: "private-session".to_owned(),
-            peer_entrypoint: false,
-        })
-        .expect("private metadata"),
-    )
-    .expect("write private metadata");
-    let runtime_root = td.path().to_path_buf();
-    let (snapshot_tx, snapshot_rx) = path_std_sync::mpsc::channel();
-    let discovery = std::thread::spawn(move || {
-        let _runtime = crate::runtime_dir::override_test_runtime_dir(&runtime_root);
-        let snapshot =
-            crate::runtime_dir::discover_peer_sessions_for_test(None, 50, "unrelated-current");
-        snapshot_tx.send(snapshot).expect("return snapshot");
-    });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let snapshot = loop {
-        if let Ok(snapshot) = snapshot_rx.try_recv() {
-            break snapshot;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for discovery");
-        let received = target.runtime_io.rx.recv_timeout(Duration::from_millis(10));
-        match received.map(|event| target.expand_component_ingress_wake(event)) {
-            Ok(HarnessEvent::NewClient(stream)) => {
-                target.accept_client(stream).expect("accept probe client");
-            }
-            Ok(HarnessEvent::FromConnection {
-                connection_id,
-                message,
-                ..
-            }) => {
-                target
-                    .handle_client_message(&connection_id, *message)
-                    .expect("handle discovery frame");
-            }
-            Ok(HarnessEvent::Command(command)) => target
-                .handle_harness_command(command)
-                .expect("handle discovery command"),
-            Ok(other) => target.log_event(&other),
-            Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {}
-            Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("target event loop disconnected")
-            }
-        }
-    };
-
-    assert_eq!(snapshot.sessions.len(), 1);
-    assert_eq!(
-        snapshot.sessions[0].project_label.as_deref(),
-        Some("redacted-project")
-    );
-    assert!(!format!("{snapshot:?}").contains("/secret/"));
-    discovery.join().expect("discovery thread");
-    forwarder.join().expect("probe forwarder");
-    target.shutdown().expect("shutdown target");
-}
-
 /// Receiver-side sender authentication must run off the central harness loop.
 /// A request whose claimed sender cannot authenticate should enqueue a helper
 /// and return promptly instead of blocking every other harness event until the
@@ -1592,190 +1494,6 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
             message: "same body".to_owned(),
         });
     assert!(!result.authorized);
-}
-
-/// Stale async external-message completions from an abandoned session must not
-/// publish sender projections or tool completions after `:session new`, even if
-/// the new session happens to reinstall the same conversation/tool ownership
-/// keys before the old worker finishes.
-#[test]
-fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dropped() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let call_id: tau_proto::ToolCallId = "stale-external-message-call".into();
-    h.tool_routing
-        .tool_runtime
-        .tool_agents
-        .insert(call_id.clone(), cid.clone());
-
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    let replacement_cid = ensure_test_user_agent(&mut h);
-    let replacement_agent = h
-        .agent_runtime
-        .agent_registry
-        .agents
-        .remove(&replacement_cid)
-        .expect("replacement agent");
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .insert(cid.clone(), replacement_agent);
-    h.tool_routing
-        .tool_runtime
-        .tool_agents
-        .insert(call_id.clone(), cid.clone());
-
-    h.handle_harness_command(
-        path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
-            crate::event::ExternalMessageToolCompletedCommand {
-                _permit: None,
-                conversation_id: cid,
-                session_generation: SessionGeneration::default(),
-                call_id: call_id.clone(),
-                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
-                tool_type: tau_proto::ToolType::Function,
-                result: Ok((crate::parse_agent_id("recipient_agent"), false)),
-                details: CborValue::Null,
-                auth_message_id: tau_proto::AgentMessageId::parse("stale-message")
-                    .expect("test identifier must satisfy its grammar"),
-                publish_sent: true,
-                sender_id: crate::parse_agent_id("sender_agent"),
-                recipient_session_id: test_session_id("other-session"),
-                kind: tau_proto::AgentMessageKind::Message,
-                message: "stale".to_owned(),
-            },
-        )),
-    )
-    .expect("handle stale completion");
-
-    let events = event_log_events(&h);
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        Event::AgentMessageSent(message) if message.message_id.as_str() == "stale-message"
-    )));
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        Event::ToolResult(result) if result.call_id == call_id
-    )));
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        Event::ToolError(error) if error.call_id == call_id
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// An old outbound callback must lose authority during S -> other -> S before
-/// its queued worker completion is consumed, so a reused session id cannot
-/// admit the abandoned request or let its eventual completion affect the
-/// replacement generation.
-#[test]
-fn stale_external_message_callback_after_session_round_trip_is_rejected_before_completion() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let sender_id =
-        crate::parse_agent_id(h.ensure_agent_id_for_agent(&cid).expect("sender public id"));
-    let call_id: tau_proto::ToolCallId = "stale-round-trip-call".into();
-    let message_id = tau_proto::AgentMessageId::parse("stale-round-trip-message")
-        .expect("test identifier must satisfy its grammar");
-    let old_generation = h.session_runtime.current_session_generation;
-    let request = tau_proto::ExternalAgentMessageAuthRequest {
-        request_id: "stale-round-trip-auth".to_owned(),
-        message_id: message_id.clone(),
-        capability: "stale-round-trip-capability".to_owned(),
-        sender_session_id: h.session_runtime.current_session_id.clone(),
-        sender_id: sender_id.clone(),
-        recipient_session_id: test_session_id("target-session"),
-        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
-            "recipient-agent",
-        )),
-        kind: tau_proto::AgentMessageKind::Message,
-        message: "old generation body".to_owned(),
-    };
-    h.peer_messaging.pending_external_message_auth.insert(
-        message_id.clone(),
-        crate::harness::PendingExternalAgentMessageAuth {
-            capability: request.capability.clone(),
-            sender_session_id: request.sender_session_id.clone(),
-            sender_id: request.sender_id.clone(),
-            recipient_session_id: request.recipient_session_id.clone(),
-            recipient: request.recipient.clone(),
-            kind: request.kind,
-            message: request.message.clone(),
-        },
-    );
-    let cancellation = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
-    h.peer_messaging
-        .peer_io_cancellations
-        .push(path_std_sync::Arc::downgrade(&cancellation));
-
-    // Retain the old worker completion, roll away and back, then deliver its
-    // callback before consuming the completion.
-    let completion = path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
-        crate::event::ExternalMessageToolCompletedCommand {
-            _permit: None,
-            conversation_id: cid,
-            session_generation: old_generation,
-            call_id: call_id.clone(),
-            tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
-            tool_type: tau_proto::ToolType::Function,
-            result: Ok((crate::parse_agent_id("recipient-agent"), false)),
-            details: CborValue::Null,
-            auth_message_id: message_id.clone(),
-            publish_sent: true,
-            sender_id,
-            recipient_session_id: request.recipient_session_id.clone(),
-            kind: request.kind,
-            message: request.message.clone(),
-        },
-    ));
-    h.switch_session(
-        test_session_id("other-session"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch away");
-    assert!(
-        cancellation.load(path_std_sync_atomic::Ordering::Acquire),
-        "rollover must preserve outbound worker cancellation"
-    );
-    h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::New)
-        .expect("switch back");
-
-    assert!(
-        !h.peer_messaging
-            .pending_external_message_auth
-            .contains_key(&message_id),
-        "generation rollover must synchronously remove the old callback capability"
-    );
-    let result = h.handle_external_agent_message_auth_request(request);
-    assert!(!result.authorized);
-    assert_eq!(
-        result.error.as_deref(),
-        Some("unknown external message capability")
-    );
-
-    h.handle_harness_command(completion)
-        .expect("consume stale completion after callback rejection");
-    let events = event_log_events(&h);
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        Event::AgentMessageSent(message) if message.message_id == message_id
-    )));
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        Event::ToolResult(result) if result.call_id == call_id
-    )));
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        Event::ToolError(error) if error.call_id == call_id
-    )));
-
-    h.shutdown().expect("shutdown");
 }
 
 /// A cold resume restores historical session membership even though an
@@ -3308,100 +3026,6 @@ fn rendered_prompt_with_seeded_agents_md_includes_synthetic_agents_message() {
     assert!(prompt.contains("seeded AGENTS instructions"));
 }
 
-#[test]
-fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let live = connect_test_tool(&mut h, "watch-live");
-    h.complete_subscription(
-        &crate::test_connection_id("watch-live"),
-        Vec::new(),
-        vec![EventSelector::Exact(
-            tau_proto::EventName::AGENT_WATCHES_UPDATED,
-        )],
-    )
-    .expect("subscribe");
-    drain_watches_updated(&live);
-
-    h.set_agent_watch(
-        "watcher",
-        "child-b",
-        true,
-        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    );
-    h.set_agent_watch(
-        "watcher",
-        "child-a",
-        true,
-        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    );
-    h.set_agent_watch(
-        "watcher",
-        "child-b",
-        false,
-        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
-    );
-    h.set_agent_watch(
-        "watcher",
-        "child-a",
-        false,
-        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
-    );
-
-    let snapshots = drain_watches_updated(&live);
-    assert_eq!(snapshots.len(), 4);
-    assert_eq!(
-        snapshots[0].watched_agent_ids,
-        vec![crate::parse_agent_id("child-b")]
-    );
-    assert_eq!(
-        snapshots[1].watched_agent_ids,
-        vec![
-            crate::parse_agent_id("child-a"),
-            crate::parse_agent_id("child-b")
-        ]
-    );
-    assert_eq!(
-        snapshots[2].watched_agent_ids,
-        vec![crate::parse_agent_id("child-a")]
-    );
-    assert!(snapshots[3].watched_agent_ids.is_empty());
-
-    h.set_agent_watch(
-        "watcher",
-        "child-a",
-        true,
-        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    );
-    let replay = connect_test_tool(&mut h, "watch-replay");
-    h.complete_subscription(
-        &crate::test_connection_id("watch-replay"),
-        vec![EventSelector::Exact(
-            tau_proto::EventName::AGENT_WATCHES_UPDATED,
-        )],
-        Vec::new(),
-    )
-    .expect("subscribe replay");
-    let replayed = drain_watches_updated(&replay);
-    assert_eq!(replayed.len(), 1);
-    assert_eq!(
-        replayed[0].cause,
-        tau_proto::AgentWatchUpdateCause::SessionSnapshot
-    );
-    assert_eq!(replayed[0].watcher_id, crate::parse_agent_id("watcher"));
-    assert_eq!(
-        replayed[0].watched_agent_ids,
-        vec![crate::parse_agent_id("child-a")]
-    );
-
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    assert!(h.agent_runtime.agent_watch.forward.is_empty());
-    assert!(h.agent_runtime.agent_watch.reverse.is_empty());
-    h.shutdown().expect("shutdown");
-}
-
 /// The authoritative harness boundary must accept DAG shapes and repeated
 /// enables, reject every closing edge atomically, let disables repair paths,
 /// and serialize reciprocal requests so exactly the first direction wins.
@@ -4398,9 +4022,8 @@ fn external_agent_message_request_publishes_received_projection() {
     h.shutdown().expect("shutdown");
 }
 
-/// Cross-harness message RPCs are addressed to one active session; stale
-/// runtime metadata or a racing `:session new` must not deliver into the wrong
-/// active session.
+/// Cross-harness message RPCs are addressed to one immutable session; a
+/// wrong-session request must not deliver into that session.
 #[test]
 fn external_agent_message_request_rejects_wrong_active_session() {
     let td = TempDir::new().expect("tempdir");
@@ -5823,4 +5446,93 @@ fn side_agent_output_length_never_completes_successfully() {
         }
         h.shutdown().expect("shutdown");
     }
+}
+
+#[test]
+fn generic_agent_watch_snapshots_replay_current_state() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let live = connect_test_tool(&mut h, "watch-live");
+    h.complete_subscription(
+        &crate::test_connection_id("watch-live"),
+        Vec::new(),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_WATCHES_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    drain_watches_updated(&live);
+
+    h.set_agent_watch(
+        "watcher",
+        "child-b",
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        "watcher",
+        "child-a",
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        "watcher",
+        "child-b",
+        false,
+        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    );
+    h.set_agent_watch(
+        "watcher",
+        "child-a",
+        false,
+        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    );
+
+    let snapshots = drain_watches_updated(&live);
+    assert_eq!(snapshots.len(), 4);
+    assert_eq!(
+        snapshots[0].watched_agent_ids,
+        vec![crate::parse_agent_id("child-b")]
+    );
+    assert_eq!(
+        snapshots[1].watched_agent_ids,
+        vec![
+            crate::parse_agent_id("child-a"),
+            crate::parse_agent_id("child-b")
+        ]
+    );
+    assert_eq!(
+        snapshots[2].watched_agent_ids,
+        vec![crate::parse_agent_id("child-a")]
+    );
+    assert!(snapshots[3].watched_agent_ids.is_empty());
+
+    h.set_agent_watch(
+        "watcher",
+        "child-a",
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let replay = connect_test_tool(&mut h, "watch-replay");
+    h.complete_subscription(
+        &crate::test_connection_id("watch-replay"),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_WATCHES_UPDATED,
+        )],
+        Vec::new(),
+    )
+    .expect("subscribe replay");
+    let replayed = drain_watches_updated(&replay);
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(
+        replayed[0].cause,
+        tau_proto::AgentWatchUpdateCause::SessionSnapshot
+    );
+    assert_eq!(replayed[0].watcher_id, crate::parse_agent_id("watcher"));
+    assert_eq!(
+        replayed[0].watched_agent_ids,
+        vec![crate::parse_agent_id("child-a")]
+    );
+    h.shutdown().expect("shutdown");
 }

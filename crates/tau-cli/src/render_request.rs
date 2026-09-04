@@ -19,31 +19,38 @@ pub(crate) fn request_rendered_value<T>(
     handle_result: impl Fn(HarnessOutputMessage, &str) -> RenderResponse<T>,
 ) -> Result<T, CliError> {
     let (mut reader, mut writer) = connect_render_client(daemon, client_name)?;
-    wait_for_preview_session(&mut reader)?;
-    let request_id = crate::ui_client::next_request_id(request_id_prefix);
-    crate::ui_client::send_message(&mut writer, &build_request(request_id.clone()))?;
+    let result = (|| {
+        wait_for_preview_session(&mut reader)?;
+        let request_id = crate::ui_client::next_request_id(request_id_prefix);
+        crate::ui_client::send_message(&mut writer, &build_request(request_id.clone()))?;
 
-    loop {
-        let Some(message) = reader.read_message().map_err(path_std_io::Error::other)? else {
-            return Err(CliError::Participant("daemon disconnected".to_owned()));
-        };
-        match message {
-            HarnessOutputMessage::Disconnect(disconnect) => {
-                return Err(CliError::Participant(
-                    disconnect
-                        .reason
-                        .unwrap_or_else(|| "daemon disconnected".to_owned()),
-                ));
-            }
-            message => match handle_result(message, &request_id) {
-                RenderResponse::Ignore => {}
-                RenderResponse::Matched(result) => {
-                    disconnect_render_client(&mut writer);
-                    return result;
+        loop {
+            let Some(message) = reader.read_message().map_err(path_std_io::Error::other)? else {
+                return Err(CliError::Participant("daemon disconnected".to_owned()));
+            };
+            match message {
+                HarnessOutputMessage::Disconnect(disconnect) => {
+                    return Err(CliError::Participant(
+                        disconnect
+                            .reason
+                            .unwrap_or_else(|| "daemon disconnected".to_owned()),
+                    ));
                 }
-            },
+                message => match handle_result(message, &request_id) {
+                    RenderResponse::Ignore => {}
+                    RenderResponse::Matched(result) => return result,
+                },
+            }
         }
-    }
+    })();
+    // Render diagnostics own a private one-shot daemon. Terminate that daemon
+    // explicitly; ordinary UI disconnect no longer controls session lifetime.
+    let _ = crate::ui_client::send_message(
+        &mut writer,
+        &HarnessInputMessage::UiShutdownRequest(tau_proto::UiShutdownRequest {}),
+    );
+    disconnect_render_client(&mut writer);
+    result
 }
 
 fn connect_render_client(

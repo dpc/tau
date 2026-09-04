@@ -102,12 +102,10 @@ includes currently loaded agents, not messages whose endpoints already unloaded.
 
 Type `:` as the first non-whitespace character to enter command mode and open command/action completion. Type `::text` to submit literal prompt text beginning with `:`, while `/` remains available for absolute and token-level path completion. Built-in commands include session and agent management, model/role switching, `:name <display name>` to rename the currently selected agent, `:skill <name> [args]` for explicit user-invocable skill injection, `:theme <name>` to switch only the current CLI UI's theme for this run, `:set`, `:tree`, `:fast`, `:detach`, `:quit`, and `:quit-session`. Extension-provided actions can add dynamic commands and argument completions at runtime. `:skill:<name> [args]` is accepted as a compact form; arguments are appended after the skill body without placeholder substitution.
 
-`:quit` exits only the invoking UI. Session lifetime after that disconnect is
-controlled independently: ordinary `tau` launches stop when their last UI
-disconnects, while supervised, already detached, and otherwise persistent
-sessions keep running. `:detach` exits the UI and disables stop-on-disconnect
-for that daemon. `:quit-session` requests unconditional canonical session
-shutdown and therefore disconnects every attached UI.
+`:quit` and `:detach` are UI-local aliases: each exits only the invoking UI and
+emits no harness frame. The fixed-session daemon keeps running after its last UI
+disconnects. `:quit-session` requests unconditional canonical session shutdown
+and therefore disconnects every attached UI.
 
 `:theme` completion lists built-in selectors (`tau-plain-dark`, `tau-plain-light`, and `tau-dpc`) plus valid user themes from `<config_dir>/themes/*.json5`. It is intentionally not persistent: it does not edit `cli.yaml`, update `cli.json`, or affect another attached UI.
 
@@ -207,8 +205,8 @@ Navigation classification is shared by UIs attached to the same daemon. Use
 `:agent suspend`, `:agent resume`, or `:agent auto` for absolute `suspended`,
 `active`, or `active-auto` modes. Selection, drafts, transcript view, and
 presentation remain local to each UI. Overrides survive UI reconnect while the
-agent remains loaded in the same daemon session; unload, session switch, and
-harness restart forget them.
+agent remains loaded in the same daemon session; unload and harness restart
+forget them.
 Selecting an agent does not resume it. Successfully submitting a visible prompt
 to an existing selected agent does: the harness makes that exact target `active`,
 and the CLI waits for the authoritative complete stats snapshot rather than

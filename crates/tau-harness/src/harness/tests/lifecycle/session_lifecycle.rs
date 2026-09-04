@@ -146,72 +146,9 @@ fn client_hello_acknowledges_matching_expected_session() {
     let events = events.lock().expect("events");
     assert!(events.iter().any(|event| matches!(
         &event.frame,
-        HarnessOutputMessage::UiSessionAccepted(accepted)
+        HarnessOutputMessage::SessionAccepted(accepted)
             if accepted.session_id == expected
     )));
-}
-
-/// A supervised fixed-session daemon must reject the same `:session new`
-/// request that an ordinary interactive daemon would use to roll over.
-#[test]
-fn pinned_session_rejects_ui_switch_without_mutating_binding() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path()).expect("start");
-    let events = connect_test_client(&mut h, "pinned-ui", tau_proto::ClientKind::Ui);
-    let observer = connect_test_client(&mut h, "observer-ui", tau_proto::ClientKind::Ui);
-    h.session_runtime.session_pinned = true;
-    let original = h.session_runtime.current_session_id.clone();
-
-    h.handle_ui_switch_session(
-        &crate::test_connection_id("pinned-ui"),
-        tau_proto::UiSwitchSession {
-            new_session_id: test_session_id("other"),
-            reason: tau_proto::SessionStartReason::New,
-        },
-    )
-    .expect("pinned switch rejection remains nonfatal");
-
-    assert_eq!(h.session_runtime.current_session_id, original);
-    assert!(h.session_runtime.session_pinned);
-    assert!(events.lock().expect("events").iter().any(|event| {
-        matches!(
-            &event.frame,
-            HarnessOutputMessage::Deliver(delivery)
-                if matches!(
-                    delivery.event(),
-                    Event::SessionStarted(started)
-                        if started.session_id == original
-                            && started.reason == tau_proto::SessionStartReason::Initial
-                )
-        )
-    }));
-    assert!(events.lock().expect("events").iter().any(|event| {
-        matches!(
-            &event.frame,
-            HarnessOutputMessage::Deliver(delivery)
-                if matches!(
-                    delivery.event(),
-                    Event::HarnessNotice(notice)
-                        if notice.kind == tau_proto::notice_kind::UI_COMMAND_ERROR
-                            && notice.level == tau_proto::NoticeLevel::Warning
-                            && notice.purpose == tau_proto::NoticePurpose::Response
-                )
-        )
-    }));
-    assert!(
-        !observer
-            .lock()
-            .expect("observer events")
-            .iter()
-            .any(|event| {
-                matches!(
-                    &event.frame,
-                    HarnessOutputMessage::Deliver(delivery)
-                        if matches!(delivery.event(), Event::SessionStarted(_))
-                )
-            }),
-        "authoritative reconciliation must remain requester-directed"
-    );
 }
 
 /// A persisted fourth-attempt successor Length restores one initial

@@ -1307,6 +1307,8 @@ struct SocketLifecycleState {
 /// Slack extension state split by authority owner and lifecycle boundary.
 #[derive(Default)]
 struct State {
+    /// Immutable Tau session identity observed from the first lifecycle fact.
+    bound_session_id: Option<tau_proto::SessionId>,
     /// Harness-selected configuration and its freeze generation.
     configuration: ConfigurationState,
     /// Registered agents and their route-local selections.
@@ -5729,6 +5731,10 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, SlackRuntime>) -> Clie
 }
 
 fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> ClientResult<()> {
+    cx.state
+        .ext
+        .validate_session_event(cx.event())
+        .map_err(ClientError::handler)?;
     cx.state.ext.apply_live_event(cx.event());
     Ok(())
 }
@@ -5739,6 +5745,29 @@ impl Extension {
     /// Only `session.started` uses both restore and live delivery. Every other
     /// caller is live-only so historical canonical facts cannot recreate
     /// process-local Slack authority.
+    /// Require lifecycle events to retain this process's first session
+    /// identity.
+    fn validate_session_event(&self, event: &Event) -> Result<(), String> {
+        let event_session_id = match event {
+            Event::SessionStarted(started) => &started.session_id,
+            Event::SessionShutdown(shutdown) => &shutdown.session_id,
+            _ => return Ok(()),
+        };
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(bound) = state.bound_session_id.as_ref()
+            && bound != event_session_id
+        {
+            return Err(format!(
+                "immutable session mismatch: expected `{bound}`, received `{}`",
+                event_session_id
+            ));
+        }
+        if state.bound_session_id.is_none() && matches!(event, Event::SessionShutdown(_)) {
+            return Err("session shutdown arrived before immutable session start".to_owned());
+        }
+        Ok(())
+    }
+
     fn apply_live_event(&self, event: &Event) {
         if let Some((kind, publisher, agent_id, message_id, extension_data)) =
             canonical_ingress_ack_fields(event)
@@ -5782,9 +5811,14 @@ impl Extension {
                         .insert(started.agent_id.clone(), display_name);
                 }
             }
-            Event::SessionStarted(_) => {
+            Event::SessionStarted(started) => {
                 {
                     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    match state.bound_session_id.as_ref() {
+                        Some(bound) if bound != &started.session_id => return,
+                        Some(_) => return,
+                        None => state.bound_session_id = Some(started.session_id.clone()),
+                    }
                     state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
                     state.sends.session_generation = state.sends.session_generation.wrapping_next();
                     state.socket.session_active = true;

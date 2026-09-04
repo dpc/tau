@@ -51,25 +51,6 @@ impl Harness {
         }
     }
 
-    pub(super) fn clear_session_agent_context(&mut self) {
-        self.prompt_coordination
-            .context_discovery
-            .agent_context
-            .clear();
-        self.prompt_coordination
-            .context_discovery
-            .pending_agents
-            .clear();
-        self.prompt_coordination
-            .context_discovery
-            .frozen_agents
-            .clear();
-        self.prompt_coordination
-            .context_discovery
-            .initialized_agent_context
-            .clear();
-    }
-
     pub(super) fn disable_optional_extension(
         &mut self,
         connection_id: &tau_proto::ConnectionId,
@@ -83,6 +64,9 @@ impl Harness {
     }
 
     pub(super) fn handle_disconnect(&mut self, connection_id: &tau_proto::ConnectionId) {
+        self.ui_runtime
+            .pending_socket_admission
+            .remove(connection_id);
         self.handle_disconnect_at(connection_id, Instant::now());
     }
 
@@ -499,47 +483,11 @@ impl Harness {
             .or_insert(now + EXTENSION_RESTART_DELAY);
     }
 
-    /// Reset only session-scoped restart budget at a logical session rollover.
+    /// Reset only session-scoped restart budget during final shutdown.
     ///
     /// Permanently disabled optional/configuration peers remain disabled. A
     /// tool disabled specifically by the prior session's budget becomes
     /// eligible again after the ordinary one-second delay.
-    pub(super) fn reset_extension_restart_budgets_at(&mut self, now: Instant) {
-        self.extensions.restart_deadlines.clear();
-        for entry in self.extensions.entries.values_mut() {
-            entry.restart_attempt = 0;
-        }
-        for connection_id in std::mem::take(&mut self.extensions.restart_budget_disabled) {
-            if let Some(entry) = self.extensions.entries.get_mut(&connection_id) {
-                entry.respawn_allowed = true;
-            }
-        }
-        let restartable = self
-            .extensions
-            .order
-            .iter()
-            .filter(|connection_id| {
-                self.extensions
-                    .entries
-                    .get(*connection_id)
-                    .is_some_and(|entry| {
-                        entry.state == ExtensionState::Disconnected
-                            && entry.kind == ClientKind::Tool
-                            && entry.respawn_allowed
-                            && entry.supervised_config.is_some()
-                    })
-                    && !self
-                        .extensions
-                        .supervised_writers
-                        .contains_key(*connection_id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for connection_id in restartable {
-            self.schedule_extension_restart_at(&connection_id, now);
-        }
-    }
-
     pub(super) fn unregister_connection_tools_for_disconnect(
         &mut self,
         connection_id: &tau_proto::ConnectionId,

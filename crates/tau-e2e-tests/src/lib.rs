@@ -35,6 +35,43 @@ use tau_harness::{EmbeddedOptions, InteractionOutcome, run_embedded_message_with
 use tempfile::TempDir;
 
 const DEFAULT_SESSION_ID: &str = "vcr-e2e-session";
+const UNIX_SOCKET_PATH_BYTES: usize = 107;
+const SESSION_SOCKET_SUFFIX_BYTES: usize = 1 + 3 + 1 + 9 + 1 + 7 + 1 + 64 + 5;
+
+/// Creates a private runtime root whose longest fixed-session socket path fits
+/// Linux `sockaddr_un::sun_path`.
+///
+/// Nix may place `TMPDIR` below a long `/build/.tmp-*` path. Prefer `/tmp`,
+/// then fall back to a shallow ancestor of the configured temporary directory,
+/// and reject every candidate whose complete Tau socket path would be too long.
+pub fn bounded_runtime_tempdir() -> Result<TempDir, path_std_io::Error> {
+    let configured = tempfile::env::temp_dir();
+    let parents = [
+        Path::new("/tmp"),
+        Path::new("/dev/shm"),
+        configured.parent().unwrap_or(configured.as_path()),
+    ];
+    let mut last_error = None;
+    for parent in parents {
+        match tempfile::Builder::new().prefix("t").tempdir_in(parent) {
+            Ok(tempdir)
+                if tempdir.path().as_os_str().as_encoded_bytes().len()
+                    + SESSION_SOCKET_SUFFIX_BYTES
+                    <= UNIX_SOCKET_PATH_BYTES =>
+            {
+                return Ok(tempdir);
+            }
+            Ok(_) => {}
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidInput,
+            "no writable temporary parent yields a bounded Tau runtime socket path",
+        )
+    }))
+}
 
 /// A real headless Tau run with isolated harness config and state.
 ///

@@ -1,5 +1,7 @@
 //! UI agent-creation admission and initial-prompt lifecycle.
 
+use std::collections::HashSet;
+
 use tau_proto::{AgentId, AgentPromptQueued, Event, HarnessOutputMessage};
 
 use super::{Harness, user_skill_invocation};
@@ -498,6 +500,31 @@ impl Harness {
         );
         for correlation in correlations {
             self.publish_initial_prompt_failed(correlation, stage, message);
+        }
+    }
+
+    /// Terminate every accepted initial prompt still owned by the session.
+    pub(super) fn fail_all_pending_initial_prompts(
+        &mut self,
+        stage: tau_proto::AgentPromptFailureStage,
+        message: &str,
+    ) {
+        let mut agents = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        agents.extend(
+            self.prompt_coordination
+                .prompt_runtime
+                .pending_initial_correlations
+                .keys()
+                .cloned(),
+        );
+        for cid in agents {
+            self.fail_pending_initial_prompts(&cid, stage, message);
         }
     }
 

@@ -59,7 +59,8 @@ impl AgentContextStore {
         });
     }
 
-    /// Remove all session-scoped context contributions.
+    /// Removes all context contributions for isolated test setup.
+    #[cfg(test)]
     pub(crate) fn clear(&mut self) {
         self.by_agent.clear();
     }

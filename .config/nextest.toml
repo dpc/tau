@@ -19,9 +19,11 @@ threads-required = 4
 
 [[profile.default.overrides]]
 # These fixtures own nested public CLI/server, daemon/extension, and attached
-# UI processes. Keep their accounting isolated from unrelated Tau binaries.
+# UI processes. Eight scheduler slots limit concurrent process stacks under
+# CPU-constrained Nix builders without weakening the fixtures' 10-second
+# synchronization deadlines.
 filter = "package(tau) & binary(detach_attach_cli)"
-threads-required = 4
+threads-required = 8
 
 [[profile.default.overrides]]
 filter = "package(tau-e2e-tests) & binary(deterministic_provider)"

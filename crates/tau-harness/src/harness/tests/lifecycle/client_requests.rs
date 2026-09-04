@@ -2,6 +2,91 @@
 
 use super::*;
 
+/// A frame that fails decoding because it uses a removed session-control
+/// encoding retires only that UI connection and publishes no session facts.
+#[test]
+fn removed_session_control_decode_failure_isolates_one_ui() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    let (rejected_id, _rejected) = connect_socket_ui(&mut h);
+    let (surviving_id, _surviving) = connect_socket_ui(&mut h);
+    let baseline_lifecycle = event_log_events(&h)
+        .into_iter()
+        .filter(|event| matches!(event, Event::SessionStarted(_) | Event::SessionShutdown(_)))
+        .count();
+    let mut served_clients = 0;
+
+    h.handle_runtime_event(
+        HarnessEvent::ReadFailed {
+            connection_id: rejected_id.clone(),
+            error: "removed ui.switch_session/ui_detach_request encoding".to_owned(),
+        },
+        &mut served_clients,
+    )
+    .expect("isolate decode failure");
+
+    assert_eq!(served_clients, 1);
+    assert!(!h.ui_runtime.client_writers.contains_key(&rejected_id));
+    assert!(h.ui_runtime.client_writers.contains_key(&surviving_id));
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| {
+                matches!(event, Event::SessionStarted(_) | Event::SessionShutdown(_))
+            })
+            .count(),
+        baseline_lifecycle
+    );
+    assert!(!h.ui_runtime.shutdown_requested);
+    h.shutdown().expect("shutdown");
+}
+
+/// Exact runtime probes are admitted only for current-session diagnostics.
+/// Semantic requests close the probe without consuming completed-client budget
+/// or mutating daemon lifecycle state.
+#[test]
+fn runtime_probe_is_quarantined_and_not_counted_as_a_served_ui() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.session_runtime.exact_socket_session_required = true;
+    let (probe_id, mut probe) = connect_socket_ui(&mut h);
+    let mut served_clients = 0;
+
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(
+            probe_id.clone(),
+            HarnessInputMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: tau_proto::ExtensionName::parse("tau-runtime-probe")
+                    .expect("probe name"),
+                client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: Some(test_session_id("s1")),
+                capabilities: Vec::new(),
+            }),
+        ),
+        &mut served_clients,
+    )
+    .expect("admit runtime probe");
+    assert!(matches!(
+        probe.read_message().expect("read acceptance"),
+        Some(HarnessOutputMessage::SessionAccepted(accepted))
+            if accepted.session_id == test_session_id("s1")
+    ));
+    assert!(h.ui_runtime.runtime_probe_peers.contains(&probe_id));
+
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(probe_id.clone(), shutdown_request()),
+        &mut served_clients,
+    )
+    .expect("quarantine semantic request");
+
+    assert_eq!(served_clients, 0);
+    assert!(!h.ui_runtime.shutdown_requested);
+    assert!(!h.ui_runtime.client_writers.contains_key(&probe_id));
+    assert!(!h.ui_runtime.runtime_probe_peers.contains(&probe_id));
+    h.shutdown().expect("shutdown");
+}
+
 /// UI command rejections remain live-only responses to the initiating UI and
 /// never enter publication history or another attached UI's stream.
 #[test]
@@ -193,112 +278,6 @@ fn tree_request_preserves_configured_extension_phase_validation() {
     );
 }
 
-/// Configured extensions are metered and silently denied after phase
-/// validation, before activation staging can turn repeated detach attempts into
-/// a quota failure.
-#[test]
-fn detach_request_is_silently_denied_for_configured_extensions() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("harness");
-    let ready = connect_ready_configured_extension(
-        &mut h,
-        "ready-requester",
-        "ready-requester",
-        tau_proto::ClientKind::Tool,
-    );
-    ready.lock().expect("ready requester frames").clear();
-    let handshaking = connect_handshaking_tool(&mut h, "handshaking-requester");
-    let notice_count = h.runtime_io.replayable_harness_notices.len();
-
-    for connection_id in ["ready-requester", "handshaking-requester"] {
-        h.handle_extension_message(&crate::test_connection_id(connection_id), detach_request())
-            .expect("silently deny configured extension detach");
-        let stats = h.extensions.entries[connection_id]
-            .protocol_io
-            .cumulative_stats();
-        assert_eq!(
-            stats.uplink["message.ui_detach_request"].count, 1,
-            "dedicated detach frame must use the message metering key"
-        );
-    }
-
-    assert_eq!(
-        h.extensions.entries["ready-requester"].state,
-        ExtensionState::Ready
-    );
-    assert_eq!(
-        h.extensions.entries["handshaking-requester"].state,
-        ExtensionState::Handshaking
-    );
-    assert!(
-        h.runtime_io
-            .bus
-            .connection(&crate::test_connection_id("ready-requester"))
-            .is_some()
-    );
-    assert!(
-        h.runtime_io
-            .bus
-            .connection(&crate::test_connection_id("handshaking-requester"))
-            .is_some()
-    );
-    assert!(
-        !h.extensions
-            .activation_staging
-            .contains_key("handshaking-requester")
-    );
-    assert!(ready.lock().expect("ready requester frames").is_empty());
-    assert!(
-        handshaking
-            .lock()
-            .expect("handshaking requester frames")
-            .is_empty()
-    );
-    assert_eq!(h.runtime_io.replayable_harness_notices.len(), notice_count);
-}
-
-/// Silent configured-extension denial happens only after ordinary phase
-/// validation: a detach request before Hello is metered, then follows normal
-/// runtime protocol-failure isolation.
-#[test]
-fn detach_request_preserves_configured_extension_phase_validation() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("harness");
-    h.extensions.initial_tool_preflight_complete = true;
-    connect_handshaking_tool(&mut h, "spawning-requester");
-    h.extensions
-        .entries
-        .get_mut("spawning-requester")
-        .expect("spawning requester")
-        .state = ExtensionState::Spawning;
-    let notice_count = h.runtime_io.replayable_harness_notices.len();
-
-    h.handle_extension_message(
-        &crate::test_connection_id("spawning-requester"),
-        detach_request(),
-    )
-    .expect("isolate out-of-phase requester");
-
-    let entry = &h.extensions.entries["spawning-requester"];
-    assert_eq!(
-        entry.protocol_io.cumulative_stats().uplink["message.ui_detach_request"].count,
-        1
-    );
-    assert_eq!(entry.state, ExtensionState::Disconnected);
-    assert!(
-        h.runtime_io
-            .bus
-            .connection(&crate::test_connection_id("spawning-requester"))
-            .is_none()
-    );
-    assert_eq!(
-        h.runtime_io.replayable_harness_notices.len(),
-        notice_count + 1
-    );
-}
-
 /// An attached socket UI receives exactly one multiline tree result while
 /// other peers, publication history, and semantic stores see no request or
 /// result event. The point-to-point request remains visible in debug JSONL.
@@ -324,15 +303,8 @@ fn tree_request_returns_one_directed_multiline_notice() {
     h.log_event(&event);
 
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
-    h.handle_runtime_event(
-        event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("handle tree request");
+    h.handle_runtime_event(event, &mut served_clients)
+        .expect("handle tree request");
 
     let notice = read_notice(&mut requesting_ui);
     assert_eq!(notice.kind, tau_proto::notice_kind::HARNESS_NOTICE);
@@ -427,13 +399,9 @@ fn tree_request_is_silently_denied_for_other_client_origins() {
         external_id,
     ] {
         let mut served_clients = 0;
-        let mut exit_on_disconnect = false;
-        let mut ever_attached = false;
         h.handle_runtime_event(
             HarnessEvent::from_connection_for_test(connection_id, tree_request("s1", None)),
             &mut served_clients,
-            &mut exit_on_disconnect,
-            &mut ever_attached,
         )
         .expect("silently deny tree request");
         assert_eq!(served_clients, 0);
@@ -443,51 +411,6 @@ fn tree_request_is_silently_denied_for_other_client_origins() {
     assert!(socket_tool.lock().expect("socket tool frames").is_empty());
     assert!(embedded_ui.lock().expect("embedded UI frames").is_empty());
     assert_no_message(&mut external);
-}
-
-/// An attached socket UI may disable exit-on-disconnect without publishing,
-/// delivering, or persisting a bus event. The point-to-point frame remains
-/// visible in the local debug JSONL trace.
-#[test]
-fn detach_request_controls_runtime_without_publication() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("harness");
-    let debug_log_path = h
-        .enable_debug_log(&td.path().join("debug"))
-        .expect("enable debug log");
-    let (ui_id, mut ui) = connect_socket_ui(&mut h);
-    let (_observer_id, mut observer) = connect_socket_ui(&mut h);
-    let baseline_seq = h.runtime_io.event_log.next_seq();
-    let event = HarnessEvent::from_connection_for_test(ui_id, detach_request());
-    h.log_event(&event);
-
-    let mut served_clients = 0;
-    let mut exit_on_disconnect = true;
-    let mut ever_attached = false;
-    h.handle_runtime_event(
-        event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("handle detach request");
-
-    assert!(!exit_on_disconnect);
-    assert_eq!(served_clients, 0);
-    assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
-    assert_no_message(&mut ui);
-    assert_no_message(&mut observer);
-
-    let lines = std::fs::read_to_string(debug_log_path).expect("read debug log");
-    let entries = lines
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("debug JSON"))
-        .collect::<Vec<_>>();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["event_name"], "<message>");
-    assert_eq!(entries[0]["event"]["message"], "ui_detach_request");
-    assert_eq!(entries[0]["event"]["payload"], serde_json::json!({}));
 }
 
 /// An attached socket UI may request unconditional canonical shutdown without
@@ -513,18 +436,13 @@ fn shutdown_request_queues_canonical_shutdown_without_publication() {
     }
     let baseline_seq = h.runtime_io.event_log.next_seq();
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = true;
 
     h.handle_runtime_event(
         HarnessEvent::from_connection_for_test(ui_id, shutdown_request()),
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("handle shutdown request");
 
-    assert!(!exit_on_disconnect);
     assert_eq!(served_clients, 0);
     assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
     assert_no_message(&mut ui);
@@ -559,18 +477,13 @@ fn shutdown_request_is_silently_denied_for_other_client_origins() {
     let connection_id = crate::test_connection_id("socket-tool-shutdown");
     let baseline_seq = h.runtime_io.event_log.next_seq();
     let mut served_clients = 0;
-    let mut exit_on_disconnect = true;
-    let mut ever_attached = true;
 
     h.handle_runtime_event(
         HarnessEvent::from_connection_for_test(connection_id, shutdown_request()),
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("silently deny shutdown request");
 
-    assert!(exit_on_disconnect);
     assert!(!h.ui_runtime.shutdown_requested);
     assert_eq!(served_clients, 0);
     assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
@@ -578,38 +491,6 @@ fn shutdown_request_is_silently_denied_for_other_client_origins() {
         h.runtime_io.rx.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
-}
-
-/// Startup gating recognizes detach only from an exact attached socket UI.
-/// Socket origin alone must not grant connection-control authority.
-#[test]
-fn detach_request_controls_startup_only_for_attached_socket_ui() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("harness");
-    connect_test_client_with_origin(
-        &mut h,
-        "socket-tool",
-        tau_proto::ClientKind::Tool,
-        ConnectionOrigin::Socket,
-    );
-
-    assert!(
-        !h.handle_startup_from_connection(
-            &crate::test_connection_id("socket-tool"),
-            detach_request()
-        )
-        .expect("deny socket tool detach")
-    );
-    assert!(!h.ui_runtime.startup_detach_requested);
-
-    let (ui_id, mut ui) = connect_socket_ui(&mut h);
-    assert!(
-        !h.handle_startup_from_connection(&ui_id, detach_request())
-            .expect("handle attached UI detach")
-    );
-    assert!(h.ui_runtime.startup_detach_requested);
-    assert_no_message(&mut ui);
 }
 
 /// Startup gating retains an authorized UI shutdown request for the runtime
@@ -639,63 +520,6 @@ fn shutdown_request_controls_startup_only_for_attached_socket_ui() {
     );
     assert!(h.ui_runtime.shutdown_requested);
     assert_no_message(&mut ui);
-}
-
-/// Non-UI sockets, dedicated external-message peers, and embedded UIs cannot
-/// mutate the runtime exit-on-disconnect control.
-#[test]
-fn detach_request_is_silently_denied_for_other_client_origins() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("harness");
-    let socket_tool = connect_test_client_with_origin(
-        &mut h,
-        "socket-tool",
-        tau_proto::ClientKind::Tool,
-        ConnectionOrigin::Socket,
-    );
-    let embedded_ui = connect_test_client(&mut h, "embedded-ui", tau_proto::ClientKind::Ui);
-    let (external_id, mut external) = connect_socket_ui(&mut h);
-    h.handle_client_message(
-        &external_id,
-        HarnessInputMessage::Hello(tau_proto::Hello {
-            protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: crate::test_extension_name(
-                crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
-            ),
-            client_kind: tau_proto::ClientKind::External,
-            expected_session_id: None,
-            capabilities: Default::default(),
-        }),
-    )
-    .expect("external-agent message hello");
-    let baseline_seq = h.runtime_io.event_log.next_seq();
-
-    for connection_id in [
-        tau_proto::ConnectionId::parse("socket-tool")
-            .expect("test connection id must satisfy the identifier grammar"),
-        tau_proto::ConnectionId::parse("embedded-ui")
-            .expect("test connection id must satisfy the identifier grammar"),
-        external_id,
-    ] {
-        let mut served_clients = 0;
-        let mut exit_on_disconnect = true;
-        let mut ever_attached = false;
-        h.handle_runtime_event(
-            HarnessEvent::from_connection_for_test(connection_id, detach_request()),
-            &mut served_clients,
-            &mut exit_on_disconnect,
-            &mut ever_attached,
-        )
-        .expect("silently deny detach request");
-        assert!(exit_on_disconnect);
-        assert_eq!(served_clients, 0);
-    }
-
-    assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
-    assert!(socket_tool.lock().expect("socket tool frames").is_empty());
-    assert!(embedded_ui.lock().expect("embedded UI frames").is_empty());
-    assert_no_message(&mut external);
 }
 
 /// A socket client cannot claim report or canonical message publication

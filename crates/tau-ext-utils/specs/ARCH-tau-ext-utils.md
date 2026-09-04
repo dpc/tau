@@ -16,8 +16,8 @@ serializes User-scope appends across harness processes sharing that state root
 and instance. The record attributes the report from the routed tool caller and
 current live `session.started` fact; it never accepts model-supplied
 attribution. It is best-effort diagnostic data, not timer or journal state:
-memory-only storage denial, quota, RPC failure, and the accepted rare lifecycle
-rollover mismatch return a no-retry outcome without interrupting the primary
+memory-only storage denial, quota, RPC failure, and a final-shutdown race return
+a no-retry outcome without interrupting the primary
 task. Ephemeral sessions append to the same durable file. Papercut calls are
 live-only and never replay-append. Existing per-session papercut files remain
 historical artifacts and are not migrated.
@@ -102,7 +102,7 @@ After live timer mutations and successful timer replay, the extension declares
 `timer_scheduled` exactly when an agent's reconstructed timer map is nonempty.
 One-shot fire removes presence; periodic fire retains it. The extension emits
 replacement declarations after map mutations, while the harness clears source,
-agent-unload, and session-rollover contributions. Scheduled timers are not
+agent-unload, and final-shutdown contributions. Scheduled timers are not
 modeled as active tool calls.
 
 Session lifecycle is explicit: live `session.started` and `session.shutdown`

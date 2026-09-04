@@ -4887,8 +4887,7 @@ where
         Ok(())
     }
 
-    /// Cancels every old-session job before the provider accepts work for a
-    /// replacement session.
+    /// Cancels every session-owned job during final daemon shutdown.
     fn handle_session_shutdown(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         self.handle_cancel_prompt(
             tau_proto::UiCancelPrompt {

@@ -2272,10 +2272,6 @@ fn representative_events() -> Vec<Event> {
             include_in_context: true,
             target_agent_id: Some(agent_id("agent-1")),
         }),
-        Event::UiSwitchSession(UiSwitchSession {
-            new_session_id: test_session_id("s2"),
-            reason: SessionStartReason::New,
-        }),
         Event::UiCreateAgent(UiCreateAgent {
             request_id: "test-create-request".to_owned(),
             literal: false,
@@ -2495,7 +2491,6 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             session_id: test_session_id("s1"),
             scope: SessionAgentListScope::History,
         }),
-        HarnessInputMessage::UiDetachRequest(UiDetachRequest {}),
         HarnessInputMessage::UiShutdownRequest(UiShutdownRequest {}),
         HarnessInputMessage::UiTreeRequest(UiTreeRequest {
             session_id: test_session_id("s1"),
@@ -3156,7 +3151,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "ui.role_update",
         "ui.set_agent_display_name",
         "ui.shell_command",
-        "ui.switch_session",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -4035,24 +4029,6 @@ fn ui_debug_event_stats_request_uses_dedicated_input_message() {
     assert!(decode_message_from_slice::<Event>(&bytes).is_err());
 }
 
-/// UI detach uses a flat dedicated input message and cannot decode as an event
-/// or harness output.
-#[test]
-fn ui_detach_request_uses_dedicated_input_message() {
-    let input = HarnessInputMessage::UiDetachRequest(UiDetachRequest {});
-    let json = serde_json::to_value(&input).expect("serialize input");
-    assert_eq!(json["message"], "ui_detach_request");
-    assert_eq!(json["payload"], serde_json::json!({}));
-
-    let bytes = encode_harness_input_to_vec(&input).expect("encode input");
-    assert_eq!(
-        decode_harness_input_from_slice(&bytes).expect("decode input"),
-        input
-    );
-    assert!(decode_harness_output_from_slice(&bytes).is_err());
-    assert!(decode_message_from_slice::<Event>(&bytes).is_err());
-}
-
 /// UI shutdown uses a flat dedicated input message and cannot decode as an
 /// event or harness output.
 #[test]
@@ -4267,11 +4243,11 @@ fn ui_session_admission_wire_round_trip() {
     };
     assert!(absent.expected_session_id.is_none());
 
-    let accepted = HarnessOutputMessage::UiSessionAccepted(UiSessionAccepted {
+    let accepted = HarnessOutputMessage::SessionAccepted(SessionAccepted {
         session_id: expected,
     });
     let accepted_json = serde_json::to_value(&accepted).expect("serialize acknowledgement");
-    assert_eq!(accepted_json["message"], "ui_session_accepted");
+    assert_eq!(accepted_json["message"], "session_accepted");
     assert_eq!(
         accepted_json["payload"]["session_id"],
         serde_json::json!("session-1")
@@ -4359,6 +4335,35 @@ fn removed_dotted_request_events_have_no_decoder() {
             serde_json::from_value::<Event>(removed).is_err(),
             "{tag} unexpectedly decoded as Event"
         );
+    }
+}
+
+/// Removed fixed-session control encodings must fail at the directional input
+/// decoder instead of being treated as an unknown but actionable request.
+#[test]
+fn removed_session_switch_and_detach_input_encodings_have_no_decoder() {
+    let old_detach = serde_json::json!({
+        "message": "ui_detach_request",
+        "payload": {}
+    });
+    let mut old_switch = serde_json::to_value(HarnessInputMessage::emit(Event::SessionStarted(
+        SessionStarted {
+            session_id: SessionId::parse("s1").expect("session id"),
+            reason: SessionStartReason::Initial,
+        },
+    )))
+    .expect("serialize input envelope");
+    old_switch["payload"]["event"] = serde_json::json!({
+        "event": "ui.switch_session",
+        "payload": {
+            "new_session_id": "s2",
+            "reason": "new"
+        }
+    });
+
+    for removed in [old_detach, old_switch] {
+        let bytes = encode_message_to_vec(&removed).expect("encode removed wire value");
+        assert!(decode_message_from_slice::<HarnessInputMessage>(&bytes).is_err());
     }
 }
 

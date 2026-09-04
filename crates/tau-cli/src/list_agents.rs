@@ -112,8 +112,12 @@ fn request_at_socket_with_timeout_typed(
     timeout: Duration,
 ) -> Result<Vec<SessionAgentListEntry>, CliError> {
     let deadline = path_std_time::Instant::now() + timeout;
-    let (mut reader, mut writer) =
-        crate::ui_client::connect_ui_client_until(socket_path, "tau-list-agents", deadline)?;
+    let (mut reader, mut writer) = crate::ui_client::connect_ui_client_until(
+        socket_path,
+        "tau-list-agents",
+        session_id,
+        deadline,
+    )?;
     let request_id = crate::ui_client::next_request_id("agent-list");
     crate::ui_client::send_message(
         &mut writer,

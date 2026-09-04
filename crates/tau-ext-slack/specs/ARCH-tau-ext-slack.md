@@ -155,7 +155,7 @@ the first authorized post or reaction API attempt.
 
 Runtime links, selections, registrations, reply/edit routes, posted-message
 ownership, received IDs, and send workers clear on restart. Disconnect, session
-rollover, agent unload, route replacement, and tool loss retire the applicable
+shutdown, agent unload, route replacement, and tool loss retire the applicable
 authority. A restarted extension admits no Socket Mode occurrence until the
 harness supplies session lifecycle authority. After session initialization, a
 restart receives the canonical current `session.started` catch-up snapshot;

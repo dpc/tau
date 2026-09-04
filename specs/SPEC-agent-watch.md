@@ -160,7 +160,7 @@ subsequent 120-minute thresholds. Each crossing emits one durable typed,
 isolated notification to every current watcher without waking the waiting agent.
 Accounting and threshold cursors advance even when there are no watchers. A
 watch enabled later receives the current work-status snapshot but no historical
-long-wait notification. Unload and session rollover discard runtime accounting
+long-wait notification. Unload and final session shutdown discard runtime accounting
 and deadlines; replay retains committed recipient projections as context without
 reconstructing timers or re-fanning notifications.
 

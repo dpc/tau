@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
-use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
+use crate::event_log as path_crate_event_log;
 
 /// Build one start-agent request with observable correlation and instruction.
 fn request(query_id: &str, instruction: &str) -> StartAgentRequest {
@@ -681,8 +681,8 @@ fn post_membership_unload_admission_rejection_restores_unavailable() {
     assert_eq!(coordinator.retained_bytes, 0);
 }
 
-/// Final process shutdown closes a post-accept startup before generation
-/// rollover instead of silently discarding its parked prompt owner.
+/// Final process shutdown closes a post-accept startup before revoking
+/// admission instead of silently discarding its parked prompt owner.
 #[test]
 fn process_shutdown_terminalizes_parked_startup_prompt() {
     let tmp = TempDir::new().expect("tempdir");
@@ -1684,122 +1684,6 @@ fn stale_generation_is_observation_only() {
             Event::StartAgentAccepted(accepted) if accepted.query_id == "q-stale"
         )
     }));
-}
-
-/// A request parked in interception cannot create, reject, or rebind work after
-/// the harness switches away from the session that admitted it.
-#[test]
-fn stale_session_request_is_observation_only() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let sink = connect_ready_configured_extension(
-        &mut h,
-        "requester",
-        "stable-requester",
-        tau_proto::ClientKind::Tool,
-    );
-    connect_start_agent_interceptor(&mut h);
-    connect_test_tool(&mut h, "rollover-request-blocker");
-    h.handle_extension_event(
-        "rollover-request-blocker",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register rollover blocker");
-    h.publish_event(None, draft_event("block deferred start request"));
-    h.handle_extension_event_inner(
-        &crate::test_connection_id("requester"),
-        request_event("q-stale-session", "session A work"),
-    )
-    .expect("defer request behind parked observation");
-
-    h.switch_session(
-        "s2".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
-    h.switch_session(
-        "s1".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::Resume,
-    )
-    .expect("return to original session id");
-    h.handle_extension_event(
-        "start-agent-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("consume stale-session interceptor reply");
-
-    assert!(source_committed(&h, "requester", |event| {
-        matches!(
-            event,
-            Event::StartAgentRequest(request) if request.query_id == "q-stale-session"
-        )
-    }));
-    assert_eq!(h.session_runtime.current_session_id.as_str(), "s1");
-    assert_eq!(query_agent_count(&h, "q-stale-session"), 0);
-    assert!(directed_acceptance(&sink, "q-stale-session").is_none());
-    assert!(directed_result(&sink, "q-stale-session").is_none());
-}
-
-/// A pre-Ready request retains its original admission session while deferred,
-/// so switching sessions before Ready cannot retarget the work into the new
-/// session.
-#[test]
-fn pre_ready_request_keeps_original_admission_session() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let sink = connect_ready_configured_extension(
-        &mut h,
-        "requester",
-        "stable-requester",
-        tau_proto::ClientKind::Tool,
-    );
-    h.extensions
-        .entries
-        .get_mut("requester")
-        .expect("requester")
-        .state = path_crate_extension::ExtensionState::Handshaking;
-
-    h.handle_extension_event(
-        "requester",
-        TestProtocolItem::Event(request_event("q-pre-ready-session", "session A work")),
-    )
-    .expect("defer request");
-    assert!(!source_committed(&h, "requester", |event| {
-        matches!(
-            event,
-            Event::StartAgentRequest(request) if request.query_id == "q-pre-ready-session"
-        )
-    }));
-
-    h.switch_session(
-        "s2".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
-    h.handle_extension_message(
-        &crate::test_connection_id("requester"),
-        TestMessage::Ready(Default::default()),
-    )
-    .expect("activate requester");
-
-    assert!(source_committed(&h, "requester", |event| {
-        matches!(
-            event,
-            Event::StartAgentRequest(request) if request.query_id == "q-pre-ready-session"
-        )
-    }));
-    assert_eq!(h.session_runtime.current_session_id.as_str(), "s2");
-    assert_eq!(query_agent_count(&h, "q-pre-ready-session"), 0);
-    assert!(directed_acceptance(&sink, "q-pre-ready-session").is_none());
-    assert!(directed_result(&sink, "q-pre-ready-session").is_none());
 }
 
 /// Repeating one stable publisher/query pair reuses the active side agent and

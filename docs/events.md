@@ -122,8 +122,8 @@ Emitted by the harness's session tracker. The durable session log is a
 membership journal, not a transcript.
 
 - **`session.started`** — Must-pass immutable runtime lifecycle fact: the
-  harness created or switched to a session. Carries `session_id` and a reason
-  (`initial` startup, `new` via `:session new`, `resume` of an existing session).
+  harness started its bound session. Carries `session_id` and an `initial` or
+  `resume` reason.
   Registered session context providers react with per-session setup and reply
   with `extension.session_context_ready`; per-agent context providers react to
   `session.agent_loaded` and reply with `extension.context_ready`. Interceptors
@@ -280,7 +280,7 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.runtime_indicators_declared`** *(Tool/Core extension)* — A bounded,
   transient complete replacement of one configured source's ambient indicators
   for a live agent. The harness unions source contributions and clears them on
-  source disconnect, agent unload, and session rollover. The only current value
+  source disconnect, agent unload, and final session shutdown. The only current value
   is `timer_scheduled`; declarations never enter replay.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). For a V1-marked ordinary
@@ -821,8 +821,6 @@ intent.
   Snapshots carry no progress or output and remain UI-only and non-durable,
   including for `!!` and ephemeral targets; the later live completion settles
   the same correlated row.
-- **`ui.switch_session`** — User wants to switch to a different session
-  in the same daemon, with `new`/`resume` reason.
 - **`ui.create_agent`** — UI requests creation of a user-owned agent, optionally
   with the first prompt to append after context loads. The request carries the
   request correlation id, role, initial metadata, optional parent agent, optional prompt correlation id,

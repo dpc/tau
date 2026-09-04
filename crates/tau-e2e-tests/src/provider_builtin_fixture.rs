@@ -10,7 +10,7 @@ pub use scripted_chat_server::CapturedChatRequest;
 use scripted_chat_server::{Script, ScriptedChatServer};
 use tempfile::TempDir;
 
-use crate::sanitize_name;
+use crate::{bounded_runtime_tempdir, sanitize_name};
 
 /// Valid-by-construction inputs for each closed production-provider script.
 enum FixtureScript<'a> {
@@ -33,6 +33,10 @@ pub const PROVIDER_BUILTIN_SESSION: &str = "provider-builtin-retry-e2e";
 pub struct ProviderBuiltinFixture {
     /// Temporary root retained on test failure.
     tempdir: Option<TempDir>,
+    /// Short private runtime root retained for the fixture lifetime.
+    _runtime_tempdir: TempDir,
+    /// Private XDG runtime directory.
+    runtime_dir: PathBuf,
     /// Generated Tau configuration directory.
     config_dir: PathBuf,
     /// Private extension state directory.
@@ -96,6 +100,8 @@ impl ProviderBuiltinFixture {
         };
         let tempdir = TempDir::new()?;
         let root = tempdir.path().join(sanitize_name(name));
+        let runtime_tempdir = bounded_runtime_tempdir()?;
+        let runtime_dir = runtime_tempdir.path().to_path_buf();
         let config_dir = root.join("config");
         let state_dir = root.join("state");
         let harness_state_dir = root.join("harness-state");
@@ -227,6 +233,8 @@ impl ProviderBuiltinFixture {
         )?;
         Ok(Self {
             tempdir: Some(tempdir),
+            _runtime_tempdir: runtime_tempdir,
+            runtime_dir,
             config_dir,
             state_dir,
             harness_state_dir,
@@ -242,6 +250,12 @@ impl ProviderBuiltinFixture {
         self.config_dir
             .parent()
             .expect("fixture config directory has a parent")
+    }
+
+    /// Returns the short private XDG runtime directory.
+    #[must_use]
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
     }
 
     /// Returns the generated Tau configuration directory.

@@ -30,7 +30,7 @@ Tau follows the XDG directories:
   - `meta.json` — canonical durable-session existence manifest with canonical creation time and a derived last-touched ordering/retention hint.
   - `lock` — flock used while the daemon has the session loaded for writing.
   - `events.jsonl` — best-effort debug runtime event log. It is an ordered subsequence of attempted observations, not authoritative replay state; a missing row does not prove an event was absent.
-  - `debug/provider-requests/<provider-instance>/*.json.zst` — zstd-compressed provider request, successful-response, and `responses-attempt-failure` captures written best-effort for an attributed durable session whose directory still exists. A late capture can land in the old attributed session after rollover. Request/response records can contain full prompt, tool, model, and provider-controlled content. Failure records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
+  - `debug/provider-requests/<provider-instance>/*.json.zst` — zstd-compressed provider request, successful-response, and `responses-attempt-failure` captures written best-effort for an attributed durable session whose directory still exists. Request/response records can contain full prompt, tool, model, and provider-controlled content. Failure records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
   - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
   - `logs/<extension>.log` — stderr for each spawned extension.
 - Agents: `~/.local/state/tau/agents/<agent_id>/`
@@ -38,10 +38,9 @@ Tau follows the XDG directories:
   - `meta.json` — agent metadata such as cwd, creation time, and latest prompt preview.
   - `lock` — flock used while the daemon has the agent loaded for writing.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`
-  - `<pid>-<instance>.sock` — Unix socket for clients.
-  - `<pid>-<instance>.json` — daemon discovery metadata containing pid, project root,
-    Tau version, and the daemon's current active `session_id`; `:session new`
-    updates this field after the daemon switches sessions successfully.
+  - `sockets/<session-key>.sock` — deterministic Unix socket for one immutable session.
+  - `claims/<session-key>.lock` — lifetime `flock`; its JSON content is diagnostic
+    only. The full BLAKE3 session key, not a PID, is routing authority.
 
 ## Runtime discovery from supervised components
 
@@ -108,10 +107,10 @@ cargo r -- dev send <session_id> :compact
 cargo r -- dev send <session_id> '!pwd'
 ```
 
-The command requires the session id and finds the matching running daemon via
-runtime harness metadata. That metadata's `session_id` is the daemon's active
-current session and is updated by `:session new`; discovery leaves stale runtime
-files untouched, and ambiguous live matches are treated as an error. It
+The command requires the session id and finds the matching running daemon through
+its deterministic session-keyed runtime claim. Exact admission verifies the
+daemon's immutable session; discovery never uses a PID as routing or liveness
+authority. It
 supports normal prompts, core commands, and `!` / `!!` shell-command
 submissions.
 

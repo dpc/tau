@@ -114,12 +114,6 @@ is done.
   is omitted from debug JSONL. Other socket peers and embedded/non-socket UIs
   receive a content-free authorization error. Configured extensions are silently
   denied without a response, warning, or disconnection.
-- **`ui_detach_request`** — An attached local UI asks the daemon to remain
-  running after that UI disconnects, so a later `tau attach SESSION` can reconnect.
-  The payload is empty. The harness consumes the request as direct
-  connection-control input; it is not published, intercepted, subscribed, or
-  replayed. Other client origins and configured extensions are silently denied.
-  The input frame remains visible in local debug JSONL and protocol metering.
 - **`ui_shutdown_request`** — An attached local UI requests unconditional
   canonical harness shutdown. The empty request is direct lifecycle input, not
   an event; it is neither published, intercepted, subscribed, nor replayed.
@@ -207,7 +201,8 @@ prompts.
 Accepted local socket clients use `get_current_session` to request the
 harness-owned in-memory current session id and immutable canonical startup
 project root. The directed `current_session_result` is correlation-matched and
-bypasses event publication, subscriptions, and persisted runtime metadata.
+bypasses event publication and subscriptions. The locked claim record is
+diagnostic only; exact admission and the responder supply authority.
 
 UI-classified local clients use `get_session_agent_list` to request a shallow,
 read-only roster from the harness currently bound to an exact `session_id`.
@@ -276,15 +271,15 @@ exactly-once guarantee.
 
 Cross-harness `message` tool delivery uses a dedicated
 `external_agent_message` / `external_agent_message_result` RPC instead of
-generic `emit`. The sending harness opens the target harness socket discovered
-from active-session runtime metadata, sends a `hello` with the narrow external
-client kind/name, then sends `external_agent_message` with `request_id`,
+generic `emit`. The sending harness resolves the target's session-keyed claim, opens its
+deterministic socket, and completes an exact-session `hello` before sending
+`external_agent_message` with `request_id`,
 `message_id`, a sender-minted per-message capability, sender session/agent
 identity, recipient session/agent identity, kind, and message body.
 
 The receiving harness accepts this RPC only from peers that completed that
 external-message hello. It validates that the requested recipient session is its
-current active session, the message is non-empty, and the recipient agent is live
+immutable bound session, the message is non-empty, and the recipient agent is live
 or pending before starting sender authentication. Authentication runs off the
 central harness loop: the receiver connects back to the claimed sender harness
 and sends `external_agent_message_auth` with the capability plus the exact bound

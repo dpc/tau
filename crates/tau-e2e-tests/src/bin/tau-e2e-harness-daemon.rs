@@ -216,7 +216,6 @@ fn launch_daemon(args: DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
         provider_mode.session_id(),
         tau_harness::ServeOptions::builder()
             .max_clients(1usize)
-            .exit_on_disconnect(true)
             .session_status(status)
             .dirs(tau_config::settings::TauDirs {
                 config_dir: Some(PathBuf::from(config_dir)),

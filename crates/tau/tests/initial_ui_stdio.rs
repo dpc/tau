@@ -1,6 +1,6 @@
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,9 @@ use tau_proto::{
     Subscribe,
 };
 
+mod support;
+use support::bounded_runtime_tempdir;
+
 /// Owns an initial-UI child and reaps it if a test exits before clean shutdown.
 struct InitialUiChild {
     /// Spawned component process.
@@ -17,26 +20,6 @@ struct InitialUiChild {
 }
 
 impl InitialUiChild {
-    /// Waits for clean shutdown only until the supplied timeout, then reaps the
-    /// child so a broken lifecycle cannot hang the test suite.
-    fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitStatus, String> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self.process.try_wait() {
-                Ok(Some(status)) => return Ok(status),
-                Ok(None) if Instant::now() >= deadline => {
-                    self.stop();
-                    return Err("initial-UI child did not exit after disconnect".to_owned());
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(error) => {
-                    self.stop();
-                    return Err(format!("query initial-UI child: {error}"));
-                }
-            }
-        }
-    }
-
     /// Stops and reaps a child that cannot complete the protocol under test.
     fn stop(&mut self) {
         if !matches!(self.process.try_wait(), Ok(Some(_))) {
@@ -112,7 +95,8 @@ fn initial_ui_introduction_notice_requires_conversational_launch() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_home = temp.path().join("config");
         let state_home = temp.path().join("state");
-        let runtime_dir = temp.path().join("runtime");
+        let runtime_temp = bounded_runtime_tempdir();
+        let runtime_dir = runtime_temp.path().to_path_buf();
         std::fs::create_dir_all(config_home.join("tau")).expect("mkdir config");
         std::fs::create_dir_all(&state_home).expect("mkdir state");
         std::fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
@@ -197,86 +181,16 @@ fn initial_ui_introduction_notice_requires_conversational_launch() {
             .expect("write disconnect");
         writer.flush().expect("flush disconnect");
         drop(writer);
-        let _ = child.wait().expect("wait child");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            child.try_wait().expect("query child").is_none(),
+            "conversational daemon must survive its initial UI disconnect"
+        );
+        child.kill().expect("stop persistent daemon");
+        let _ = child.wait().expect("reap child");
         reader_thread.join().expect("reader thread");
     }
 }
-
-/// A metadata-publication failure occurs after harness construction but before
-/// welcome eligibility is consumed, so the initial UI receives only disconnect.
-#[test]
-fn late_startup_failure_does_not_emit_introduction_notice() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config_home = temp.path().join("config");
-    let state_home = temp.path().join("state");
-    let runtime_dir = temp.path().join("runtime");
-    std::fs::create_dir_all(config_home.join("tau")).expect("mkdir config");
-    std::fs::create_dir_all(&state_home).expect("mkdir state");
-    std::fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
-    std::fs::write(
-        config_home.join("tau/harness.yaml"),
-        "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n",
-    )
-    .expect("write minimal harness config");
-
-    let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
-    let instance = "0123456789abcdef";
-    let mut child =
-        initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
-            .env("TAU_SESSION_ID", "late-startup-failure")
-            .env("TAU_HARNESS_INSTANCE_ID", instance)
-            .env(tau_harness::INITIAL_UI_INTRODUCTION_NOTICE_ENV, "1")
-            .spawn()
-            .expect("spawn harness");
-    let metadata = runtime_dir
-        .join("tau/harnesses")
-        .join(format!("{}-{instance}.json", child.id()));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline
-        && !metadata
-            .parent()
-            .expect("metadata parent")
-            .try_exists()
-            .expect("check runtime directory")
-    {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::fs::create_dir(&metadata).expect("block metadata file replacement");
-
-    let mut writer = PeerOutputWriter::new(BufWriter::new(child.stdin.take().expect("stdin")));
-    write_initial_ui_handshake(&mut writer);
-    let mut reader = PeerInputReader::new(BufReader::new(child.stdout.take().expect("stdout")));
-    let mut introductions = 0;
-    let disconnect = loop {
-        let message = reader
-            .read_message()
-            .expect("read startup result")
-            .expect("startup result");
-        match message {
-            HarnessOutputMessage::Deliver(delivery) => {
-                if matches!(
-                    delivery.event(),
-                    Event::HarnessNotice(notice)
-                        if notice.kind == tau_proto::notice_kind::HARNESS_INTRODUCTION
-                ) {
-                    introductions += 1;
-                }
-            }
-            HarnessOutputMessage::Disconnect(disconnect) => break disconnect,
-            _ => {}
-        }
-    };
-    assert_eq!(introductions, 0);
-    assert!(
-        disconnect
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("harness startup failed"))
-    );
-    drop(writer);
-    assert!(!child.wait().expect("wait child").success());
-}
-
 /// Ensures a real `tau component harness --initial-ui-stdio` child flushes a
 /// fatal startup disconnect all the way to child stdout before exiting. This
 /// protects the child-process stdio path, not just the in-process UnixStream
@@ -286,7 +200,8 @@ fn initial_ui_stdio_startup_error_reaches_child_stdout() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_home = temp.path().join("config");
     let state_home = temp.path().join("state");
-    let runtime_dir = temp.path().join("runtime");
+    let runtime_temp = bounded_runtime_tempdir();
+    let runtime_dir = runtime_temp.path().to_path_buf();
     let tau_config_dir = config_home.join("tau");
     std::fs::create_dir_all(&tau_config_dir).expect("mkdir config");
     std::fs::create_dir_all(&state_home).expect("mkdir state");
@@ -349,7 +264,8 @@ fn resumed_harness_process_does_not_recreate_deleted_session() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_home = temp.path().join("config");
     let state_home = temp.path().join("state");
-    let runtime_dir = temp.path().join("runtime");
+    let runtime_temp = bounded_runtime_tempdir();
+    let runtime_dir = runtime_temp.path().to_path_buf();
     let tau_config_dir = config_home.join("tau");
     let session_dir = state_home.join("tau/sessions/deleted-session");
     std::fs::create_dir_all(&tau_config_dir).expect("mkdir config");
@@ -411,7 +327,8 @@ fn resumed_configured_harness_process_creates_relay_log() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_home = temp.path().join("config");
     let state_home = temp.path().join("state");
-    let runtime_dir = temp.path().join("runtime");
+    let runtime_temp = bounded_runtime_tempdir();
+    let runtime_dir = runtime_temp.path().to_path_buf();
     let tau_config_dir = config_home.join("tau");
     let session_dir = state_home.join("tau/sessions/resumed-session");
     std::fs::create_dir_all(&tau_config_dir).expect("mkdir config");
@@ -511,19 +428,18 @@ fn resumed_configured_harness_process_creates_relay_log() {
                 .map_err(|error| format!("flush clean shutdown: {error}"))
         });
     drop(writer);
-    let status = match shutdown {
-        Ok(()) => child.wait_for_exit(Duration::from_secs(10)),
-        Err(error) => {
-            child.stop();
-            Err(error)
-        }
-    };
-    reader_thread.join().expect("reader thread");
-    let status = status.unwrap_or_else(|error| panic!("{error}"));
+    shutdown.unwrap_or_else(|error| panic!("{error}"));
+    std::thread::sleep(Duration::from_millis(100));
     assert!(
-        status.success(),
-        "resumed initial-UI harness must exit cleanly after disconnect"
+        child
+            .process
+            .try_wait()
+            .expect("query resumed harness")
+            .is_none(),
+        "resumed conversational daemon must survive its initial UI disconnect"
     );
+    child.stop();
+    reader_thread.join().expect("reader thread");
 }
 
 /// A real harness process must reject an attach handshake whose expected
@@ -533,7 +449,8 @@ fn harness_process_rejects_attach_session_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_home = temp.path().join("config");
     let state_home = temp.path().join("state");
-    let runtime_dir = temp.path().join("runtime");
+    let runtime_temp = bounded_runtime_tempdir();
+    let runtime_dir = runtime_temp.path().to_path_buf();
     std::fs::create_dir_all(config_home.join("tau")).expect("mkdir config");
     std::fs::create_dir_all(&state_home).expect("mkdir state");
     std::fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
@@ -587,4 +504,85 @@ fn harness_process_rejects_attach_session_mismatch() {
     drop(writer);
     let status = child.wait().expect("wait child");
     assert!(!status.success());
+}
+
+/// A late daemon startup failure must not emit an introduction for a session
+/// that never became usable.
+#[test]
+fn late_startup_failure_does_not_emit_introduction_notice() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_home = temp.path().join("config");
+    let state_home = temp.path().join("state");
+    let runtime_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(config_home.join("tau")).expect("mkdir config");
+    std::fs::create_dir_all(&state_home).expect("mkdir state");
+    std::fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
+    std::fs::write(
+        config_home.join("tau/harness.yaml"),
+        "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n",
+    )
+    .expect("write minimal harness config");
+
+    let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
+    let instance = "0123456789abcdef";
+    let mut child =
+        initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
+            .env("TAU_SESSION_ID", "late-startup-failure")
+            .env("TAU_HARNESS_INSTANCE_ID", instance)
+            .env(tau_harness::INITIAL_UI_INTRODUCTION_NOTICE_ENV, "1")
+            .spawn()
+            .expect("spawn harness");
+    let metadata = runtime_dir
+        .join("tau/harnesses")
+        .join(format!("{}-{instance}.json", child.id()));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline
+        && !metadata
+            .parent()
+            .expect("metadata parent")
+            .try_exists()
+            .expect("check runtime directory")
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::create_dir(&metadata).expect("block metadata file replacement");
+
+    let mut writer = PeerOutputWriter::new(BufWriter::new(child.stdin.take().expect("stdin")));
+    let _ = writer.write_message(&HarnessInputMessage::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: "tau-chat".parse().expect("valid chat client name"),
+        client_kind: ClientKind::Ui,
+        expected_session_id: None,
+        capabilities: Vec::new(),
+    }));
+    let _ = writer.flush();
+    let mut reader = PeerInputReader::new(BufReader::new(child.stdout.take().expect("stdout")));
+    let mut introductions = 0;
+    let disconnect = loop {
+        let Some(message) = reader.read_message().expect("read startup result") else {
+            break None;
+        };
+        match message {
+            HarnessOutputMessage::Deliver(delivery) => {
+                if matches!(
+                    delivery.event(),
+                    Event::HarnessNotice(notice)
+                        if notice.kind == tau_proto::notice_kind::HARNESS_INTRODUCTION
+                ) {
+                    introductions += 1;
+                }
+            }
+            HarnessOutputMessage::Disconnect(disconnect) => break Some(disconnect),
+            _ => {}
+        }
+    };
+    assert_eq!(introductions, 0);
+    assert!(disconnect.is_none_or(|disconnect| {
+        disconnect
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("harness startup failed"))
+    }));
+    drop(writer);
+    assert!(!child.wait().expect("wait child").success());
 }

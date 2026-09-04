@@ -16,7 +16,6 @@ use tau_swarm_iroh::{Credentials, Server};
 use tokio::sync as path_tokio_sync;
 
 use super::*;
-use crate::tools as path_crate_tools;
 use crate::worker_health::WorkerHealth;
 
 fn resolved_config() -> ResolvedConfig {
@@ -64,8 +63,9 @@ fn worker_error_retires_health_before_optional_notice() {
     assert!(!health.is_running());
 }
 
-/// An ordinary session reset retains the process incarnation, while a newly
-/// started extension runtime receives a distinct collision-resistant identity.
+/// Clearing the bound session's working state retains the process incarnation
+/// and immutable session identity, while a new extension process receives a
+/// distinct collision-resistant identity.
 #[test]
 fn scopes_application_incarnation_to_extension_process() {
     let mut running = SwarmRuntime::new();
@@ -78,10 +78,19 @@ fn scopes_application_incarnation_to_extension_process() {
     )));
     running.commands = Some(Arc::clone(&commands));
 
-    running.reset_session(Some("first".parse().expect("session ID")));
-    running.reset_session(Some("second".parse().expect("session ID")));
+    let session_id: tau_proto::SessionId = "first".parse().expect("session ID");
+    fold_event(
+        &mut running,
+        &Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: session_id.clone(),
+            reason: tau_proto::SessionStartReason::Resume,
+        }),
+    )
+    .expect("bind session");
+    running.reset_session_working_state();
 
     assert_eq!(running.application_incarnation_id, incarnation);
+    assert_eq!(running.session_id.as_ref(), Some(&session_id));
     assert!(Arc::ptr_eq(
         running.commands.as_ref().expect("command state"),
         &commands
@@ -215,142 +224,61 @@ fn replay_error_invalidates_projection() {
 
 /// A session-start lifecycle event owns the incarnation reset and clears old
 /// projected agents, task metadata, blockers, updates, and pending loopbacks
-/// before replay.
+/// The first session-start frame binds the extension; repeats are idempotent
+/// and a different session id fails closed without clearing live state.
 #[test]
-fn session_switch_clears_incarnation_state_before_replay() {
+fn session_start_binding_is_immutable() {
     let mut state = SwarmRuntime::new();
     state.config = Some(resolved_config());
-    state.session_id = Some("old".parse().expect("session ID"));
-    state.replay_complete = true;
+    let session: tau_proto::SessionId = "session".parse().expect("session ID");
+    let started = Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: session.clone(),
+        reason: tau_proto::SessionStartReason::Resume,
+    });
+    fold_event(&mut state, &started).expect("initial session bind");
     let agent = tau_swarm_api::AgentId::new("agent");
     let mut draft = AgentDraft::new();
     draft.loaded = true;
-    draft.replay_valid = true;
-    state.agents.insert(agent, draft);
-    state
-        .projection
-        .blocking_lock()
-        .add_update(tau_swarm_api::UpdatePublication {
-            id: tau_swarm_api::UpdateId::new("update"),
-            owner: tau_swarm_api::AgentId::new("agent"),
-            title: "title".into(),
-            description: "description".into(),
-            task_id: None,
-            source_timestamp: tau_swarm_api::Timestamp(1),
-        })
-        .expect("old update");
-    state
-        .projection
-        .blocking_lock()
-        .upsert_task_info(tau_swarm_api::TaskInfo {
-            task_id: tau_swarm_api::TaskId::new("task"),
-            title: tau_swarm_api::TaskTitle::new("Title").expect("title"),
-            description: None,
-        })
-        .expect("old task info");
-    state
-        .blocker_history
-        .lock()
-        .expect("history")
-        .push(crate::tools::BlockerRecord {
-            blocker_id: tau_swarm_api::BlockerId::new("blocker"),
-            revision: tau_swarm_api::BlockerRevisionNumber(1),
-            owner: tau_swarm_api::AgentId::new("agent"),
-            title: "title".into(),
-            description: "description".into(),
-            recommended_answer: None,
-            task_id: None,
-            lifecycle: path_crate_tools::BlockerLifecycle::active(),
-        });
-    let (completion, _result) = path_tokio_sync::oneshot::channel();
-    state.pending.lock().expect("pending").insert(
-        PendingKey {
-            agent_id: tau_swarm_api::AgentId::new("agent"),
-            ctx_id: "ctx".into(),
-            text: "text".into(),
-        },
-        completion,
-    );
-    fold_event(
+    state.agents.insert(agent.clone(), draft);
+
+    fold_event(&mut state, &started).expect("same session is idempotent");
+    assert!(state.agents.contains_key(&agent));
+
+    let error = fold_event(
         &mut state,
         &Event::SessionStarted(tau_proto::SessionStarted {
-            session_id: "new".parse().expect("session ID"),
+            session_id: "other".parse().expect("session ID"),
             reason: tau_proto::SessionStartReason::Resume,
         }),
     )
-    .expect("session switch");
-    assert_eq!(
-        state.session_id.as_ref().map(tau_proto::SessionId::as_str),
-        Some("new")
-    );
-    assert!(!state.replay_complete);
+    .expect_err("different session must fail closed");
+    assert!(error.to_string().contains("immutable session mismatch"));
+    assert_eq!(state.session_id.as_ref(), Some(&session));
+    assert!(state.agents.contains_key(&agent));
+
+    fold_event(
+        &mut state,
+        &Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: session.clone(),
+        }),
+    )
+    .expect("matching shutdown clears working state");
+    assert_eq!(state.session_id.as_ref(), Some(&session));
     assert!(state.agents.is_empty());
-    assert!(state.blocker_history.lock().expect("history").is_empty());
-    assert!(state.pending.lock().expect("pending").is_empty());
-    assert_eq!(
-        state.projection.blocking_lock().update_usage(),
-        crate::projection::UpdateUsage {
-            entries: 0,
-            logical_bytes: 0,
-        }
-    );
+
+    let error = fold_event(
+        &mut state,
+        &Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: "other".parse().expect("session ID"),
+        }),
+    )
+    .expect_err("different shutdown must fail closed");
     assert!(
-        state
-            .projection
-            .blocking_lock()
-            .snapshot()
-            .snapshot
-            .task_info
-            .is_empty()
+        error
+            .to_string()
+            .contains("immutable session shutdown mismatch")
     );
-    for stale in [
-        Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            session_id: "old".parse().expect("session ID"),
-            agent_id: tau_proto::AgentId::parse("stale").expect("agent ID"),
-            agent_initialization_id: tau_proto::AgentInitializationId::parse("stale")
-                .expect("valid initialization id"),
-            ephemeral: false,
-        }),
-        Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-            session_id: "old".parse().expect("session ID"),
-            agent_id: tau_proto::AgentId::parse("agent").expect("agent ID"),
-        }),
-        Event::SessionShutdown(tau_proto::SessionShutdown {
-            session_id: "old".parse().expect("session ID"),
-        }),
-        Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
-            agent_id: tau_proto::AgentId::parse("stale").expect("agent ID"),
-            session_id: Some("old".parse().expect("session ID")),
-            error: Some("stale error".into()),
-        }),
-        Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
-            session_id: "old".parse().expect("session ID"),
-            agent_id: tau_proto::AgentId::parse("stale").expect("agent ID"),
-            work_status: Default::default(),
-            navigation_mode: tau_proto::AgentNavigationMode::Active,
-            runtime_state: tau_proto::AgentRuntimeState::Running,
-            turn_activity: tau_proto::AgentTurnActivity::Idle,
-            tools: tau_proto::AgentToolStats::default(),
-            context: tau_proto::AgentContextStats::default(),
-            estimated_api_cost: tau_proto::EstimatedApiCost::default(),
-            creator_subtree_estimated_api_cost: Default::default(),
-        }),
-        Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
-            session_id: "old".parse().expect("session ID"),
-            watcher_id: tau_proto::AgentId::parse("stale").expect("agent ID"),
-            watched_agent_ids: vec![tau_proto::AgentId::parse("other").expect("agent ID")],
-            changed_agent_id: None,
-            cause: tau_proto::AgentWatchUpdateCause::SessionSnapshot,
-        }),
-    ] {
-        fold_event(&mut state, &stale).expect("stale event ignored");
-    }
-    assert_eq!(
-        state.session_id.as_ref().map(tau_proto::SessionId::as_str),
-        Some("new")
-    );
-    assert!(state.projection_valid);
-    assert!(state.agents.is_empty());
+    assert_eq!(state.session_id.as_ref(), Some(&session));
 }
 
 /// Stats and watch replacement folds preserve a canonical v0 work status in

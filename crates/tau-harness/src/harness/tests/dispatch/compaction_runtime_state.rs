@@ -61,38 +61,3 @@ fn manual_compaction_start_transition_consumes_only_matching_owner() {
     assert_eq!(pending.call_id, call_id);
     assert!(state.active_manual_starts_is_empty());
 }
-
-/// Session rollover clears model-tool delivery while preserving the independent
-/// UI coalescing owner and its durable request correlation.
-#[test]
-fn manual_compaction_rollover_clears_only_model_tool_owners() {
-    let agent_id = tau_proto::AgentId::parse("agent-rollover").expect("agent id");
-    let ui_transaction =
-        tau_proto::CompactionTransactionId::parse("ct-rollover-ui").expect("transaction id");
-    let model_transaction =
-        tau_proto::CompactionTransactionId::parse("ct-rollover-model").expect("transaction id");
-    let ui_request = tau_proto::CompactionRequestId::parse("cr-rollover-ui").expect("request id");
-    let mut state = CompactionRuntimeState::default();
-    state.record_ui_start(agent_id.clone(), ui_transaction.clone(), ui_request.clone());
-    state.record_model_tool_start(
-        agent_id.clone(),
-        model_transaction.clone(),
-        PendingManualCompactionTool {
-            request_id: tau_proto::CompactionRequestId::parse("cr-rollover-model")
-                .expect("request id"),
-            caller_agent_id: agent_id.clone(),
-            call_id: ToolCallId::from("call-rollover"),
-            tool_name: ToolName::new("compact"),
-            target_agent_id: agent_id.clone(),
-        },
-    );
-
-    state.clear_model_tool_starts();
-
-    assert_eq!(
-        state.ui_start_request(agent_id.clone(), ui_transaction),
-        Some(&ui_request)
-    );
-    assert!(!state.has_model_tool_start(agent_id, model_transaction));
-    assert_eq!(state.active_manual_start_count(), 1);
-}

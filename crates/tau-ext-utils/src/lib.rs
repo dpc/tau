@@ -142,9 +142,11 @@ struct TimerRuntime {
     /// Configured wire name for papercut calls after optional tool-prefix
     /// scoping.
     papercut_tool_name: Option<tau_proto::ToolName>,
-    /// Harness-authoritative current session identifier for papercut
+    /// Harness-authoritative immutable session identifier for papercut
     /// attribution.
-    session_id: Option<tau_proto::SessionId>,
+    bound_session_id: Option<tau_proto::SessionId>,
+    /// Whether session-owned work remains active before terminal shutdown.
+    session_active: bool,
     /// Optional per-instance User-scope append service enabled by extension
     /// configuration.
     papercut_storage: Option<Box<dyn PapercutStorage>>,
@@ -534,7 +536,8 @@ impl TimerRuntime {
             reported_timer_agents: HashSet::new(),
             timer_tool_name: None,
             papercut_tool_name: None,
-            session_id: None,
+            bound_session_id: None,
+            session_active: false,
             papercut_storage: None,
         }
     }
@@ -902,7 +905,7 @@ impl TimerRuntime {
         self.pending_invocations.clear();
         self.replay_complete_agents.clear();
         self.reported_timer_agents.clear();
-        self.session_id = None;
+        self.session_active = false;
     }
 
     fn is_timer_tool(&self, name: &tau_proto::ToolName) -> bool {
@@ -969,9 +972,12 @@ impl TimerRuntime {
             Ok(report) => report,
             Err(message) => return papercut_not_recorded(&message),
         };
-        let Some(session_id) = &self.session_id else {
+        let Some(session_id) = &self.bound_session_id else {
             return papercut_not_recorded("no active session is available");
         };
+        if !self.session_active {
+            return papercut_not_recorded("no active session is available");
+        }
         let Some(storage) = &self.papercut_storage else {
             return papercut_not_recorded("papercut storage is unavailable");
         };
@@ -1361,11 +1367,28 @@ fn handle_delivery(
             report_papercut_tool(runtime.state(), runtime.handle(), invoke)?;
         }
         Event::AgentReplayComplete(event) => runtime.state_mut().complete_agent_replay(event)?,
-        Event::SessionStarted(event) => {
+        Event::SessionStarted(event) => match runtime.state().bound_session_id.as_ref() {
+            Some(current) if current != &event.session_id => {
+                return Err(tau_client::ClientError::handler(format!(
+                    "immutable session mismatch: expected `{current}`, received `{}`",
+                    event.session_id
+                )));
+            }
+            Some(_) => {}
+            None => {
+                runtime.state_mut().clear_session_state();
+                runtime.state_mut().bound_session_id = Some(event.session_id.clone());
+                runtime.state_mut().session_active = true;
+            }
+        },
+        Event::SessionShutdown(shutdown) => {
+            if runtime.state().bound_session_id.as_ref() != Some(&shutdown.session_id) {
+                return Err(tau_client::ClientError::handler(
+                    "session shutdown does not match immutable binding",
+                ));
+            }
             runtime.state_mut().clear_session_state();
-            runtime.state_mut().session_id = Some(event.session_id.clone());
         }
-        Event::SessionShutdown(_) => runtime.state_mut().clear_session_state(),
         Event::SessionAgentUnloaded(event) => {
             runtime.state_mut().unload_agent(&event.agent_id);
         }

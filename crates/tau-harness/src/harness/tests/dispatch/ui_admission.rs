@@ -1154,42 +1154,6 @@ fn ui_shell_command_id_bounds_apply_before_projection() {
     assert!(h.ui_runtime.active_ui_shell_command_ids.is_empty());
 }
 
-/// Disconnect and session shutdown clear pending user-shell ownership and emit
-/// one harness-owned terminal failure rather than leaving the UI pending.
-#[test]
-fn ui_shell_pending_commands_fail_on_provider_disconnect_and_session_shutdown() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path()).expect("harness");
-    configure_test_ui_shell_provider(&mut h, "shell-owner");
-    let disconnected = routed_ui_shell_command(&mut h, "disconnect-shell", false);
-    h.handle_disconnect(&crate::test_connection_id("shell-owner"));
-    assert_eq!(
-        event_log_events(&h)
-            .iter()
-            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
-            if done.command_id == disconnected.command_id
-                && done.output.contains("disconnected")))
-            .count(),
-        1
-    );
-    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
-
-    configure_test_ui_shell_provider(&mut h, "replacement-shell");
-    let shutdown = routed_ui_shell_command(&mut h, "shutdown-shell", false);
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    assert_eq!(
-        event_log_events(&h)
-            .iter()
-            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
-            if done.command_id == shutdown.command_id
-                && done.output.contains("session shut down")))
-            .count(),
-        1
-    );
-    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
-}
-
 #[test]
 fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     // Selecting a later prompt anchor should move the branch head to that
@@ -2954,348 +2918,6 @@ fn ui_cannot_emit_custom_event_with_reserved_first_party_category() {
         "reserved first-party category must be rejected at construction"
     );
 }
-/// Ensures all three UI actions are absolute shared writes while stale-session
-/// and extension-originated requests cannot mutate the loaded agent's mode.
-#[test]
-fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path().join("state")).expect("harness");
-    let requester = connect_test_client(&mut h, "navigation-ui", tau_proto::ClientKind::Ui);
-    let observer = connect_test_client(&mut h, "navigation-observer", tau_proto::ClientKind::Ui);
-    let external = connect_test_client(
-        &mut h,
-        "navigation-external",
-        tau_proto::ClientKind::External,
-    );
-    let promoted_external =
-        connect_test_client(&mut h, "navigation-promoted", tau_proto::ClientKind::Ui);
-    let promoted_external_id = h
-        .runtime_io
-        .bus
-        .connections()
-        .into_iter()
-        .find(|connection| connection.name == "navigation-promoted")
-        .expect("promoted external connection")
-        .id;
-    h.peer_messaging
-        .external_message_peers
-        .insert(promoted_external_id.clone());
-    h.submit_user_prompt(
-        h.session_runtime.current_session_id.clone(),
-        "hello".to_owned(),
-    )
-    .expect("create user agent");
-    let agent_id = h
-        .agent_runtime
-        .agent_registry
-        .session_loaded
-        .iter()
-        .next()
-        .cloned()
-        .expect("loaded agent");
-    h.runtime_io
-        .bus
-        .set_subscriptions(
-            &crate::test_connection_id("navigation-observer"),
-            Vec::new(),
-            vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_STATS_UPDATED,
-            )],
-        )
-        .expect("observer subscription");
-    requester.lock().expect("requester frames").clear();
-    observer.lock().expect("observer frames").clear();
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .navigation_modes
-            .get(&agent_id),
-        Some(&tau_proto::AgentNavigationMode::Active)
-    );
-
-    for (index, action, expected) in [
-        (
-            1,
-            tau_proto::UiAgentNavigationModeAction::SetSuspended,
-            tau_proto::AgentNavigationMode::Suspended,
-        ),
-        (
-            2,
-            tau_proto::UiAgentNavigationModeAction::SetActiveAuto,
-            tau_proto::AgentNavigationMode::ActiveAuto,
-        ),
-        (
-            3,
-            tau_proto::UiAgentNavigationModeAction::SetActive,
-            tau_proto::AgentNavigationMode::Active,
-        ),
-    ] {
-        h.handle_client_event_inner(
-            &crate::test_connection_id("navigation-ui"),
-            Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
-                request_id: format!("navigation-{index}"),
-                session_id: h.session_runtime.current_session_id.clone(),
-                agent_id: agent_id.clone(),
-                action,
-            }),
-        )
-        .expect("UI navigation request");
-        assert_eq!(
-            h.agent_runtime
-                .agent_registry
-                .navigation_modes
-                .get(&agent_id),
-            Some(&expected)
-        );
-    }
-
-    h.handle_client_event_inner(
-        &crate::test_connection_id("navigation-ui"),
-        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
-            request_id: "stale".to_owned(),
-            session_id: test_session_id("other-session"),
-            agent_id: agent_id.clone(),
-            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
-        }),
-    )
-    .expect("stale UI request");
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .navigation_modes
-            .get(&agent_id),
-        Some(&tau_proto::AgentNavigationMode::Active)
-    );
-
-    h.handle_client_event_inner(
-        &crate::test_connection_id("navigation-ui"),
-        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
-            request_id: "unloaded".to_owned(),
-            session_id: h.session_runtime.current_session_id.clone(),
-            agent_id: tau_proto::AgentId::parse("unknown-agent").expect("agent id"),
-            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
-        }),
-    )
-    .expect("unloaded request");
-
-    h.handle_client_event_inner(
-        &crate::test_connection_id("navigation-external"),
-        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
-            request_id: "external".to_owned(),
-            session_id: h.session_runtime.current_session_id.clone(),
-            agent_id: agent_id.clone(),
-            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
-        }),
-    )
-    .expect("external request consumed");
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .navigation_modes
-            .get(&agent_id),
-        Some(&tau_proto::AgentNavigationMode::Active)
-    );
-    assert!(external.lock().expect("external frames").is_empty());
-    h.handle_client_event_inner(
-        &promoted_external_id,
-        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
-            request_id: "promoted-external".to_owned(),
-            session_id: h.session_runtime.current_session_id.clone(),
-            agent_id: agent_id.clone(),
-            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
-        }),
-    )
-    .expect("promoted external request consumed");
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .navigation_modes
-            .get(&agent_id),
-        Some(&tau_proto::AgentNavigationMode::Active)
-    );
-    assert!(
-        promoted_external
-            .lock()
-            .expect("promoted external frames")
-            .is_empty()
-    );
-    let results = requester
-        .lock()
-        .expect("requester frames")
-        .iter()
-        .filter_map(|frame| match peel_inner_event(&frame.frame) {
-            Some(Event::UiSetAgentNavigationModeResult(result)) => Some(result.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(results.len(), 5);
-    assert_eq!(
-        results
-            .iter()
-            .map(|result| (result.request_id.as_str(), result.outcome))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                "navigation-1",
-                tau_proto::UiSetAgentNavigationModeOutcome::Applied,
-            ),
-            (
-                "navigation-2",
-                tau_proto::UiSetAgentNavigationModeOutcome::Applied,
-            ),
-            (
-                "navigation-3",
-                tau_proto::UiSetAgentNavigationModeOutcome::Applied,
-            ),
-            (
-                "stale",
-                tau_proto::UiSetAgentNavigationModeOutcome::Rejected {
-                    reason: tau_proto::UiSetAgentNavigationModeRejection::StaleSession,
-                },
-            ),
-            (
-                "unloaded",
-                tau_proto::UiSetAgentNavigationModeOutcome::Rejected {
-                    reason: tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded,
-                },
-            ),
-        ]
-    );
-    assert!(
-        !observer
-            .lock()
-            .expect("observer frames")
-            .iter()
-            .any(|frame| {
-                matches!(
-                    peel_inner_event(&frame.frame),
-                    Some(Event::UiSetAgentNavigationModeResult(_))
-                )
-            })
-    );
-    let observed_modes = observer
-        .lock()
-        .expect("observer frames")
-        .iter()
-        .filter_map(|frame| match peel_inner_event(&frame.frame) {
-            Some(Event::AgentStatsUpdated(stats)) if stats.agent_id == agent_id => {
-                Some(stats.navigation_mode)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        observed_modes,
-        vec![
-            tau_proto::AgentNavigationMode::Suspended,
-            tau_proto::AgentNavigationMode::ActiveAuto,
-            tau_proto::AgentNavigationMode::Active,
-        ]
-    );
-    h.handle_client_event_inner(
-        &crate::test_connection_id("navigation-ui"),
-        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
-            request_id: "before-reconnect".to_owned(),
-            session_id: h.session_runtime.current_session_id.clone(),
-            agent_id: agent_id.clone(),
-            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
-        }),
-    )
-    .expect("set mode before reconnect");
-    h.handle_authenticated_ui_prompt_submitted(
-        crate::harness::harness_connection_id(),
-        UiPromptSubmitted {
-            literal: false,
-            session_id: h.session_runtime.current_session_id.clone(),
-            text: "resume before reconnect".to_owned(),
-            agent_id: agent_id.clone(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: Some("navigation-reconnect".to_owned()),
-        },
-    )
-    .expect("accepted prompt before reconnect");
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .navigation_modes
-            .get(&agent_id),
-        Some(&tau_proto::AgentNavigationMode::Active)
-    );
-    h.runtime_io
-        .bus
-        .disconnect(&crate::test_connection_id("navigation-ui"));
-    let reconnected =
-        connect_test_client(&mut h, "navigation-reconnected", tau_proto::ClientKind::Ui);
-    h.complete_subscription(
-        &crate::test_connection_id("navigation-reconnected"),
-        vec![EventSelector::Exact(
-            tau_proto::EventName::AGENT_STATS_UPDATED,
-        )],
-        vec![EventSelector::Exact(
-            tau_proto::EventName::AGENT_STATS_UPDATED,
-        )],
-    )
-    .expect("reconnected catch-up");
-    assert!(
-        reconnected
-            .lock()
-            .expect("reconnected frames")
-            .iter()
-            .any(|frame| matches!(
-                peel_inner_event(&frame.frame),
-                Some(Event::AgentStatsUpdated(stats))
-                    if stats.agent_id == agent_id
-                        && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
-            ))
-    );
-
-    let extension_event = Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
-        request_id: "extension".to_owned(),
-        session_id: h.session_runtime.current_session_id.clone(),
-        agent_id: agent_id.clone(),
-        action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
-    });
-    connect_test_tool(&mut h, "extension-test");
-    h.handle_extension_event_inner(
-        &crate::test_connection_id("extension-test"),
-        extension_event,
-    )
-    .expect("extension intake");
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .navigation_modes
-            .get(&agent_id),
-        Some(&tau_proto::AgentNavigationMode::Active)
-    );
-    h.react_to_committed_event(
-        None,
-        &Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-            session_id: h.session_runtime.current_session_id.clone(),
-            agent_id: agent_id.clone(),
-        }),
-        true,
-        None,
-    );
-    assert!(
-        !h.agent_runtime
-            .agent_registry
-            .navigation_modes
-            .contains_key(&agent_id)
-    );
-    h.agent_runtime
-        .agent_registry
-        .navigation_modes
-        .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Suspended);
-    h.switch_session(
-        test_session_id("navigation-next"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
-    assert!(h.agent_runtime.agent_registry.navigation_modes.is_empty());
-    h.shutdown().expect("shutdown");
-}
 
 /// Ensures create admission returns exactly one correlated point-to-point
 /// rejection and never exposes that transient result to another UI.
@@ -3739,4 +3361,373 @@ fn ui_session_metadata_touch_worker_failure_does_not_retract_admission() {
         "metadata failure must not retract the accepted prompt"
     );
     harness.shutdown().expect("shutdown");
+}
+
+/// Ensures all three UI actions are absolute shared writes while stale-session
+/// and extension-originated requests cannot mutate the loaded agent's mode.
+#[test]
+fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let requester = connect_test_client(&mut h, "navigation-ui", tau_proto::ClientKind::Ui);
+    let observer = connect_test_client(&mut h, "navigation-observer", tau_proto::ClientKind::Ui);
+    let external = connect_test_client(
+        &mut h,
+        "navigation-external",
+        tau_proto::ClientKind::External,
+    );
+    let promoted_external =
+        connect_test_client(&mut h, "navigation-promoted", tau_proto::ClientKind::Ui);
+    let promoted_external_id = h
+        .runtime_io
+        .bus
+        .connections()
+        .into_iter()
+        .find(|connection| connection.name == "navigation-promoted")
+        .expect("promoted external connection")
+        .id;
+    h.peer_messaging
+        .external_message_peers
+        .insert(promoted_external_id.clone());
+    h.submit_user_prompt(
+        h.session_runtime.current_session_id.clone(),
+        "hello".to_owned(),
+    )
+    .expect("create user agent");
+    let agent_id = h
+        .agent_runtime
+        .agent_registry
+        .session_loaded
+        .iter()
+        .next()
+        .cloned()
+        .expect("loaded agent");
+    h.runtime_io
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("navigation-observer"),
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("observer subscription");
+    requester.lock().expect("requester frames").clear();
+    observer.lock().expect("observer frames").clear();
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .get(&agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
+
+    for (index, action, expected) in [
+        (
+            1,
+            tau_proto::UiAgentNavigationModeAction::SetSuspended,
+            tau_proto::AgentNavigationMode::Suspended,
+        ),
+        (
+            2,
+            tau_proto::UiAgentNavigationModeAction::SetActiveAuto,
+            tau_proto::AgentNavigationMode::ActiveAuto,
+        ),
+        (
+            3,
+            tau_proto::UiAgentNavigationModeAction::SetActive,
+            tau_proto::AgentNavigationMode::Active,
+        ),
+    ] {
+        h.handle_client_event_inner(
+            &crate::test_connection_id("navigation-ui"),
+            Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+                request_id: format!("navigation-{index}"),
+                session_id: h.session_runtime.current_session_id.clone(),
+                agent_id: agent_id.clone(),
+                action,
+            }),
+        )
+        .expect("UI navigation request");
+        assert_eq!(
+            h.agent_runtime
+                .agent_registry
+                .navigation_modes
+                .get(&agent_id),
+            Some(&expected)
+        );
+    }
+
+    h.handle_client_event_inner(
+        &crate::test_connection_id("navigation-ui"),
+        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+            request_id: "stale".to_owned(),
+            session_id: test_session_id("other-session"),
+            agent_id: agent_id.clone(),
+            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
+        }),
+    )
+    .expect("stale UI request");
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .get(&agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
+
+    h.handle_client_event_inner(
+        &crate::test_connection_id("navigation-ui"),
+        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+            request_id: "unloaded".to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id: tau_proto::AgentId::parse("unknown-agent").expect("agent id"),
+            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
+        }),
+    )
+    .expect("unloaded request");
+
+    h.handle_client_event_inner(
+        &crate::test_connection_id("navigation-external"),
+        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+            request_id: "external".to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
+        }),
+    )
+    .expect("external request consumed");
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .get(&agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
+    assert!(external.lock().expect("external frames").is_empty());
+    h.handle_client_event_inner(
+        &promoted_external_id,
+        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+            request_id: "promoted-external".to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
+        }),
+    )
+    .expect("promoted external request consumed");
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .get(&agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
+    assert!(
+        promoted_external
+            .lock()
+            .expect("promoted external frames")
+            .is_empty()
+    );
+    let results = requester
+        .lock()
+        .expect("requester frames")
+        .iter()
+        .filter_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::UiSetAgentNavigationModeResult(result)) => Some(result.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 5);
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| (result.request_id.as_str(), result.outcome))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "navigation-1",
+                tau_proto::UiSetAgentNavigationModeOutcome::Applied,
+            ),
+            (
+                "navigation-2",
+                tau_proto::UiSetAgentNavigationModeOutcome::Applied,
+            ),
+            (
+                "navigation-3",
+                tau_proto::UiSetAgentNavigationModeOutcome::Applied,
+            ),
+            (
+                "stale",
+                tau_proto::UiSetAgentNavigationModeOutcome::Rejected {
+                    reason: tau_proto::UiSetAgentNavigationModeRejection::StaleSession,
+                },
+            ),
+            (
+                "unloaded",
+                tau_proto::UiSetAgentNavigationModeOutcome::Rejected {
+                    reason: tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded,
+                },
+            ),
+        ]
+    );
+    assert!(
+        !observer
+            .lock()
+            .expect("observer frames")
+            .iter()
+            .any(|frame| {
+                matches!(
+                    peel_inner_event(&frame.frame),
+                    Some(Event::UiSetAgentNavigationModeResult(_))
+                )
+            })
+    );
+    let observed_modes = observer
+        .lock()
+        .expect("observer frames")
+        .iter()
+        .filter_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::AgentStatsUpdated(stats)) if stats.agent_id == agent_id => {
+                Some(stats.navigation_mode)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed_modes,
+        vec![
+            tau_proto::AgentNavigationMode::Suspended,
+            tau_proto::AgentNavigationMode::ActiveAuto,
+            tau_proto::AgentNavigationMode::Active,
+        ]
+    );
+    h.handle_client_event_inner(
+        &crate::test_connection_id("navigation-ui"),
+        Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+            request_id: "before-reconnect".to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
+        }),
+    )
+    .expect("set mode before reconnect");
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: h.session_runtime.current_session_id.clone(),
+            text: "resume before reconnect".to_owned(),
+            agent_id: agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("navigation-reconnect".to_owned()),
+        },
+    )
+    .expect("accepted prompt before reconnect");
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .get(&agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
+    h.runtime_io
+        .bus
+        .disconnect(&crate::test_connection_id("navigation-ui"));
+    let reconnected =
+        connect_test_client(&mut h, "navigation-reconnected", tau_proto::ClientKind::Ui);
+    h.complete_subscription(
+        &crate::test_connection_id("navigation-reconnected"),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("reconnected catch-up");
+    assert!(
+        reconnected
+            .lock()
+            .expect("reconnected frames")
+            .iter()
+            .any(|frame| matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::AgentStatsUpdated(stats))
+                    if stats.agent_id == agent_id
+                        && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
+            ))
+    );
+
+    let extension_event = Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+        request_id: "extension".to_owned(),
+        session_id: h.session_runtime.current_session_id.clone(),
+        agent_id: agent_id.clone(),
+        action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
+    });
+    connect_test_tool(&mut h, "extension-test");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("extension-test"),
+        extension_event,
+    )
+    .expect("extension intake");
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .get(&agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
+    h.react_to_committed_event(
+        None,
+        &Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        true,
+        None,
+    );
+    assert!(
+        !h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .contains_key(&agent_id)
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Provider disconnect and final shutdown clear pending user-shell ownership
+/// and emit one harness-owned terminal failure rather than leaving the UI
+/// pending.
+#[test]
+fn ui_shell_pending_commands_fail_on_provider_disconnect_and_shutdown() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    configure_test_ui_shell_provider(&mut h, "shell-owner");
+    let disconnected = routed_ui_shell_command(&mut h, "disconnect-shell", false);
+    h.handle_disconnect(&crate::test_connection_id("shell-owner"));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
+            if done.command_id == disconnected.command_id
+                && done.output.contains("disconnected")))
+            .count(),
+        1
+    );
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
+
+    configure_test_ui_shell_provider(&mut h, "replacement-shell");
+    let shutdown = routed_ui_shell_command(&mut h, "shutdown-shell", false);
+    h.shutdown().expect("shutdown");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
+            if done.command_id == shutdown.command_id
+                && done.output.contains("session shut down")))
+            .count(),
+        1
+    );
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
 }

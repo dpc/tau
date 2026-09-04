@@ -2606,34 +2606,96 @@ fn unload_persistence_failure_still_revokes_live_authority() {
     );
 }
 
-/// A delayed replay boundary from an old session must not prune or activate the
-/// current session's durable desired registrations after a switch.
+/// A replay boundary for another session must not prune or activate the bound
+/// session's durable desired registrations.
 #[test]
-fn stale_replay_complete_cannot_reconcile_new_session_desire() {
+fn mismatched_replay_complete_cannot_reconcile_bound_session_desire() {
     let (ext, _rx, _client) = extension();
-    {
-        let mut state = ext.state.lock();
-        state.current_session_id = Some(tau_proto::SessionId::parse("s2").expect("session id"));
-        state.desired_registrations.insert(agent_id("agent-2"));
-    }
     let runtime = TelegramRuntime {
         ext,
         desired_registration_storage: DesiredRegistrationStorage::default(),
     };
+    handle_live_event_value(
+        &runtime,
+        Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+            reason: tau_proto::SessionStartReason::Resume,
+        }),
+    )
+    .expect("bind session");
+    runtime
+        .ext
+        .state
+        .lock()
+        .desired_registrations
+        .insert(agent_id("agent-2"));
 
     let error = handle_live_event_value(
         &runtime,
         Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
-            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+            session_id: tau_proto::SessionId::parse("s2").expect("session id"),
             error: None,
         }),
     )
-    .expect_err("old replay boundary must fail closed");
+    .expect_err("mismatched replay boundary must fail closed");
 
     assert!(error.contains("stale Telegram session"));
     assert_eq!(
         runtime.ext.state.lock().desired_registrations,
         BTreeSet::from([agent_id("agent-2")])
+    );
+}
+
+/// Matching shutdown clears Telegram working state but retains its immutable
+/// binding; a later shutdown for another session fails closed.
+#[test]
+fn shutdown_retains_immutable_session_binding_and_rejects_mismatch() {
+    let (ext, _rx, _client) = extension();
+    let runtime = TelegramRuntime {
+        ext,
+        desired_registration_storage: DesiredRegistrationStorage::default(),
+    };
+    let session_id = tau_proto::SessionId::parse("s1").expect("session id");
+    handle_live_event_value(
+        &runtime,
+        Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: session_id.clone(),
+            reason: tau_proto::SessionStartReason::Resume,
+        }),
+    )
+    .expect("bind session");
+    runtime
+        .ext
+        .state
+        .lock()
+        .desired_registrations
+        .insert(agent_id("agent-2"));
+
+    handle_live_event_value(
+        &runtime,
+        Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: session_id.clone(),
+        }),
+    )
+    .expect("matching shutdown");
+    {
+        let state = runtime.ext.state.lock();
+        assert_eq!(state.current_session_id.as_ref(), Some(&session_id));
+        assert!(state.session_start_observed);
+        assert!(state.desired_registrations.is_empty());
+    }
+
+    let error = handle_live_event_value(
+        &runtime,
+        Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: tau_proto::SessionId::parse("s2").expect("session id"),
+        }),
+    )
+    .expect_err("mismatched shutdown must fail closed");
+    assert!(error.contains("does not match immutable binding"));
+    assert_eq!(
+        runtime.ext.state.lock().current_session_id.as_ref(),
+        Some(&session_id)
     );
 }
 

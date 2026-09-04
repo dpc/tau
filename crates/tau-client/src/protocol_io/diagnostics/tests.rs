@@ -389,12 +389,19 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
     );
 }
 
-/// Exact stats duplicate classification resets at a loaded-agent boundary so a
-/// reloaded agent's first snapshot is never charged to its previous epoch.
+/// Exact stats duplicate classification resets at loaded-agent boundaries, and
+/// a conflicting session disables further diagnostic folding.
 #[test]
 fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     let mut meter = TestMeter::default();
     finish_protocol_io_cold_attach(&mut meter);
+    meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
+        UnixMicros::new(0),
+        Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: "session-1".parse().expect("session id"),
+            reason: tau_proto::SessionStartReason::Initial,
+        }),
+    ));
     let stats = tau_proto::AgentStatsUpdated {
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
@@ -455,6 +462,7 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     meter.record_downlink_frame(&stats_message());
 
     let diagnostics = meter.diagnostic_stats();
+    assert!(meter.state.session_binding_failed);
     assert_eq!(
         diagnostics.measurements
             ["steady.non-replay.agent.stats_updated.exact-duplicate-within-loaded-epoch-frame"]
@@ -464,8 +472,80 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     assert_eq!(
         diagnostics.measurements["steady.non-replay.agent.stats_updated.initial-loaded-epoch-frame"]
             .count,
-        4
+        3
     );
+}
+
+/// Matching shutdown clears session-owned equality predecessors while retaining
+/// the immutable binding; a shutdown for another session disables diagnostics.
+#[test]
+fn protocol_io_meter_retains_binding_across_shutdown_and_rejects_mismatch() {
+    let mut meter = TestMeter::default();
+    let session_id: tau_proto::SessionId = "session-1".parse().expect("session id");
+    meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
+        UnixMicros::new(0),
+        Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: session_id.clone(),
+            reason: tau_proto::SessionStartReason::Initial,
+        }),
+    ));
+    meter.state.last_agent_stats.insert(
+        AgentComparisonKey {
+            scope: DeliveryScope {
+                attach: AttachPhase::ColdAttach,
+                delivery: DeliveryKind::NonReplay,
+            },
+            agent_id: agent_id(),
+        },
+        tau_proto::AgentStatsUpdated {
+            session_id: session_id.clone(),
+            agent_id: agent_id(),
+            navigation_mode: tau_proto::AgentNavigationMode::Active,
+            runtime_state: tau_proto::AgentRuntimeState::Running,
+            turn_activity: tau_proto::AgentTurnActivity::Idle,
+            tools: tau_proto::AgentToolStats::default(),
+            context: tau_proto::AgentContextStats::default(),
+            estimated_api_cost: Default::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
+            work_status: Default::default(),
+        },
+    );
+    meter.state.last_provider_quota.insert(
+        QuotaComparisonKey {
+            scope: DeliveryScope {
+                attach: AttachPhase::ColdAttach,
+                delivery: DeliveryKind::NonReplay,
+            },
+            provider: tau_proto::ProviderName::new("provider-test"),
+        },
+        tau_proto::HarnessProviderQuotaChanged {
+            provider: tau_proto::ProviderName::new("provider-test"),
+            profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
+            windows: Vec::new(),
+            route_bindings: Vec::new(),
+        },
+    );
+
+    meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: session_id.clone(),
+        }),
+    ));
+    assert_eq!(meter.state.bound_session_id.as_ref(), Some(&session_id));
+    assert!(meter.state.last_agent_stats.is_empty());
+    assert!(meter.state.last_provider_quota.is_empty());
+    assert!(!meter.state.session_binding_failed);
+
+    meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
+        UnixMicros::new(2),
+        Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: "session-2".parse().expect("session id"),
+        }),
+    ));
+    assert!(meter.state.session_binding_failed);
+    assert_eq!(meter.state.bound_session_id.as_ref(), Some(&session_id));
 }
 
 /// Replay snapshots must not become duplicate predecessors for the first live

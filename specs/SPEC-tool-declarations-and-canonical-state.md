@@ -47,7 +47,7 @@ an intermediate runtime tool.
 
 Declarations and canonical tool state are process-lifetime runtime records.
 They never enter agent/session semantic history and have no cold-restart replay
-contract. A declaration deferred across session rollover still commits and
+contract. A declaration deferred during extension activation still commits and
 updates this process-global state when its captured connection and configured
 instance remain current. Disconnect still removes the connection's registry
 ownership and availability projections; it does not regenerate a peer declaration.

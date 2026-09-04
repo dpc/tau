@@ -10,49 +10,6 @@ use crate::harness::extension_activation::{
     tool_started_subscription_work,
 };
 
-/// Session rollover resets only budget exhaustion; a peer disabled by
-/// configuration policy remains disabled.
-#[test]
-fn session_restart_budget_reset_preserves_permanent_disablement() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    for connection_id in ["budget-disabled", "permanently-disabled"] {
-        let _sink = connect_handshaking_tool(&mut h, connection_id);
-        let entry = h
-            .extensions
-            .entries
-            .get_mut(connection_id)
-            .expect("extension");
-        entry.state = ExtensionState::Disconnected;
-        entry.respawn_allowed = false;
-        entry.restart_attempt = MAX_EXTENSION_RESTART_ATTEMPTS;
-        entry.supervised_config = Some(supervised_test_config(connection_id, "exit 1"));
-    }
-    h.extensions
-        .restart_budget_disabled
-        .insert(crate::test_connection_id("budget-disabled"));
-    let rollover_at = Instant::now();
-
-    h.reset_extension_restart_budgets_at(rollover_at);
-
-    let budget_disabled = &h.extensions.entries["budget-disabled"];
-    assert!(budget_disabled.respawn_allowed);
-    assert_eq!(budget_disabled.restart_attempt, 0);
-    assert_eq!(
-        h.extensions.restart_deadlines["budget-disabled"],
-        rollover_at + EXTENSION_RESTART_DELAY
-    );
-    let permanently_disabled = &h.extensions.entries["permanently-disabled"];
-    assert!(!permanently_disabled.respawn_allowed);
-    assert_eq!(permanently_disabled.restart_attempt, 0);
-    assert!(
-        !h.extensions
-            .restart_deadlines
-            .contains_key("permanently-disabled")
-    );
-    h.shutdown().expect("shutdown");
-}
-
 /// Supervised providers preserve fatal/non-respawn policy even though their
 /// writer cleanup uses the same retained ownership path.
 #[test]
@@ -1422,7 +1379,7 @@ fn provider_disconnect_terminates_event_loop() {
         .expect("queue provider disconnect");
 
     let err = h
-        .run_event_loop(None, false)
+        .run_event_loop(None)
         .expect_err("provider disconnect should terminate harness");
     assert!(matches!(
         err,
@@ -1446,7 +1403,7 @@ fn termination_command_wakes_idle_event_loop() {
         )))
         .expect("queue termination command");
 
-    h.run_event_loop(None, false)
+    h.run_event_loop(None)
         .expect("termination command exits cleanly");
     h.shutdown().expect("shutdown");
 }
@@ -1596,7 +1553,7 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
         ))
         .expect("queue explicit disconnect");
 
-    h.run_event_loop(Some(1), false).expect("event loop exits");
+    h.run_event_loop(Some(1)).expect("event loop exits");
 
     assert!(h.runtime_io.bus.connection(&socket_conn).is_none());
     assert!(!h.ui_runtime.client_writers.contains_key(&socket_conn));
@@ -1697,19 +1654,16 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
     });
     let frame_bytes = lifecycle_input_frame_bytes(&message);
     let mut served_clients = 0;
-    let mut exit_on_disconnect = true;
 
     h.handle_runtime_connection_message(
         client_id.clone(),
         Box::new(message),
         frame_bytes,
         &mut served_clients,
-        &mut exit_on_disconnect,
     )
     .expect("handle runtime rejection");
 
     assert_eq!(served_clients, 1);
-    assert!(exit_on_disconnect);
     assert!(h.runtime_io.bus.connection(&client_id).is_none());
     assert!(!h.ui_runtime.client_writers.contains_key(&client_id));
     assert_eq!(
@@ -1729,6 +1683,63 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
     let reason = disconnect.reason.expect("disconnect reason");
     assert!(reason.contains(requested.as_str()));
     assert!(reason.contains(h.session_runtime.current_session_id.as_str()));
+}
+
+/// A raw socket has no UI or shutdown authority until exact Hello admission
+/// succeeds, even though its transport is already registered for output.
+#[test]
+fn pre_hello_shutdown_request_is_rejected_without_semantic_effect() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    h.session_runtime.exact_socket_session_required = true;
+    let committed = Arc::new(Mutex::new(Vec::new()));
+    let completed_flushes = Arc::new(AtomicUsize::new(0));
+    let client_id = h
+        .accept_client_io(
+            path_std_io::empty(),
+            RecordingWriter {
+                committed: Arc::clone(&committed),
+                flushes: 0,
+                completed_flushes: Arc::clone(&completed_flushes),
+            },
+            None,
+            ConnectionOrigin::Socket,
+            ClientWriterFailure::Report,
+        )
+        .expect("accept pending runtime client");
+    let message = HarnessInputMessage::UiShutdownRequest(tau_proto::UiShutdownRequest {});
+    let frame_bytes = lifecycle_input_frame_bytes(&message);
+    let mut served_clients = 0;
+
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(message),
+        frame_bytes,
+        &mut served_clients,
+    )
+    .expect("reject pre-Hello semantic request");
+
+    assert!(!h.ui_runtime.shutdown_requested);
+    assert_eq!(served_clients, 1);
+    assert!(h.runtime_io.bus.connection(&client_id).is_none());
+    assert!(
+        !h.ui_runtime.pending_socket_admission.contains(&client_id),
+        "disconnect must retire pending admission state"
+    );
+    let output = committed.lock().expect("committed output").clone();
+    let mut reader = HarnessOutputReader::new(BufReader::new(output.as_slice()));
+    let HarnessOutputMessage::Disconnect(disconnect) = reader
+        .read_message()
+        .expect("read rejection")
+        .expect("rejection frame")
+    else {
+        panic!("expected pre-Hello disconnect");
+    };
+    assert!(
+        disconnect
+            .reason
+            .is_some_and(|reason| reason.contains("exact Hello admission"))
+    );
 }
 
 /// A client-requested runtime disconnect must not wait behind stalled outbound
@@ -1773,14 +1784,12 @@ fn client_requested_disconnect_does_not_drain_stalled_writer() {
         handled_before_release
     });
     let mut served_clients = 0;
-    let mut exit_on_disconnect = true;
 
     h.handle_runtime_connection_message(
         client_id,
         Box::new(message),
         frame_bytes,
         &mut served_clients,
-        &mut exit_on_disconnect,
     )
     .expect("handle client-requested disconnect");
     let _ = handled_tx.send(());
@@ -1789,7 +1798,6 @@ fn client_requested_disconnect_does_not_drain_stalled_writer() {
         "client-requested disconnect waited for stalled output"
     );
     assert_eq!(served_clients, 1);
-    assert!(exit_on_disconnect);
 }
 
 /// A protocol mismatch is client-local and must not depend on unrelated
@@ -3037,87 +3045,6 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     );
 }
 
-#[test]
-fn switch_session_clears_session_scoped_extension_context() {
-    let tmp = TempDir::new().expect("temp dir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    connect_test_tool(&mut h, "ctx-ext");
-    let contributor = tau_proto::ConnectionId::parse("ctx-ext")
-        .expect("test connection id must satisfy the identifier grammar");
-    let agent_id = crate::parse_agent_id("agent-1");
-
-    h.apply_extension_prompt_fragment(
-        &crate::test_connection_id("ctx-ext"),
-        tau_proto::ExtPromptFragmentPublish {
-            fragment: tau_proto::PromptFragment::new(
-                "ctx-fragment",
-                tau_proto::PromptPriority::new(100),
-                "old session fragment",
-            ),
-        },
-    );
-    h.apply_agent_context_publish(
-        &crate::test_connection_id("ctx-ext"),
-        tau_proto::ExtAgentContextPublish {
-            session_id: test_session_id("test-session"),
-            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
-                .expect("test identifier must be valid"),
-
-            agent_id: agent_id.clone(),
-            key: tau_proto::AgentContextKey::from("skills"),
-            value: tau_proto::AgentContextValue(serde_json::json!(["old session"])),
-        },
-    );
-    h.prompt_coordination
-        .context_discovery
-        .agent_context_providers
-        .insert(contributor.clone());
-    set_test_agent_context_wait(
-        &mut h,
-        agent_id.clone(),
-        HashSet::from([contributor.clone()]),
-    );
-
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-
-    assert!(
-        h.prompt_coordination
-            .context_discovery
-            .prompt_fragments
-            .contains_key(&contributor)
-    );
-    let (fragments, tool_fragments) =
-        h.gather_sourced_prompt_fragment_groups(&h.config.selected_role);
-    assert!(tool_fragments.is_empty());
-    assert!(fragments.iter().any(|sourced| {
-        sourced.fragment.name == "ctx-fragment"
-            && matches!(
-                sourced.source,
-                PromptFragmentSource::Extension { ref connection_id }
-                    if connection_id == &contributor
-            )
-    }));
-    assert_eq!(
-        h.prompt_coordination
-            .context_discovery
-            .agent_context
-            .template_value(Some(&agent_id)),
-        serde_json::json!({})
-    );
-    assert!(
-        h.prompt_coordination
-            .context_discovery
-            .pending_agents
-            .is_empty()
-    );
-    assert!(
-        h.prompt_coordination
-            .context_discovery
-            .agent_context_providers
-            .contains(&contributor)
-    );
-}
 /// Prevents steady-state Provider captures from being rejected after activation
 /// consumes the transient `ready_received` marker and leaves the peer `Ready`.
 #[test]
@@ -8074,16 +8001,12 @@ fn decode_failures_follow_required_optional_and_runtime_policy() {
         .expect("runtime extension")
         .state = ExtensionState::Ready;
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
     h.handle_runtime_event(
         HarnessEvent::ReadFailed {
             connection_id: crate::test_connection_id("runtime-decode"),
             error: "malformed cbor".to_owned(),
         },
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("runtime decode failure is isolated");
     let runtime = &h.extensions.entries["runtime-decode"];

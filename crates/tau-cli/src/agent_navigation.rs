@@ -60,12 +60,6 @@ impl AgentNavigation {
     }
 
     /// Clear all session-scoped navigation facts.
-    pub(crate) fn clear(&mut self) {
-        self.live_agents.clear();
-        self.modes.clear();
-        self.runtime_states.clear();
-    }
-
     /// Return the stored mode, using the ordinary-agent `active` default.
     pub(crate) fn mode(&self, agent_id: &tau_proto::AgentId) -> tau_proto::AgentNavigationMode {
         self.modes.get(agent_id).copied().unwrap_or_default()

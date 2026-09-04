@@ -510,7 +510,7 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
         HarnessOutputMessage::Deliver(delivery) => delivery.event().name().to_string(),
         HarnessOutputMessage::Disconnect(_) => "message.disconnect".to_owned(),
         HarnessOutputMessage::Configure(_) => "message.configure".to_owned(),
-        HarnessOutputMessage::UiSessionAccepted(_) => "message.ui_session_accepted".to_owned(),
+        HarnessOutputMessage::SessionAccepted(_) => "message.session_accepted".to_owned(),
         HarnessOutputMessage::InterceptRequest(_) => "message.intercept_request".to_owned(),
         HarnessOutputMessage::AgentPromptCreatedResult(_) => {
             "message.agent_prompt_created_result".to_owned()
@@ -563,7 +563,6 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::GetCurrentSession(_) => "get_current_session",
         HarnessInputMessage::GetSessionAgentList(_) => "get_session_agent_list",
         HarnessInputMessage::UiDebugEventStatsRequest(_) => "ui_debug_event_stats_request",
-        HarnessInputMessage::UiDetachRequest(_) => "ui_detach_request",
         HarnessInputMessage::UiShutdownRequest(_) => "ui_shutdown_request",
         HarnessInputMessage::UiTreeRequest(_) => "ui_tree_request",
         HarnessInputMessage::ProviderDebugCapture(_) => "provider_debug_capture",

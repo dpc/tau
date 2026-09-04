@@ -535,15 +535,8 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
         panic!("capacity recovery must wake the runtime loop");
     };
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
-    h.handle_runtime_event(
-        event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("capacity-ready retry");
+    h.handle_runtime_event(event, &mut served_clients)
+        .expect("capacity-ready retry");
     h.handle_disconnect(&crate::test_connection_id("dormant-length-interceptor"));
     h.handle_disconnect(&crate::test_connection_id("dormant-owner-interceptor"));
 
@@ -1915,15 +1908,8 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
         panic!("capacity recovery must wake the runtime loop");
     };
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
-    h.handle_runtime_event(
-        event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("capacity-ready retry");
+    h.handle_runtime_event(event, &mut served_clients)
+        .expect("capacity-ready retry");
     h.handle_disconnect(&crate::test_connection_id("length-finish-interceptor"));
     assert!(
         h.runtime_io.publication.pending_intercept.is_some(),
@@ -2006,13 +1992,8 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
         full_event,
         HarnessEvent::Command(crate::harness::HarnessCommand::SemanticPersistenceProgress)
     ));
-    h.handle_runtime_event(
-        full_event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("observe capacity-Full edge before recovery");
+    h.handle_runtime_event(full_event, &mut served_clients)
+        .expect("observe capacity-Full edge before recovery");
     h.session_runtime
         .persistence_owner
         .as_ref()
@@ -2021,13 +2002,8 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
     let RuntimeEventWait::Event(event) = h.next_runtime_event() else {
         panic!("dispatch capacity recovery must wake the runtime loop");
     };
-    h.handle_runtime_event(
-        event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("dispatch capacity-ready progress");
+    h.handle_runtime_event(event, &mut served_clients)
+        .expect("dispatch capacity-ready progress");
     assert!(
         h.runtime_io
             .publication

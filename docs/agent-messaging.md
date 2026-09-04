@@ -155,7 +155,7 @@ another running harness daemon:
 message({"recipient_id":"01JZ.../engineer_b","message":"Please compare this with your session."})
 ```
 
-If the session id is the current active session, the address is treated as a
+If the session id is the daemon's immutable session, the address is treated as a
 local agent id. Otherwise the message tool performs runtime-daemon discovery and
 a dedicated external-message RPC on a helper thread, so the harness event loop is
 not blocked by socket lookup or target validation. On confirmed delivery, the
@@ -292,8 +292,8 @@ watcher is itself a side agent.
 
 The `agent_start` tool result only confirms metadata such as `self_agent_id` and
 `sub_agent_id`; response text arrives through watch notifications. Watches are
-session-local runtime state: they are dropped on session shutdown, including a
-session switch such as `:session new`. Disable watching explicitly when later
+session-local runtime state: they are dropped on final session shutdown. Disable
+watching explicitly when later
 responses in the same session are no longer wanted.
 
 Disable watching with:

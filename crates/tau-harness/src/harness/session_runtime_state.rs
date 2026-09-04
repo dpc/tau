@@ -47,15 +47,14 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) agent_store: AgentStore,
     /// Harness-wide immutable storage policy.
     pub(crate) storage_mode: crate::HarnessStorageMode,
-    /// Runtime daemon path stem used for discovery metadata updates.
-    pub(crate) runtime_harness_path: Option<PathBuf>,
+    /// Whether filesystem-routed socket clients require exact session
+    /// admission.
+    pub(crate) exact_socket_session_required: bool,
     /// Absolute canonical startup project root.
     pub(crate) project_root: PathBuf,
-    /// Active session binding.
+    /// Immutable session binding for this daemon lifetime.
     pub(crate) current_session_id: SessionId,
-    /// Whether this process rejects all UI-requested session switches.
-    pub(crate) session_pinned: bool,
-    /// Monotonic generation of the active session binding.
+    /// Monotonic generation of session-owned working state.
     pub(crate) current_session_generation: SessionGeneration,
     /// Reason associated with the active session binding.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
@@ -71,6 +70,6 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) precommitted_user_interactions: HashMap<String, u64>,
     /// Current session initialization turn state.
     pub(crate) turn_state: TurnState,
-    /// State reset as one unit when the active session changes.
+    /// Session-owned working state cleared during terminal shutdown.
     pub(crate) current_session_state: CurrentSessionState,
 }

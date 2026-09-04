@@ -784,51 +784,6 @@ fn dedup_map_rebuilds_on_session_restore() {
     h.shutdown().expect("shutdown");
 }
 
-/// `:session new` starts a fresh conversation branch. Even if the requested
-/// session id already has durable history (possible with a short-id
-/// collision, and modeled here by resetting to the same id), the first
-/// identical result in the fresh branch must be recorded verbatim.
-#[test]
-fn new_session_reset_does_not_dedup_against_previous_branch() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    let cid = ensure_test_user_agent(&mut h);
-    let big = CborValue::Text("n".repeat(2048));
-    let _ = run_tool_result(&mut h, "s1", &cid, "call_before_new", "ls", big.clone());
-
-    h.switch_session(
-        "s1".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("same-id :session new reset");
-
-    let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(
-        h.agent_runtime
-            .agent_registry
-            .agents
-            .get(&cid)
-            .expect("default conv")
-            .identity
-            .head,
-        None,
-        "a :session new reset must start from a fresh branch head",
-    );
-
-    let after = run_tool_result(&mut h, "s1", &cid, "call_after_new", "ls", big.clone());
-    assert_eq!(after.status, ToolResultStatus::Success);
-    let result = after.output;
-    assert_eq!(
-        result.raw, big,
-        "first result after :session new must not dedup against an older branch that the model cannot see",
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
 /// A conversation should only see its OWN branch's prior entries —
 /// it must not dedup against content that exists in the tree but
 /// only on a different conversation's branch. Modeled here by

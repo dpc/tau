@@ -38,8 +38,8 @@ use tau_cli_term::RendererDeliveryId;
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
-    CborValue, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
-    PeerOutputWriter, SessionId, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UnixMicros,
+    CborValue, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
+    SessionId, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -407,14 +407,6 @@ fn send_cancel_prompt_frame(
     )
 }
 
-/// Send the point-to-point connection-control request used by `:detach`.
-fn send_ui_detach_request(writer: &WriterHandle) -> io::Result<()> {
-    send_frame(
-        writer,
-        &HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest {}),
-    )
-}
-
 /// Send the point-to-point lifecycle request used by `:quit-session`.
 fn send_ui_shutdown_request(writer: &WriterHandle) -> io::Result<()> {
     send_frame(
@@ -435,16 +427,12 @@ fn handle_ui_shutdown_command_text(
     Ok(Some(InputLoopExit::QuitSession))
 }
 
-/// Consume `:detach`, send its connection-control request, and select the
-/// daemon-preserving exit path.
-fn handle_ui_detach_command_text(text: &str, writer: &WriterHandle) -> Option<InputLoopExit> {
+/// Consume `:detach` as a UI-local alias for `:quit`.
+fn handle_ui_detach_command_text(text: &str) -> Option<InputLoopExit> {
     if text != ":detach" {
         return None;
     }
-    // If the write fails we still exit — the daemon will notice the disconnect
-    // and fall back to its default behavior.
-    let _ = send_ui_detach_request(writer);
-    Some(InputLoopExit::Detach)
+    Some(InputLoopExit::Quit)
 }
 
 /// Wrap an event in the interactive UI's durable-by-default Emit message.
@@ -707,10 +695,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
         ":retry",
         "Run the selected agent's delayed provider retry now",
     ),
-    (
-        ":detach",
-        "Leave the UI but keep the harness running for later reattach",
-    ),
+    (":detach", "Quit this UI (alias for :quit)"),
     (
         ":pick-agent",
         "Pick a currently active agent with optional fzf",
@@ -743,10 +728,6 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     (
         ":skill",
         "Invoke a user-invocable skill (e.g. :skill jujutsu optional args)",
-    ),
-    (
-        ":session",
-        "Manage chat sessions (e.g. :session new starts a fresh session)",
     ),
     (
         ":session-stats",
@@ -1412,7 +1393,7 @@ fn run_chat_session(
     let agent_in_progress = renderer.agent_in_progress_state();
     let fast_service_tier_state = renderer.fast_service_tier_state();
     let current_role_state = renderer.current_role_state();
-    let current_agent_state = renderer.selection_intent();
+    let current_agent_state = renderer.current_agent_state();
     let known_agents = renderer.known_agents();
     let agent_display_names = renderer.agent_display_names();
     let agent_navigation = renderer.agent_navigation();
@@ -1430,10 +1411,6 @@ fn run_chat_session(
     );
     completion_data
         .set_agent_mention_completer(build_agent_mention_completer(input_routing.clone()));
-    completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new(":session"),
-        build_session_arg_completer(),
-    );
     completion_data.set_arg_completer(
         tau_cli_term::CommandName::new(":theme"),
         build_theme_arg_completer(dirs.clone()),
@@ -1489,8 +1466,6 @@ fn run_chat_session(
             role_group_memory,
             theme,
             dirs: dirs.clone(),
-            cwd,
-            home_dir,
             prompt_symbol: settings.prompt_symbol,
             agent_in_progress,
             remote_disconnected,
@@ -2047,14 +2022,11 @@ fn await_ui_session_admission(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputLoopExit {
     /// User typed `:quit`, hit Ctrl-D, or the socket dropped. Only this UI
-    /// disconnects; the daemon's independent exit-on-disconnect policy decides
-    /// whether the session then stops.
+    /// disconnects; the fixed-session daemon continues serving other or future
+    /// UIs.
     Quit,
     /// User typed `:quit-session` and sent the canonical shutdown request.
     QuitSession,
-    /// User typed `:detach`. We leave the daemon running whether we
-    /// spawned it or attached to it.
-    Detach,
     /// Foreground ownership is unconfirmed, so only this attachment may exit.
     ForegroundOwnershipUnconfirmed,
     /// Terminal output failed, so only this attachment may exit.
@@ -2066,29 +2038,17 @@ impl InputLoopExit {
         match self {
             Self::Quit => "quit",
             Self::QuitSession => "quit-session",
-            Self::Detach => "detach",
             Self::ForegroundOwnershipUnconfirmed => "foreground-ownership-unconfirmed",
             Self::TerminalOutputFailed => "terminal-output-failed",
-        }
-    }
-
-    fn harness_disconnect_reason(self) -> &'static str {
-        match self {
-            Self::Quit => "quit",
-            Self::QuitSession => "quit-session",
-            Self::Detach | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed => {
-                "detach"
-            }
         }
     }
 
     fn daemon_disposition(self) -> DaemonDisposition {
         match self {
             Self::QuitSession => DaemonDisposition::WaitRequestedOwned,
-            Self::Quit
-            | Self::Detach
-            | Self::ForegroundOwnershipUnconfirmed
-            | Self::TerminalOutputFailed => DaemonDisposition::KeepRunning,
+            Self::Quit | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed => {
+                DaemonDisposition::KeepRunning
+            }
         }
     }
 }
@@ -2103,7 +2063,6 @@ fn shutdown_ui_connection(
 ) -> &'static str {
     let reason = exit.reason();
     local_disconnect_started.store(true, Ordering::Release);
-    send_ui_exit_frames(exit, &writer);
 
     // Drop the writer, then actively cancel the read transport so the reader
     // cannot wait on a daemon that intentionally survives detach.
@@ -2115,21 +2074,6 @@ fn shutdown_ui_connection(
     reason
 }
 
-fn send_ui_exit_frames(exit: InputLoopExit, writer: &WriterHandle) {
-    if matches!(
-        exit,
-        InputLoopExit::ForegroundOwnershipUnconfirmed | InputLoopExit::TerminalOutputFailed
-    ) {
-        let _ = send_ui_detach_request(writer);
-    }
-    let _ = send_frame(
-        writer,
-        &HarnessInputMessage::Disconnect(Disconnect {
-            reason: Some(exit.harness_disconnect_reason().to_owned()),
-        }),
-    );
-}
-
 fn join_ui_thread(handle: std::thread::JoinHandle<()>, name: &str) {
     if handle.join().is_err() {
         tracing::warn!(target: "tau_cli::ui", name, "UI worker thread panicked during shutdown");
@@ -2137,9 +2081,10 @@ fn join_ui_thread(handle: std::thread::JoinHandle<()>, name: &str) {
 }
 
 fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
-    // Ordinary UI quit never directly kills an owned daemon: launch policy
-    // decides. Explicit session quit waits boundedly for requested canonical
-    // shutdown, then detaches rather than forcing it; detach always preserves it.
+    // Ordinary UI exit leaves the fixed-session daemon to explicit shutdown,
+    // supervisor/process termination, fatal harness failure, or an explicit
+    // max-clients bound. Session quit waits boundedly for canonical shutdown,
+    // then releases local ownership rather than force-killing the process.
     match exit.daemon_disposition() {
         DaemonDisposition::WaitRequestedOwned => {
             daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
@@ -2154,8 +2099,8 @@ enum DaemonDisposition {
     /// Wait boundedly for explicitly requested owned-daemon shutdown, then
     /// leak.
     WaitRequestedOwned,
-    /// Leave daemon lifetime to harness connection policy or an explicit
-    /// canonical shutdown request.
+    /// Leave daemon lifetime to explicit shutdown, supervision, fatal failure,
+    /// or an explicit completed-client bound.
     KeepRunning,
 }
 
@@ -2282,8 +2227,6 @@ struct TerminalInputLoopCtx {
     role_group_memory: Arc<Mutex<HashMap<String, String>>>,
     theme: tau_themes::Theme,
     dirs: tau_config::settings::TauDirs,
-    cwd: std::path::PathBuf,
-    home_dir: Option<std::path::PathBuf>,
     prompt_symbol: String,
     agent_in_progress: Arc<path_std_sync::atomic::AtomicBool>,
     remote_disconnected: Arc<AtomicBool>,
@@ -3003,8 +2946,7 @@ impl<'a> TerminalInputSession<'a> {
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
         // Keep session-lifecycle commands first: UI/session quit and detach exit
-        // immediately, while `:session new` mutates `session_id` for later
-        // commands and prompt submission.
+        // immediately. A daemon never switches its bound session.
         let outcome = self.handle_session_command(text)?;
         if !matches!(outcome, CommandOutcome::NotHandled) {
             return Ok(outcome);
@@ -3162,8 +3104,7 @@ impl<'a> TerminalInputSession<'a> {
             self.output.command_feedback("usage: :retry");
             return Ok(CommandOutcome::Continue);
         }
-        if let Some(exit) = handle_ui_detach_command_text(text, self.writer) {
-            // Tell the harness to stay alive after we leave, then exit the UI.
+        if let Some(exit) = handle_ui_detach_command_text(text) {
             return Ok(CommandOutcome::Exit(exit));
         }
         if text == ":session" || text.starts_with(":session ") {
@@ -3180,43 +3121,25 @@ impl<'a> TerminalInputSession<'a> {
         let subcommand = parts.next();
         let extra = parts.next();
         match (subcommand, extra) {
-            (Some("new"), None) => self.start_new_session(),
+            (Some("new"), None) => {
+                self.output.command_feedback(
+                    "start another Tau invocation in a new terminal to create another session",
+                );
+                Ok(())
+            }
             (None, None) => {
-                self.output.command_feedback(":session new");
+                self.output.command_feedback(
+                    "session switching is unavailable; start another Tau invocation in a new terminal",
+                );
                 Ok(())
             }
             _ => {
-                self.output.command_feedback(":session new");
+                self.output.command_feedback(
+                    "session switching is unavailable; start another Tau invocation in a new terminal",
+                );
                 Ok(())
             }
         }
-    }
-
-    fn start_new_session(&mut self) -> Result<(), CliError> {
-        let cwd = std::env::current_dir()?;
-        let new_id = crate::daemon::mint_session_id(&cwd);
-        *self.session_id = new_id;
-        if let Ok(mut active_session) = self.ctx.active_session_state.lock() {
-            *active_session = self.session_id.clone();
-        }
-        self.term
-            .handle()
-            .set_right_prompt(crate::theme::right_prompt_context(
-                &self.ctx.theme,
-                &self.ctx.cwd,
-                self.ctx.home_dir.as_deref(),
-                self.session_id,
-            ));
-        let _ = send_event(
-            self.writer,
-            &Event::UiSwitchSession(tau_proto::UiSwitchSession {
-                new_session_id: self.session_id.clone(),
-                reason: tau_proto::SessionStartReason::New,
-            }),
-        );
-        self.pending_new_agent_options.clear();
-        self.clear_selected_agent();
-        Ok(())
     }
 
     fn send_cancel_prompt(&self) {
@@ -4377,8 +4300,6 @@ fn terminal_input_loop(
     .run()
 }
 
-const SESSION_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[("new", "Start a fresh chat session")];
-
 const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
     ("new", "Clear the selected agent"),
     ("switch", "Show a known agent transcript"),
@@ -4387,22 +4308,6 @@ const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
     ("auto", "Make a loaded agent eligible only while running"),
     ("name", "Set an agent display name"),
 ];
-
-fn build_session_arg_completer() -> tau_cli_term::ArgCompleter {
-    use tau_cli_term::CompletionItem;
-
-    Arc::new(move |args: &[&str]| match args.len() {
-        0 | 1 => {
-            let needle = args.first().copied().unwrap_or("").to_lowercase();
-            SESSION_SUBCOMMAND_COMPLETIONS
-                .iter()
-                .filter(|(subcommand, _)| completion_matches(subcommand, &needle))
-                .map(|(subcommand, description)| CompletionItem::new(*subcommand, *description))
-                .collect()
-        }
-        _ => Vec::new(),
-    })
-}
 
 fn build_agent_arg_completer(
     routing: InputRoutingState,
@@ -4798,7 +4703,6 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
             | ":detach"
             | ":pick-agent"
             | ":pick-agent-all"
-            | ":session"
             | ":session-stats"
             | ":tree"
             | ":compact"

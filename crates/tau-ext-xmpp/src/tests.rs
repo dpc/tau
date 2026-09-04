@@ -1410,7 +1410,7 @@ fn unload_and_session_shutdown_revoke_reader_registration() {
 /// cleanup and passes that same exact lease to the bridge.
 #[test]
 fn lifecycle_retirement_paths_revoke_and_enqueue_exact_lease() {
-    for retire in ["unload", "shutdown", "rollover", "disconnect"] {
+    for retire in ["unload", "shutdown", "disconnect"] {
         let (ext, rx, bridge) = extension();
         ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
         let _progress = rx.recv().expect("register progress");
@@ -1433,14 +1433,6 @@ fn lifecycle_retirement_paths_revoke_and_enqueue_exact_lease() {
                     .parse()
                     .expect("known-safe SessionId must be valid"),
             ),
-            "rollover" => {
-                ext.revoke_all();
-                ext.state.lock().expect("lock").current_session_id = Some(
-                    "session-2"
-                        .parse()
-                        .expect("known-safe SessionId must be valid"),
-                );
-            }
             "disconnect" => ext.revoke_all(),
             _ => unreachable!("known test case"),
         }
@@ -2083,40 +2075,34 @@ fn harness_disconnect_stops_extension_and_shuts_down_bridge() {
     )));
 }
 
-/// A new live session id retires every registration from the previous session
-/// before later tools can observe it.
+/// A second session-start frame cannot rebind a live extension process to a
+/// different immutable session.
 #[test]
-fn session_rollover_revokes_active_registration() {
+fn mismatched_session_start_is_rejected_without_rebinding() {
     let bridge = FakeBridge::new();
     bridge.set_ready(true);
-    let frames = run_protocol_messages(
-        &[
-            valid_config_message(),
-            session_started_message("session-1"),
-            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
-                REGISTER_TOOL_NAME,
-                "agent-1",
-                bool_args(true),
-            ))),
-            session_started_message("session-2"),
-            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
-                SEND_TOOL_NAME,
-                "agent-1",
-                message_args("must fail"),
-            ))),
-        ],
-        bridge.clone(),
-    );
+    let mut input = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    for message in [
+        valid_config_message(),
+        session_started_message("session-1"),
+        session_started_message("session-2"),
+    ] {
+        writer.write_message(&message).expect("write input");
+    }
+    writer.flush().expect("flush input");
 
-    assert!(frames.iter().any(|frame| matches!(
-        frame,
-        HarnessInputMessage::Emit(emit)
-            if matches!(
-                emit.event.as_ref(),
-                Event::ToolErrorReported(error) if error.message.contains("registration tool")
-            )
-    )));
-    assert_eq!(bridge.cleanup_leases.lock().expect("lock").len(), 1);
+    let error = run_with_bridge(
+        path_std_io::Cursor::new(input),
+        SharedWriter::default(),
+        bridge,
+    )
+    .expect_err("mismatched session must stop the extension");
+    assert!(
+        error
+            .to_string()
+            .contains("immutable session mismatch: expected `session-1`, received `session-2`")
+    );
 }
 
 /// A disconnect must clear the cached online marker so later register/send

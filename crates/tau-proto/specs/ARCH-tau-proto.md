@@ -267,11 +267,12 @@ root. Runtime discovery uses both fields to establish live identity without
 trusting adjacent metadata. See
 [SPEC-tau-proto-session-events](SPEC-tau-proto-session-events.md).
 
-An interactive UI may bind `Hello.expected_session_id` to its selected target.
-The harness admits the connection only when that value equals its current
-session and replies with `ui_session_accepted` before accepting later UI
-traffic. A mismatch receives an actionable disconnect instead, preventing a
-stale or replaced runtime socket from silently attaching the UI elsewhere.
+Every UI or External client routed through the shared runtime namespace binds
+`Hello.expected_session_id` to its exact target. The harness admits the
+connection only when that value equals its immutable bound session and replies
+with `session_accepted` before later semantic traffic. Configured extensions on
+private transports retain their existing non-runtime handshake. A missing or
+mismatched runtime target receives a disconnect.
 
 `get_session_agent_list` is a separate UI-only, requester-directed RPC for the
 harness's exact current session. Its bounded result contains membership
@@ -317,8 +318,6 @@ requests. Only harness-authored `agent.metadata_set` and
 `ui_debug_event_stats_request` is a flat peer-to-harness message rather than a
 bus event. Its payload selects one configured extension by name; authorization
 and the directed notice response remain harness concerns.
-`ui_detach_request` is likewise a flat payload-free peer-to-harness message; its
-authorized effect is local connection control rather than event publication.
 `ui_shutdown_request` is a flat payload-free peer-to-harness message; its
 authorized effect is unconditional canonical harness shutdown rather than
 event publication.

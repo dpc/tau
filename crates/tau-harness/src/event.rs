@@ -1134,7 +1134,7 @@ pub(crate) fn spawn_writer_thread(
 }
 
 /// Spawns a local UI writer whose independent ingress reader owns disconnect
-/// ordering and may still hold a detach request after downlink failure.
+/// ordering after a concurrent downlink failure.
 pub(crate) fn spawn_initial_stdio_writer_thread(
     writer: impl Write + Send + 'static,
     protocol_io: Option<ProtocolIoMeter>,
@@ -1267,11 +1267,10 @@ fn spawn_writer_thread_inner(
                     }
                     log.retire_consumer_after_io(consumer);
                     // A local UI's ingress reader remains authoritative for
-                    // disconnect ordering: it may already hold a detach request
-                    // ahead of EOF while the downlink fails concurrently.
+                    // disconnect ordering while the downlink fails concurrently.
                     // Supervised extensions retain writer-failure reporting
                     // because their owned-child lifecycle has no independent
-                    // local-UI detach transition to preserve.
+                    // local-UI ingress transition to preserve.
                     let report_failure = match &shutdown {
                         WriterShutdown::CloseStream { report_failure } => *report_failure,
                         WriterShutdown::Supervised { .. } => true,

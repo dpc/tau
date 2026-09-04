@@ -4,60 +4,6 @@ use fs2::FileExt as _;
 
 use super::*;
 
-/// Runtime construction carries configured input-wait bounds through the
-/// internal-tool facade, session rollover, and the actual wait registration.
-#[test]
-fn configured_input_wait_bounds_survive_rollover_and_drive_wait_registration() {
-    let td = TempDir::new().expect("tempdir");
-    let state_dir = td.path().join("state");
-    let config_dir = state_dir.join("config");
-    path_std_fs::create_dir_all(&config_dir).expect("config directory");
-    path_std_fs::write(
-        config_dir.join("harness.yaml"),
-        "wait_timeout_minimum_minutes: 7\nwait_timeout_maximum_minutes: 9\n",
-    )
-    .expect("configured wait bounds");
-
-    let mut h = echo_harness(&state_dir).expect("start");
-    let input_wait_arguments = CborValue::Map(vec![(
-        CborValue::Text("timeout_minutes".to_owned()),
-        CborValue::Integer(1.into()),
-    )]);
-    assert_eq!(h.input_wait_timeout_bounds().minimum().get(), 7);
-    assert_eq!(h.input_wait_timeout_bounds().maximum().get(), 9);
-    assert_eq!(
-        path_crate_internal_tools::InternalToolHost::new(&mut h)
-            .normalized_wait_timeout_minutes(&input_wait_arguments),
-        Ok(Some(7))
-    );
-
-    h.switch_session(
-        test_session_id("configured-wait-bounds"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
-    assert_eq!(h.input_wait_timeout_bounds().minimum().get(), 7);
-    assert_eq!(h.input_wait_timeout_bounds().maximum().get(), 9);
-
-    let cid = ensure_test_user_agent(&mut h);
-    let call = AgentToolCall {
-        call_ref: None,
-        id: "configured-wait-bounds".into(),
-        name: ToolName::new("wait"),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: input_wait_arguments,
-    };
-    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
-    let now = path_std_time::Instant::now();
-    h.handle_wait_tool_call_at(&cid, &call, ToolName::new("wait"), now)
-        .expect("register configured input wait");
-    assert_eq!(
-        h.next_input_wait_deadline(),
-        now.checked_add(path_std_time::Duration::from_secs(7 * 60))
-    );
-    h.shutdown().expect("shutdown");
-}
-
 /// Each new canonical activation committed before its first checkpoint is
 /// replay-woken once.
 #[test]
@@ -407,6 +353,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
             reason: tau_proto::SessionStartReason::Resume,
             storage_mode: crate::HarnessStorageMode::Durable,
             internal_tool_handlers: vec![std::sync::Arc::new(PromptObserver(observed.clone()))],
+            before_session_init: None,
         },
     )
     .expect("resume harness");
@@ -1890,6 +1837,52 @@ fn durable_replay_activation_extends_session_retention() {
             .expect("trace capture lock")
             .is_empty(),
         "replay activation session activity must not enter prompt-acceptance tracing"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Configured wait bounds must survive startup and govern semantic wait
+/// registration.
+#[test]
+fn configured_input_wait_bounds_drive_wait_registration() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let config_dir = state_dir.join("config");
+    path_std_fs::create_dir_all(&config_dir).expect("config directory");
+    path_std_fs::write(
+        config_dir.join("harness.yaml"),
+        "wait_timeout_minimum_minutes: 7\nwait_timeout_maximum_minutes: 9\n",
+    )
+    .expect("configured wait bounds");
+
+    let mut h = echo_harness(&state_dir).expect("start");
+    let input_wait_arguments = CborValue::Map(vec![(
+        CborValue::Text("timeout_minutes".to_owned()),
+        CborValue::Integer(1.into()),
+    )]);
+    assert_eq!(h.input_wait_timeout_bounds().minimum().get(), 7);
+    assert_eq!(h.input_wait_timeout_bounds().maximum().get(), 9);
+    assert_eq!(
+        path_crate_internal_tools::InternalToolHost::new(&mut h)
+            .normalized_wait_timeout_minutes(&input_wait_arguments),
+        Ok(Some(7))
+    );
+
+    let cid = ensure_test_user_agent(&mut h);
+    let call = AgentToolCall {
+        call_ref: None,
+        id: "configured-wait-bounds".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: input_wait_arguments,
+    };
+    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+    let now = path_std_time::Instant::now();
+    h.handle_wait_tool_call_at(&cid, &call, ToolName::new("wait"), now)
+        .expect("register configured input wait");
+    assert_eq!(
+        h.next_input_wait_deadline(),
+        now.checked_add(path_std_time::Duration::from_secs(7 * 60))
     );
     h.shutdown().expect("shutdown");
 }

@@ -38,8 +38,7 @@ present nonempty description.
 
 Command deduplication, task metadata, blocker history, pending updates, and acknowledgements
 live only in extension process memory. An ordinary Iroh reconnect preserves
-them. A session switch retains command deduplication but clears the other
-session-specific state. Tau restart or extension restart clears all of them.
+them. Tau restart or extension restart clears all of them.
 The extension retains one Tau Swarm application-incarnation ID across ordinary
 reconnects. A restarted process declares a fresh ID, which lets the server fence
 ambiguous commands and lifecycle state owned by the previous process.

@@ -14,6 +14,22 @@ mod fake_external_sender;
 
 use fake_external_sender::FakeExternalSender;
 
+/// Waits for exact admission before sending any external semantic request.
+fn await_session_acceptance(
+    peer: &mut tau_socket::SocketPeer,
+    expected: &SessionId,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match peer.recv_timeout(deadline.saturating_duration_since(Instant::now()))? {
+        tau_socket::SocketReceive::Message {
+            message: HarnessOutputMessage::SessionAccepted(accepted),
+        } if accepted.session_id == *expected => Ok(()),
+        other => {
+            Err(format!("expected exact session acceptance for `{expected}`, got {other:?}").into())
+        }
+    }
+}
+
 use super::gate_fixture::GateFixture;
 use super::observer::{SideObserver, discover_daemon};
 use super::pty_process::{PtyArtifacts, PtyProcess};
@@ -98,9 +114,10 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
             .expect("callback client name must satisfy the identifier grammar"),
         client_kind: tau_proto::ClientKind::External,
-        expected_session_id: None,
+        expected_session_id: Some(target_session.clone()),
         capabilities: Default::default(),
     }))?;
+    await_session_acceptance(&mut peer, &target_session, deadline)?;
     peer.send(&HarnessInputMessage::ExternalAgentMessage(request))?;
     sender.authorize(deadline)?;
     let result = recv_external_message_result(&mut peer, deadline)?;
@@ -219,9 +236,10 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)?,
         client_kind: tau_proto::ClientKind::External,
-        expected_session_id: None,
+        expected_session_id: Some(target_session.clone()),
         capabilities: Default::default(),
     }))?;
+    await_session_acceptance(&mut peer, &target_session, deadline)?;
     peer.send(&HarnessInputMessage::ExternalAgentMessage(request))?;
     sender.authorize(deadline)?;
     let result = recv_external_message_result(&mut peer, deadline)?;

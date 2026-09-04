@@ -25,10 +25,10 @@ use crate::harness::provider_startup::{self, ProviderStartupSnapshot};
 use crate::harness::{
     ClientWriterFailure, EXTENSION_RESTART_DELAY, HarnessSessionLaunch, HarnessStartupInputs,
     MAX_EXTENSION_RESTART_ATTEMPTS, MAX_EXTENSION_RESTART_NOTICE_BYTES, PendingTool,
-    PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
-    extension_disconnected_tool_call_error_message, extension_restart_disabled_notice,
-    prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
-    tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
+    PendingUiShellCommand, UiShellRouteId, extension_disconnected_tool_call_error_message,
+    extension_restart_disabled_notice, prompt_snapshot_tool_error_message,
+    tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
+    unavailable_tool_error_message, validate_protocol_version,
 };
 use crate::settings::{
     Config, ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource,
@@ -682,10 +682,6 @@ fn debug_event_stats_request(extension_name: &str) -> HarnessInputMessage {
     HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
         extension_name: crate::test_extension_name(extension_name),
     })
-}
-
-fn detach_request() -> HarnessInputMessage {
-    HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest {})
 }
 
 fn shutdown_request() -> HarnessInputMessage {

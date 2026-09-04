@@ -17,15 +17,13 @@ use crate::{CliError, mint_short_id};
 const RESUME_PICKER_LIMIT: usize = 10;
 const SESSION_ID_SUFFIX_BYTES: usize = 7;
 const SESSION_ID_MAX_BYTES: usize = tau_proto::SESSION_SCOPED_ID_MAX_LEN;
-const OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OWNED_DAEMON_EXIT_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 pub(crate) const REQUESTED_DAEMON_EXIT_WAIT: Duration = Duration::from_secs(10);
 
 /// How this CLI invocation is related to its harness daemon.
 ///
-/// - `Owned`: we spawned the daemon; Drop kills it unless the UI detached
-///   (calls [`DaemonHandle::leak`]), in which case we forget the `Child` so the
-///   daemon outlives us.
+/// - `Owned`: we spawned the daemon. Dropping the UI handle never kills it;
+///   daemon lifetime belongs to the bound session.
 /// - `Attached`: we joined a daemon someone else owns. Drop never touches it.
 pub(crate) struct InitialUiStdio {
     /// Parent-side writer connected to the harness's standard input.
@@ -42,9 +40,6 @@ pub(crate) enum DaemonHandle {
         child: Option<std::process::Child>,
         harness_path: PathBuf,
         initial_ui: Option<InitialUiStdio>,
-        /// Whether the owning parent removes this child's exact runtime
-        /// discovery pair after reap, including after forced-exit fallback.
-        cleanup_runtime_pair_after_reap: bool,
     },
     Attached {
         harness_path: PathBuf,
@@ -68,37 +63,6 @@ impl DaemonHandle {
         }
     }
 
-    /// Makes this owning CLI remove its exact runtime discovery pair after the
-    /// child has exited, including after the bounded forced-exit fallback.
-    pub(crate) fn ensure_runtime_pair_cleanup_after_reap(&mut self) {
-        if let Self::Owned {
-            cleanup_runtime_pair_after_reap,
-            ..
-        } = self
-        {
-            *cleanup_runtime_pair_after_reap = true;
-        }
-    }
-
-    /// Stops and reaps an owned child, then applies its exact runtime-pair
-    /// cleanup policy.
-    fn cleanup_owned(&mut self, graceful_timeout: Duration) {
-        if let Self::Owned {
-            child,
-            harness_path,
-            initial_ui,
-            cleanup_runtime_pair_after_reap,
-        } = self
-            && let Some(mut child) = child.take()
-        {
-            stop_owned_daemon(&mut child, initial_ui.take(), graceful_timeout);
-            if *cleanup_runtime_pair_after_reap {
-                let _ = std::fs::remove_file(runtime_dir::socket_path(harness_path));
-                let _ = std::fs::remove_file(runtime_dir::metadata_path(harness_path));
-            }
-        }
-    }
-
     fn harness_path(&self) -> &Path {
         match self {
             Self::Owned { harness_path, .. } | Self::Attached { harness_path } => harness_path,
@@ -107,9 +71,9 @@ impl DaemonHandle {
 
     /// Consume the handle without killing the child.
     ///
-    /// Used after every interactive UI exit: daemon lifetime belongs to harness
-    /// disconnect policy, detach policy, or an explicit shutdown request rather
-    /// than direct client-process ownership. For `Owned` this
+    /// Used after every interactive UI exit: daemon lifetime belongs to its
+    /// immutable session or an explicit shutdown request rather than direct
+    /// client-process ownership. For `Owned` this
     /// `mem::forget`s the `Child` — on Linux its parent becomes init
     /// on our exit, which is exactly what we want for a long-lived
     /// daemon when policy keeps it running.
@@ -128,10 +92,7 @@ impl DaemonHandle {
     /// cleanup may continue independently.
     pub(crate) fn wait_requested_exit_or_leak(mut self, timeout: Duration) {
         let Self::Owned {
-            child,
-            harness_path,
-            initial_ui,
-            cleanup_runtime_pair_after_reap,
+            child, initial_ui, ..
         } = &mut self
         else {
             return;
@@ -144,10 +105,6 @@ impl DaemonHandle {
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => {
-                    if *cleanup_runtime_pair_after_reap {
-                        let _ = std::fs::remove_file(runtime_dir::socket_path(harness_path));
-                        let _ = std::fs::remove_file(runtime_dir::metadata_path(harness_path));
-                    }
                     return;
                 }
                 Ok(None) if Instant::now() < deadline => {
@@ -164,40 +121,16 @@ impl DaemonHandle {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
-        self.cleanup_owned(OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT);
-        // Attached, or Owned-after-leak: do nothing. The daemon keeps
-        // running so other UIs can still use it, or this same UI can
-        // `tau attach SESSION` back in later.
+        if let Self::Owned { child, .. } = self
+            && let Some(child) = child.take()
+        {
+            std::mem::forget(child);
+        }
     }
 }
 
 /// Stops a CLI-owned daemon, preferring its normal disconnect cleanup while
 /// retaining a bounded forced-termination fallback.
-fn stop_owned_daemon(
-    child: &mut std::process::Child,
-    initial_ui: Option<InitialUiStdio>,
-    graceful_timeout: Duration,
-) {
-    // Closing the initial UI transport is the daemon's normal shutdown signal.
-    // Give exit-on-disconnect time to stop extensions and remove runtime files.
-    drop(initial_ui);
-    let deadline = Instant::now() + graceful_timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => {
-                // dpc approved this bounded polling exception. std::process has
-                // no portable timed child-exit notification; revisit when Rust
-                // adds one or Tau adopts a race-safe timed process-handle API.
-                std::thread::sleep(OWNED_DAEMON_EXIT_CHECK_INTERVAL);
-            }
-            Ok(None) | Err(_) => break,
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// Resolves an explicit or interactively selected persisted session.
 pub(crate) fn resolve_resume_session_id(
     requested: Option<&tau_proto::SessionId>,
@@ -572,13 +505,14 @@ fn start_daemon(
     });
     configure_introduction_notice(&mut command, introduction_notice_eligible);
     configure_agent_store_mode(&mut command, memory_only_agent_store);
-    let runtime_instance_id = configure_runtime_instance(&mut command);
     let spawn_result = command.spawn();
 
     let mut child = spawn_result?;
 
     tracing::debug!(target: "tau_cli::startup", pid = child.id(), "harness daemon spawned");
-    let harness_path = runtime_dir::harness_path_for_process(child.id(), &runtime_instance_id);
+    let session_id = tau_proto::SessionId::parse(session_id)
+        .map_err(|error| CliError::Participant(error.to_string()))?;
+    let harness_path = runtime_dir::harness_path_for_session(&session_id);
     if let Some(harness_log) = deferred_harness_log {
         let stderr = child
             .stderr
@@ -594,7 +528,6 @@ fn start_daemon(
             stdout: Box::new(stdout_parent),
             shutdown_stream: Some(stdout_shutdown_stream),
         }),
-        cleanup_runtime_pair_after_reap: matches!(storage_mode, HarnessStorageMode::MemoryOnly),
     })
 }
 
@@ -676,13 +609,6 @@ fn relay_stderr_after_lock_held_log(mut stderr: std::process::ChildStderr, harne
         }
         let _ = std::fs::remove_file(temporary_path);
     });
-}
-
-/// Assigns one random runtime identity to both sides of a CLI-managed spawn.
-fn configure_runtime_instance(command: &mut Command) -> runtime_dir::HarnessInstanceId {
-    let instance_id = runtime_dir::HarnessInstanceId::mint();
-    command.env(runtime_dir::HARNESS_INSTANCE_ID_ENV, instance_id.as_str());
-    instance_id
 }
 
 struct DaemonCommandSpec<'a> {

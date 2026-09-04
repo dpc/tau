@@ -15,6 +15,30 @@ fn wait_for_socket(sock: &Path) {
     }
 }
 
+fn connect_admitted_test_ui(
+    socket: &Path,
+    client_name: &str,
+    session_id: &tau_proto::SessionId,
+) -> tau_socket::SocketPeer {
+    let mut peer = tau_socket::SocketPeer::connect(socket).expect("connect test UI");
+    peer.send(&HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: tau_proto::ExtensionName::parse(client_name).expect("client name"),
+        client_kind: tau_proto::ClientKind::Ui,
+        expected_session_id: Some(session_id.clone()),
+        capabilities: Vec::new(),
+    }))
+    .expect("send test UI hello");
+    assert!(matches!(
+        peer.recv_timeout(Duration::from_secs(3))
+            .expect("receive admission"),
+        tau_socket::SocketReceive::Message {
+            message: HarnessOutputMessage::SessionAccepted(accepted),
+        } if accepted.session_id == *session_id
+    ));
+    peer
+}
+
 /// Ensures embedded mode returns provider output, persists the resulting
 /// history/debug events, and leaves the durable session inspectable.
 #[test]
@@ -238,63 +262,6 @@ fn session_extension_data_mismatch_rejects_before_root_selection() {
             .join("ext")
             .exists(),
         "mismatch must fail before selecting or creating the current root"
-    );
-}
-
-/// Ensures an omitted wire target falls back to the frame-admission session
-/// across rollover, while an explicit target takes precedence over that
-/// fallback.
-#[test]
-fn session_extension_data_uses_explicit_or_frame_admission_target() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("harness");
-    let provider_connection = crate::test_connection_id(
-        h.extension_connection_id("provider")
-            .expect("provider connection"),
-    );
-    let old_admission = h.current_extension_frame_admission();
-    h.switch_session(session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    let request = |request_id: &str, expected_session_id: Option<tau_proto::SessionId>| {
-        tau_proto::HarnessInputMessage::ExtensionDataRequest(tau_proto::ExtensionDataRequest {
-            request_id: request_id.to_owned(),
-            scope: tau_proto::ExtensionDataScope::Session,
-            expected_session_id,
-            op: tau_proto::ExtensionDataRequestOp::AppendFile {
-                path: tau_proto::ExtensionDataPath::from("log"),
-                contents: request_id.as_bytes().to_vec(),
-            },
-        })
-    };
-
-    h.handle_extension_message_with_admission(
-        &provider_connection,
-        request("implicit-stale", None),
-        old_admission.clone(),
-    )
-    .expect("stale request returns an operation result");
-    h.handle_extension_message_with_admission(
-        &provider_connection,
-        request("explicit-current", Some(session_id("s2"))),
-        old_admission,
-    )
-    .expect("explicitly current request succeeds");
-
-    assert!(
-        !tau_config::settings::sessions_dir_of(&sp)
-            .join("s1")
-            .join("ext/data/provider/log")
-            .exists()
-    );
-    assert_eq!(
-        std::fs::read(
-            tau_config::settings::sessions_dir_of(&sp)
-                .join("s2")
-                .join("ext/data/provider/log")
-        )
-        .expect("current session append"),
-        b"explicit-current"
     );
 }
 
@@ -1127,6 +1094,67 @@ fn ui_create_agent_inherits_ephemeral_parent_persistence() {
     );
 }
 
+/// A wire session-data request without an explicit target uses the immutable
+/// frame-admission session. An explicit mismatch is rejected before selecting
+/// or creating the other session's extension-data root.
+#[test]
+fn session_extension_data_wire_uses_frame_admission_and_rejects_mismatch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let provider_connection = h
+        .extension_connection_id("provider")
+        .expect("provider connection")
+        .to_owned();
+    let extension_name = h.extensions.entries[&provider_connection].name.clone();
+    let bound_root = tau_config::settings::sessions_dir_of(&sp)
+        .join("s1")
+        .join("ext")
+        .join("data")
+        .join(extension_name.as_str());
+
+    h.handle_extension_message(
+        &provider_connection,
+        HarnessInputMessage::ExtensionDataRequest(tau_proto::ExtensionDataRequest {
+            request_id: "frame-admission".to_owned(),
+            scope: tau_proto::ExtensionDataScope::Session,
+            expected_session_id: None,
+            op: tau_proto::ExtensionDataRequestOp::WriteFile {
+                path: tau_proto::ExtensionDataPath::from("bound.txt"),
+                contents: b"bound".to_vec(),
+            },
+        }),
+    )
+    .expect("wire fallback request");
+    assert_eq!(
+        std::fs::read(bound_root.join("bound.txt")).expect("bound write"),
+        b"bound"
+    );
+
+    let stale_root = tau_config::settings::sessions_dir_of(&sp)
+        .join("stale-session")
+        .join("ext")
+        .join("data")
+        .join(extension_name.as_str());
+    h.handle_extension_message(
+        &provider_connection,
+        HarnessInputMessage::ExtensionDataRequest(tau_proto::ExtensionDataRequest {
+            request_id: "explicit-mismatch".to_owned(),
+            scope: tau_proto::ExtensionDataScope::Session,
+            expected_session_id: Some(session_id("stale-session")),
+            op: tau_proto::ExtensionDataRequestOp::WriteFile {
+                path: tau_proto::ExtensionDataPath::from("forbidden.txt"),
+                contents: b"forbidden".to_vec(),
+            },
+        }),
+    )
+    .expect("wire mismatch response");
+    assert!(
+        !stale_root.exists(),
+        "mismatch selected another session's storage root"
+    );
+}
+
 /// Ensures daemon mode accepts multiple later socket clients and persists both
 /// cycles.
 #[test]
@@ -1197,6 +1225,89 @@ fn daemon_mode_accepts_later_clients() {
     );
 }
 
+/// `max_clients` counts retired clients rather than admissions: two UIs may be
+/// admitted concurrently, and retiring the first reaches the cap and closes the
+/// already-admitted second UI through canonical daemon shutdown.
+#[test]
+fn max_clients_one_closes_an_already_admitted_second_ui() {
+    let td = TempDir::new().expect("tempdir");
+    let sock = td.path().join("daemon.sock");
+    let sp = td.path().join("state");
+    let server = thread::spawn({
+        let sock = sock.clone();
+        move || {
+            run_daemon_with_echo(
+                sock,
+                sp,
+                "s1",
+                ServeOptions::builder().max_clients(1).build(),
+            )
+        }
+    });
+    wait_for_socket(&sock);
+    let session_id = session_id("s1");
+    let mut first = connect_admitted_test_ui(&sock, "max-client-first", &session_id);
+    let mut second = connect_admitted_test_ui(&sock, "max-client-second", &session_id);
+    second
+        .send(&HarnessInputMessage::Subscribe(tau_proto::Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::SESSION_SHUTDOWN,
+            )],
+        }))
+        .expect("subscribe second UI to shutdown");
+    second
+        .send(&HarnessInputMessage::GetCurrentSession(
+            tau_proto::GetCurrentSession {
+                request_id: "max-client-subscribe-barrier".to_owned(),
+            },
+        ))
+        .expect("send second UI barrier");
+    let barrier_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match second
+            .recv_timeout(barrier_deadline.saturating_duration_since(Instant::now()))
+            .expect("receive second UI barrier")
+        {
+            tau_socket::SocketReceive::Message {
+                message: HarnessOutputMessage::CurrentSessionResult(result),
+            } if result.request_id == "max-client-subscribe-barrier" => break,
+            tau_socket::SocketReceive::Message { .. } => {}
+            tau_socket::SocketReceive::Timeout | tau_socket::SocketReceive::Closed => {
+                panic!("second UI barrier did not complete")
+            }
+        }
+    }
+
+    first
+        .send(&HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("first retired".to_owned()),
+        }))
+        .expect("retire first UI");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut saw_shutdown = false;
+    loop {
+        match second
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("receive canonical shutdown")
+        {
+            tau_socket::SocketReceive::Message {
+                message: HarnessOutputMessage::Deliver(delivery),
+            } if matches!(delivery.event(), Event::SessionShutdown(_)) => {
+                saw_shutdown = true;
+            }
+            tau_socket::SocketReceive::Message {
+                message: HarnessOutputMessage::Disconnect(_),
+            }
+            | tau_socket::SocketReceive::Closed => break,
+            tau_socket::SocketReceive::Timeout => panic!("second UI did not close"),
+            tau_socket::SocketReceive::Message { .. } => {}
+        }
+    }
+    assert!(saw_shutdown, "second UI missed canonical session shutdown");
+    server.join().expect("join").expect("daemon clean exit");
+}
+
 /// Ensures daemon debug system-prompt rendering uses the requested role over
 /// the socket path.
 #[test]
@@ -1223,7 +1334,8 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
 
     wait_for_socket(&sock);
 
-    let prompt = get_daemon_rendered_system_prompt(&sock, "engineer").expect("render prompt");
+    let prompt = get_daemon_rendered_system_prompt(&sock, &session_id("s1"), "engineer")
+        .expect("render prompt");
     assert!(!prompt.contains("## Your mission"));
     assert_eq!(
         prompt
@@ -1291,8 +1403,8 @@ fn daemon_mode_renders_tool_definitions_for_requested_role() {
 
     wait_for_socket(&sock);
 
-    let tools =
-        get_daemon_rendered_tool_definitions(&sock, "engineer").expect("render tool definitions");
+    let tools = get_daemon_rendered_tool_definitions(&sock, &session_id("s1"), "engineer")
+        .expect("render tool definitions");
     assert!(!tools.is_empty());
     let read_tool = tools
         .iter()
@@ -1334,8 +1446,8 @@ fn daemon_mode_reports_unknown_role_for_rendered_tool_definitions_request() {
 
     wait_for_socket(&sock);
 
-    let error =
-        get_daemon_rendered_tool_definitions(&sock, "missing-role").expect_err("unknown role");
+    let error = get_daemon_rendered_tool_definitions(&sock, &session_id("s1"), "missing-role")
+        .expect_err("unknown role");
     assert!(
         matches!(error, HarnessError::Participant(message) if message.contains("unknown role"))
     );
@@ -1369,7 +1481,8 @@ fn daemon_mode_reports_unknown_role_for_rendered_system_prompt_request() {
 
     wait_for_socket(&sock);
 
-    let error = get_daemon_rendered_system_prompt(&sock, "missing-role").expect_err("unknown role");
+    let error = get_daemon_rendered_system_prompt(&sock, &session_id("s1"), "missing-role")
+        .expect_err("unknown role");
     assert!(
         matches!(error, HarnessError::Participant(message) if message.contains("unknown role"))
     );
@@ -1547,6 +1660,13 @@ fn daemon_disconnect_reason_is_reported() {
     let server = thread::spawn(move || {
         let mut accepted = listener.accept().expect("accept");
         let _ = accepted.recv(); // hello
+        accepted
+            .send(&HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+                },
+            ))
+            .expect("write acceptance");
         let _ = accepted.recv(); // subscribe
         let _ = accepted.recv(); // message
         accepted

@@ -28,10 +28,16 @@ fn disconnect_cancels_active_user_shell_command_before_scheduler_join() {
 }
 
 #[test]
-fn session_shutdown_cancels_active_user_shell_and_keeps_scheduler_usable() {
+fn session_shutdown_cancels_active_user_shell() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
 
+    writer
+        .write_event(&Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: "session-1".parse().expect("session id"),
+            reason: tau_proto::SessionStartReason::Initial,
+        }))
+        .expect("session start");
     writer
         .write_event(&ui_shell_command(
             "ui-sleep-session",
@@ -55,16 +61,6 @@ fn session_shutdown_cancels_active_user_shell_and_keeps_scheduler_usable() {
         cancelled.cancelled,
         "session shutdown should cancel running UI shell command: {cancelled:?}"
     );
-
-    writer
-        .write_event(&ui_shell_command("ui-after-session", "printf after"))
-        .expect("second ui shell");
-    writer.flush().expect("flush second ui shell");
-
-    let finished = wait_for_user_shell_finished(&mut reader, "ui-after-session");
-    assert_eq!(finished.exit_code, Some(0));
-    assert!(!finished.cancelled);
-    assert!(finished.output.contains("after"));
 
     writer
         .write_frame(&disconnect_frame(None))

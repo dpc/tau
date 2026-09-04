@@ -476,6 +476,15 @@ impl ColdAttachStager {
         let charge = delivery.queue_bytes.max(1);
         match delivery.event.as_ref() {
             Event::SessionStarted(started) => {
+                if let ToolReconciliation::Active(state) = &self.tool_reconciliation
+                    && let Some(bound) = state.current_session_id.as_ref()
+                {
+                    if bound.value != started.session_id {
+                        self.tool_reconciliation = ToolReconciliation::FailedClosed;
+                        return false;
+                    }
+                    return true;
+                }
                 let (adds_item, old_charge) = match &self.tool_reconciliation {
                     ToolReconciliation::Active(state) => (
                         state.current_session_id.is_none(),

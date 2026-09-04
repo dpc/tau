@@ -75,15 +75,8 @@ fn debug_event_stats_request_is_ignored_from_configured_extensions() {
     );
     h.log_event(&event);
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
-    h.handle_runtime_event(
-        event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("ignore client-only request through runtime router");
+    h.handle_runtime_event(event, &mut served_clients)
+        .expect("ignore client-only request through runtime router");
 
     assert!(
         requester.lock().expect("requester frames").is_empty(),
@@ -126,16 +119,9 @@ fn debug_event_stats_request_is_not_staged_for_handshaking_extensions() {
     );
     h.log_event(&event);
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
 
-    h.handle_runtime_event(
-        event,
-        &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
-    )
-    .expect("silently deny request through runtime router");
+    h.handle_runtime_event(event, &mut served_clients)
+        .expect("silently deny request through runtime router");
 
     assert!(requester.lock().expect("requester frames").is_empty());
     assert_eq!(
@@ -320,16 +306,12 @@ fn debug_event_stats_request_is_directed_to_requesting_ui() {
     );
 
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
     h.handle_runtime_event(
         HarnessEvent::from_connection_for_test(
             requesting_ui_id,
             debug_event_stats_request("std-shell"),
         ),
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("request stats through runtime router");
 
@@ -374,16 +356,12 @@ fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
     );
 
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
     h.handle_runtime_event(
         HarnessEvent::from_connection_for_test(
             crate::test_connection_id("ui"),
             debug_event_stats_request("secret-ext"),
         ),
         &mut served_clients,
-        &mut exit_on_disconnect,
-        &mut ever_attached,
     )
     .expect("request stats through runtime router");
 

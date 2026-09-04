@@ -30,27 +30,22 @@ misrouting and unintended spend; it is not an ACL against malicious same-user
 processes. Peer text remains escaped agent-authored model input, never a
 harness/system instruction.
 
-Targeted runtime lookup visits at most 4096 raw entries, accepts at most 16 KiB
-of regular metadata for each metadata-shaped entry, and reads at most 16 KiB
-plus one byte to detect oversize input, while admitting at most 128 records that
-claim the requested session. It never deletes runtime files:
-pathname identity and PID liveness checks cannot be atomic with PID reuse and a
-replacement daemon binding that pathname. Unreachable matching records whose
-metadata PID is live or liveness-unknown, ambiguous catalogs, matching-candidate
-exhaustion, raw-entry-budget exhaustion, and deadline expiry fail closed; two
-successfully probed claimants establish ambiguity even if the scan is otherwise
-incomplete. Unreadable, malformed, non-regular, symlinked, or oversized metadata
-at a PID-prefixed stem (`<pid>-...`, canonically `<pid>-<instance>`) or a legacy
-numeric `<pid>` stem leaves uniqueness unresolved when that PID is live or
-liveness-unknown. Definitely-dead PID-prefixed and legacy numeric stems, plus
-non-lifecycle-shaped filenames, may be ignored non-destructively. Outbound and
-inbound socket jobs use
-bounded global admission and absolute deadlines. Potentially blocking runtime lookup is
-isolated behind a separate 16-job non-queued lease; a stalled storage worker
-retains that lease after caller timeout so repeated stalls remain bounded. A 64
-KiB message limit bounds accepted peer text. Disconnect and session rollover
-cancel live work, and generation-tagged completions cannot enter a replacement
-session.
+Targeted runtime lookup derives one full-BLAKE3 claim and socket pair directly
+from the exact session id. An absent or safely unlocked claim linearizes as not
+running. A contended claim must contain the exact session identity and its socket
+must complete exact-session admission; unavailable, malformed, or mismatched
+contended state is incomplete and never falls back to PID or catalog scanning.
+Only a daemon holding the session claim may reclaim its stale socket. Listing
+alone performs bounded claim-directory traversal and fails wholly on traversal,
+deadline, or probe incompleteness. Outbound and inbound socket jobs retain
+bounded global admission and absolute deadlines. A 64 KiB message limit bounds
+accepted peer text. Disconnect and final daemon shutdown cancel live work;
+generation-tagged completions cannot enter a retired runtime.
+Claim listing and opted-in peer probing share one whole-call deadline. A timed
+out or failed opted-in probe makes the snapshot incomplete rather than exposing
+partial results, and cancellation is rechecked after claim reads and before
+socket I/O. Exact identity probes are quarantined diagnostic clients and do not
+count as completed UIs.
 
 The target admits input before creation or receive publication. Each endpoint
 accepts at most 32 queued peer inputs and 256 KiB of queued peer body, including
@@ -80,7 +75,7 @@ in-memory, generation-bound continuation acknowledges only from the
 post-acceptance commit hook. Here commit means bounded persistence admission and
 the authoritative in-memory fold; it does not wait for filesystem I/O.
 Interception rejection, admission failure,
-target disappearance, disconnect, or rollover before commit fails or removes
+target disappearance, disconnect, or shutdown before commit fails or removes
 the continuation without success. Only confirmed acknowledgement permits the
 sender's `AgentMessageSent` projection. The same-loop post-commit reaction
 transfers queued byte ownership and installs any payload-free live wake before
@@ -103,6 +98,6 @@ or deduplication index. Crash ambiguity may duplicate prompts, agents, model wor
 and spend. An ACK or provider effect can also escape after live acceptance and
 before worker persistence, then survive a crash that loses the journal fact.
 Immediately before receive commit, bare authority, creation-role
-membership, provider/model/skill availability, endpoint liveness, and generation
+membership, provider/model/skill availability, endpoint liveness, and runtime generation
 are revalidated. Authority loss reselects once; a second loss fails. Exact routes
 never redirect.

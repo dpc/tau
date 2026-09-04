@@ -564,7 +564,7 @@ fn new_session_preserves_role_status() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     sync(&handle);
 
@@ -724,7 +724,7 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s1"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     sync(&handle);
 
@@ -783,7 +783,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s1"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         creator: Some(tau_proto::AgentCreator::default()),
@@ -828,7 +828,7 @@ fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s1"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         creator: Some(tau_proto::AgentCreator::default()),
@@ -875,7 +875,7 @@ fn status_agent_chip_shows_current_agent_watchers() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s1"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         creator: Some(tau_proto::AgentCreator::default()),
@@ -932,7 +932,7 @@ fn status_agent_chip_truncates_multiple_current_agent_watchers() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s1"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     renderer.switch_agent(agent_id("engineer_child"));
     renderer.handle(&Event::AgentWatchesUpdated(
@@ -1294,7 +1294,7 @@ fn watched_agent_stats_redraws_status_row() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s1"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
@@ -3183,8 +3183,7 @@ fn context_size_formatter_rounds_and_promotes_within_three_numeric_columns() {
 }
 
 /// Extension ready/kept messages are informational lifecycle notices, so a
-/// warning threshold should keep them out of live startup and `:session new`
-/// preambles.
+/// warning threshold should keep them out of live startup preambles.
 #[test]
 fn warning_notice_level_hides_routine_extension_status() {
     let (_term, handle, vt) = setup(80, 24);
@@ -3203,7 +3202,7 @@ fn warning_notice_level_hides_routine_extension_status() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     sync(&handle);
 
@@ -3231,7 +3230,7 @@ fn model_status_uses_symbol_prefixed_chips() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("tau-agent-test"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::HarnessContextUsageChanged(
         HarnessContextUsageChanged {

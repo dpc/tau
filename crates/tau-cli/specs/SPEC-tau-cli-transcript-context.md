@@ -28,7 +28,7 @@ visible transcript. The hidden fold becomes visible only when that transcript is
 selected.
 
 The initial no-agent/start-new-agent screen is not a durable transcript boundary.
-Startup or post-`:session new` status, action, and extension output that is
+Startup status, action, and extension output that is
 visible there is the beginning of the first selected/created agent conversation.
 Selecting that first agent therefore adopts the visible no-agent output in place,
 without replacing the terminal snapshot or clearing scrollback. Pending no-agent

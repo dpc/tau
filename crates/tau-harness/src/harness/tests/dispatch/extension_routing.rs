@@ -963,7 +963,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
     for forged in [
         Event::SessionStarted(tau_proto::SessionStarted {
             session_id: test_session_id("forged-session"),
-            reason: tau_proto::SessionStartReason::New,
+            reason: tau_proto::SessionStartReason::Initial,
         }),
         Event::SessionShutdown(tau_proto::SessionShutdown {
             session_id: test_session_id("forged-session"),

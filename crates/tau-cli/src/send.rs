@@ -79,12 +79,17 @@ fn send_message(
     let socket_path = tau_harness::runtime_dir::socket_path(&harness_path);
     if matches!(message, HarnessInputMessage::UiTreeRequest(_)) {
         let deadline = Instant::now() + TREE_REQUEST_TIMEOUT;
-        let (mut reader, mut writer) =
-            crate::ui_client::connect_ui_client_until(&socket_path, "tau-dev-send", deadline)?;
+        let (mut reader, mut writer) = crate::ui_client::connect_ui_client_until(
+            &socket_path,
+            "tau-dev-send",
+            session_id,
+            deadline,
+        )?;
         crate::ui_client::send_message(&mut writer, &message)?;
         print!("{}", tree_stdout_text(&read_tree_result(&mut reader)?));
     } else {
-        let mut writer = crate::ui_client::connect_ui_writer(&socket_path, "tau-dev-send")?;
+        let (_reader, mut writer) =
+            crate::ui_client::connect_ui_client(&socket_path, "tau-dev-send", Some(session_id))?;
         crate::ui_client::send_message(&mut writer, &message)?;
     }
     Ok(())

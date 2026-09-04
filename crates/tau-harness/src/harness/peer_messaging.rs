@@ -12,8 +12,8 @@ use super::*;
 ///
 /// Socket admission follows connection lifetime. Callback capabilities,
 /// receive acknowledgements, rate admission, auto-start tracking, I/O
-/// cancellation, and fairness belong to the active session generation. Session
-/// rollover first invalidates callback authority, then resolves parked receive
+/// cancellation, and fairness belong to the active session generation. Final
+/// shutdown first invalidates callback authority, then resolves parked receive
 /// acknowledgements, signals and drains I/O handles, and resets rate and
 /// fairness state. Connection teardown removes socket admission and inbound
 /// handles. Durable receive publication remains with the publication
@@ -74,7 +74,7 @@ pub(crate) struct PendingExternalReceiveAck {
     pub(crate) recipient: tau_proto::ExternalAgentMessageRecipient,
     /// Exact immutable projection expected to emerge from interception.
     pub(crate) expected_receive: tau_proto::AgentMessageReceived,
-    /// Whether disconnect/rollover canceled this parked continuation.
+    /// Whether disconnect or shutdown canceled this parked continuation.
     pub(crate) canceled: bool,
     /// Whether resolving this delivery created its recipient.
     pub(crate) started: bool,

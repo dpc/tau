@@ -240,7 +240,7 @@ The harness applies the serving model's prices to each accepted usage record and
 accumulates a runtime-only self estimate per loaded agent and an inclusive
 creator-subtree estimate through authenticated same-session
 `AgentStarted.creator` agent edges. Metadata `parent_agent` never creates cost
-membership; completed descendants remain included until session rollover. If a
+membership; completed descendants remain included until final session shutdown. If a
 provider reports total input without cached-token detail, Tau treats all input
 as ordinary input. Explicit cache observations clamp to total input in read,
 write, then miss order. A missing cache-write price uses the ordinary-input

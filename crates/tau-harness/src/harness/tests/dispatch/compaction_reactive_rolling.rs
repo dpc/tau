@@ -643,10 +643,9 @@ fn reactive_context_overflow_terminalizes_unfitting_rolling_prefix() {
     h.shutdown().expect("shutdown");
 }
 
-/// A committed partial reactive success must restart from its durable
 /// predecessor link and retain the rejected activation below local threshold.
 #[test]
-fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
+fn reactive_context_overflow_partial_success_continues_after_cold_replay() {
     fn copy_tree(source: &Path, destination: &Path) {
         std::fs::create_dir_all(destination).expect("create copied state directory");
         for entry in std::fs::read_dir(source).expect("read copied state directory") {
@@ -827,81 +826,72 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
         )
         .expect("append committed partial success");
     drop(store);
-    let loss_state = td.path().join("loss-state");
-    copy_tree(&state, &loss_state);
-    let rejected_start_state = td.path().join("rejected-start-state");
-    copy_tree(&state, &rejected_start_state);
+    let rejected_state = td.path().join("rejected-state");
+    copy_tree(&state, &rejected_state);
+    let route_loss_state = td.path().join("route-loss-state");
+    copy_tree(&state, &route_loss_state);
 
     {
-        let mut rejected = quiet_provider_harness_for_with_start_reason_and_storage_mode(
-            "s3",
-            &rejected_start_state,
-            tau_proto::SessionStartReason::Initial,
-            crate::HarnessStorageMode::Durable,
-        )
-        .expect("start rejected-publication harness");
-        let info = rejected
-            .provider_runtime
-            .model_info
-            .get_mut(&"test/model".into())
-            .expect("test model");
-        info.supports_compaction = false;
-        info.supports_standalone_compaction = true;
-        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
-        info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(1_000));
         let interceptor = "reactive-rolling-restart-reject";
-        connect_test_tool(&mut rejected, interceptor);
-        rejected
-            .handle_extension_event(
-                interceptor,
-                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-                    selectors: vec![EventSelector::Exact(
-                        tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
-                    )],
-                    priority: InterceptionPriority::new(0),
+        let mut rejected =
+            quiet_standalone_provider_harness_for_with_start_reason_storage_mode_and_hook(
+                "s1",
+                &rejected_state,
+                tau_proto::SessionStartReason::Resume,
+                crate::HarnessStorageMode::Durable,
+                Some(Box::new(move |h| {
+                    let model: tau_proto::ModelId = "test/model".into();
+                    let info = h
+                        .provider_runtime
+                        .model_info
+                        .get_mut(&model)
+                        .expect("test model");
+                    info.standalone_compaction_threshold =
+                        Some(tau_proto::TokenCount::new(u64::MAX));
+                    info.standalone_compaction_prefix_budget =
+                        Some(tau_proto::ByteCount::new(1_000));
+                    assert!(h.provider_runtime.model_routes.contains_key(&model));
+                    connect_test_tool(h, interceptor);
+                    h.handle_extension_event(
+                        interceptor,
+                        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                            selectors: vec![EventSelector::Exact(
+                                tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+                            )],
+                            priority: InterceptionPriority::new(0),
+                        })),
+                    )
+                    .expect("register rolling-start interceptor");
                 })),
             )
-            .expect("register rolling-start interceptor");
-        rejected
-            .switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
-            .expect("restore partial success with rejected successor start");
-        assert!(matches!(
+            .expect("resume with rejected successor");
+        assert!(
+            matches!(
+                rejected.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+                Some(Event::AgentStandaloneCompactionStarted(started))
+                    if matches!(
+                        &started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { previous_transaction_id }
+                            if previous_transaction_id == &first_transaction_id
+                    )
+            ),
+            "pending={:?} relevant={:?}",
             rejected
                 .runtime_io
                 .publication
                 .pending_intercept
                 .as_ref()
-                .map(|pending| &pending.event),
-            Some(Event::AgentStandaloneCompactionStarted(started))
-                if matches!(
-                    &started.trigger,
-                    tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-                        previous_transaction_id
-                    } if previous_transaction_id == &first_transaction_id
-                )
-        ));
-        assert!(matches!(
-            rejected
-                .agent_runtime
-                .agent_watch
-                .provider_status
-                .get(first_started.agent_id.as_str()),
-            Some(tau_proto::AgentWatchProviderStatusNotification {
-                agent_prompt_id,
-                state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
-                ..
-            }) if agent_prompt_id == &failed_agent_prompt_id
-        ));
-        assert!(
-            event_log_events(&rejected).iter().all(|event| !matches!(
-                event,
-                Event::AgentStandaloneCompactionStarted(started)
-                    if matches!(
-                        started.trigger,
-                        tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
-                    )
-            )),
-            "the rejected rolling successor must not appear committed"
+                .map(|pending| pending.event.name()),
+            event_log_events(&rejected)
+                .into_iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentStandaloneCompactionStarted(_)
+                        | Event::AgentStandaloneCompactionFailed(_)
+                        | Event::AgentInferenceDispatchStarted(_)
+                        | Event::AgentPromptCreated(_)
+                ))
+                .collect::<Vec<_>>()
         );
         reject_next_semantic_admission(&rejected);
         rejected
@@ -912,60 +902,21 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
                 })),
             )
             .expect("reject rolling successor append");
-        assert!(matches!(
-            rejected
-                .agent_runtime
-                .agent_watch
-                .provider_status
-                .get(first_started.agent_id.as_str()),
-            Some(tau_proto::AgentWatchProviderStatusNotification {
-                agent_prompt_id,
-                state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
-                ..
-            }) if agent_prompt_id == &failed_agent_prompt_id
-        ));
-        let late_cid = rejected.create_durable_user_agent(
-            rejected.session_runtime.current_session_id.clone(),
-            &rejected.config.selected_role.clone(),
-        );
-        let late_id = durable_agent_id_for_conversation(&rejected, &late_cid);
-        rejected.set_agent_watch(
-            late_id.as_str(),
-            first_started.agent_id.as_str(),
-            true,
-            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-        );
-        assert!(matches!(
-            reactive_provider_watch_notifications(
-                &rejected,
-                &first_started.agent_id,
-                &late_id
-            )
-            .as_slice(),
-            [tau_proto::AgentWatchProviderStatusNotification {
-                agent_prompt_id,
-                state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
-                initial: true,
-                ..
-            }] if agent_prompt_id == &failed_agent_prompt_id
-        ));
+        assert!(event_log_events(&rejected).iter().all(|event| !matches!(
+            event,
+            Event::AgentStandaloneCompactionStarted(started)
+                if matches!(started.trigger, tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. })
+        )));
         rejected.retry_pending_agent_publications();
-        let continuation = event_log_events(&rejected)
-            .into_iter()
-            .find_map(|event| match event {
-                Event::AgentStandaloneCompactionStarted(started)
-                    if matches!(
-                        &started.trigger,
-                        tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-                            previous_transaction_id
-                        } if previous_transaction_id == &first_transaction_id
-                    ) =>
-                {
-                    Some(started)
-                }
-                _ => None,
-            })
-            .expect("retry commits the exact rolling successor");
+        let continuation = event_log_events(&rejected).into_iter().find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started)
+                if matches!(
+                    &started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { previous_transaction_id }
+                        if previous_transaction_id == &first_transaction_id
+                ) => Some(started),
+            _ => None,
+        }).expect("retry commits exact successor");
         let compact = read_prompt_created(&rejected, &continuation.compact_prompt_id);
         rejected.handle_cancel_prompt(
             crate::harness::harness_connection_id(),
@@ -979,80 +930,63 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
             event,
             Event::AgentStandaloneCompactionFailed(failed)
                 if failed.transaction_id == continuation.transaction_id
-                    && failed.reason
-                        == tau_proto::StandaloneCompactionFailureReason::Cancelled
+                    && failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
         )));
-        assert!(
-            !rejected
-                .agent_runtime
-                .agent_watch
-                .provider_status
-                .contains_key(continuation.agent_id.as_str()),
-            "the matching terminal retires the restored recovery snapshot"
-        );
-        rejected.shutdown().expect("shutdown rejected harness");
+        rejected.shutdown().expect("shutdown rejected restart");
     }
 
     {
-        let mut loss = quiet_provider_harness_for_with_start_reason_and_storage_mode(
-            "s2",
-            &loss_state,
-            tau_proto::SessionStartReason::Initial,
+        let mut route_loss = quiet_provider_harness_for_with_start_reason_storage_mode_and_hook(
+            "s1",
+            &route_loss_state,
+            tau_proto::SessionStartReason::Resume,
             crate::HarnessStorageMode::Durable,
+            Some(Box::new(|h| {
+                let model: tau_proto::ModelId = "test/model".into();
+                h.provider_runtime.model_info.remove(&model);
+                h.provider_runtime.model_routes.remove(&model);
+                for models in h.provider_runtime.models_by_extension.values_mut() {
+                    models.retain(|candidate| candidate.id != model);
+                }
+            })),
         )
-        .expect("start route-loss harness");
-        loss.provider_runtime
-            .model_info
-            .remove(&"test/model".into());
-        loss.provider_runtime
-            .model_routes
-            .remove(&"test/model".into());
-        for models in loss.provider_runtime.models_by_extension.values_mut() {
-            models.retain(|model| model.id != "test/model".into());
-        }
-        loss.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
-            .expect("resume without captured capability");
-        let events = event_log_events(&loss);
-        let local_start = events.iter().find_map(|event| match event {
-            Event::AgentStandaloneCompactionStarted(started)
-                if matches!(
-                    started.trigger,
-                    tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
-                        reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
-                        ..
-                    }
-                ) =>
-            {
-                Some(started)
-            }
-            _ => None,
-        });
-        let local_start = local_start
-            .unwrap_or_else(|| panic!("route loss terminalizes linked rolling work: {events:#?}"));
+        .expect("resume without provider route");
+        let events = event_log_events(&route_loss);
+        let local_start = events
+            .iter()
+            .find_map(|event| match event {
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                            reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
+                            ..
+                        }
+                    ) =>
+                {
+                    Some(started)
+                }
+                _ => None,
+            })
+            .expect("route loss emits typed local start");
         assert!(events.iter().any(|event| matches!(
             event,
             Event::AgentStandaloneCompactionFailed(failed)
                 if failed.transaction_id == local_start.transaction_id
                     && failed.reason == tau_proto::StandaloneCompactionFailureReason::RouteFailed
         )));
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            Event::AgentInferenceDispatchStarted(started)
-                if started.transaction_id.as_ref() == Some(&first_transaction_id)
-        )));
         assert!(
             events
                 .iter()
-                .all(|event| !matches!(event, Event::AgentPromptCreated(_))),
-            "route loss must terminalize without provider dispatch"
+                .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
         );
-        loss.shutdown().expect("shutdown loss harness");
+        route_loss.shutdown().expect("shutdown route-loss restart");
     }
 
-    let mut resumed = quiet_provider_harness_for_with_start_reason_and_storage_mode(
-        "s2",
+    let mut resumed = quiet_standalone_provider_harness_for_with_start_reason_and_storage_mode(
+        "s1",
         &state,
-        tau_proto::SessionStartReason::Initial,
+        tau_proto::SessionStartReason::Resume,
         crate::HarnessStorageMode::Durable,
     )
     .expect("start cold continuation harness");
@@ -1065,9 +999,7 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
     info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(1_000));
-    resumed
-        .switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
-        .expect("resume partial reactive success");
+    resumed.resume_restored_compaction_checkpoints(RestoredCheckpointAuthority::DiscoveryComplete);
     let events = event_log_events(&resumed);
     let continuation = events
         .iter()

@@ -394,11 +394,4 @@ impl CompactionRuntimeState {
             Some(ManualCompactionStartOwner::ModelTool(_))
         )
     }
-
-    /// Remove model-tool owners while preserving independent UI coalescing
-    /// state.
-    pub(super) fn clear_model_tool_starts(&mut self) {
-        self.active_manual_transactions
-            .retain(|_, owner| matches!(owner, ManualCompactionStartOwner::Ui { .. }));
-    }
 }

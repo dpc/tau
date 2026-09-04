@@ -84,7 +84,7 @@ before and after every await and before:
 6. enqueueing terminal success.
 
 Registration installation compare-and-swaps the exact pending token to active.
-Session rollover/shutdown, explicit unregister, unload, `Disconnect`,
+Session shutdown, explicit unregister, unload, `Disconnect`,
 configuration invalidation before start, and output loss remove local routes and
 increment relevant generations before any remote wait. Revocation signals the
 active record, and no later part may start. A stale registration completion
@@ -110,7 +110,7 @@ content-free structured outcome records the reason.
 | Queue full | `ToolErrorReported`: `XMPP operation queue is full (capacity 32); no remote I/O was attempted` |
 | Executor spawn failure or worker unavailable before an effect | `ToolErrorReported`: `XMPP operation executor is unavailable; no remote I/O was attempted` |
 | Deadline before an effect | `ToolErrorReported`: `XMPP operation deadline expired before remote I/O (60s total)` |
-| Unload, session rollover/shutdown, explicit unregister/supersession, or `Disconnect` revokes a queued call before an effect | `ToolCancelledReported` |
+| Unload, session shutdown, explicit unregister/supersession, or `Disconnect` revokes a queued call before an effect | `ToolCancelledReported` |
 
 Worker death drains other queued records once with the executor-unavailable
 error. Unload and session shutdown attempt cancellations while output is usable.

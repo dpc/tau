@@ -645,7 +645,7 @@ struct State {
     registered_agents: HashMap<AgentId, RegistrationLease>,
     /// XMPP conversation address per agent.
     conversations: HashMap<AgentId, String>,
-    /// Current Tau session id used to scope registration lifecycle cleanup.
+    /// Immutable Tau session id used to scope registration lifecycle cleanup.
     current_session_id: Option<SessionId>,
     /// Durable role observed for each agent.
     agent_roles: HashMap<AgentId, String>,
@@ -2831,20 +2831,17 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, XmppRuntime>) -> Clien
 
 fn handle_session_started(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> ClientResult<()> {
     if let Event::SessionStarted(started) = cx.event() {
-        let rollover = cx
-            .state
-            .ext
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .current_session_id
-            .as_ref()
-            .is_some_and(|current| current != &started.session_id);
-        if rollover {
-            cx.state.ext.revoke_all();
-        }
         let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.current_session_id = Some(started.session_id.clone());
+        match state.current_session_id.as_ref() {
+            Some(current) if current != &started.session_id => {
+                return Err(ClientError::handler(format!(
+                    "immutable session mismatch: expected `{current}`, received `{}`",
+                    started.session_id
+                )));
+            }
+            Some(_) => {}
+            None => state.current_session_id = Some(started.session_id.clone()),
+        }
     }
     Ok(())
 }
@@ -2886,6 +2883,19 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> Client
             unload_agent(&cx.state.ext, unloaded.agent_id.clone());
         }
         Event::SessionShutdown(shutdown) => {
+            let bound = cx
+                .state
+                .ext
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .current_session_id
+                .clone();
+            if bound.as_ref() != Some(&shutdown.session_id) {
+                return Err(ClientError::handler(
+                    "session shutdown does not match immutable binding",
+                ));
+            }
             shutdown_session(&cx.state.ext, shutdown.session_id.clone());
         }
         _ => {}
@@ -2912,9 +2922,14 @@ fn shutdown_session(ext: &Extension, session_id: SessionId) {
         for agent_id in state.ephemeral_agent_roles.drain().collect::<Vec<_>>() {
             state.agent_roles.remove(&agent_id);
         }
-        if state.current_session_id.as_ref() == Some(&session_id) {
-            state.current_session_id = None;
-        }
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(
+            state
+                .current_session_id
+                .as_ref()
+                .is_none_or(|bound| bound == &session_id),
+            "shutdown must not target another session"
+        );
     }
     ext.revoke_all();
 }

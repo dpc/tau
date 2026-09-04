@@ -2175,113 +2175,6 @@ fn watched_agent_count_projects_recursive_activity() {
         "the existing selected-agent exclusion remains in force"
     );
 }
-
-/// Watch, selection, transcript, and display-name state must retain validated
-/// agent ids through live folding, replay, unload, and session reset. A display
-/// name equal to another agent id must remain presentation data rather than
-/// colliding with that agent's renderer state.
-#[test]
-fn renderer_agent_maps_retain_typed_ids_across_watch_lifecycle_boundaries() {
-    fn assert_agent_graph(_: &HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>) {}
-    fn assert_agent_snapshots(_: &HashMap<tau_proto::AgentId, super::AgentUiState>) {}
-    fn assert_agent_names(_: &HashMap<tau_proto::AgentId, String>) {}
-
-    let session_one = tau_proto::SessionId::parse("typed-watch-session").expect("session id");
-    let session_two = tau_proto::SessionId::parse("typed-watch-reset").expect("session id");
-    let manager = agent_id("manager");
-    let worker = agent_id("worker");
-    let started = tau_proto::Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: session_one.clone(),
-        reason: tau_proto::SessionStartReason::Initial,
-    });
-    let watches = tau_proto::Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
-        session_id: session_one.clone(),
-        watcher_id: manager.clone(),
-        watched_agent_ids: vec![worker.clone()],
-        changed_agent_id: Some(worker.clone()),
-        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    });
-    let colliding_name = tau_proto::Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
-        agent_id: manager.clone(),
-        display_name: worker.to_string(),
-    });
-
-    let mut live = renderer_for_agent_id_tests();
-    live.handle(&started);
-    live.switch_agent(manager.clone());
-    live.handle(&watches);
-    live.handle(&colliding_name);
-    live.switch_agent(worker.clone());
-    live.switch_agent(manager.clone());
-
-    assert_agent_graph(&live.watches.watched_agents);
-    assert_agent_graph(&live.watches.agent_watchers);
-    assert_agent_snapshots(&live.selection.agents_ui_state);
-    let names = live
-        .discovery
-        .agent_display_names
-        .lock()
-        .expect("display names");
-    assert_agent_names(&names);
-    assert_eq!(
-        names.get(&manager).map(String::as_str),
-        Some(worker.as_str())
-    );
-    assert!(!names.contains_key(&worker));
-    drop(names);
-
-    let mut replay = renderer_for_agent_id_tests();
-    replay.handle(&started);
-    replay.switch_agent(manager.clone());
-    replay.handle(&watches);
-    replay.handle(&colliding_name);
-    replay.switch_agent(worker.clone());
-    replay.switch_agent(manager.clone());
-    assert_eq!(replay.watches.watched_agents, live.watches.watched_agents);
-    assert_eq!(replay.watches.agent_watchers, live.watches.agent_watchers);
-    assert_eq!(
-        replay
-            .selection
-            .agents_ui_state
-            .keys()
-            .collect::<HashSet<_>>(),
-        live.selection
-            .agents_ui_state
-            .keys()
-            .collect::<HashSet<_>>()
-    );
-
-    live.handle(&tau_proto::Event::SessionAgentUnloaded(
-        tau_proto::SessionAgentUnloaded {
-            session_id: session_one,
-            agent_id: worker.clone(),
-        },
-    ));
-    assert!(!live.watches.watched_agents.contains_key(&worker));
-    assert!(
-        live.watches
-            .watched_agents
-            .values()
-            .all(|targets| !targets.contains(&worker))
-    );
-    live.handle(&tau_proto::Event::SessionStarted(
-        tau_proto::SessionStarted {
-            session_id: session_two,
-            reason: tau_proto::SessionStartReason::New,
-        },
-    ));
-    assert!(live.watches.watched_agents.is_empty());
-    assert!(live.watches.agent_watchers.is_empty());
-    assert!(live.selection.agents_ui_state.is_empty());
-    assert!(
-        live.discovery
-            .agent_display_names
-            .lock()
-            .expect("display names")
-            .is_empty()
-    );
-}
-
 /// Renderer-owned auto-selection from the empty screen must retarget any
 /// pending prompt draft, because the input loop is not involved in remote-event
 /// selection changes.
@@ -2634,514 +2527,6 @@ fn agent_id_for_event_resolves_shell_progress_from_learned_metadata() {
         Some(agent_id("shell-agent"))
     );
 }
-
-/// Shell ownership retains protocol identifiers through selection changes,
-/// replacement, output and both terminal outcomes, late events, cold replay,
-/// unknown events, and reset without sharing generic tool correlations.
-#[test]
-fn shell_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
-    let agent_a = agent_id("agent-a");
-    let agent_b = agent_id("agent-b");
-    let command_one =
-        tau_proto::ShellCommandId::parse("shell-one").expect("valid shell command id");
-    let command_two =
-        tau_proto::ShellCommandId::parse("shell-two").expect("valid shell command id");
-    let unknown_command =
-        tau_proto::ShellCommandId::parse("shell-unknown").expect("valid shell command id");
-    let session_id = tau_proto::SessionId::parse("session-one").expect("valid session id");
-    let shell_start = |command_id: tau_proto::ShellCommandId, agent_id: tau_proto::AgentId| {
-        tau_proto::Event::UiShellCommand(tau_proto::UiShellCommand {
-            session_id: session_id.clone(),
-            command_id,
-            command: "printf shell-output".to_owned(),
-            include_in_context: true,
-            target_agent_id: Some(agent_id),
-        })
-    };
-    let shell_output = |command_id: tau_proto::ShellCommandId| {
-        tau_proto::Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-            command_id,
-            stream: tau_proto::ShellStream::Stdout,
-            chunk: "shell-output".to_owned(),
-            target_agent_id: None,
-        })
-    };
-    let shell_terminal =
-        |command_id: tau_proto::ShellCommandId, exit_code: Option<i32>, cancelled: bool| {
-            tau_proto::Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
-                command_id,
-                session_id: session_id.clone(),
-                command: "printf shell-output".to_owned(),
-                include_in_context: true,
-                target_agent_id: None,
-                output: "shell-output".to_owned(),
-                exit_code,
-                cancelled,
-            })
-        };
-    let tool_collision: tau_proto::ToolCallId = "shell-one".into();
-    let tool_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
-        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
-        call_id: tool_collision.clone(),
-        tool_name: tau_proto::ToolName::new("generic"),
-        arguments: tau_proto::CborValue::Null,
-        agent_id: agent_a.clone(),
-        originator: tau_proto::PromptOriginator::User,
-    });
-    let tool_progress = tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
-        call_id: tool_collision,
-        tool_name: tau_proto::ToolName::new("generic"),
-        message: None,
-        progress: None,
-        display: None,
-    });
-
-    let first_start = shell_start(command_one.clone(), agent_a.clone());
-    let second_start = shell_start(command_two.clone(), agent_b.clone());
-    let replacement_start = shell_start(command_one.clone(), agent_b.clone());
-    let first_output = shell_output(command_one.clone());
-    let failed_terminal = shell_terminal(command_one.clone(), Some(1), false);
-    let cancelled_terminal = shell_terminal(command_two.clone(), None, true);
-    let late_terminal = shell_terminal(command_one.clone(), Some(0), false);
-    let unknown_output = shell_output(unknown_command.clone());
-    let unknown_terminal = shell_terminal(unknown_command.clone(), None, true);
-
-    let mut live = renderer_for_agent_id_tests();
-    live.switch_agent(agent_a.clone());
-    live.handle(&first_start);
-    live.switch_agent(agent_b.clone());
-    live.handle(&second_start);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&first_output),
-        Some(agent_a.clone()),
-        "the hidden first shell command stays with agent A after selecting agent B"
-    );
-
-    live.handle(&replacement_start);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&first_output),
-        Some(agent_b.clone()),
-        "a later shell start replaces its typed owner for later output"
-    );
-    live.handle(&tool_start);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&first_output),
-        Some(agent_b.clone()),
-        "a generic tool with the same display text cannot replace shell ownership"
-    );
-    assert_eq!(
-        live.agent_id_for_event_for_test(&tool_progress),
-        Some(agent_a.clone()),
-        "the generic tool retains its separate typed owner"
-    );
-
-    let mut cold_replay = renderer_for_agent_id_tests();
-    for event in [
-        first_start.clone(),
-        second_start.clone(),
-        replacement_start.clone(),
-        first_output.clone(),
-    ] {
-        cold_replay.handle(&event);
-    }
-    assert_eq!(
-        cold_replay.event_owners.shell_agents, live.event_owners.shell_agents,
-        "cold replay preserves the live typed shell ownership winners"
-    );
-
-    for renderer in [&mut live, &mut cold_replay] {
-        assert_eq!(
-            renderer.agent_id_for_event_for_test(&failed_terminal),
-            Some(agent_b.clone()),
-            "output and failure terminals route through the retained replacement owner"
-        );
-        renderer.handle(&failed_terminal);
-        assert!(
-            !renderer
-                .event_owners
-                .shell_agents
-                .contains_key(&command_one),
-            "a shell terminal consumes only its typed shell owner"
-        );
-    }
-    assert_eq!(
-        live.agent_id_for_event_for_test(&late_terminal),
-        None,
-        "a late shell terminal has no owner after the original terminal consumed it"
-    );
-    live.handle(&late_terminal);
-    assert!(
-        !live.event_owners.shell_agents.contains_key(&command_one),
-        "a late terminal must not synthesize a new shell owner"
-    );
-
-    assert_eq!(
-        live.agent_id_for_event_for_test(&cancelled_terminal),
-        Some(agent_b.clone()),
-        "a cancelled terminal retains the second command's typed owner"
-    );
-    live.handle(&cancelled_terminal);
-    assert!(
-        !live.event_owners.shell_agents.contains_key(&command_two),
-        "a cancelled terminal removes its typed shell owner"
-    );
-    assert_eq!(
-        live.agent_id_for_event_for_test(&unknown_output),
-        None,
-        "unknown shell output has no owner and cannot invent one"
-    );
-    live.handle(&unknown_output);
-    live.handle(&unknown_terminal);
-    assert!(
-        !live
-            .event_owners
-            .shell_agents
-            .contains_key(&unknown_command),
-        "unknown shell events must not synthesize a typed owner"
-    );
-
-    live.handle(&first_start);
-    live.handle(&tau_proto::Event::SessionStarted(
-        tau_proto::SessionStarted {
-            session_id: tau_proto::SessionId::parse("session-two").expect("valid session id"),
-            reason: tau_proto::SessionStartReason::New,
-        },
-    ));
-    assert!(
-        live.event_owners.shell_agents.is_empty(),
-        "new-session reset clears every typed shell owner"
-    );
-}
-
-/// Prompt ownership must retain protocol identifiers through live routing,
-/// duplicate replacement, late terminals, hidden-agent selection, cold replay,
-/// unknown prompt fallback, and session reset without rebuilding IDs from text.
-#[test]
-fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
-    let agent_a = agent_id("agent-a");
-    let agent_b = agent_id("agent-b");
-    let prompt_one = tau_proto::AgentPromptId::parse("prompt-one").expect("valid prompt id");
-    let prompt_two = tau_proto::AgentPromptId::parse("prompt-two").expect("valid prompt id");
-    let unknown_prompt =
-        tau_proto::AgentPromptId::parse("prompt-unknown").expect("valid prompt id");
-    let prompt_started = |agent_prompt_id: tau_proto::AgentPromptId,
-                          agent_id: tau_proto::AgentId| {
-        tau_proto::Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-            agent_prompt_id,
-            agent_id,
-            session_id: tau_proto::SessionId::parse("session-one").expect("valid session id"),
-            model: "test/model".parse().expect("valid model id"),
-            model_params: Some(tau_proto::ModelParams::default()),
-            outer_turn_id: None,
-            operation: tau_proto::PromptOperation::Inference,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        })
-    };
-    let response_update = |agent_prompt_id: tau_proto::AgentPromptId,
-                           agent_id: tau_proto::AgentId| {
-        tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
-            agent_prompt_id,
-            agent_id,
-            deltas: Vec::new(),
-            compaction: None,
-            status: None,
-            response_stats: None,
-            originator: tau_proto::PromptOriginator::User,
-        })
-    };
-    let prompt_terminated = |agent_prompt_id: tau_proto::AgentPromptId,
-                             agent_id: tau_proto::AgentId| {
-        tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
-            agent_id,
-            agent_prompt_id,
-            reason: tau_proto::AgentPromptTerminationReason::Stale,
-            originator: tau_proto::PromptOriginator::User,
-            automatic_compaction_decision: None,
-        })
-    };
-
-    let first_start = prompt_started(prompt_one.clone(), agent_a.clone());
-    let second_start = prompt_started(prompt_two.clone(), agent_b.clone());
-    let replacement_start = prompt_started(prompt_one.clone(), agent_b.clone());
-    let late_terminal = prompt_terminated(prompt_one.clone(), agent_b.clone());
-    let stale_update = response_update(prompt_one.clone(), agent_a.clone());
-    let unknown_submission =
-        tau_proto::Event::ProviderPromptSubmitted(tau_proto::ProviderPromptSubmitted {
-            agent_prompt_id: unknown_prompt.clone(),
-            originator: tau_proto::PromptOriginator::User,
-        });
-
-    let mut live = renderer_for_agent_id_tests();
-    live.switch_agent(agent_a.clone());
-    live.handle(&first_start);
-    assert!(
-        live.transcript.runtime.prompts.contains_key(&prompt_one),
-        "the production start path keys transcript state by the protocol prompt id"
-    );
-    assert!(
-        live.watches
-            .active_agent_prompts
-            .get(agent_a.as_str())
-            .is_some_and(|prompts| prompts.contains(&prompt_one)),
-        "the production start path keeps the typed id in the activity guard"
-    );
-    live.switch_agent(agent_b.clone());
-    live.handle(&second_start);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&tau_proto::Event::ProviderPromptSubmitted(
-            tau_proto::ProviderPromptSubmitted {
-                agent_prompt_id: prompt_one.clone(),
-                originator: tau_proto::PromptOriginator::User,
-            },
-        )),
-        Some(agent_a.clone()),
-        "the hidden first prompt stays with agent A after selecting agent B"
-    );
-
-    live.handle(&replacement_start);
-    live.handle(&stale_update);
-    assert_eq!(
-        live.event_owners.prompt_agents.get(&prompt_one),
-        Some(&agent_b),
-        "the later typed lifecycle fact keeps the existing replacement winner"
-    );
-    assert_eq!(
-        live.agent_id_for_event_for_test(&stale_update),
-        Some(agent_b.clone()),
-        "a no-content update cannot steal the replacement owner's transcript"
-    );
-
-    live.handle(&late_terminal);
-    assert!(
-        !live.transcript.runtime.prompts.contains_key(&prompt_one)
-            && live.watches.terminal_agent_prompts.contains(&prompt_one),
-        "the production terminal path atomically retires typed runtime state and guards resurrection"
-    );
-    assert_eq!(
-        live.agent_id_for_event_for_test(&late_terminal),
-        Some(agent_b.clone()),
-        "a late terminal still routes through its retained typed owner"
-    );
-    assert_eq!(
-        live.agent_id_for_event_for_test(&unknown_submission),
-        Some(agent_b.clone()),
-        "an unknown typed prompt retains the existing user-originator fallback"
-    );
-    live.handle(&unknown_submission);
-    assert!(
-        !live
-            .event_owners
-            .prompt_agents
-            .contains_key(&unknown_prompt),
-        "unknown prompt routing must not synthesize a string or ownership record"
-    );
-
-    let mut cold_replay = renderer_for_agent_id_tests();
-    for event in [
-        first_start.clone(),
-        second_start.clone(),
-        replacement_start.clone(),
-        late_terminal.clone(),
-    ] {
-        cold_replay.handle(&event);
-    }
-    assert_eq!(
-        cold_replay.event_owners.prompt_agents, live.event_owners.prompt_agents,
-        "cold replay preserves the live typed ownership winners"
-    );
-    assert_eq!(
-        cold_replay.watches.terminal_agent_prompts, live.watches.terminal_agent_prompts,
-        "cold replay preserves the live typed terminal guards"
-    );
-
-    live.handle(&tau_proto::Event::SessionStarted(
-        tau_proto::SessionStarted {
-            session_id: tau_proto::SessionId::parse("session-two").expect("valid session id"),
-            reason: tau_proto::SessionStartReason::New,
-        },
-    ));
-    assert!(
-        live.event_owners.prompt_agents.is_empty(),
-        "new-session reset clears every typed prompt owner"
-    );
-    assert!(
-        live.transcript.runtime.prompts.is_empty()
-            && live.watches.active_agent_prompts.is_empty()
-            && live.watches.terminal_agent_prompts.is_empty(),
-        "new-session reset clears typed transcript and idempotency state"
-    );
-}
-
-/// Tool ownership must retain protocol identifiers through live routing,
-/// replacement, foreground/background terminals, selection changes, unknown
-/// events, and session reset without rebuilding IDs from presentation text.
-#[test]
-fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
-    let agent_a = agent_id("agent-a");
-    let agent_b = agent_id("agent-b");
-    let call_one: tau_proto::ToolCallId = "call-one".into();
-    let call_two: tau_proto::ToolCallId = "call-two".into();
-    let unknown_call: tau_proto::ToolCallId = "call-unknown".into();
-    let tool_started = |call_id: tau_proto::ToolCallId, agent_id: tau_proto::AgentId| {
-        tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
-            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
-            call_id,
-            tool_name: tau_proto::ToolName::new("generic"),
-            arguments: tau_proto::CborValue::Null,
-            agent_id,
-            originator: tau_proto::PromptOriginator::User,
-        })
-    };
-    let provider_finished = |agent_id: tau_proto::AgentId, call_id: tau_proto::ToolCallId| {
-        tau_proto::Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-            automatic_compaction_decision: None,
-            estimated_api_cost_rates: None,
-            estimated_api_cost_increment: None,
-            agent_prompt_id: tau_proto::AgentPromptId::parse("tool-owner-prompt")
-                .expect("valid prompt id"),
-            agent_id,
-            output_items: vec![tool_call(call_id.as_str())],
-            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-            error: None,
-            failure_kind: None,
-            context_limit_telemetry: None,
-            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-            output_length_disposition: tau_proto::OutputLengthDisposition::None,
-            originator: tau_proto::PromptOriginator::User,
-            usage: None,
-            compaction_original_input_tokens: None,
-            compaction_output_tokens: None,
-            backend: None,
-            provider_attempt: Default::default(),
-            provider_response_id: None,
-            ws_pool_delta: None,
-        })
-    };
-    let foreground_terminal = |call_id: tau_proto::ToolCallId| {
-        tau_proto::Event::ToolResultDisplay(tau_proto::ToolResultDisplay {
-            call_id,
-            tool_name: tau_proto::ToolName::new("generic"),
-            tool_type: tau_proto::ToolType::Function,
-            kind: tau_proto::ToolResultKind::Final,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        })
-    };
-    let background_terminal = |call_id: tau_proto::ToolCallId| {
-        tau_proto::Event::ToolBackgroundResultDisplay(tau_proto::ToolBackgroundResultDisplay {
-            call_id,
-            tool_name: tau_proto::ToolName::new("generic"),
-            tool_type: tau_proto::ToolType::Function,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        })
-    };
-    let tool_progress = |call_id: tau_proto::ToolCallId| {
-        tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
-            call_id,
-            tool_name: tau_proto::ToolName::new("generic"),
-            message: None,
-            progress: None,
-            display: None,
-        })
-    };
-    let tool_error = |call_id: tau_proto::ToolCallId| {
-        tau_proto::Event::ToolError(tau_proto::ToolError {
-            presentation: Default::default(),
-            call_id,
-            tool_name: tau_proto::ToolName::new("generic"),
-            tool_type: tau_proto::ToolType::Function,
-            message: "failed".to_owned(),
-            details: None,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        })
-    };
-    let tool_cancelled = |call_id: tau_proto::ToolCallId| {
-        tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
-            presentation: Default::default(),
-            call_id,
-            tool_name: tau_proto::ToolName::new("generic"),
-            tool_type: tau_proto::ToolType::Function,
-            display: None,
-        })
-    };
-
-    let first_start = tool_started(call_one.clone(), agent_a.clone());
-    let second_start = tool_started(call_two.clone(), agent_b.clone());
-    let duplicate_start = tool_started(call_one.clone(), agent_b.clone());
-    let replacement = provider_finished(agent_b.clone(), call_one.clone());
-    let foreground = foreground_terminal(call_one.clone());
-    let background = background_terminal(call_one.clone());
-    let error = tool_error(call_two.clone());
-    let late_cancel = tool_cancelled(call_one.clone());
-    let unknown_terminal = foreground_terminal(unknown_call.clone());
-    let first_progress = tool_progress(call_one.clone());
-    let unknown_progress = tool_progress(unknown_call.clone());
-
-    let mut live = renderer_for_agent_id_tests();
-    live.switch_agent(agent_a.clone());
-    live.handle(&first_start);
-    live.switch_agent(agent_b.clone());
-    live.handle(&second_start);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&first_progress),
-        Some(agent_a.clone()),
-        "the hidden first tool stays with agent A after selecting agent B"
-    );
-
-    live.handle(&duplicate_start);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&first_progress),
-        Some(agent_a.clone()),
-        "a duplicate start retains the original typed owner for later progress"
-    );
-
-    live.handle(&replacement);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&first_progress),
-        Some(agent_b.clone()),
-        "provider output replaces later progress ownership with its typed transcript owner"
-    );
-    for terminal in [&foreground, &background, &late_cancel] {
-        assert_eq!(
-            live.agent_id_for_event_for_test(terminal),
-            Some(agent_b.clone()),
-            "every foreground, background, and late terminal keeps the replacement owner"
-        );
-        live.handle(terminal);
-    }
-    assert_eq!(
-        live.agent_id_for_event_for_test(&error),
-        Some(agent_b.clone()),
-        "a generic tool error routes through its typed owner"
-    );
-    live.handle(&error);
-    assert_eq!(
-        live.agent_id_for_event_for_test(&unknown_terminal),
-        Some(agent_b.clone()),
-        "an unknown tool retains the existing user-originator fallback"
-    );
-    live.handle(&unknown_terminal);
-    assert!(
-        live.agent_id_for_event_for_test(&unknown_progress)
-            .is_none(),
-        "unknown tool routing must not synthesize an ownership record"
-    );
-
-    live.handle(&tau_proto::Event::SessionStarted(
-        tau_proto::SessionStarted {
-            session_id: tau_proto::SessionId::parse("session-two").expect("valid session id"),
-            reason: tau_proto::SessionStartReason::New,
-        },
-    ));
-    assert!(
-        live.agent_id_for_event_for_test(&first_progress).is_none(),
-        "new-session reset clears every typed tool owner from later progress routing"
-    );
-}
-
 /// Initial-discovery deferral reuses one measured lightweight projection even
 /// when the existing deferred event payload contains 8 MiB arguments.
 #[test]
@@ -4025,10 +3410,9 @@ fn watch_work_status_visibly_escapes_structural_unicode() {
     assert!(!text.contains("must not render"));
 }
 
-/// A resumed different session must not inherit a same-spelled agent's local
-/// display name from the previously attached session.
+/// Repeated same-session startup is inert, while another session fails closed.
 #[test]
-fn resumed_session_clears_agent_display_name_authority() {
+fn renderer_keeps_one_immutable_session_binding() {
     let message = agent_message("agent-a", "agent-b", "payload");
     let mut renderer = renderer_for_agent_id_tests();
     renderer.handle(&tau_proto::Event::SessionStarted(
@@ -4045,6 +3429,17 @@ fn resumed_session_clears_agent_display_name_authority() {
             .agent_message_summary(&message)
             .contains("session A worker")
     );
+    renderer.handle(&tau_proto::Event::SessionStarted(
+        tau_proto::SessionStarted {
+            session_id: "session-a".parse().expect("session id"),
+            reason: tau_proto::SessionStartReason::Resume,
+        },
+    ));
+    assert!(
+        renderer
+            .agent_message_summary(&message)
+            .contains("session A worker")
+    );
 
     renderer.handle(&tau_proto::Event::SessionStarted(
         tau_proto::SessionStarted {
@@ -4054,6 +3449,7 @@ fn resumed_session_clears_agent_display_name_authority() {
             reason: tau_proto::SessionStartReason::Resume,
         },
     ));
+    assert!(renderer.session.session_binding_failed);
     assert_eq!(
         renderer.agent_message_summary(&message),
         "Message from @agent-a to @agent-b"
@@ -4801,5 +4197,554 @@ fn indexed_stream_join_checks_capacity_and_bounds_large_chunk_retention() {
             .expect("joined reasoning")
             .len(),
         expected_len
+    );
+}
+
+/// colliding with that agent's renderer state.
+#[test]
+fn renderer_agent_maps_retain_typed_ids_across_watch_lifecycle_boundaries() {
+    fn assert_agent_graph(_: &HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>) {}
+    fn assert_agent_snapshots(_: &HashMap<tau_proto::AgentId, super::AgentUiState>) {}
+    fn assert_agent_names(_: &HashMap<tau_proto::AgentId, String>) {}
+
+    let session_one = tau_proto::SessionId::parse("typed-watch-session").expect("session id");
+    let manager = agent_id("manager");
+    let worker = agent_id("worker");
+    let started = tau_proto::Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: session_one.clone(),
+        reason: tau_proto::SessionStartReason::Initial,
+    });
+    let watches = tau_proto::Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
+        session_id: session_one.clone(),
+        watcher_id: manager.clone(),
+        watched_agent_ids: vec![worker.clone()],
+        changed_agent_id: Some(worker.clone()),
+        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    });
+    let colliding_name = tau_proto::Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+        agent_id: manager.clone(),
+        display_name: worker.to_string(),
+    });
+
+    let mut live = renderer_for_agent_id_tests();
+    live.handle(&started);
+    live.switch_agent(manager.clone());
+    live.handle(&watches);
+    live.handle(&colliding_name);
+    live.switch_agent(worker.clone());
+    live.switch_agent(manager.clone());
+
+    assert_agent_graph(&live.watches.watched_agents);
+    assert_agent_graph(&live.watches.agent_watchers);
+    assert_agent_snapshots(&live.selection.agents_ui_state);
+    let names = live
+        .discovery
+        .agent_display_names
+        .lock()
+        .expect("display names");
+    assert_agent_names(&names);
+    assert_eq!(
+        names.get(&manager).map(String::as_str),
+        Some(worker.as_str())
+    );
+    assert!(!names.contains_key(&worker));
+    drop(names);
+
+    let mut replay = renderer_for_agent_id_tests();
+    replay.handle(&started);
+    replay.switch_agent(manager.clone());
+    replay.handle(&watches);
+    replay.handle(&colliding_name);
+    replay.switch_agent(worker.clone());
+    replay.switch_agent(manager.clone());
+    assert_eq!(replay.watches.watched_agents, live.watches.watched_agents);
+    assert_eq!(replay.watches.agent_watchers, live.watches.agent_watchers);
+    assert_eq!(
+        replay
+            .selection
+            .agents_ui_state
+            .keys()
+            .collect::<HashSet<_>>(),
+        live.selection
+            .agents_ui_state
+            .keys()
+            .collect::<HashSet<_>>()
+    );
+
+    live.handle(&tau_proto::Event::SessionAgentUnloaded(
+        tau_proto::SessionAgentUnloaded {
+            session_id: session_one,
+            agent_id: worker.clone(),
+        },
+    ));
+    assert!(!live.watches.watched_agents.contains_key(&worker));
+    assert!(
+        live.watches
+            .watched_agents
+            .values()
+            .all(|targets| !targets.contains(&worker))
+    );
+}
+
+/// unknown events without sharing generic tool correlations.
+#[test]
+fn shell_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
+    let agent_a = agent_id("agent-a");
+    let agent_b = agent_id("agent-b");
+    let command_one =
+        tau_proto::ShellCommandId::parse("shell-one").expect("valid shell command id");
+    let command_two =
+        tau_proto::ShellCommandId::parse("shell-two").expect("valid shell command id");
+    let unknown_command =
+        tau_proto::ShellCommandId::parse("shell-unknown").expect("valid shell command id");
+    let session_id = tau_proto::SessionId::parse("session-one").expect("valid session id");
+    let shell_start = |command_id: tau_proto::ShellCommandId, agent_id: tau_proto::AgentId| {
+        tau_proto::Event::UiShellCommand(tau_proto::UiShellCommand {
+            session_id: session_id.clone(),
+            command_id,
+            command: "printf shell-output".to_owned(),
+            include_in_context: true,
+            target_agent_id: Some(agent_id),
+        })
+    };
+    let shell_output = |command_id: tau_proto::ShellCommandId| {
+        tau_proto::Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+            command_id,
+            stream: tau_proto::ShellStream::Stdout,
+            chunk: "shell-output".to_owned(),
+            target_agent_id: None,
+        })
+    };
+    let shell_terminal =
+        |command_id: tau_proto::ShellCommandId, exit_code: Option<i32>, cancelled: bool| {
+            tau_proto::Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+                command_id,
+                session_id: session_id.clone(),
+                command: "printf shell-output".to_owned(),
+                include_in_context: true,
+                target_agent_id: None,
+                output: "shell-output".to_owned(),
+                exit_code,
+                cancelled,
+            })
+        };
+    let tool_collision: tau_proto::ToolCallId = "shell-one".into();
+    let tool_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
+        call_id: tool_collision.clone(),
+        tool_name: tau_proto::ToolName::new("generic"),
+        arguments: tau_proto::CborValue::Null,
+        agent_id: agent_a.clone(),
+        originator: tau_proto::PromptOriginator::User,
+    });
+    let tool_progress = tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
+        call_id: tool_collision,
+        tool_name: tau_proto::ToolName::new("generic"),
+        message: None,
+        progress: None,
+        display: None,
+    });
+
+    let first_start = shell_start(command_one.clone(), agent_a.clone());
+    let second_start = shell_start(command_two.clone(), agent_b.clone());
+    let replacement_start = shell_start(command_one.clone(), agent_b.clone());
+    let first_output = shell_output(command_one.clone());
+    let failed_terminal = shell_terminal(command_one.clone(), Some(1), false);
+    let cancelled_terminal = shell_terminal(command_two.clone(), None, true);
+    let late_terminal = shell_terminal(command_one.clone(), Some(0), false);
+    let unknown_output = shell_output(unknown_command.clone());
+    let unknown_terminal = shell_terminal(unknown_command.clone(), None, true);
+
+    let mut live = renderer_for_agent_id_tests();
+    live.switch_agent(agent_a.clone());
+    live.handle(&first_start);
+    live.switch_agent(agent_b.clone());
+    live.handle(&second_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_output),
+        Some(agent_a.clone()),
+        "the hidden first shell command stays with agent A after selecting agent B"
+    );
+
+    live.handle(&replacement_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_output),
+        Some(agent_b.clone()),
+        "a later shell start replaces its typed owner for later output"
+    );
+    live.handle(&tool_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_output),
+        Some(agent_b.clone()),
+        "a generic tool with the same display text cannot replace shell ownership"
+    );
+    assert_eq!(
+        live.agent_id_for_event_for_test(&tool_progress),
+        Some(agent_a.clone()),
+        "the generic tool retains its separate typed owner"
+    );
+
+    let mut cold_replay = renderer_for_agent_id_tests();
+    for event in [
+        first_start.clone(),
+        second_start.clone(),
+        replacement_start.clone(),
+        first_output.clone(),
+    ] {
+        cold_replay.handle(&event);
+    }
+    assert_eq!(
+        cold_replay.event_owners.shell_agents, live.event_owners.shell_agents,
+        "cold replay preserves the live typed shell ownership winners"
+    );
+
+    for renderer in [&mut live, &mut cold_replay] {
+        assert_eq!(
+            renderer.agent_id_for_event_for_test(&failed_terminal),
+            Some(agent_b.clone()),
+            "output and failure terminals route through the retained replacement owner"
+        );
+        renderer.handle(&failed_terminal);
+        assert!(
+            !renderer
+                .event_owners
+                .shell_agents
+                .contains_key(&command_one),
+            "a shell terminal consumes only its typed shell owner"
+        );
+    }
+    assert_eq!(
+        live.agent_id_for_event_for_test(&late_terminal),
+        None,
+        "a late shell terminal has no owner after the original terminal consumed it"
+    );
+    live.handle(&late_terminal);
+    assert!(
+        !live.event_owners.shell_agents.contains_key(&command_one),
+        "a late terminal must not synthesize a new shell owner"
+    );
+
+    assert_eq!(
+        live.agent_id_for_event_for_test(&cancelled_terminal),
+        Some(agent_b.clone()),
+        "a cancelled terminal retains the second command's typed owner"
+    );
+    live.handle(&cancelled_terminal);
+    assert!(
+        !live.event_owners.shell_agents.contains_key(&command_two),
+        "a cancelled terminal removes its typed shell owner"
+    );
+    assert_eq!(
+        live.agent_id_for_event_for_test(&unknown_output),
+        None,
+        "unknown shell output has no owner and cannot invent one"
+    );
+    live.handle(&unknown_output);
+    live.handle(&unknown_terminal);
+    assert!(
+        !live
+            .event_owners
+            .shell_agents
+            .contains_key(&unknown_command),
+        "unknown shell events must not synthesize a typed owner"
+    );
+
+    live.handle(&first_start);
+}
+
+/// unknown prompt fallback without rebuilding IDs from text.
+#[test]
+fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
+    let agent_a = agent_id("agent-a");
+    let agent_b = agent_id("agent-b");
+    let prompt_one = tau_proto::AgentPromptId::parse("prompt-one").expect("valid prompt id");
+    let prompt_two = tau_proto::AgentPromptId::parse("prompt-two").expect("valid prompt id");
+    let unknown_prompt =
+        tau_proto::AgentPromptId::parse("prompt-unknown").expect("valid prompt id");
+    let prompt_started = |agent_prompt_id: tau_proto::AgentPromptId,
+                          agent_id: tau_proto::AgentId| {
+        tau_proto::Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id,
+            agent_id,
+            session_id: tau_proto::SessionId::parse("session-one").expect("valid session id"),
+            model: "test/model".parse().expect("valid model id"),
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+            operation: tau_proto::PromptOperation::Inference,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+    };
+    let response_update = |agent_prompt_id: tau_proto::AgentPromptId,
+                           agent_id: tau_proto::AgentId| {
+        tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
+            agent_prompt_id,
+            agent_id,
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            response_stats: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let prompt_terminated = |agent_prompt_id: tau_proto::AgentPromptId,
+                             agent_id: tau_proto::AgentId| {
+        tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+            agent_id,
+            agent_prompt_id,
+            reason: tau_proto::AgentPromptTerminationReason::Stale,
+            originator: tau_proto::PromptOriginator::User,
+            automatic_compaction_decision: None,
+        })
+    };
+
+    let first_start = prompt_started(prompt_one.clone(), agent_a.clone());
+    let second_start = prompt_started(prompt_two.clone(), agent_b.clone());
+    let replacement_start = prompt_started(prompt_one.clone(), agent_b.clone());
+    let late_terminal = prompt_terminated(prompt_one.clone(), agent_b.clone());
+    let stale_update = response_update(prompt_one.clone(), agent_a.clone());
+    let unknown_submission =
+        tau_proto::Event::ProviderPromptSubmitted(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: unknown_prompt.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        });
+
+    let mut live = renderer_for_agent_id_tests();
+    live.switch_agent(agent_a.clone());
+    live.handle(&first_start);
+    assert!(
+        live.transcript.runtime.prompts.contains_key(&prompt_one),
+        "the production start path keys transcript state by the protocol prompt id"
+    );
+    assert!(
+        live.watches
+            .active_agent_prompts
+            .get(agent_a.as_str())
+            .is_some_and(|prompts| prompts.contains(&prompt_one)),
+        "the production start path keeps the typed id in the activity guard"
+    );
+    live.switch_agent(agent_b.clone());
+    live.handle(&second_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&tau_proto::Event::ProviderPromptSubmitted(
+            tau_proto::ProviderPromptSubmitted {
+                agent_prompt_id: prompt_one.clone(),
+                originator: tau_proto::PromptOriginator::User,
+            },
+        )),
+        Some(agent_a.clone()),
+        "the hidden first prompt stays with agent A after selecting agent B"
+    );
+
+    live.handle(&replacement_start);
+    live.handle(&stale_update);
+    assert_eq!(
+        live.event_owners.prompt_agents.get(&prompt_one),
+        Some(&agent_b),
+        "the later typed lifecycle fact keeps the existing replacement winner"
+    );
+    assert_eq!(
+        live.agent_id_for_event_for_test(&stale_update),
+        Some(agent_b.clone()),
+        "a no-content update cannot steal the replacement owner's transcript"
+    );
+
+    live.handle(&late_terminal);
+    assert!(
+        !live.transcript.runtime.prompts.contains_key(&prompt_one)
+            && live.watches.terminal_agent_prompts.contains(&prompt_one),
+        "the production terminal path atomically retires typed runtime state and guards resurrection"
+    );
+    assert_eq!(
+        live.agent_id_for_event_for_test(&late_terminal),
+        Some(agent_b.clone()),
+        "a late terminal still routes through its retained typed owner"
+    );
+    assert_eq!(
+        live.agent_id_for_event_for_test(&unknown_submission),
+        Some(agent_b.clone()),
+        "an unknown typed prompt retains the existing user-originator fallback"
+    );
+    live.handle(&unknown_submission);
+    assert!(
+        !live
+            .event_owners
+            .prompt_agents
+            .contains_key(&unknown_prompt),
+        "unknown prompt routing must not synthesize a string or ownership record"
+    );
+
+    let mut cold_replay = renderer_for_agent_id_tests();
+    for event in [
+        first_start.clone(),
+        second_start.clone(),
+        replacement_start.clone(),
+        late_terminal.clone(),
+    ] {
+        cold_replay.handle(&event);
+    }
+    assert_eq!(
+        cold_replay.event_owners.prompt_agents, live.event_owners.prompt_agents,
+        "cold replay preserves the live typed ownership winners"
+    );
+    assert_eq!(
+        cold_replay.watches.terminal_agent_prompts, live.watches.terminal_agent_prompts,
+        "cold replay preserves the live typed terminal guards"
+    );
+}
+
+/// events without rebuilding IDs from presentation text.
+#[test]
+fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
+    let agent_a = agent_id("agent-a");
+    let agent_b = agent_id("agent-b");
+    let call_one: tau_proto::ToolCallId = "call-one".into();
+    let call_two: tau_proto::ToolCallId = "call-two".into();
+    let unknown_call: tau_proto::ToolCallId = "call-unknown".into();
+    let tool_started = |call_id: tau_proto::ToolCallId, agent_id: tau_proto::AgentId| {
+        tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            arguments: tau_proto::CborValue::Null,
+            agent_id,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let provider_finished = |agent_id: tau_proto::AgentId, call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: tau_proto::AgentPromptId::parse("tool-owner-prompt")
+                .expect("valid prompt id"),
+            agent_id,
+            output_items: vec![tool_call(call_id.as_str())],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+    };
+    let foreground_terminal = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolResultDisplay(tau_proto::ToolResultDisplay {
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let background_terminal = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolBackgroundResultDisplay(tau_proto::ToolBackgroundResultDisplay {
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let tool_progress = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            message: None,
+            progress: None,
+            display: None,
+        })
+    };
+    let tool_error = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolError(tau_proto::ToolError {
+            presentation: Default::default(),
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "failed".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let tool_cancelled = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
+            presentation: Default::default(),
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            display: None,
+        })
+    };
+
+    let first_start = tool_started(call_one.clone(), agent_a.clone());
+    let second_start = tool_started(call_two.clone(), agent_b.clone());
+    let duplicate_start = tool_started(call_one.clone(), agent_b.clone());
+    let replacement = provider_finished(agent_b.clone(), call_one.clone());
+    let foreground = foreground_terminal(call_one.clone());
+    let background = background_terminal(call_one.clone());
+    let error = tool_error(call_two.clone());
+    let late_cancel = tool_cancelled(call_one.clone());
+    let unknown_terminal = foreground_terminal(unknown_call.clone());
+    let first_progress = tool_progress(call_one.clone());
+    let unknown_progress = tool_progress(unknown_call.clone());
+
+    let mut live = renderer_for_agent_id_tests();
+    live.switch_agent(agent_a.clone());
+    live.handle(&first_start);
+    live.switch_agent(agent_b.clone());
+    live.handle(&second_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_progress),
+        Some(agent_a.clone()),
+        "the hidden first tool stays with agent A after selecting agent B"
+    );
+
+    live.handle(&duplicate_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_progress),
+        Some(agent_a.clone()),
+        "a duplicate start retains the original typed owner for later progress"
+    );
+
+    live.handle(&replacement);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_progress),
+        Some(agent_b.clone()),
+        "provider output replaces later progress ownership with its typed transcript owner"
+    );
+    for terminal in [&foreground, &background, &late_cancel] {
+        assert_eq!(
+            live.agent_id_for_event_for_test(terminal),
+            Some(agent_b.clone()),
+            "every foreground, background, and late terminal keeps the replacement owner"
+        );
+        live.handle(terminal);
+    }
+    assert_eq!(
+        live.agent_id_for_event_for_test(&error),
+        Some(agent_b.clone()),
+        "a generic tool error routes through its typed owner"
+    );
+    live.handle(&error);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&unknown_terminal),
+        Some(agent_b.clone()),
+        "an unknown tool retains the existing user-originator fallback"
+    );
+    live.handle(&unknown_terminal);
+    assert!(
+        live.agent_id_for_event_for_test(&unknown_progress)
+            .is_none(),
+        "unknown tool routing must not synthesize an ownership record"
     );
 }

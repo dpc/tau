@@ -810,9 +810,9 @@ impl Harness {
     }
 
     /// Return whether one configured-peer event updates process-global state
-    /// that remains valid across a session rollover for the same
+    /// that remains valid while final shutdown quiesces the same
     /// connection/instance.
-    pub(super) fn peer_event_semantics_survive_rollover(event: &Event) -> bool {
+    pub(super) fn peer_event_semantics_survive_shutdown(event: &Event) -> bool {
         matches!(
             event,
             Event::ToolRegistrationDeclared(_)
@@ -854,7 +854,7 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
-        if !Self::peer_event_semantics_survive_rollover(event)
+        if !Self::peer_event_semantics_survive_shutdown(event)
             && peer_context.extension.as_ref().is_some_and(|extension| {
                 extension.admission.session_id != self.session_runtime.current_session_id
                     || extension.admission.session_generation
@@ -862,7 +862,7 @@ impl Harness {
             })
         {
             // The raw event has already committed and remains observable. A
-            // rollover generation boundary suppresses session-bound downstream
+            // shutdown generation boundary suppresses session-bound downstream
             // semantics. Explicitly process-global declarations and current-state
             // reports continue below under exact connection/instance checks.
             self.discard_peer_activation_reservation(peer_context);
@@ -1422,7 +1422,7 @@ impl Harness {
                     != self.session_runtime.current_session_generation
         }) {
             // The raw report has already committed and remains observable, but
-            // session-bound report semantics cannot cross rollover.
+            // session-bound report semantics cannot survive final shutdown.
             self.discard_peer_activation_reservation(peer_context);
             return;
         }

@@ -433,11 +433,6 @@ impl ToolTurnMachine {
     }
 
     /// Remove all queued and in-flight scheduler state.
-    pub(crate) fn clear(&mut self) {
-        self.pending_tool_invocations.clear();
-        self.in_flight_tool_invocations.clear();
-    }
-
     /// True when no queued or in-flight tool calls remain.
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {

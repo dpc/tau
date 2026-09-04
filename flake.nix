@@ -301,7 +301,10 @@
               # This terminal gate has no downstream Cargo consumer. Exporting
               # its target directory would recompress about 3 GiB after every run.
               doInstallCargoArtifacts = false;
-              nativeBuildInputs = [ pkgs.ripgrep ];
+              nativeBuildInputs = [
+                pkgs.ripgrep
+                pkgs.util-linux
+              ];
               postCheck = ''
                 # Public provider cassettes are a wire-compatibility gate.
                 export TAU_VCR=replay-only

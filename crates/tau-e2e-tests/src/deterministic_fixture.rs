@@ -11,7 +11,7 @@ use tau_harness::{
 };
 use tempfile::TempDir;
 
-use crate::{ScenarioV1, ScenarioV2, sanitize_name};
+use crate::{ScenarioV1, ScenarioV2, bounded_runtime_tempdir, sanitize_name};
 
 #[cfg(test)]
 mod tests;
@@ -73,6 +73,8 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
 pub struct DeterministicFixture {
     /// Temporary root retained automatically when a test panics.
     tempdir: Option<TempDir>,
+    /// Short private runtime root retained for the fixture lifetime.
+    _runtime_tempdir: TempDir,
     /// Generated harness configuration directory.
     config_dir: PathBuf,
     /// Isolated Tau state directory.
@@ -534,18 +536,13 @@ impl DeterministicFixture {
         } = tool_surface;
         let tempdir = create_fixture_tempdir_in(&tempfile::env::temp_dir())?;
         let root = tempdir.path().join(sanitize_name(name));
+        let runtime_tempdir = bounded_runtime_tempdir()?;
         let config_dir = root.join("config");
         let state_dir = root.join("state");
-        let runtime_dir = root.join("xdg-runtime");
+        let runtime_dir = runtime_tempdir.path().to_path_buf();
         let harness_state_dir = root.join("harness-state");
         let artifacts_dir = root.join("artifacts");
-        for private_root in [
-            "home",
-            "xdg-config",
-            "xdg-state",
-            "xdg-cache",
-            "xdg-runtime",
-        ] {
+        for private_root in ["home", "xdg-config", "xdg-state", "xdg-cache"] {
             tau_util_fs_err::create_dir_all(root.join(private_root))?;
         }
         tau_util_fs_err::create_dir_all(&config_dir)?;
@@ -819,6 +816,7 @@ impl DeterministicFixture {
 
         Ok(Self {
             tempdir: Some(tempdir),
+            _runtime_tempdir: runtime_tempdir,
             config_dir,
             state_dir,
             runtime_dir,
@@ -915,6 +913,12 @@ impl DeterministicFixture {
         self.config_dir
             .parent()
             .expect("fixture config directory has a root")
+    }
+
+    /// Returns the short private XDG runtime directory.
+    #[must_use]
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
     }
 
     /// Returns the fixture-provided path where the dummy binds the S6/S7

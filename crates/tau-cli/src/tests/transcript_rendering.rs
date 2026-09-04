@@ -1058,7 +1058,7 @@ fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
 }
 
 /// Renderer stats forwarding preserves exact canonical costs, rejects foreign
-/// sessions, and clears the picker projection across New and Resume switches.
+/// events, and fails closed when another session identity appears.
 #[test]
 fn agent_cost_projection_tracks_renderer_session_authority() {
     let (_term, handle, _vt) = setup(80, 24);
@@ -1101,17 +1101,11 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     assert!(projection.snapshot().is_empty());
     renderer.handle(&stats("s2", "agent-b"));
-    assert_eq!(
-        projection.snapshot().get(&agent_id("agent-b")),
-        Some(&crate::estimated_cost::AgentCostSnapshot::new(
-            cost,
-            tau_proto::EstimatedApiCost::default(),
-        ))
-    );
+    assert!(projection.snapshot().is_empty());
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s3"),
@@ -1119,13 +1113,7 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
     }));
     assert!(projection.snapshot().is_empty());
     renderer.handle(&stats("s3", "agent-c"));
-    assert_eq!(
-        projection.snapshot().get(&agent_id("agent-c")),
-        Some(&crate::estimated_cost::AgentCostSnapshot::new(
-            cost,
-            tau_proto::EstimatedApiCost::default(),
-        ))
-    );
+    assert!(projection.snapshot().is_empty());
 }
 
 #[test]
@@ -1164,38 +1152,6 @@ fn clearing_selected_agent_preserves_previous_transcript() {
 
     assert!(vt.screen_contains(80, "worker transcript survives"));
 }
-
-#[test]
-fn new_session_resets_agent_transcripts() {
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
-        start_id: tau_proto::StartOperationId(1),
-        query_id: "q-worker".to_owned(),
-        agent_id: agent_id("worker-1"),
-    }));
-    renderer.switch_agent(agent_id("worker-1"));
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: tau_proto::SessionStartReason::New,
-    }));
-    sync(&handle);
-
-    assert!(!vt.screen_contains(80, "@worker-1"));
-    assert!(
-        !renderer
-            .known_agents()
-            .lock()
-            .expect("known agents")
-            .iter()
-            .any(|agent| agent == "worker-1")
-    );
-}
-
 #[test]
 fn agent_switch_preserves_separate_transcripts() {
     let (_term, handle, vt) = setup(80, 24);
@@ -3483,7 +3439,7 @@ fn known_static_commands_are_identified_for_history_rendering() {
     assert!(is_known_static_command(":suspend"));
     assert!(is_known_static_command(":resume"));
     assert!(is_known_static_command(":new now"));
-    assert!(is_known_static_command(":session new"));
+    assert!(!is_known_static_command(":session new"));
     assert!(is_known_static_command(":version"));
     assert!(is_known_static_command(":version now"));
     assert!(is_known_static_command(":skill jujutsu"));

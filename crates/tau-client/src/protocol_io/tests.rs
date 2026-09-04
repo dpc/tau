@@ -47,10 +47,6 @@ fn protocol_io_input_message_keys_use_flat_variant_names() {
             "message.ui_debug_event_stats_request",
         ),
         (
-            HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest::default()),
-            "message.ui_detach_request",
-        ),
-        (
             HarnessInputMessage::UiShutdownRequest(tau_proto::UiShutdownRequest::default()),
             "message.ui_shutdown_request",
         ),

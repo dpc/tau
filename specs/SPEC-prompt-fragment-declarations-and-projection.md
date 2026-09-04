@@ -34,8 +34,8 @@ Emit intake.
 Declarations default to transient and never enter semantic session or agent
 journals, regardless of the caller's `Emit.persist` value. They have no restore
 processing, historical replay, or subscribe-time current-state synthesis. The
-runtime projection survives session switches and is removed when its contributing
-connection disconnects. A declaration deferred across rollover therefore commits
+runtime projection survives UI disconnects and is removed when its contributing
+connection disconnects. A declaration deferred during activation therefore commits
 and updates the projection when its captured connection and configured instance
 remain current.
 

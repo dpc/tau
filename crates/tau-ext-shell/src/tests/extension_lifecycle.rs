@@ -1402,7 +1402,7 @@ fn mandatory_discovery_write_failure_exits_production_manual_loop() {
     input
         .write_event(&Event::SessionStarted(tau_proto::SessionStarted {
             session_id: tau_proto::SessionId::parse("session-write-failure").expect("session id"),
-            reason: tau_proto::SessionStartReason::New,
+            reason: tau_proto::SessionStartReason::Initial,
         }))
         .expect("session start");
     input.flush().expect("flush session start");

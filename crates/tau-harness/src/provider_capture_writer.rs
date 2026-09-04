@@ -12,8 +12,7 @@ use tau_config::provider_debug_capture::ProviderDebugCaptureFilename;
 #[cfg(test)]
 mod tests;
 
-/// Existing Provider capture queue capacity, retained across the process
-/// boundary rollover.
+/// Existing Provider capture queue capacity, retained across worker activity.
 const CAPTURE_QUEUE_CAPACITY: usize = 64;
 
 /// One harness-attributed opaque capture awaiting filesystem I/O.

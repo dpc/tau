@@ -3658,10 +3658,11 @@ fn authenticate_external_agent_message_sender(
         )
         .map_err(|error| format!("invalid external-message client name: {error}"))?,
         client_kind: tau_proto::ClientKind::External,
-        expected_session_id: None,
+        expected_session_id: Some(request.sender_session_id.clone()),
         capabilities: Default::default(),
     }))
     .map_err(|err| format!("failed to send external auth hello: {err}"))?;
+    await_exact_session_acceptance(&mut peer, &request.sender_session_id, deadline, cancelled)?;
     check_peer_io_active(deadline, cancelled)?;
     peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|err| format!("failed to set external auth deadline: {err}"))?;
@@ -3752,12 +3753,19 @@ fn send_external_agent_message_request(
             ))
         })?,
         client_kind: tau_proto::ClientKind::External,
-        expected_session_id: None,
+        expected_session_id: Some(request.recipient_session_id.clone()),
         capabilities: Default::default(),
     }))
     .map_err(|err| {
         ExternalMessageDeliveryError::Local(format!("failed to send external message hello: {err}"))
     })?;
+    await_exact_session_acceptance(
+        &mut peer,
+        &request.recipient_session_id,
+        deadline,
+        cancelled,
+    )
+    .map_err(ExternalMessageDeliveryError::Local)?;
     check_peer_io_active(deadline, cancelled).map_err(ExternalMessageDeliveryError::Local)?;
     peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|err| {
@@ -3810,6 +3818,43 @@ fn send_external_agent_message_request(
                 return Err(ExternalMessageDeliveryError::Local(
                     "target harness closed before external message result".to_owned(),
                 ));
+            }
+        }
+    }
+}
+
+/// Waits for the exact-session admission acknowledgement before peer semantics.
+fn await_exact_session_acceptance(
+    peer: &mut tau_socket::SocketPeer,
+    session_id: &tau_proto::SessionId,
+    deadline: Instant,
+    cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    loop {
+        check_peer_io_active(deadline, cancelled)?;
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            return Err("timed out waiting for exact session admission".to_owned());
+        };
+        match peer
+            .recv_timeout(timeout.min(Duration::from_millis(100)))
+            .map_err(|error| format!("failed to receive session admission: {error}"))?
+        {
+            tau_socket::SocketReceive::Message {
+                message: tau_proto::HarnessOutputMessage::SessionAccepted(accepted),
+            } if accepted.session_id == *session_id => return Ok(()),
+            tau_socket::SocketReceive::Message {
+                message: tau_proto::HarnessOutputMessage::Disconnect(disconnect),
+            } => {
+                return Err(disconnect
+                    .reason
+                    .unwrap_or_else(|| "exact session admission was rejected".to_owned()));
+            }
+            tau_socket::SocketReceive::Message { .. } => {
+                return Err("semantic response arrived before exact session admission".to_owned());
+            }
+            tau_socket::SocketReceive::Timeout => {}
+            tau_socket::SocketReceive::Closed => {
+                return Err("harness closed before exact session admission".to_owned());
             }
         }
     }

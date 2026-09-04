@@ -1,152 +1,83 @@
-//! Daemon runtime directory management.
+//! Session-keyed daemon runtime claims and socket discovery.
 //!
-//! Each discoverable harness daemon gets one socket plus one adjacent metadata
-//! file under `<runtime-parent>/tau/harnesses/`:
-//!
-//! - `<pid>-<instance>.sock` — Unix socket for client connections
-//! - `<pid>-<instance>.json` — daemon metadata used for discovery
-//!
-//! Metadata-based discovery enumerates `*.sock`, reads matching `*.json`, then
-//! verifies liveness. Running-session listing instead treats sockets as
-//! candidates and asks each responsive harness for its in-memory session
-//! identity.
-//!
-//! Normal processes select the ambient runtime parent from `XDG_RUNTIME_DIR`
-//! with the platform fallback below. One embedded operation may instead supply
-//! an explicit thread-scoped parent; it takes precedence for that operation and
-//! is restored after normal return or unwinding.
+//! One daemon incarnation owns one lifetime `flock` under
+//! `<runtime>/tau/harnesses/claims/` and one deterministic Unix socket under
+//! `<runtime>/tau/harnesses/sockets/`. The validated session identity, never a
+//! PID or process-generation token, is the routing authority.
 
-use std::{
-    collections as path_std_collections, fs as path_std_fs, io as path_std_io,
-    thread as path_std_thread,
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs::{File, OpenOptions, Permissions};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::{
+    FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
 };
-#[cfg(test)]
-use std::{sync as path_std_sync, sync::atomic as path_std_sync_atomic};
-
-#[cfg(test)]
-mod tests;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-const HARNESSES_DIR: &str = "harnesses";
-const SOCK_EXTENSION: &str = "sock";
-const METADATA_EXTENSION: &str = "json";
-const HARNESS_INSTANCE_ID_HEX_LEN: usize = 16;
-const SESSION_DISCOVERY_MAX_CANDIDATES: usize = 128;
-const SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES: usize = 4_096;
-const SESSION_DISCOVERY_MAX_METADATA_BYTES: u64 = 16 * 1024;
-const SESSION_DISCOVERY_MAX_PROBES: usize = 8;
-const SESSION_DISCOVERY_MAX_CALLS: usize = 8;
-const SESSION_DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-const SESSION_DISCOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
-// Keep at zero per `GATE-no-backward-compatibility`.
-const DAEMON_METADATA_VERSION: u32 = 0;
+#[cfg(test)]
+mod tests;
 
-/// Maximum number of sessions returned by one discovery request.
+const HARNESSES_DIR: &str = "harnesses";
+const CLAIMS_DIR: &str = "claims";
+const SOCKETS_DIR: &str = "sockets";
+const CLAIM_EXTENSION: &str = "lock";
+const SOCKET_EXTENSION: &str = "sock";
+const CLAIM_VERSION: u32 = 0;
+const MAX_CLAIM_BYTES: u64 = 16 * 1024;
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_DIRECTORY_ENTRIES: usize = 4_096;
+const MAX_DISCOVERY_CALLS: usize = 8;
+const MAX_DISCOVERY_PROBES: usize = 8;
+
+/// Maximum number of sessions returned by one peer-discovery request.
 pub const SESSION_DISCOVERY_MAX_RESULTS: usize = 50;
 
-/// Private CLI-to-harness transport for the minted runtime instance id.
-pub const HARNESS_INSTANCE_ID_ENV: &str = "TAU_HARNESS_INSTANCE_ID";
-
 static ACTIVE_DISCOVERY_CALLS: AtomicUsize = AtomicUsize::new(0);
-
 #[cfg(test)]
-static TEST_METADATA_RENAME_PAUSE: path_std_sync::LazyLock<Mutex<Option<MetadataRenamePause>>> =
-    path_std_sync::LazyLock::new(|| Mutex::new(None));
-
-/// One deterministic test interception immediately before metadata publication.
+static ACTIVE_DISCOVERY_WORKERS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
-struct MetadataRenamePause {
-    /// Public metadata path whose next replacement should pause.
-    path: PathBuf,
-    /// Notification sent after the complete temporary file is ready.
-    reached: mpsc::SyncSender<()>,
-    /// Release received before the atomic rename proceeds.
-    resume: mpsc::Receiver<()>,
-}
+static TEST_DISCOVERY_SCAN_DELAY: LazyLock<Mutex<Option<(PathBuf, u64)>>> =
+    LazyLock::new(|| Mutex::new(None));
+#[cfg(test)]
+static TEST_CANCEL_AFTER_CLAIM_READ: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TEST_DISCOVERY_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-/// Random process-instance discriminator used in one daemon runtime path.
-///
-/// The process id remains in the path for diagnostics, while this discriminator
-/// prevents unrelated PID namespaces that share an XDG runtime directory from
-/// selecting the same socket pathname.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HarnessInstanceId {
-    /// Fixed-width lowercase hexadecimal discriminator.
-    value: String,
-}
-
-impl HarnessInstanceId {
-    /// Mints a new random runtime instance discriminator.
-    #[must_use]
-    pub fn mint() -> Self {
-        Self {
-            value: format!("{:016x}", rand::random::<u64>()),
-        }
-    }
-
-    /// Parses the private instance-id transport supplied by a spawning CLI.
-    ///
-    /// # Errors
-    ///
-    /// Returns invalid input when the value is not exactly 16 lowercase
-    /// hexadecimal ASCII characters.
-    pub(crate) fn parse(value: impl Into<String>) -> Result<Self, std::io::Error> {
-        let value = value.into();
-        if value.len() != HARNESS_INSTANCE_ID_HEX_LEN
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return Err(path_std_io::Error::new(
-                path_std_io::ErrorKind::InvalidInput,
-                "invalid harness runtime instance id",
-            ));
-        }
-        Ok(Self { value })
-    }
-
-    /// Returns the serialized instance discriminator.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-/// Authoritative current identity reported by one responsive harness.
+/// One authoritative running session reported by its admitted daemon.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunningSession {
-    /// Harness-owned current session id at probe handling time.
+    /// Immutable session identity owned by the daemon.
     pub session_id: tau_proto::SessionId,
-    /// Absolute canonical project root captured when the harness started.
+    /// Canonical project root captured at daemon startup.
     pub project_root: PathBuf,
 }
 
-/// Non-queued admission for one top-level session discovery call.
+/// Non-queued admission for one top-level peer-discovery call.
 #[derive(Clone)]
 pub(crate) struct DiscoveryCallPermit {
-    /// Shared lease keeps the global slot charged through isolated storage
-    /// work.
+    /// Shared lease retains the charged slot through the call.
     _lease: Arc<DiscoveryCallLease>,
 }
 
 struct DiscoveryCallLease;
 
 impl DiscoveryCallPermit {
-    /// Acquires one process-wide call slot or rejects immediately.
+    /// Acquires one process-wide discovery slot or rejects immediately.
     pub(crate) fn try_acquire() -> Option<Self> {
-        #[allow(
-            deprecated,
-            reason = "AtomicUsize::try_update requires Rust 1.95, above the workspace MSRV"
-        )]
+        #[allow(deprecated, reason = "workspace MSRV predates AtomicUsize::try_update")]
         ACTIVE_DISCOVERY_CALLS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < SESSION_DISCOVERY_MAX_CALLS).then_some(active + 1)
+                (active < MAX_DISCOVERY_CALLS).then_some(active + 1)
             })
             .ok()
             .map(|_| Self {
@@ -164,79 +95,41 @@ impl Drop for DiscoveryCallLease {
 /// One redacted live peer session returned by bounded discovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerSession {
-    /// Active session routing key.
+    /// Exact session routing key.
     pub session_id: String,
     /// Basename-only project label.
     pub project_label: Option<String>,
-    /// Whether this is the calling harness's current session.
+    /// Whether this is the caller's own session.
     pub current: bool,
 }
 
-/// Bounded, racy peer-session snapshot.
+/// Complete bounded peer-session snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerSessionSnapshot {
     /// Deterministically session-id-sorted matching sessions.
     pub sessions: Vec<PeerSession>,
-    /// True when the result limit omitted additional matches.
+    /// Whether the caller's result limit omitted additional matches.
     pub truncated: bool,
-    /// True when the runtime candidate cap omitted files from the scan.
+    /// Whether discovery could not prove a complete runtime snapshot.
     pub scan_truncated: bool,
 }
 
-/// Metadata written next to one discoverable harness socket.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DaemonMetadata {
-    /// Metadata schema version.
-    pub version: u32,
-    /// Process id of the harness that wrote this metadata.
-    pub pid: u32,
-    /// Optional project root associated with the harness instance.
-    pub project_root: Option<PathBuf>,
-    /// Active/current session id presently bound to this daemon.
-    ///
-    /// This field is intentionally kept under the original name for runtime
-    /// metadata compatibility. Harnesses that support `:session new` update it
-    /// after every successful session switch.
-    pub session_id: String,
-    /// Untrusted discovery hint that this daemon currently advertises a peer
-    /// entrypoint. Callers must still probe the live harness.
-    #[serde(default)]
-    pub peer_entrypoint: bool,
-}
-
-/// Error returned when session-based daemon discovery is ambiguous.
+/// Error returned when exact session resolution cannot determine availability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FindHarnessForSessionError {
-    /// More than one live harness advertises the requested active session.
-    Ambiguous {
-        session_id: String,
-        matches: Vec<PathBuf>,
-    },
-    /// The bounded scan or deadline ended before uniqueness was proven.
+    /// The claim is contended but its exact responder cannot be admitted.
     Incomplete {
-        /// Requested active session routing key.
+        /// Requested immutable session identity.
         session_id: String,
     },
 }
 
 impl std::fmt::Display for FindHarnessForSessionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ambiguous {
-                session_id,
-                matches,
-            } => write!(
-                f,
-                "multiple running harnesses advertise session `{session_id}`: {}",
-                matches
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
             Self::Incomplete { session_id } => write!(
-                f,
-                "bounded runtime lookup could not prove a unique daemon for session `{session_id}`"
+                formatter,
+                "runtime claim for session `{session_id}` is owned but not responding exactly"
             ),
         }
     }
@@ -244,10 +137,115 @@ impl std::fmt::Display for FindHarnessForSessionError {
 
 impl std::error::Error for FindHarnessForSessionError {}
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ClaimRecord {
+    /// Runtime-claim schema version.
+    version: u32,
+    /// Exact session identity protected by the held lock.
+    session_id: tau_proto::SessionId,
+    /// Canonical startup project root.
+    project_root: PathBuf,
+    /// Whether the daemon accepts inter-harness peer traffic.
+    peer_entrypoint: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    /// Filesystem device number.
+    device: u64,
+    /// Filesystem inode number.
+    inode: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// Lifetime runtime ownership for one immutable session daemon.
+pub struct SessionClaim {
+    /// Held exclusive lock; this field drops last.
+    file: File,
+    /// Device/inode identity of the locked claim.
+    identity: FileIdentity,
+    /// Exact claim pathname.
+    claim_path: PathBuf,
+    /// Deterministic socket pathname.
+    socket_path: PathBuf,
+    /// Diagnostic record written only while the lock is held.
+    record: ClaimRecord,
+}
+
+impl SessionClaim {
+    /// Returns the deterministic socket pathname protected by this claim.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Publishes bounded diagnostics after the exact responder is ready.
+    pub fn publish(&mut self, peer_entrypoint: bool) -> io::Result<()> {
+        self.record.peer_entrypoint = peer_entrypoint;
+        let bytes = serde_json::to_vec(&self.record).map_err(io::Error::other)?;
+        if bytes.len() as u64 > MAX_CLAIM_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "runtime claim record is too large",
+            ));
+        }
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(&bytes)?;
+        self.file.flush()
+    }
+
+    /// Reclaims only the exact stale socket while holding the session lock.
+    pub fn reclaim_stale_socket(&self) -> io::Result<()> {
+        let metadata = match std::fs::symlink_metadata(&self.socket_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_socket() || metadata.uid() != current_euid() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to replace non-owned socket path `{}`",
+                    self.socket_path.display()
+                ),
+            ));
+        }
+        std::fs::remove_file(&self.socket_path)
+    }
+
+    /// Retires the claim pathname while the lock is still held.
+    pub fn retire(self) -> io::Result<()> {
+        self.remove_owned_claim_path()
+    }
+
+    fn remove_owned_claim_path(&self) -> io::Result<()> {
+        let metadata = match std::fs::symlink_metadata(&self.claim_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if FileIdentity::from_metadata(&metadata) == self.identity {
+            std::fs::remove_file(&self.claim_path)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SessionClaim {
+    fn drop(&mut self) {
+        let _ = self.remove_owned_claim_path();
+    }
+}
+
 /// Returns the effective Tau runtime root for the calling thread.
-///
-/// An explicit embedded-operation override takes precedence over the ambient
-/// XDG runtime parent and platform fallback.
 #[must_use]
 pub fn root_runtime_dir() -> PathBuf {
     if let Some(dir) = runtime_dir_override() {
@@ -255,17 +253,7 @@ pub fn root_runtime_dir() -> PathBuf {
     }
     dirs::runtime_dir()
         .map(|dir| dir.join("tau"))
-        .unwrap_or_else(|| {
-            #[cfg(unix)]
-            {
-                PathBuf::from(format!("/tmp/tau-{}", current_euid()))
-            }
-            #[cfg(not(unix))]
-            {
-                let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
-                PathBuf::from(format!("/tmp/tau-{user}"))
-            }
-        })
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/tau-{}", current_euid())))
 }
 
 fn runtime_dir_override() -> Option<PathBuf> {
@@ -274,7 +262,7 @@ fn runtime_dir_override() -> Option<PathBuf> {
 
 /// Restores the calling thread's previous runtime-directory override.
 pub(crate) struct RuntimeDirOverride {
-    /// Previous override restored when the embedded operation completes.
+    /// Previous override restored on drop.
     previous: Option<PathBuf>,
 }
 
@@ -290,8 +278,6 @@ fn override_runtime_dir(path: &Path) -> RuntimeDirOverride {
 }
 
 /// Runs one embedded operation with an explicit thread-scoped runtime parent.
-///
-/// Nested scopes restore their predecessor after normal return or unwinding.
 pub(crate) fn with_runtime_dir<T>(path: Option<&Path>, operation: impl FnOnce() -> T) -> T {
     let Some(path) = path else {
         return operation();
@@ -304,231 +290,483 @@ thread_local! {
     static RUNTIME_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Installs a thread-scoped runtime root used by discovery tests.
-#[cfg(test)]
-pub(crate) fn override_test_runtime_dir(path: &Path) -> RuntimeDirOverride {
-    override_runtime_dir(path)
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_CANCEL_AFTER_SESSION_METADATA_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Returns the directory containing discoverable harness sockets.
+/// Returns the common private harness runtime directory.
 #[must_use]
 pub fn harnesses_dir() -> PathBuf {
     root_runtime_dir().join(HARNESSES_DIR)
 }
 
-/// Creates and validates the private directory that owns harness runtime
-/// sockets.
-pub(crate) fn prepare_harnesses_dir() -> Result<PathBuf, std::io::Error> {
-    let root_dir = root_runtime_dir();
-    ensure_private_runtime_dir(&root_dir)?;
-    let harnesses_dir = root_dir.join(HARNESSES_DIR);
-    ensure_private_runtime_dir(&harnesses_dir)?;
-    tau_util_fs_err::canonicalize(harnesses_dir)
+fn claims_dir() -> PathBuf {
+    harnesses_dir().join(CLAIMS_DIR)
 }
 
-/// Returns the runtime path stem for one PID and process instance.
+fn sockets_dir() -> PathBuf {
+    harnesses_dir().join(SOCKETS_DIR)
+}
+
+/// Creates and validates the private runtime directory hierarchy.
+pub(crate) fn prepare_harnesses_dir() -> io::Result<PathBuf> {
+    let root = root_runtime_dir();
+    ensure_private_runtime_dir(&root)?;
+    let harnesses = root.join(HARNESSES_DIR);
+    ensure_private_runtime_dir(&harnesses)?;
+    ensure_private_runtime_dir(&harnesses.join(CLAIMS_DIR))?;
+    ensure_private_runtime_dir(&harnesses.join(SOCKETS_DIR))?;
+    std::fs::canonicalize(harnesses)
+}
+
+fn session_key(session_id: &tau_proto::SessionId) -> String {
+    blake3::hash(session_id.as_str().as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+fn claim_path(session_id: &tau_proto::SessionId) -> PathBuf {
+    claims_dir()
+        .join(session_key(session_id))
+        .with_extension(CLAIM_EXTENSION)
+}
+
+/// Returns the deterministic runtime path stem for one session.
 #[must_use]
-pub fn harness_path_for_process(pid: u32, instance_id: &HarnessInstanceId) -> PathBuf {
-    harnesses_dir().join(format!("{pid}-{}", instance_id.as_str()))
+pub fn harness_path_for_session(session_id: &tau_proto::SessionId) -> PathBuf {
+    sockets_dir().join(session_key(session_id))
 }
 
-/// Returns the socket path for a harness path stem.
+/// Returns the socket pathname for a deterministic session stem.
 #[must_use]
 pub fn socket_path(harness_path: &Path) -> PathBuf {
-    harness_path.with_extension(SOCK_EXTENSION)
+    harness_path.with_extension(SOCKET_EXTENSION)
 }
 
-/// Returns the metadata path for a harness path stem.
-#[must_use]
-pub fn metadata_path(harness_path: &Path) -> PathBuf {
-    harness_path.with_extension(METADATA_EXTENSION)
+/// Acquires lifetime runtime ownership for one exact session.
+pub fn claim_session(
+    project_root: &Path,
+    session_id: &tau_proto::SessionId,
+) -> io::Result<SessionClaim> {
+    prepare_harnesses_dir()?;
+    validate_socket_path(&socket_path(&harness_path_for_session(session_id)))?;
+    verify_runtime_lock_support()?;
+    let claim_path = claim_path(session_id);
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(&claim_path)?;
+    validate_claim_file(&file, &claim_path)?;
+    fs2::FileExt::try_lock_exclusive(&file)?;
+    let identity = FileIdentity::from_metadata(&file.metadata()?);
+    validate_path_identity(&claim_path, identity)?;
+    Ok(SessionClaim {
+        file,
+        identity,
+        claim_path,
+        socket_path: socket_path(&harness_path_for_session(session_id)),
+        record: ClaimRecord {
+            version: CLAIM_VERSION,
+            session_id: session_id.clone(),
+            project_root: project_root.to_path_buf(),
+            peer_entrypoint: false,
+        },
+    })
 }
 
-/// Paths and metadata for one daemon instance.
-pub struct HarnessPaths {
-    path: PathBuf,
-    metadata: DaemonMetadata,
-}
-
-impl HarnessPaths {
-    /// Returns the harness path stem shared by the socket and metadata files.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the socket path.
-    #[must_use]
-    pub fn socket_path(&self) -> PathBuf {
-        socket_path(&self.path)
-    }
-
-    /// Set the peer-entrypoint discovery hint before writing metadata.
-    pub fn set_peer_entrypoint(&mut self, enabled: bool) {
-        self.metadata.peer_entrypoint = enabled;
-    }
-
-    /// Writes the daemon metadata. Must be called after the socket is bound.
-    pub fn write_metadata(&self) -> Result<(), std::io::Error> {
-        let json = serde_json::to_vec_pretty(&self.metadata).map_err(path_std_io::Error::other)?;
-        replace_metadata(&metadata_path(&self.path), &json)
-    }
-
-    /// Removes the daemon socket and metadata.
-    pub fn cleanup(&self) {
-        let _ = tau_util_fs_err::remove_file(socket_path(&self.path));
-        let _ = tau_util_fs_err::remove_file(metadata_path(&self.path));
-    }
-}
-
-/// Reads the metadata for a harness path stem.
-#[must_use]
-pub fn read_metadata(harness_path: &Path) -> Option<DaemonMetadata> {
-    std::fs::read_to_string(metadata_path(harness_path))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-}
-
-fn read_metadata_bounded(
-    harness_path: &Path,
-    deadline: Instant,
-    cancelled: &AtomicBool,
-) -> Option<DaemonMetadata> {
-    use std::io::Read as _;
-
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return None;
-    }
-    let path = metadata_path(harness_path);
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !metadata.file_type().is_file()
-        || cancelled.load(Ordering::Acquire)
-        || Instant::now() >= deadline
-    {
-        return None;
-    }
-    let file = path_std_fs::File::open(path).ok()?;
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return None;
-    }
-    if file.metadata().ok()?.len() > SESSION_DISCOVERY_MAX_METADATA_BYTES {
-        return None;
-    }
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(SESSION_DISCOVERY_MAX_METADATA_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= SESSION_DISCOVERY_MAX_METADATA_BYTES)
-        .then(|| serde_json::from_slice(&bytes).ok())
-        .flatten()
-}
-
-fn collect_directory_entries_bounded<T>(
-    mut entries: impl Iterator<Item = T>,
-    deadline: Instant,
-    cancelled: &AtomicBool,
-) -> Result<Vec<T>, ()> {
-    let mut collected = Vec::new();
-    while collected.len() < SESSION_DISCOVERY_MAX_CANDIDATES {
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(());
-        }
-        let Some(entry) = entries.next() else {
-            break;
-        };
-        collected.push(entry);
-    }
-    Ok(collected)
-}
-
-/// Discover live sessions that currently confirm an advertised peer entrypoint.
+/// Acquires a session claim under an explicit runtime parent.
 ///
-/// Runtime files are only untrusted candidates. Every returned entry completed
-/// a narrow live-harness probe, and all filesystem, metadata, concurrency,
-/// result, per-probe, and total work is bounded.
+/// This is intended for embedded hosts and hermetic integration tests that do
+/// not use the ambient `XDG_RUNTIME_DIR`.
+pub fn claim_session_in(
+    runtime_parent: &Path,
+    project_root: &Path,
+    session_id: &tau_proto::SessionId,
+) -> io::Result<SessionClaim> {
+    with_runtime_dir(Some(runtime_parent), || {
+        claim_session(project_root, session_id)
+    })
+}
+
+fn validate_socket_path(path: &Path) -> io::Result<()> {
+    // Linux `sockaddr_un.sun_path` reserves one byte for the trailing NUL.
+    if path.as_os_str().as_bytes().len() >= 108 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("runtime socket path is too long: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_runtime_lock_support() -> io::Result<()> {
+    reject_known_network_filesystem(&claims_dir())?;
+    let path = claims_dir().join(format!(".flock-test-{:016x}", rand::random::<u64>()));
+    let first = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    let second = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    fs2::FileExt::try_lock_exclusive(&first)?;
+    let result = fs2::FileExt::try_lock_exclusive(&second);
+    let _ = std::fs::remove_file(&path);
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        Ok(()) => Err(io::Error::other(
+            "runtime filesystem does not enforce independent-open flock exclusion",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn reject_known_network_filesystem(path: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+
+    let encoded = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "runtime path contains NUL"))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `encoded` is NUL terminated and `stats` points to writable storage.
+    if unsafe { libc::statfs(encoded.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful `statfs` initialized the output structure.
+    let kind = unsafe { stats.assume_init() }.f_type as u64;
+    const NFS_SUPER_MAGIC: u64 = 0x6969;
+    const SMB_SUPER_MAGIC: u64 = 0x517B;
+    const CIFS_MAGIC_NUMBER: u64 = 0xFF53_4D42;
+    const CODA_SUPER_MAGIC: u64 = 0x7375_7245;
+    const AFS_SUPER_MAGIC: u64 = 0x5346_414F;
+    if matches!(
+        kind,
+        NFS_SUPER_MAGIC | SMB_SUPER_MAGIC | CIFS_MAGIC_NUMBER | CODA_SUPER_MAGIC | AFS_SUPER_MAGIC
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "runtime claims require a local filesystem with coherent flock semantics",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reject_known_network_filesystem(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn validate_claim_file(file: &File, path: &Path) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != current_euid()
+        || metadata.nlink() != 1
+        || metadata.permissions().mode() & 0o777 != 0o600
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("invalid runtime claim `{}`", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_path_identity(path: &Path, expected: FileIdentity) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || FileIdentity::from_metadata(&metadata) != expected {
+        return Err(io::Error::other("runtime claim pathname changed"));
+    }
+    Ok(())
+}
+
+fn read_claim(file: &mut File) -> io::Result<ClaimRecord> {
+    if file.metadata()?.len() > MAX_CLAIM_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime claim record is too large",
+        ));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CLAIM_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CLAIM_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime claim record is too large",
+        ));
+    }
+    let record: ClaimRecord = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if record.version != CLAIM_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported runtime claim version",
+        ));
+    }
+    Ok(record)
+}
+
+/// Resolves one exact running session to its deterministic socket stem.
+pub fn find_harness_for_session(
+    session_id: &str,
+) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
+    let session_id = tau_proto::SessionId::parse(session_id).map_err(|_| {
+        FindHarnessForSessionError::Incomplete {
+            session_id: session_id.to_owned(),
+        }
+    })?;
+    find_harness_for_session_until(
+        session_id.as_str(),
+        Instant::now() + DISCOVERY_TIMEOUT,
+        &AtomicBool::new(false),
+    )
+}
+
+/// Resolves one exact running session within an absolute deadline.
+pub(crate) fn find_harness_for_session_until(
+    session_id: &str,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
+    #[cfg(test)]
+    if let Some(path) = TEST_SESSION_HARNESSES
+        .lock()
+        .expect("test registry")
+        .get(session_id)
+        .cloned()
+    {
+        return Ok(Some(path));
+    }
+    let parsed = tau_proto::SessionId::parse(session_id).map_err(|_| incomplete(session_id))?;
+    let path = claim_path(&parsed);
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(incomplete(session_id));
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(incomplete(session_id)),
+    };
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(incomplete(session_id));
+    }
+    if validate_claim_file(&file, &path).is_err() {
+        return Err(incomplete(session_id));
+    }
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(incomplete(session_id));
+    }
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let identity =
+                FileIdentity::from_metadata(&file.metadata().map_err(|_| incomplete(session_id))?);
+            validate_path_identity(&path, identity).map_err(|_| incomplete(session_id))?;
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(incomplete(session_id));
+            }
+            Ok(None)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            let identity =
+                FileIdentity::from_metadata(&file.metadata().map_err(|_| incomplete(session_id))?);
+            validate_path_identity(&path, identity).map_err(|_| incomplete(session_id))?;
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(incomplete(session_id));
+            }
+            let record = read_claim(&mut file).map_err(|_| incomplete(session_id))?;
+            #[cfg(test)]
+            if TEST_CANCEL_AFTER_CLAIM_READ.swap(false, Ordering::AcqRel) {
+                cancelled.store(true, Ordering::Release);
+            }
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(incomplete(session_id));
+            }
+            if record.session_id != parsed
+                || session_key(&record.session_id) != session_key(&parsed)
+            {
+                return Err(incomplete(session_id));
+            }
+            let stem = harness_path_for_session(&parsed);
+            probe_exact_session(&stem, &parsed, deadline, cancelled)
+                .ok_or_else(|| incomplete(session_id))?;
+            Ok(Some(stem))
+        }
+        Err(_) => Err(incomplete(session_id)),
+    }
+}
+
+fn incomplete(session_id: &str) -> FindHarnessForSessionError {
+    FindHarnessForSessionError::Incomplete {
+        session_id: session_id.to_owned(),
+    }
+}
+
+fn probe_exact_session(
+    stem: &Path,
+    session_id: &tau_proto::SessionId,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Option<RunningSession> {
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    let timeout = probe_remaining(deadline, cancelled)?;
+    let mut peer =
+        tau_socket::SocketPeer::connect_with_io_timeout(socket_path(stem), timeout).ok()?;
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    peer.set_write_timeout(probe_remaining(deadline, cancelled)?)
+        .ok()?;
+    peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: tau_proto::ExtensionName::parse("tau-runtime-probe").ok()?,
+        client_kind: tau_proto::ClientKind::Ui,
+        expected_session_id: Some(session_id.clone()),
+        capabilities: Vec::new(),
+    }))
+    .ok()?;
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    match peer
+        .recv_timeout(probe_remaining(deadline, cancelled)?)
+        .ok()?
+    {
+        tau_socket::SocketReceive::Message {
+            message: tau_proto::HarnessOutputMessage::SessionAccepted(accepted),
+        } if accepted.session_id == *session_id => {}
+        _ => return None,
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    let request_id = "runtime-probe".to_owned();
+    peer.set_write_timeout(probe_remaining(deadline, cancelled)?)
+        .ok()?;
+    peer.send(&tau_proto::HarnessInputMessage::GetCurrentSession(
+        tau_proto::GetCurrentSession {
+            request_id: request_id.clone(),
+        },
+    ))
+    .ok()?;
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        match peer
+            .recv_timeout(probe_remaining(deadline, cancelled)?)
+            .ok()?
+        {
+            tau_socket::SocketReceive::Message {
+                message: tau_proto::HarnessOutputMessage::CurrentSessionResult(result),
+            } if result.request_id == request_id && result.session_id == *session_id => {
+                return Some(RunningSession {
+                    session_id: result.session_id,
+                    project_root: result.project_root,
+                });
+            }
+            tau_socket::SocketReceive::Message { .. } => {}
+            _ => return None,
+        }
+    }
+}
+
+/// Lists every contended exact session claim and verifies its responder.
+pub fn list_running_sessions() -> io::Result<Vec<RunningSession>> {
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    let permit = DiscoveryCallPermit::try_acquire()
+        .ok_or_else(|| io::Error::other("running-session discovery is busy"))?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let scan_cancelled = Arc::clone(&cancelled);
+    let scan_permit = permit.clone();
+    let scan_dir = claims_dir();
+    let (scan_tx, scan_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _permit = scan_permit;
+        #[cfg(test)]
+        let _worker = DiscoveryWorkerGuard::new();
+        let result = list_running_claim_records_until(&scan_dir, deadline, &scan_cancelled);
+        let _ = scan_tx.send(result);
+    });
+    let records = deadline
+        .checked_duration_since(Instant::now())
+        .and_then(|remaining| scan_rx.recv_timeout(remaining).ok())
+        .and_then(Result::ok)
+        .ok_or_else(|| {
+            cancelled.store(true, Ordering::Release);
+            io::Error::other("could not list every running session claim")
+        })?;
+    let mut sessions = Vec::with_capacity(records.len());
+    for record in records {
+        let stem = harness_path_for_session(&record.session_id);
+        let running = probe_exact_session(&stem, &record.session_id, deadline, &cancelled)
+            .ok_or_else(|| io::Error::other("contended runtime claim is not responding"))?;
+        sessions.push(running);
+    }
+    drop(permit);
+    sessions.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then(left.project_root.cmp(&right.project_root))
+    });
+    Ok(sessions)
+}
+
+/// Discovers exact live sessions that advertise an inter-harness entrypoint.
 pub(crate) fn discover_peer_sessions(
     query: Option<&str>,
     limit: usize,
     current_session_id: &str,
     permit: DiscoveryCallPermit,
 ) -> PeerSessionSnapshot {
-    let deadline = Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT;
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
     let cancelled = Arc::new(AtomicBool::new(false));
-    let scan_dir = harnesses_dir();
+    let scan_dir = claims_dir();
+    let socket_dir = sockets_dir();
     let scan_cancelled = Arc::clone(&cancelled);
     let scan_permit = permit.clone();
     let (scan_tx, scan_rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let _permit = scan_permit;
         #[cfg(test)]
-        if let Some((_, delay_ms)) = TEST_DISCOVERY_SCAN_DELAY
-            .lock()
-            .expect("test scan delay lock poisoned")
-            .as_ref()
-            .filter(|(path, _)| path == &scan_dir)
-        {
-            std::thread::sleep(Duration::from_millis(*delay_ms));
-        }
-        if scan_cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            drop(_permit);
-            let _ = scan_tx.send((Vec::new(), true));
-            return;
-        }
-        let entries = match std::fs::read_dir(scan_dir).map(|directory| {
-            collect_directory_entries_bounded(directory, deadline, &scan_cancelled)
-        }) {
-            Ok(Ok(entries)) => entries,
-            Ok(Err(())) => {
-                drop(_permit);
-                let _ = scan_tx.send((Vec::new(), true));
-                return;
-            }
-            Err(_) => Vec::new(),
-        };
-        let scan_truncated = entries.len() == SESSION_DISCOVERY_MAX_CANDIDATES;
-        let mut paths = entries
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension().and_then(|ext| ext.to_str()) == Some(SOCK_EXTENSION))
-                    .then(|| path.with_extension(""))
-            })
-            .collect::<Vec<_>>();
-        paths.sort();
-        let candidates = paths
-            .into_iter()
-            .filter_map(|path| {
-                let metadata = read_metadata_bounded(&path, deadline, &scan_cancelled)?;
-                metadata.peer_entrypoint.then_some((path, metadata))
-            })
-            .collect::<Vec<_>>();
-        drop(_permit);
-        let _ = scan_tx.send((candidates, scan_truncated));
+        let _worker = DiscoveryWorkerGuard::new();
+        let result = list_running_claim_records_until(&scan_dir, deadline, &scan_cancelled);
+        let _ = scan_tx.send(result);
     });
     let scan_result = deadline
         .checked_duration_since(Instant::now())
         .and_then(|remaining| scan_rx.recv_timeout(remaining).ok());
-    let Some((candidates, scan_truncated)) = scan_result else {
+    let Some(Ok(records)) = scan_result else {
         cancelled.store(true, Ordering::Release);
-        return PeerSessionSnapshot {
-            sessions: Vec::new(),
-            truncated: false,
-            scan_truncated: true,
-        };
+        discovery_probe_slots().1.notify_all();
+        return incomplete_peer_snapshot();
     };
-    let queue = Arc::new(Mutex::new(path_std_collections::VecDeque::from(candidates)));
+
+    let queue = Arc::new(Mutex::new(
+        records
+            .into_iter()
+            .filter(|record| record.peer_entrypoint)
+            .map(|record| {
+                let stem = socket_dir.join(session_key(&record.session_id));
+                (record, stem)
+            })
+            .collect::<std::collections::VecDeque<_>>(),
+    ));
+    let workers = MAX_DISCOVERY_PROBES.min(queue.lock().expect("queue poisoned").len());
     let (tx, rx) = mpsc::channel();
-    let workers = SESSION_DISCOVERY_MAX_PROBES.min(queue.lock().expect("queue poisoned").len());
-    let mut live = Vec::new();
+    let mut available = Vec::new();
+    let mut incomplete = false;
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let queue = Arc::clone(&queue);
@@ -549,252 +787,300 @@ pub(crate) fn discover_peer_sessions(
                         break;
                     }
                     let candidate = queue.lock().expect("queue poisoned").pop_front();
-                    let Some((path, metadata)) = candidate else {
-                        drop(slot);
+                    let Some((record, stem)) = candidate else {
                         break;
                     };
-                    if probe_peer_entrypoint(&path, &metadata.session_id, deadline, &cancelled) {
-                        let _ = tx.send(metadata);
+                    let outcome =
+                        probe_peer_entrypoint(&stem, &record.session_id, deadline, &cancelled);
+                    if tx.send((record, outcome)).is_err() {
+                        break;
                     }
                 }
             });
         }
         drop(tx);
-        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                incomplete = true;
+                break;
+            };
             match rx.recv_timeout(remaining) {
-                Ok(metadata) => live.push(metadata),
+                Ok((record, PeerProbeOutcome::Available)) => available.push(record),
+                Ok((_, PeerProbeOutcome::Unavailable)) => {}
+                Ok((_, PeerProbeOutcome::Incomplete)) => incomplete = true,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    cancelled.store(true, Ordering::Release);
-                    discovery_probe_slots().1.notify_all();
+                    incomplete = true;
                     break;
                 }
             }
         }
+        if !queue.lock().expect("queue poisoned").is_empty() {
+            incomplete = true;
+        }
         cancelled.store(true, Ordering::Release);
         discovery_probe_slots().1.notify_all();
     });
-    live.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    let mut ambiguous = path_std_collections::HashSet::new();
-    for pair in live.windows(2) {
-        if pair[0].session_id == pair[1].session_id {
-            ambiguous.insert(pair[0].session_id.clone());
-        }
+    drop(permit);
+    if incomplete {
+        return incomplete_peer_snapshot();
     }
+
     let needle = query.map(str::to_lowercase);
-    let mut sessions = live
+    let mut projected = available
         .into_iter()
-        .filter(|metadata| !ambiguous.contains(&metadata.session_id))
-        .filter_map(|metadata| {
-            let project_label = metadata
+        .filter_map(|record| {
+            let project_label = record
                 .project_root
-                .as_deref()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
+                .file_name()
+                .and_then(|value| value.to_str())
                 .map(str::to_owned);
             let matches = needle.as_ref().is_none_or(|needle| {
-                metadata.session_id.to_lowercase().contains(needle)
+                record.session_id.as_str().to_lowercase().contains(needle)
                     || project_label
                         .as_ref()
                         .is_some_and(|label| label.to_lowercase().contains(needle))
             });
             matches.then(|| PeerSession {
-                current: metadata.session_id == current_session_id,
-                session_id: metadata.session_id,
+                current: record.session_id.as_str() == current_session_id,
+                session_id: record.session_id.to_string(),
                 project_label,
             })
         })
         .collect::<Vec<_>>();
+    projected.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     let limit = limit.min(SESSION_DISCOVERY_MAX_RESULTS);
-    let truncated = sessions.len() > limit;
-    sessions.truncate(limit);
+    let truncated = projected.len() > limit;
+    projected.truncate(limit);
     PeerSessionSnapshot {
-        sessions,
+        sessions: projected,
         truncated,
-        scan_truncated,
+        scan_truncated: false,
     }
 }
 
-#[cfg(test)]
-pub(crate) fn discover_peer_sessions_for_test(
-    query: Option<&str>,
-    limit: usize,
-    current_session_id: &str,
-) -> PeerSessionSnapshot {
-    let _serial = TEST_DISCOVERY_SERIAL
-        .lock()
-        .expect("test discovery serial lock poisoned");
-    discover_peer_sessions(
-        query,
-        limit,
-        current_session_id,
-        DiscoveryCallPermit::try_acquire().expect("discovery call permit"),
-    )
+fn incomplete_peer_snapshot() -> PeerSessionSnapshot {
+    PeerSessionSnapshot {
+        sessions: Vec::new(),
+        truncated: false,
+        scan_truncated: true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeerProbeOutcome {
+    Available,
+    Unavailable,
+    Incomplete,
 }
 
 fn probe_peer_entrypoint(
-    harness_path: &Path,
-    session_id: &str,
+    stem: &Path,
+    session_id: &tau_proto::SessionId,
     deadline: Instant,
     cancelled: &AtomicBool,
-) -> bool {
-    let Ok(session_id) = tau_proto::SessionId::parse(session_id) else {
-        return false;
+) -> PeerProbeOutcome {
+    if cancelled.load(Ordering::Acquire) {
+        return PeerProbeOutcome::Incomplete;
+    }
+    let Some(timeout) = probe_remaining(deadline, cancelled) else {
+        return PeerProbeOutcome::Incomplete;
     };
-    let ProbeConnect::Connected(mut peer, probe_deadline) = connect_probe_peer(
-        harness_path,
-        deadline,
-        cancelled,
-        tau_proto::ExtensionName::parse(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME)
-            .expect("built-in extension name must satisfy the extension identifier grammar"),
-        tau_proto::ClientKind::External,
+    let Ok(mut peer) = tau_socket::SocketPeer::connect_with_io_timeout(
+        socket_path(stem),
+        timeout.min(PROBE_TIMEOUT),
     ) else {
-        return false;
+        return PeerProbeOutcome::Incomplete;
     };
+    if cancelled.load(Ordering::Acquire) {
+        return PeerProbeOutcome::Incomplete;
+    }
+    let Ok(client_name) =
+        tau_proto::ExtensionName::parse(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME)
+    else {
+        return PeerProbeOutcome::Incomplete;
+    };
+    let Some(write_timeout) = probe_remaining(deadline, cancelled) else {
+        return PeerProbeOutcome::Incomplete;
+    };
+    if peer.set_write_timeout(write_timeout).is_err() {
+        return PeerProbeOutcome::Incomplete;
+    }
+    if peer
+        .send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name,
+            client_kind: tau_proto::ClientKind::External,
+            expected_session_id: Some(session_id.clone()),
+            capabilities: Vec::new(),
+        }))
+        .is_err()
+        || cancelled.load(Ordering::Acquire)
+    {
+        return PeerProbeOutcome::Incomplete;
+    }
+    let Some(receive_timeout) = probe_remaining(deadline, cancelled) else {
+        return PeerProbeOutcome::Incomplete;
+    };
+    if !matches!(
+        peer.recv_timeout(receive_timeout),
+        Ok(tau_socket::SocketReceive::Message {
+            message: tau_proto::HarnessOutputMessage::SessionAccepted(accepted),
+        }) if accepted.session_id == *session_id
+    ) || cancelled.load(Ordering::Acquire)
+    {
+        return PeerProbeOutcome::Incomplete;
+    }
     let request_id = format!("peer-probe-{}", std::process::id());
+    let Some(write_timeout) = probe_remaining(deadline, cancelled) else {
+        return PeerProbeOutcome::Incomplete;
+    };
+    if peer.set_write_timeout(write_timeout).is_err() {
+        return PeerProbeOutcome::Incomplete;
+    }
     if peer
         .send(&tau_proto::HarnessInputMessage::PeerSessionProbe(
             tau_proto::PeerSessionProbe {
                 request_id: request_id.clone(),
-                session_id,
+                session_id: session_id.clone(),
             },
         ))
         .is_err()
+        || cancelled.load(Ordering::Acquire)
     {
-        return false;
+        return PeerProbeOutcome::Incomplete;
     }
-    matches!(
-        peer.recv_timeout(
-            probe_deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO)
-        ),
+    let Some(receive_timeout) = probe_remaining(deadline, cancelled) else {
+        return PeerProbeOutcome::Incomplete;
+    };
+    match peer.recv_timeout(receive_timeout) {
         Ok(tau_socket::SocketReceive::Message {
             message: tau_proto::HarnessOutputMessage::PeerSessionProbeResult(result),
-        }) if result.request_id == request_id && result.available
-    )
-}
-
-enum ProbeConnect {
-    Connected(tau_socket::SocketPeer, Instant),
-    Unresponsive,
-    Infrastructure(std::io::Error),
-}
-
-/// Minimal message transport used by deterministic probe protocol tests.
-trait ProbeTransport {
-    /// Sends one client-to-harness probe message.
-    fn send_probe_input(&mut self, message: &tau_proto::HarnessInputMessage) -> bool;
-
-    /// Receives one harness-to-client probe outcome.
-    fn receive_probe_output(&mut self, timeout: Duration) -> ProbeTransportReceive;
-}
-
-impl ProbeTransport for tau_socket::SocketPeer {
-    fn send_probe_input(&mut self, message: &tau_proto::HarnessInputMessage) -> bool {
-        self.send(message).is_ok()
-    }
-
-    fn receive_probe_output(&mut self, timeout: Duration) -> ProbeTransportReceive {
-        match self.recv_timeout(timeout) {
-            Ok(tau_socket::SocketReceive::Message { message }) => {
-                ProbeTransportReceive::Message(message)
-            }
-            Ok(tau_socket::SocketReceive::Timeout) => ProbeTransportReceive::Timeout,
-            Ok(tau_socket::SocketReceive::Closed) | Err(_) => ProbeTransportReceive::Closed,
-        }
+        }) if result.request_id == request_id && result.available => PeerProbeOutcome::Available,
+        Ok(tau_socket::SocketReceive::Message {
+            message: tau_proto::HarnessOutputMessage::PeerSessionProbeResult(result),
+        }) if result.request_id == request_id => PeerProbeOutcome::Unavailable,
+        _ => PeerProbeOutcome::Incomplete,
     }
 }
 
-/// One protocol receive outcome relevant to bounded discovery probes.
-enum ProbeTransportReceive {
-    /// One decoded harness output message.
-    Message(tau_proto::HarnessOutputMessage),
-    /// No complete response arrived before the per-probe budget.
-    Timeout,
-    /// The transport closed or failed before a complete response.
-    Closed,
+fn probe_remaining(deadline: Instant, cancelled: &AtomicBool) -> Option<Duration> {
+    probe_remaining_at(deadline, cancelled, Instant::now())
 }
 
-/// Sends the shared authenticated discovery-probe greeting.
-fn send_probe_hello(
-    peer: &mut impl ProbeTransport,
-    client_name: tau_proto::ExtensionName,
-    client_kind: tau_proto::ClientKind,
-) -> bool {
-    peer.send_probe_input(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
-        protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name,
-        client_kind,
-        expected_session_id: None,
-        capabilities: Vec::new(),
-    }))
+fn probe_remaining_at(deadline: Instant, cancelled: &AtomicBool, now: Instant) -> Option<Duration> {
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    deadline
+        .checked_duration_since(now)
+        .map(|remaining| remaining.min(PROBE_TIMEOUT))
 }
 
-fn connect_probe_peer(
-    harness_path: &Path,
+fn list_running_claim_records_until(
+    claims_directory: &Path,
     deadline: Instant,
     cancelled: &AtomicBool,
-    client_name: tau_proto::ExtensionName,
-    client_kind: tau_proto::ClientKind,
-) -> ProbeConnect {
-    let connect = || -> Option<Result<(tau_socket::SocketPeer, Instant), std::io::Error>> {
-        let probe_deadline = deadline.min(Instant::now() + SESSION_DISCOVERY_PROBE_TIMEOUT);
-        let timeout = probe_deadline.checked_duration_since(Instant::now())?;
-        if cancelled.load(Ordering::Acquire) {
-            return None;
+) -> Result<Vec<ClaimRecord>, ()> {
+    #[cfg(test)]
+    {
+        let delay_ms = TEST_DISCOVERY_SCAN_DELAY
+            .lock()
+            .expect("scan delay lock poisoned")
+            .as_ref()
+            .filter(|(path, _)| path == claims_directory)
+            .map(|(_, delay_ms)| *delay_ms);
+        if let Some(delay_ms) = delay_ms {
+            std::thread::sleep(Duration::from_millis(delay_ms));
         }
-        let mut peer = match tau_socket::SocketPeer::connect_with_io_timeout(
-            socket_path(harness_path),
-            timeout,
-        ) {
-            Ok(peer) => peer,
-            Err(tau_socket::SocketTransportError::SpawnReader { source }) => {
-                return Some(Err(source));
-            }
-            Err(_) => return None,
-        };
-        peer.set_write_timeout(probe_deadline.checked_duration_since(Instant::now())?)
-            .ok()?;
-        send_probe_hello(&mut peer, client_name, client_kind).then_some(())?;
-        if cancelled.load(Ordering::Acquire) {
-            return None;
-        }
-        peer.set_write_timeout(probe_deadline.checked_duration_since(Instant::now())?)
-            .ok()?;
-        Some(Ok((peer, probe_deadline)))
-    };
-    match connect() {
-        Some(Ok((peer, probe_deadline))) => ProbeConnect::Connected(peer, probe_deadline),
-        Some(Err(error)) => ProbeConnect::Infrastructure(error),
-        None => ProbeConnect::Unresponsive,
     }
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(());
+    }
+    let entries = match std::fs::read_dir(claims_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(()),
+    };
+    let mut records = Vec::new();
+    let mut seen = HashSet::new();
+    let mut visited = 0_usize;
+    for entry in entries.take(MAX_DIRECTORY_ENTRIES + 1) {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(());
+        }
+        let path = entry.map_err(|_| ())?.path();
+        visited += 1;
+        if MAX_DIRECTORY_ENTRIES < visited {
+            return Err(());
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some(CLAIM_EXTENSION) {
+            continue;
+        }
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let mut file = options.open(&path).map_err(|_| ())?;
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(());
+        }
+        validate_claim_file(&file, &path).map_err(|_| ())?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => return Err(()),
+        }
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(());
+        }
+        let record = read_claim(&mut file).map_err(|_| ())?;
+        let expected_name = format!("{}.{}", session_key(&record.session_id), CLAIM_EXTENSION);
+        if path.file_name().and_then(|value| value.to_str()) != Some(expected_name.as_str()) {
+            return Err(());
+        }
+        if !seen.insert(record.session_id.clone()) {
+            return Err(());
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+#[cfg(test)]
+fn list_running_claim_records() -> Result<Vec<ClaimRecord>, ()> {
+    list_running_claim_records_until(
+        &claims_dir(),
+        Instant::now() + DISCOVERY_TIMEOUT,
+        &AtomicBool::new(false),
+    )
 }
 
 fn discovery_probe_slots() -> &'static (Mutex<usize>, Condvar) {
     static SLOTS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
-    SLOTS.get_or_init(|| (Mutex::new(SESSION_DISCOVERY_MAX_PROBES), Condvar::new()))
+    SLOTS.get_or_init(|| (Mutex::new(MAX_DISCOVERY_PROBES), Condvar::new()))
 }
 
 struct DiscoveryProbeSlot;
 
 impl DiscoveryProbeSlot {
     fn acquire(deadline: Instant, cancelled: &AtomicBool) -> Option<Self> {
-        let (slots, available) = discovery_probe_slots();
-        let mut count = slots.lock().expect("discovery probe slots poisoned");
+        let (slots, changed) = discovery_probe_slots();
+        let mut available = slots.lock().expect("probe slots poisoned");
         loop {
             if cancelled.load(Ordering::Acquire) {
                 return None;
             }
-            let remaining = deadline.checked_duration_since(Instant::now())?;
-            if *count > 0 {
-                *count -= 1;
+            if let Some(next) = available.checked_sub(1) {
+                *available = next;
                 return Some(Self);
             }
-            let (next, timeout) = available
-                .wait_timeout(count, remaining)
-                .expect("discovery probe slots poisoned");
-            count = next;
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let (next, timeout) = changed
+                .wait_timeout(available, remaining)
+                .expect("probe slot wait poisoned");
+            available = next;
             if timeout.timed_out() {
                 return None;
             }
@@ -804,20 +1090,11 @@ impl DiscoveryProbeSlot {
 
 impl Drop for DiscoveryProbeSlot {
     fn drop(&mut self) {
-        let (slots, available) = discovery_probe_slots();
-        *slots.lock().expect("discovery probe slots poisoned") += 1;
-        available.notify_one();
+        let (slots, changed) = discovery_probe_slots();
+        *slots.lock().expect("probe slots poisoned") += 1;
+        changed.notify_one();
     }
 }
-
-#[cfg(test)]
-static ACTIVE_DISCOVERY_WORKERS: path_std_sync::atomic::AtomicUsize =
-    path_std_sync_atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static TEST_DISCOVERY_SERIAL: Mutex<()> = Mutex::new(());
-#[cfg(test)]
-static TEST_DISCOVERY_SCAN_DELAY: std::sync::LazyLock<Mutex<Option<(PathBuf, u64)>>> =
-    path_std_sync::LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
 struct DiscoveryWorkerGuard;
@@ -837,866 +1114,46 @@ impl Drop for DiscoveryWorkerGuard {
     }
 }
 
-/// Reads the validated session id a running daemon at `harness_path` is bound
-/// to.
-///
-/// Reports missing metadata, malformed JSON, and invalid controlled identifiers
-/// as distinct I/O errors.
-pub fn read_session_id(harness_path: &Path) -> Result<tau_proto::SessionId, std::io::Error> {
-    let encoded = std::fs::read_to_string(metadata_path(harness_path))?;
-    let metadata: DaemonMetadata = serde_json::from_str(&encoded).map_err(|error| {
-        path_std_io::Error::new(
-            path_std_io::ErrorKind::InvalidData,
-            format!("malformed daemon metadata: {error}"),
-        )
-    })?;
-    tau_proto::SessionId::parse(metadata.session_id).map_err(|error| {
-        path_std_io::Error::new(
-            path_std_io::ErrorKind::InvalidData,
-            format!("invalid daemon session id: {error}"),
-        )
-    })
-}
-
-/// Updates the active/current session id in an existing daemon metadata file.
-pub fn update_session_id(harness_path: &Path, session_id: &str) -> Result<(), std::io::Error> {
-    let session_id = validate_session_id_for_metadata(session_id)?;
-    let mut metadata = read_metadata(harness_path).ok_or_else(|| {
-        path_std_io::Error::new(path_std_io::ErrorKind::NotFound, "metadata missing")
-    })?;
-    metadata.session_id = session_id.to_string();
-    let json = serde_json::to_vec_pretty(&metadata).map_err(path_std_io::Error::other)?;
-    replace_metadata(&metadata_path(harness_path), &json)
-}
-
-/// Atomically replaces one daemon metadata file through its private runtime
-/// directory.
-///
-/// Closing a fully written adjacent temporary file before `rename` ensures
-/// discovery readers observe either the previous complete document or the new
-/// complete document. Runtime discovery is ephemeral and does not promise
-/// crash durability, so this visibility boundary deliberately does not fsync.
-fn replace_metadata(path: &Path, json: &[u8]) -> Result<(), std::io::Error> {
-    use std::io::Write as _;
-
-    loop {
-        let temporary = path.with_extension(format!(
-            "{METADATA_EXTENSION}.tmp-{:016x}",
-            rand::random::<u64>()
-        ));
-        let mut file = match tau_util_fs_err::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == path_std_io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        };
-        if let Err(error) = file.write_all(json) {
-            drop(file);
-            let _ = tau_util_fs_err::remove_file(&temporary);
-            return Err(error);
-        }
-        drop(file);
-        #[cfg(test)]
-        pause_before_metadata_rename(path);
-        if let Err(error) = tau_util_fs_err::rename(&temporary, path) {
-            let _ = tau_util_fs_err::remove_file(&temporary);
-            return Err(error);
-        }
-        return Ok(());
-    }
-}
-
-/// Applies and consumes a matching deterministic metadata publication pause.
 #[cfg(test)]
-fn pause_before_metadata_rename(path: &Path) {
-    let pause = {
-        let mut configured = TEST_METADATA_RENAME_PAUSE
-            .lock()
-            .expect("metadata rename pause lock poisoned");
-        if configured.as_ref().is_some_and(|pause| pause.path == path) {
-            configured.take()
-        } else {
-            None
-        }
-    };
-    if let Some(pause) = pause {
-        pause
-            .reached
-            .send(())
-            .expect("report metadata rename pause");
-        pause.resume.recv().expect("resume metadata rename");
-    }
-}
+static TEST_SESSION_HARNESSES: LazyLock<Mutex<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Creates paths and metadata for the current process.
-pub fn prepare_harness_paths(
-    project_root: &Path,
-    session_id: &str,
-) -> Result<HarnessPaths, std::io::Error> {
-    validate_session_id_for_metadata(session_id)?;
-    prepare_harness_paths_for_instance(project_root, session_id, &HarnessInstanceId::mint())
-}
-
-/// Creates paths and metadata for one explicitly identified process instance.
-pub(crate) fn prepare_harness_paths_for_instance(
-    project_root: &Path,
-    session_id: &str,
-    instance_id: &HarnessInstanceId,
-) -> Result<HarnessPaths, std::io::Error> {
-    validate_session_id_for_metadata(session_id)?;
-    let pid = std::process::id();
-    let harnesses_dir = prepare_harnesses_dir()?;
-    let path = harnesses_dir.join(format!("{pid}-{}", instance_id.as_str()));
-    Ok(HarnessPaths {
-        path,
-        metadata: DaemonMetadata {
-            version: DAEMON_METADATA_VERSION,
-            pid,
-            project_root: Some(project_root.to_path_buf()),
-            session_id: session_id.to_owned(),
-            peer_entrypoint: false,
-        },
-    })
-}
-
-fn validate_session_id_for_metadata(
-    session_id: &str,
-) -> Result<tau_proto::SessionId, std::io::Error> {
-    tau_proto::SessionId::parse(session_id).map_err(|error| {
-        path_std_io::Error::new(
-            path_std_io::ErrorKind::InvalidInput,
-            format!("invalid session id `{session_id}`: {error}"),
-        )
-    })
-}
-
-fn ensure_private_runtime_dir(path: &Path) -> Result<(), std::io::Error> {
-    tau_util_fs_err::create_dir_all(path)?;
-    let metadata = tau_util_fs_err::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(path_std_io::Error::new(
-            path_std_io::ErrorKind::PermissionDenied,
-            format!(
-                "runtime directory `{}` must not be a symlink",
-                path.display()
-            ),
-        ));
-    }
-    if !metadata.is_dir() {
-        return Err(path_std_io::Error::new(
-            path_std_io::ErrorKind::NotADirectory,
-            format!("runtime path `{}` is not a directory", path.display()),
-        ));
-    }
-    ensure_private_runtime_dir_platform(path, &metadata)
-}
-
-#[cfg(unix)]
-fn ensure_private_runtime_dir_platform(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-    let uid = current_euid();
-    if metadata.uid() != uid {
-        return Err(path_std_io::Error::new(
-            path_std_io::ErrorKind::PermissionDenied,
-            format!(
-                "runtime directory `{}` is owned by uid {}, not current uid {uid}",
-                path.display(),
-                metadata.uid()
-            ),
-        ));
-    }
-
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o700 {
-        tau_util_fs_err::set_permissions(path, path_std_fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_private_runtime_dir_platform(
-    _path: &Path,
-    _metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-#[cfg(unix)]
-#[allow(unsafe_code)]
-fn current_euid() -> u32 {
-    // SAFETY: `geteuid` has no preconditions and only reads the process'
-    // effective user id.
-    unsafe { libc::geteuid() }
-}
-
-/// Finds a running harness daemon for the given project root.
-///
-/// Discovery verifies matching candidates by connecting to their sockets.
-/// Runtime discovery never removes an unreachable candidate. A liveness check
-/// and a pathname unlink cannot be made atomic with daemon startup and PID
-/// reuse, so cleanup belongs to the daemon's owned shutdown path.
-#[must_use]
-pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
-    let runtime_dir = harnesses_dir();
-    if !runtime_dir.exists() {
-        return None;
-    }
-
-    let entries = std::fs::read_dir(&runtime_dir).ok()?;
-    for entry in entries.flatten() {
-        let sock = entry.path();
-        if sock.extension().and_then(|ext| ext.to_str()) != Some(SOCK_EXTENSION) {
-            continue;
-        }
-        let harness_path = sock.with_extension("");
-
-        let metadata = match read_metadata(&harness_path) {
-            Some(metadata) => metadata,
-            None => continue,
-        };
-
-        if metadata
-            .project_root
-            .as_deref()
-            .is_some_and(|stored_root| paths_equal(stored_root, project_root))
-            && verify_harness_running(&harness_path)
-        {
-            return Some(harness_path);
-        }
-    }
-
-    None
-}
-
-/// Lists authoritative current identities reported by responsive harness
-/// daemons.
-///
-/// Persisted session directories and runtime metadata are not lifecycle
-/// authority. This non-destructive scan uses bounded runtime-directory
-/// traversal only to locate socket candidates, then obtains each identity
-/// through a bounded local control RPC answered from harness memory. Results
-/// are sorted by session id and project root. One record is retained per
-/// responsive harness, including indistinguishable duplicate identities, so
-/// callers can detect multiple harnesses for one directory. Having no
-/// responsive daemons produces an empty vector.
-///
-/// # Errors
-///
-/// Returns an error instead of a partial list when the bounded candidate scan
-/// fails, process-wide discovery admission is busy, the scan worker cannot be
-/// spawned, or the total probe deadline expires before every candidate is
-/// resolved.
-pub fn list_running_sessions() -> Result<Vec<RunningSession>, std::io::Error> {
-    list_running_sessions_with_policy(
-        SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
-        RunningSessionListPolicy::production(),
-    )
-}
-
+/// Registers one exact test-only session socket stem until the guard drops.
 #[cfg(test)]
-type TestRunningSessionProbe =
-    Arc<dyn Fn(&Path, &RunningSessionListDeadline) -> CurrentSessionProbe + Send + Sync>;
-
-/// Per-call deadline and worker-start behavior for running-session listing.
-#[derive(Clone)]
-struct RunningSessionListPolicy {
-    /// Deadline policy applied to the scan and every subsequent probe.
-    deadline: RunningSessionListDeadline,
-    /// Optional test-only interception before the scan worker starts storage
-    /// work.
-    #[cfg(test)]
-    before_scan: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Optional call-owned semantic probe fixture.
-    #[cfg(test)]
-    probe: Option<TestRunningSessionProbe>,
-}
-
-impl RunningSessionListPolicy {
-    /// Creates the fixed production policy with one absolute two-second budget.
-    fn production() -> Self {
-        Self {
-            deadline: RunningSessionListDeadline::Absolute(
-                Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT,
-            ),
-            #[cfg(test)]
-            before_scan: None,
-            #[cfg(test)]
-            probe: None,
-        }
-    }
-
-    /// Creates a non-expiring semantic-test policy with an optional worker
-    /// gate.
-    #[cfg(test)]
-    fn non_expiring(
-        before_scan: Option<Arc<dyn Fn() + Send + Sync>>,
-        probe: TestRunningSessionProbe,
-    ) -> Self {
-        Self {
-            deadline: RunningSessionListDeadline::NonExpiring,
-            before_scan,
-            probe: Some(probe),
-        }
-    }
-
-    /// Creates a manually expired deadline-test policy with a worker gate.
-    #[cfg(test)]
-    fn manual(
-        expired: Arc<AtomicBool>,
-        before_scan: Option<Arc<dyn Fn() + Send + Sync>>,
-        probe: TestRunningSessionProbe,
-    ) -> Self {
-        Self {
-            deadline: RunningSessionListDeadline::Manual(expired),
-            before_scan,
-            probe: Some(probe),
-        }
-    }
-
-    /// Acquires production discovery admission or uses call-owned test
-    /// admission.
-    fn acquire_permit(&self) -> Result<Option<DiscoveryCallPermit>, std::io::Error> {
-        match self.deadline {
-            RunningSessionListDeadline::Absolute(_) => DiscoveryCallPermit::try_acquire()
-                .map(Some)
-                .ok_or_else(|| running_session_list_incomplete("runtime scan capacity is busy")),
-            #[cfg(test)]
-            RunningSessionListDeadline::NonExpiring | RunningSessionListDeadline::Manual(_) => {
-                Ok(None)
-            }
-        }
-    }
-
-    /// Probes one candidate through production I/O or the call-owned test
-    /// fixture.
-    fn probe(&self, harness_path: &Path, cancelled: &AtomicBool) -> CurrentSessionProbe {
-        #[cfg(test)]
-        if let Some(probe) = &self.probe {
-            return probe(harness_path, &self.deadline);
-        }
-        probe_current_session(harness_path, &self.deadline, cancelled)
-    }
-}
-
-/// Clock policy used by one running-session listing call.
-#[derive(Clone)]
-enum RunningSessionListDeadline {
-    /// Fixed production wall-clock deadline.
-    Absolute(Instant),
-    /// Semantic-test clock that never expires.
-    #[cfg(test)]
-    NonExpiring,
-    /// Deadline-test clock advanced explicitly by its owning test.
-    #[cfg(test)]
-    Manual(Arc<AtomicBool>),
-}
-
-impl RunningSessionListDeadline {
-    /// Reports whether the total listing budget has expired.
-    fn expired(&self) -> bool {
-        match self {
-            Self::Absolute(deadline) => Instant::now() >= *deadline,
-            #[cfg(test)]
-            Self::NonExpiring => false,
-            #[cfg(test)]
-            Self::Manual(expired) => expired.load(Ordering::Acquire),
-        }
-    }
-
-    /// Returns the real I/O deadline used to retain the per-probe cap.
-    fn probe_io_deadline(&self) -> Instant {
-        match self {
-            Self::Absolute(deadline) => *deadline,
-            #[cfg(test)]
-            Self::NonExpiring | Self::Manual(_) => Instant::now() + SESSION_DISCOVERY_PROBE_TIMEOUT,
-        }
-    }
-
-    /// Receives the isolated scan result under this policy.
-    fn receive_scan<T>(&self, receiver: &mpsc::Receiver<T>) -> Result<T, ()> {
-        match self {
-            Self::Absolute(deadline) => {
-                let timeout = deadline.checked_duration_since(Instant::now()).ok_or(())?;
-                receiver.recv_timeout(timeout).map_err(|_| ())
-            }
-            #[cfg(test)]
-            Self::NonExpiring | Self::Manual(_) => receiver.recv().map_err(|_| ()),
-        }
-    }
-}
-
-fn list_running_sessions_with_policy(
-    entry_limit: usize,
-    policy: RunningSessionListPolicy,
-) -> Result<Vec<RunningSession>, std::io::Error> {
-    let permit = policy.acquire_permit()?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let scan_cancelled = Arc::clone(&cancelled);
-    let runtime_dir = harnesses_dir();
-    let scan_permit = permit.clone();
-    let scan_policy = policy.clone();
-    let (scan_tx, scan_rx) = mpsc::sync_channel(1);
-    path_std_thread::Builder::new()
-        .name("tau-running-session-scan".to_owned())
-        .spawn(move || {
-            let _permit = scan_permit;
-            #[cfg(test)]
-            if let Some(before_scan) = &scan_policy.before_scan {
-                before_scan();
-            }
-            let result = scan_running_session_candidates(
-                &runtime_dir,
-                &scan_policy.deadline,
-                &scan_cancelled,
-                entry_limit,
-            );
-            let _ = scan_tx.send(result);
-        })
-        .map_err(|error| {
-            running_session_list_incomplete(&format!("could not spawn runtime scan: {error}"))
-        })?;
-    let mut candidates = match policy.deadline.receive_scan(&scan_rx) {
-        Ok(result) => result?,
-        Err(_) => {
-            cancelled.store(true, Ordering::Release);
-            return Err(running_session_list_incomplete("runtime scan timed out"));
-        }
-    };
-    candidates.sort();
-    let mut sessions = Vec::new();
-    for harness_path in candidates {
-        if policy.deadline.expired() {
-            return Err(running_session_list_incomplete(
-                "runtime probe deadline reached before every candidate",
-            ));
-        }
-        match policy.probe(&harness_path, &cancelled) {
-            CurrentSessionProbe::Reported(session) => sessions.push(session),
-            CurrentSessionProbe::Unresponsive => {}
-            CurrentSessionProbe::DeadlineExpired => {
-                return Err(running_session_list_incomplete(
-                    "runtime probe deadline expired",
-                ));
-            }
-            CurrentSessionProbe::Infrastructure(error) => {
-                return Err(running_session_list_incomplete(&format!(
-                    "runtime probe infrastructure failed: {error}"
-                )));
-            }
-        }
-    }
-    sessions.sort_by(|left, right| {
-        (&left.session_id, &left.project_root).cmp(&(&right.session_id, &right.project_root))
-    });
-    Ok(sessions)
-}
-
-fn scan_running_session_candidates(
-    runtime_dir: &Path,
-    deadline: &RunningSessionListDeadline,
-    cancelled: &AtomicBool,
-    entry_limit: usize,
-) -> Result<Vec<PathBuf>, std::io::Error> {
-    if !runtime_dir.try_exists()? {
-        if deadline.expired() {
-            return Err(running_session_list_incomplete("runtime scan timed out"));
-        }
-        return Ok(Vec::new());
-    }
-    let mut entries = std::fs::read_dir(runtime_dir)?;
-    let mut candidates = Vec::new();
-    for entries_visited in 0..=entry_limit {
-        if cancelled.load(Ordering::Acquire) || deadline.expired() {
-            return Err(running_session_list_incomplete("runtime scan timed out"));
-        }
-        let Some(entry) = entries.next() else {
-            return Ok(candidates);
-        };
-        if entries_visited == entry_limit {
-            return Err(running_session_list_incomplete(
-                "runtime directory entry limit reached",
-            ));
-        }
-        let socket_path = entry?.path();
-        if socket_path.extension().and_then(|ext| ext.to_str()) == Some(SOCK_EXTENSION) {
-            candidates.push(socket_path.with_extension(""));
-        }
-    }
-    Ok(candidates)
-}
-
-enum CurrentSessionProbe {
-    Reported(RunningSession),
-    Unresponsive,
-    DeadlineExpired,
-    Infrastructure(std::io::Error),
-}
-
-/// Requests and correlates one authoritative current-session response.
-fn request_current_session(
-    peer: &mut impl ProbeTransport,
-    request_id: &str,
-    mut remaining: impl FnMut() -> Option<Duration>,
-) -> Option<RunningSession> {
-    if !peer.send_probe_input(&tau_proto::HarnessInputMessage::GetCurrentSession(
-        tau_proto::GetCurrentSession {
-            request_id: request_id.to_owned(),
-        },
-    )) {
-        return None;
-    }
-    loop {
-        match peer.receive_probe_output(remaining()?) {
-            ProbeTransportReceive::Message(
-                tau_proto::HarnessOutputMessage::CurrentSessionResult(result),
-            ) if result.request_id == request_id => {
-                return Some(RunningSession {
-                    session_id: result.session_id,
-                    project_root: result.project_root,
-                });
-            }
-            ProbeTransportReceive::Message(tau_proto::HarnessOutputMessage::Disconnect(_))
-            | ProbeTransportReceive::Timeout
-            | ProbeTransportReceive::Closed => return None,
-            ProbeTransportReceive::Message(_) => {}
-        }
-    }
-}
-
-fn probe_current_session(
-    harness_path: &Path,
-    deadline: &RunningSessionListDeadline,
-    cancelled: &AtomicBool,
-) -> CurrentSessionProbe {
-    let reported = (|| {
-        let (mut peer, probe_deadline) = match connect_probe_peer(
-            harness_path,
-            deadline.probe_io_deadline(),
-            cancelled,
-            tau_proto::ExtensionName::parse("tau-session-list")
-                .expect("built-in extension name must satisfy the extension identifier grammar"),
-            tau_proto::ClientKind::Ui,
-        ) {
-            ProbeConnect::Connected(peer, probe_deadline) => (peer, probe_deadline),
-            ProbeConnect::Unresponsive => return None,
-            ProbeConnect::Infrastructure(error) => {
-                return Some(Err(error));
-            }
-        };
-        let request_id = format!("current-session-{}", std::process::id());
-        request_current_session(&mut peer, &request_id, || {
-            probe_deadline.checked_duration_since(Instant::now())
-        })
-        .map(Ok)
-    })();
-    match reported {
-        Some(Ok(session)) => CurrentSessionProbe::Reported(session),
-        Some(Err(error)) => CurrentSessionProbe::Infrastructure(error),
-        None if deadline.expired() => CurrentSessionProbe::DeadlineExpired,
-        None => CurrentSessionProbe::Unresponsive,
-    }
-}
-
-fn running_session_list_incomplete(reason: &str) -> std::io::Error {
-    path_std_io::Error::other(format!("could not list all running sessions: {reason}"))
-}
-
-/// Finds the single live harness advertising `session_id` as its active
-/// session.
-///
-/// Discovery verifies candidates by connecting to their sockets. A matching
-/// unreachable record with a live or unverifiable metadata pid leaves
-/// uniqueness unresolved. Dead unreachable records are ignored but preserved:
-/// pathname deletion cannot be made atomic with liveness and identity checks
-/// needed to exclude PID reuse. Returns `Ok(None)` when no live daemon
-/// advertises the session and `Err` when uniqueness cannot be proven, including
-/// ambiguous, truncated, and expired lookups.
-pub fn find_harness_for_session(
-    session_id: &str,
-) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
-    find_harness_for_session_until(
-        session_id,
-        Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT,
-        &AtomicBool::new(false),
-    )
-}
-
-/// Finds one live session daemon with bounded traversal, metadata I/O, and an
-/// absolute caller-owned deadline.
-///
-/// Cancellation returns [`FindHarnessForSessionError::Incomplete`].
-pub(crate) fn find_harness_for_session_until(
-    session_id: &str,
-    deadline: Instant,
-    cancelled: &AtomicBool,
-) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
-    find_harness_for_session_until_with_entry_limit(
-        session_id,
-        deadline,
-        cancelled,
-        SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
-    )
-}
-
-fn find_harness_for_session_until_with_entry_limit(
-    session_id: &str,
-    deadline: Instant,
-    cancelled: &AtomicBool,
-    entry_limit: usize,
-) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
-    #[cfg(test)]
-    if let Some(path) = TEST_SESSION_HARNESSES
-        .lock()
-        .expect("test session harness registry poisoned")
-        .get(session_id)
-        .cloned()
-    {
-        return Ok(Some(path));
-    }
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return Err(FindHarnessForSessionError::Incomplete {
-            session_id: session_id.to_owned(),
-        });
-    }
-    let runtime_dir = harnesses_dir();
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return Err(FindHarnessForSessionError::Incomplete {
-            session_id: session_id.to_owned(),
-        });
-    }
-    match runtime_dir.try_exists() {
-        Ok(false) => return Ok(None),
-        Err(_) => {
-            return Err(FindHarnessForSessionError::Incomplete {
-                session_id: session_id.to_owned(),
-            });
-        }
-        Ok(true) => {}
-    }
-
-    let mut matches = Vec::new();
-    let mut unresolved_match = false;
-    let mut matching_candidates = 0;
-    let mut entries_visited = 0;
-    let mut scan_exhausted = false;
-    {
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(FindHarnessForSessionError::Incomplete {
-                session_id: session_id.to_owned(),
-            });
-        }
-        let Ok(entries) = std::fs::read_dir(&runtime_dir) else {
-            return Err(incomplete_or_ambiguous(session_id, &matches));
-        };
-        for entry in entries.take(entry_limit) {
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(incomplete_or_ambiguous(session_id, &matches));
-            }
-            entries_visited += 1;
-            let Ok(entry) = entry else {
-                return Err(incomplete_or_ambiguous(session_id, &matches));
-            };
-            let metadata_path = entry.path();
-            if metadata_path.extension().and_then(|ext| ext.to_str()) != Some(METADATA_EXTENSION) {
-                continue;
-            }
-            let harness_path = metadata_path.with_extension("");
-            let metadata = match read_metadata_bounded(&harness_path, deadline, cancelled) {
-                Some(metadata) => metadata,
-                None if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline => {
-                    return Err(incomplete_or_ambiguous(session_id, &matches));
-                }
-                None => {
-                    if harness_stem_liveness(&harness_path)
-                        .is_some_and(|liveness| liveness != ProcessLiveness::Dead)
-                    {
-                        unresolved_match = true;
-                    }
-                    continue;
-                }
-            };
-            #[cfg(test)]
-            TEST_CANCEL_AFTER_SESSION_METADATA_READ.with(|enabled| {
-                if enabled.replace(false) {
-                    cancelled.store(true, Ordering::Release);
-                }
-            });
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(incomplete_or_ambiguous(session_id, &matches));
-            }
-            if metadata.session_id != session_id {
-                continue;
-            }
-            matching_candidates += 1;
-            if SESSION_DISCOVERY_MAX_CANDIDATES < matching_candidates {
-                scan_exhausted = true;
-                continue;
-            }
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(incomplete_or_ambiguous(session_id, &matches));
-            }
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(|| incomplete_or_ambiguous(session_id, &matches))?;
-            if tau_socket::SocketPeer::connect_with_io_timeout(
-                socket_path(&harness_path),
-                remaining,
-            )
-            .is_ok()
-            {
-                matches.push(harness_path);
-            } else {
-                match process_liveness(metadata.pid) {
-                    ProcessLiveness::Dead => {}
-                    ProcessLiveness::Running | ProcessLiveness::Unknown => {
-                        unresolved_match = true;
-                    }
-                }
-            }
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(incomplete_or_ambiguous(session_id, &matches));
-            }
-        }
-        scan_exhausted |= entries_visited == entry_limit;
-    }
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return Err(incomplete_or_ambiguous(session_id, &matches));
-    }
-    match matches.len() {
-        2.. => Err(FindHarnessForSessionError::Ambiguous {
-            session_id: session_id.to_owned(),
-            matches,
-        }),
-        _ if scan_exhausted || unresolved_match => Err(FindHarnessForSessionError::Incomplete {
-            session_id: session_id.to_owned(),
-        }),
-        0 => Ok(None),
-        1 => Ok(matches.pop()),
-    }
-}
-
-/// Classifies an incomplete scan without losing already-proven ambiguity.
-fn incomplete_or_ambiguous(
-    session_id: &str,
-    live_matches: &[PathBuf],
-) -> FindHarnessForSessionError {
-    if live_matches.len() >= 2 {
-        FindHarnessForSessionError::Ambiguous {
-            session_id: session_id.to_owned(),
-            matches: live_matches.to_vec(),
-        }
-    } else {
-        FindHarnessForSessionError::Incomplete {
-            session_id: session_id.to_owned(),
-        }
-    }
-}
-
-/// Returns liveness only for a conventional PID-prefixed daemon path stem.
-fn harness_stem_liveness(harness_path: &Path) -> Option<ProcessLiveness> {
-    harness_path
-        .file_name()
-        .and_then(|stem| stem.to_str())
-        .and_then(|stem| {
-            stem.split_once('-')
-                .map_or(stem, |(pid, _)| pid)
-                .parse::<u32>()
-                .ok()
-        })
-        .filter(|pid| *pid > 0)
-        .map(process_liveness)
-}
-
-/// Conservative process-liveness result used for unreachable session claims.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProcessLiveness {
-    /// The process entry is observable.
-    Running,
-    /// Procfs is observable and the process entry is absent.
-    Dead,
-    /// Process liveness cannot be proven.
-    Unknown,
-}
-
-#[cfg(test)]
-static TEST_SESSION_HARNESSES: std::sync::LazyLock<
-    Mutex<std::collections::HashMap<String, PathBuf>>,
-> = path_std_sync::LazyLock::new(|| Mutex::new(path_std_collections::HashMap::new()));
-
-/// Registers a real test harness socket for worker-thread session lookup.
-#[cfg(test)]
-pub(crate) fn register_test_session_harness(
-    session_id: &str,
-    harness_path: PathBuf,
-) -> TestSessionHarnessGuard {
+pub(crate) fn register_test_session_harness(session_id: &str, path: PathBuf) -> impl Drop + use<> {
     TEST_SESSION_HARNESSES
         .lock()
-        .expect("test session harness registry poisoned")
-        .insert(session_id.to_owned(), harness_path);
-    TestSessionHarnessGuard {
-        session_id: session_id.to_owned(),
+        .expect("test registry")
+        .insert(session_id.to_owned(), path);
+    struct Guard(String);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_SESSION_HARNESSES
+                .lock()
+                .expect("test registry")
+                .remove(&self.0);
+        }
     }
+    Guard(session_id.to_owned())
 }
 
-/// Removes a worker-visible test session registration when dropped.
-#[cfg(test)]
-pub(crate) struct TestSessionHarnessGuard {
-    /// Registered session key.
-    session_id: String,
-}
-
-#[cfg(test)]
-impl Drop for TestSessionHarnessGuard {
-    fn drop(&mut self) {
-        TEST_SESSION_HARNESSES
-            .lock()
-            .expect("test session harness registry poisoned")
-            .remove(&self.session_id);
+fn ensure_private_runtime_dir(path: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.uid() != current_euid() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("invalid runtime directory `{}`", path.display()),
+        ));
     }
-}
-
-/// Verifies that a daemon is actually running by connecting to its
-/// socket.
-pub(crate) fn verify_harness_running(harness_path: &Path) -> bool {
-    UnixStream::connect(socket_path(harness_path)).is_ok()
-}
-
-#[cfg(target_os = "linux")]
-fn process_liveness(pid: u32) -> ProcessLiveness {
-    process_liveness_at(Path::new("/proc"), pid)
-}
-
-#[cfg(target_os = "linux")]
-fn process_liveness_at(proc_root: &Path, pid: u32) -> ProcessLiveness {
-    if !std::fs::metadata(proc_root.join("self")).is_ok_and(|metadata| metadata.is_dir()) {
-        return ProcessLiveness::Unknown;
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        std::fs::set_permissions(path, Permissions::from_mode(0o700))?;
     }
-    match std::fs::symlink_metadata(proc_root.join(pid.to_string())) {
-        Ok(_) => ProcessLiveness::Running,
-        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => ProcessLiveness::Dead,
-        Err(_) => ProcessLiveness::Unknown,
-    }
+    Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-fn process_liveness(_pid: u32) -> ProcessLiveness {
-    // Tau forbids unsafe code, so avoid libc `kill(pid, 0)` here. Preserving
-    // files is the conservative fallback: discovery still never returns a
-    // candidate whose socket probe failed, but non-Linux platforms may retain
-    // stale runtime files until a future safe liveness backend is added.
-    ProcessLiveness::Unknown
-}
-
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a_canon), Ok(b_canon)) => a_canon == b_canon,
-        _ => a == b,
-    }
+#[allow(unsafe_code)]
+fn current_euid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and reads process credentials only.
+    unsafe { libc::geteuid() }
 }

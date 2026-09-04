@@ -753,6 +753,7 @@ fn assert_attach_semantics(
             .position(|row| row.contains(needle))
             .ok_or_else(|| format!("missing semantic row `{needle}` in:\n{frame}"))
     };
+
     let submitted = find(prompt)?;
     let initialized = find(&format!("initialized {}", agent_id.as_str()))?;
     let answered = find(response)?;

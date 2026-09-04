@@ -209,13 +209,12 @@ fn picker_foreground_restoration_failure_is_fatal() {
     );
 }
 
-/// Attachment fail-stop disconnects with a distinct reason and keeps an owned
-/// daemon running so another terminal can attach after this UI exits.
+/// Attachment fail-stop keeps an owned daemon running so another terminal can
+/// attach after this UI exits.
 #[test]
 fn foreground_restoration_fail_stop_keeps_daemon_running() {
     let exit = InputLoopExit::ForegroundOwnershipUnconfirmed;
 
     assert_eq!(exit.reason(), "foreground-ownership-unconfirmed");
-    assert_eq!(exit.harness_disconnect_reason(), "detach");
     assert_eq!(exit.daemon_disposition(), DaemonDisposition::KeepRunning);
 }

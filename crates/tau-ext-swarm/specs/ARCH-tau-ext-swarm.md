@@ -20,19 +20,17 @@ compatibility projection. The independent Swarm `AgentActivity` remains derived
 only from Tau's runtime state because it controls `ActiveAuto` navigation and
 must not be overwritten by a self-reported status.
 
-A session switch cancels and joins the previous worker and clears session-local
-task metadata, blocker history, updates, and acknowledgements while retaining the
-process-incarnation command table. Ordinary Iroh
-reconnects retain that process-memory state and restart publication from a
+Final session shutdown cancels and joins the worker. Ordinary Iroh reconnects
+retain process-memory task metadata, blocker history, updates, acknowledgements,
+and the process-incarnation command table, and restart publication from a
 coherent snapshot when retained changes no longer cover the reader revision.
 The owned worker generation also owns authoritative publication health. Normal
 return or panic unwind makes that health indeterminate before any optional
 warning; panic-abort builds terminate the extension process. The mutating
 `task_info`, `task_blocker`, and `task_update` tools serialize their complete mutation against
-retirement, then reject without changing local state until a fresh session
-replay starts a live publisher.
+retirement, then reject without changing local state.
 `SwarmRuntime` generates one collision-resistant application-incarnation ID at
-process startup and retains it across session workers and ordinary reconnects.
+process startup and retains it across ordinary reconnects.
 A replacement process declares a fresh ID, allowing Tau Swarm to fence ambiguous
 old commands and supersede the previous process's active lifecycle state.
 
@@ -57,5 +55,5 @@ role tool policy is the complete grant boundary, and any loaded agent granted
 `task_info` may replace any valid task ID in its current session. Its current map shares publication
 revision order with agents, blockers, and immutable updates. Complete snapshots
 carry the map so reconnect converges after lost or indeterminate live
-submissions; task metadata has no acknowledgement outbox. Session switches and
-extension restart clear it, while ordinary reconnect retains it.
+submissions; task metadata has no acknowledgement outbox. Extension restart
+clears it, while ordinary reconnect retains it.

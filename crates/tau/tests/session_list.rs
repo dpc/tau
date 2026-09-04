@@ -1,12 +1,15 @@
+use std::io as path_std_io;
 use std::io::{BufReader, BufWriter};
 use std::os::unix as path_std_os_unix;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use std::{fs as path_std_fs, io as path_std_io};
 
 use tempfile::TempDir;
+
+mod support;
+use support::isolated_runtime_dir;
 
 const FAKE_HARNESS_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -19,18 +22,12 @@ fn tau_bin() -> PathBuf {
 
 /// Creates a private runtime root suitable for Tau's same-user socket policy.
 fn runtime_root(temp: &TempDir) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let runtime = temp.path().join("runtime");
-    std::fs::create_dir(&runtime).expect("runtime root");
-    std::fs::set_permissions(&runtime, path_std_fs::Permissions::from_mode(0o700))
-        .expect("private runtime permissions");
-    runtime
+    isolated_runtime_dir(temp.path())
 }
 
 /// Runs one isolated `tau session list` command.
 fn run_list(runtime: &Path, cwd: &Path, arguments: &[&str]) -> Output {
-    let root = runtime.parent().expect("isolated test root");
+    let root = cwd;
     Command::new(tau_bin())
         .args(["session", "list"])
         .args(arguments)
@@ -48,6 +45,7 @@ fn run_list(runtime: &Path, cwd: &Path, arguments: &[&str]) -> Output {
 /// Serves one bounded fake current-session control exchange.
 fn serve_current_session(
     listener: tau_socket::SocketListener,
+    session_id: tau_proto::SessionId,
     project_root: PathBuf,
 ) -> Result<(), String> {
     let raw_listener = listener
@@ -80,9 +78,18 @@ fn serve_current_session(
     let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(reader_stream));
     let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
     match reader.read_message().map_err(|error| error.to_string())? {
-        Some(tau_proto::HarnessInputMessage::Hello(_)) => {}
+        Some(tau_proto::HarnessInputMessage::Hello(hello))
+            if hello.expected_session_id.as_ref() == Some(&session_id) => {}
         other => return Err(format!("expected probe hello, got {other:?}")),
     }
+    writer
+        .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+            tau_proto::SessionAccepted {
+                session_id: session_id.clone(),
+            },
+        ))
+        .map_err(|error| error.to_string())?;
+    writer.flush().map_err(|error| error.to_string())?;
     let request = match reader.read_message().map_err(|error| error.to_string())? {
         Some(tau_proto::HarnessInputMessage::GetCurrentSession(request)) => request,
         other => return Err(format!("expected current-session request, got {other:?}")),
@@ -91,9 +98,7 @@ fn serve_current_session(
         .write_message(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
             tau_proto::CurrentSessionResult {
                 request_id: request.request_id,
-                session_id: "live-session"
-                    .parse::<tau_proto::SessionId>()
-                    .expect("known-safe SessionId must be valid"),
+                session_id,
                 project_root,
             },
         ))
@@ -151,16 +156,26 @@ fn relative_directory_filter_returns_live_json_record() {
     std::fs::create_dir(&project).expect("project directory");
     path_std_os_unix::fs::symlink(&project, &alias).expect("project symlink");
     let project = project.canonicalize().expect("canonical project");
-    let harnesses = runtime.join("tau/harnesses");
-    std::fs::create_dir_all(&harnesses).expect("harness runtime directory");
-    let harness_path = harnesses.join("fake");
+    let session_id = "live-session"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
+    let mut claim = tau_harness::runtime_dir::claim_session_in(&runtime, &project, &session_id)
+        .expect("claim fake harness runtime");
+    claim
+        .reclaim_stale_socket()
+        .expect("reclaim stale fake harness socket");
     let listener =
-        tau_socket::SocketListener::bind(tau_harness::runtime_dir::socket_path(&harness_path))
-            .expect("fake harness listener");
+        tau_socket::SocketListener::bind_fresh(claim.socket_path()).expect("fake harness listener");
+    claim.publish(false).expect("publish fake harness claim");
+    let response_session_id = session_id.clone();
     let response_root = project.clone();
     let (server_tx, server_rx) = mpsc::sync_channel(1);
     let daemon = std::thread::spawn(move || {
-        let _ = server_tx.send(serve_current_session(listener, response_root));
+        let _ = server_tx.send(serve_current_session(
+            listener,
+            response_session_id,
+            response_root,
+        ));
     });
 
     let output = run_list(&runtime, temp.path(), &["--dir", "alias", "--json"]);
@@ -189,10 +204,9 @@ fn relative_directory_filter_returns_live_json_record() {
 fn runtime_scan_failure_has_no_partial_stdout_or_cleanup() {
     let temp = TempDir::new().expect("tempdir");
     let runtime = runtime_root(&temp);
-    let harnesses = runtime.join("tau/harnesses");
-    std::fs::create_dir_all(harnesses.parent().expect("Tau runtime root"))
-        .expect("Tau runtime root");
-    std::fs::write(&harnesses, b"sentinel").expect("non-directory harness path");
+    let claims = runtime.join("tau/harnesses/claims");
+    std::fs::create_dir_all(claims.parent().expect("Tau runtime root")).expect("Tau runtime root");
+    std::fs::write(&claims, b"sentinel").expect("non-directory claims path");
 
     let output = run_list(&runtime, temp.path(), &["--json"]);
 
@@ -200,11 +214,11 @@ fn runtime_scan_failure_has_no_partial_stdout_or_cleanup() {
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
     assert!(
-        harnesses.is_file(),
+        claims.is_file(),
         "inspection must not replace the invalid runtime entry"
     );
     assert_eq!(
-        std::fs::read(&harnesses).expect("runtime sentinel"),
+        std::fs::read(&claims).expect("runtime sentinel"),
         b"sentinel",
         "inspection must not rewrite the invalid runtime entry"
     );

@@ -46,50 +46,6 @@ fn disconnect_cancels_pending_rendered_preview() {
     );
 }
 
-/// Replacing a session must cancel previews that are still waiting for
-/// extension context, rather than retaining an unanswerable response entry.
-#[test]
-fn session_switch_cancels_pending_rendered_preview() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    let cid = h.create_durable_user_agent(
-        h.session_runtime.current_session_id.clone(),
-        &h.config.selected_role.clone(),
-    );
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.prompt_coordination
-        .context_discovery
-        .pending_rendered_prompts
-        .insert(
-            agent_id.clone(),
-            PendingRenderedPreview {
-                requests: vec![PendingRenderedPrompt::System {
-                    connection_id: crate::test_connection_id("preview-switch-requester"),
-                    request_id: "preview-switch".to_owned(),
-                    role: h.config.selected_role.clone(),
-                }],
-                deadline: Instant::now(),
-            },
-        );
-
-    h.switch_session(
-        "preview-replacement".parse().expect("session id"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
-
-    assert!(
-        !h.prompt_coordination
-            .context_discovery
-            .pending_rendered_prompts
-            .contains_key(&agent_id)
-    );
-    assert!(
-        h.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
-            .is_none()
-    );
-}
-
 /// An extension that never completes per-agent context must hit the bounded
 /// preview deadline and release both request state and the temporary agent.
 #[test]

@@ -3,15 +3,11 @@
 use super::*;
 use crate::harness::HarnessSessionLaunchMode;
 
-/// Proves a late opaque capture keeps its Provider-supplied durable session
-/// attribution after the harness rolls to a replacement current session.
+/// Provider debug captures must never select another durable session's path.
 #[test]
-fn provider_capture_attribution_survives_session_rollover() {
+fn provider_capture_rejects_another_existing_session() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness
-        .switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch session");
     let provider = harness
         .extensions
         .entries
@@ -21,24 +17,29 @@ fn provider_capture_attribution_survives_session_rollover() {
                 .then(|| connection_id.clone())
         })
         .expect("ready provider");
+    let other_session_dir = harness.sessions_dir().join("s2");
+    path_std_fs::create_dir_all(&other_session_dir).expect("other durable session");
     let capture = tau_proto::ProviderDebugCapture {
-        session_id: test_session_id("s1"),
-        agent_prompt_id: tau_proto::AgentPromptId::parse("late-prompt").expect("prompt"),
+        session_id: test_session_id("s2"),
+        agent_prompt_id: tau_proto::AgentPromptId::parse("other-prompt").expect("prompt"),
         class: tau_proto::ProviderDebugCaptureClass::HttpSseResponse,
         zstd: vec![1, 2, 3],
     };
-    assert!(
-        harness.sessions_dir().join("s1").is_dir(),
-        "old durable session root remains"
+
+    assert_eq!(
+        harness.provider_debug_capture_target(&provider, &capture),
+        None
     );
-
-    let (target, instance) = harness
-        .provider_debug_capture_target(&provider, &capture)
-        .expect("late durable attribution");
-
-    assert!(target.ends_with("sessions/s1"));
-    assert_eq!(instance.as_str(), "provider");
+    harness.handle_provider_debug_capture(&provider, capture);
+    assert!(
+        path_std_fs::read_dir(other_session_dir)
+            .expect("other session remains readable")
+            .next()
+            .is_none(),
+        "rejected capture must not write into another session"
+    );
 }
+
 /// Ensures a failed direct provider prompt route unwinds in-flight prompt
 /// bookkeeping and emits user-visible lifecycle diagnostics.
 #[test]
@@ -300,6 +301,7 @@ fn raw_secret_source_error_prevents_provider_start() {
                 memory_only_agent_store: false,
                 project_root: tempdir.path().canonicalize().expect("project root"),
                 extension_stderr_mirror: None,
+                before_session_init: None,
             },
             &mut initial_client_error_stream,
         ) {

@@ -1,4 +1,5 @@
-//! Authenticated creator relationships between agents in one harness session.
+//! Authenticated creator relationships between agents in one fixed-session
+//! daemon.
 
 #[cfg(test)]
 mod tests;
@@ -10,7 +11,7 @@ use tau_proto::{AgentCreator, AgentId, SessionId};
 /// Harness-owned graph of authenticated agent creation relationships.
 ///
 /// The graph retains relationships after an individual runtime retires, but the
-/// harness clears it when the active session changes.
+/// harness clears it during final session shutdown.
 #[derive(Default)]
 pub(crate) struct AgentCreatorTopology {
     /// One authenticated creator for each child that has one.

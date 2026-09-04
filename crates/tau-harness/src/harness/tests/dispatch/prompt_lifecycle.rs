@@ -1529,10 +1529,10 @@ fn rendered_prompt_unknown_role_returns_in_band_error() {
 }
 
 /// A committed initial submission keeps its correlation until provider-prompt
-/// materialization, so session rollover can emit a terminal instead of losing
-/// the accepted prompt.
+/// materialization, so final shutdown emits a terminal instead of losing the
+/// accepted prompt.
 #[test]
-fn initial_prompt_correlation_survives_submission_until_rollover_terminal() {
+fn initial_prompt_correlation_survives_submission_until_shutdown_terminal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
@@ -1541,9 +1541,9 @@ fn initial_prompt_correlation_survives_submission_until_rollover_terminal() {
         &cid,
         AgentPublishCompletion::InitialPromptSubmission {
             correlation: crate::agent::InitialPromptCorrelation {
-                request_id: "create-rollover".to_owned(),
+                request_id: "create-shutdown".to_owned(),
                 agent_id: agent_id.clone(),
-                ctx_id: "prompt-rollover".to_owned(),
+                ctx_id: "prompt-shutdown".to_owned(),
                 bootstrap_prompt: false,
                 activation_through: None,
             },
@@ -1557,19 +1557,21 @@ fn initial_prompt_correlation_survives_submission_until_rollover_terminal() {
             .contains_key(&cid)
     );
 
-    h.switch_session(
-        test_session_id("replacement-session"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
+    h.shutdown().expect("shutdown");
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentPromptFailed(failed)
-            if failed.request_id == "create-rollover"
+            if failed.request_id == "create-shutdown"
                 && failed.agent_id == agent_id
-                && failed.ctx_id == "prompt-rollover"
+                && failed.ctx_id == "prompt-shutdown"
                 && failed.stage == tau_proto::AgentPromptFailureStage::LifecycleTeardown
     )));
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_initial_correlations
+            .is_empty()
+    );
 }
 
 /// A render/materialization error before `AgentPromptCreated` consumes the
@@ -2594,271 +2596,6 @@ fn distinct_queued_completion_preempts_wait_with_consumable_candidate() {
         )));
         h.shutdown().expect("shutdown");
     }
-}
-
-/// Session rollover commits the old shutdown, cancels a parked standalone
-/// continuation checkpoint and all warm activation owners, suspends its
-/// responder until the stale reply is consumed, and creates fresh routing only
-/// on the next prompt.
-#[test]
-fn switch_session_clears_loaded_agents_until_next_prompt() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
-    h.config.selected_model = Some("test/model".into());
-    let model: tau_proto::ModelId = "test/model".into();
-    h.session_runtime.current_session_state.context_input_tokens =
-        Some(tau_proto::TokenCount::new(92_000));
-    h.session_runtime
-        .current_session_state
-        .context_cached_tokens = Some(tau_proto::TokenCount::new(90_000));
-    h.session_runtime.current_session_state.context_percent_used = Some(92);
-    h.session_runtime
-        .current_session_state
-        .token_usage
-        .start_request(&model);
-    h.session_runtime
-        .current_session_state
-        .token_usage
-        .add_sent(&model, 819_300, 750_000);
-    h.session_runtime
-        .current_session_state
-        .token_usage
-        .add_received(&model, 34_000);
-
-    let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid]
-            .identity
-            .session_id
-            .as_str(),
-        "s1"
-    );
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("default conversation")
-        .identity
-        .agent_id = Some(crate::parse_agent_id("old-agent"));
-    h.agent_runtime
-        .agent_registry
-        .agent_routes
-        .insert(crate::parse_agent_id("old-agent"), cid.clone());
-    let transaction_id =
-        tau_proto::CompactionTransactionId::parse("ct-session-reset").expect("transaction");
-    h.prompt_coordination
-        .prompt_runtime
-        .pending_publish_completions
-        .insert(
-            cid.clone(),
-            AgentPublishCompletion::StandaloneContinuation {
-                transaction_id: transaction_id.clone(),
-                model: model.clone(),
-                activation_cut: tau_proto::AgentHead::Root,
-                batch_parent: tau_proto::AgentHead::Root,
-                source: None,
-                retry_prompts: vec![PendingPrompt::user("stale retry".to_owned())],
-                complete_on_commit: true,
-                owned_publication: None,
-            },
-        );
-    h.prompt_coordination
-        .compaction_runtime
-        .enqueued_inference_checkpoints
-        .insert((
-            tau_proto::AgentId::parse("old-agent").expect("agent id"),
-            transaction_id.clone(),
-        ));
-    h.enqueue_committed_activation_dispatch(
-        cid.clone(),
-        Some(tau_proto::AgentHead::Root),
-        Some(tau_proto::AgentHead::Root),
-    );
-    let _interceptor = connect_test_tool(&mut h, "rollover-completion-owner");
-    h.handle_extension_event(
-        "rollover-completion-owner",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register rollover interceptor");
-    let checkpoint_prompt_id = test_agent_prompt_id("ap-old-checkpoint");
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("old agent")
-        .dispatch
-        .activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
-        owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
-            id: transaction_id.clone(),
-        },
-        agent_prompt_id: checkpoint_prompt_id.clone(),
-        through: tau_proto::AgentHead::Root,
-        dispatch: crate::agent::InferenceDispatchOwnership {
-            model: model.clone(),
-            operation: tau_proto::PromptOperation::Inference,
-            activation_cut: tau_proto::AgentHead::Root,
-        },
-    };
-    h.publish_for_agent(
-        &cid,
-        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
-            output_length_continuation: None,
-            agent_id: tau_proto::AgentId::parse("old-agent").expect("agent id"),
-            transaction_id: Some(transaction_id.clone()),
-            agent_prompt_id: checkpoint_prompt_id,
-            through: tau_proto::AgentHead::Root,
-            model: Some(model.clone()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
-        }),
-    );
-    assert!(h.runtime_io.publication.pending_intercept.is_some());
-
-    let shell_conn = h
-        .extension_connection_id("shell")
-        .expect("shell")
-        .to_owned();
-
-    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
-        .expect("switch");
-
-    let mut saw_session_dir = false;
-    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.runtime_io.event_log.get_next_from(cursor) {
-        cursor = entry.seq.next();
-        if let Event::HarnessSessionDir(session_dir) = &entry.event
-            && session_dir.session_id == "s2"
-            && session_dir.path.ends_with("s2")
-            && session_dir.status == tau_proto::SessionDirStatus::New
-        {
-            saw_session_dir = true;
-        }
-    }
-    assert!(saw_session_dir, "switch must announce the new session dir");
-
-    assert_eq!(h.session_runtime.current_session_id.as_str(), "s2");
-    assert!(
-        h.prompt_coordination
-            .prompt_runtime
-            .pending_publish_completions
-            .is_empty()
-    );
-    assert!(
-        h.prompt_coordination
-            .compaction_runtime
-            .enqueued_inference_checkpoints
-            .is_empty()
-    );
-    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
-    assert!(h.runtime_io.publication.pending_intercept.is_none());
-    assert!(event_log_events(&h).into_iter().any(|event| {
-        matches!(
-            event,
-            Event::SessionShutdown(shutdown) if shutdown.session_id.as_str() == "s1"
-        )
-    }));
-    assert!(!event_log_events(&h).into_iter().any(|event| {
-        matches!(
-            event,
-            Event::AgentInferenceDispatchStarted(started)
-                if started.transaction_id.as_ref() == Some(&transaction_id)
-        )
-    }));
-    h.handle_extension_event(
-        "rollover-completion-owner",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("replace suspended interceptor registration");
-    let new_session_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
-        session_id: test_session_id("s2"),
-        target_agent_id: None,
-        text: Some("new session event".to_owned()),
-    });
-    h.publish_event(None, new_session_draft.clone());
-    assert!(h.runtime_io.publication.pending_intercept.is_none());
-    h.handle_extension_event(
-        "rollover-completion-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Drop,
-        })),
-    )
-    .expect("stale old-session reply is ignored");
-    assert!(event_log_events(&h).contains(&new_session_draft));
-    let post_stale_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
-        session_id: test_session_id("s2"),
-        target_agent_id: None,
-        text: Some("interception resumes after stale reply".to_owned()),
-    });
-    h.publish_event(None, post_stale_draft.clone());
-    assert!(h.runtime_io.publication.pending_intercept.is_some());
-    h.handle_extension_event(
-        "rollover-completion-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("registration resumes after stale reply is consumed");
-    assert!(event_log_events(&h).contains(&post_stale_draft));
-    assert_eq!(
-        h.session_runtime.current_session_state.context_input_tokens,
-        None
-    );
-    assert_eq!(
-        h.session_runtime
-            .current_session_state
-            .context_cached_tokens,
-        None
-    );
-    assert_eq!(
-        h.session_runtime.current_session_state.context_percent_used,
-        None
-    );
-    assert_eq!(
-        h.session_runtime.current_session_state.token_usage,
-        tau_proto::TokenUsageStats::default()
-    );
-    assert!(h.agent_runtime.agent_registry.agents.is_empty());
-    assert!(h.agent_runtime.agent_registry.agent_routes.is_empty());
-
-    // Drive the new session through init so submit_user_prompt
-    // actually dispatches (rather than queuing).
-    h.handle_extension_event(
-        &shell_conn,
-        TestProtocolItem::Event(Event::ExtensionContextReady(
-            tau_proto::ExtensionContextReady {
-                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
-                    .expect("test identifier must be valid"),
-
-                session_id: test_session_id("s2"),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            },
-        )),
-    )
-    .expect("ready");
-
-    let submission = h
-        .submit_user_prompt(test_session_id("s2"), "hello".to_owned())
-        .expect("submit");
-    assert_eq!(submission, PromptSubmission::Dispatched);
-    let new_cid = test_user_agent(&h);
-    let new_agent_id = h.agent_runtime.agent_registry.agents[&new_cid]
-        .identity
-        .agent_id
-        .clone()
-        .expect("new session agent id");
-    publish_pending_agent_discovery(&mut h, new_agent_id.as_str());
-    assert!(read_nth_prompt_created(&h, 0).agent_id.as_str() == new_agent_id.as_str());
-
-    h.shutdown().expect("shutdown");
 }
 
 /// Named context-size alerts fire as internal prompts only after their

@@ -698,7 +698,7 @@ impl SessionStore {
         Ok(status)
     }
 
-    /// Releases both managed streams before session switch or maintenance.
+    /// Releases both managed streams before shutdown or maintenance.
     pub fn release_session(
         &mut self,
         session_id: &str,

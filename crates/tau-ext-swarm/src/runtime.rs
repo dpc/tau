@@ -138,7 +138,7 @@ pub(crate) struct SwarmRuntime {
     handle: Option<ClientHandle>,
     /// Immutable resolved configuration for this process.
     pub(crate) config: Option<ResolvedConfig>,
-    /// Current Tau logical session, cleared on shutdown.
+    /// Immutable Tau session binding for this extension process.
     session_id: Option<tau_proto::SessionId>,
     /// Whether the current catch-up crossed its coherent boundary.
     pub(crate) replay_complete: bool,
@@ -187,9 +187,8 @@ impl SwarmRuntime {
         }
     }
 
-    fn reset_session(&mut self, session_id: Option<tau_proto::SessionId>) {
+    fn reset_session_working_state(&mut self) {
         self.stop_worker();
-        self.session_id = session_id;
         self.replay_complete = false;
         self.projection_valid = true;
         self.agents.clear();
@@ -618,12 +617,34 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
         return Ok(());
     }
     match event {
-        Event::SessionStarted(event) => {
-            state.reset_session(Some(event.session_id.clone()));
-        }
-        Event::SessionShutdown(event) if state.session_id.as_ref() == Some(&event.session_id) => {
-            state.reset_session(None);
-        }
+        Event::SessionStarted(event) => match state.session_id.as_ref() {
+            Some(current) if current != &event.session_id => {
+                return Err(ClientError::handler(format!(
+                    "immutable session mismatch: expected `{current}`, received `{}`",
+                    event.session_id
+                )));
+            }
+            Some(_) => {}
+            None => {
+                state.session_id = Some(event.session_id.clone());
+                state.reset_session_working_state();
+            }
+        },
+        Event::SessionShutdown(event) => match state.session_id.as_ref() {
+            Some(current) if current != &event.session_id => {
+                return Err(ClientError::handler(format!(
+                    "immutable session shutdown mismatch: expected `{current}`, received `{}`",
+                    event.session_id
+                )));
+            }
+            Some(_) => state.reset_session_working_state(),
+            None => {
+                return Err(ClientError::handler(format!(
+                    "session shutdown arrived before immutable binding: `{}`",
+                    event.session_id
+                )));
+            }
+        },
         Event::SessionAgentLoaded(event)
             if state.session_id.as_ref() == Some(&event.session_id) =>
         {

@@ -638,7 +638,7 @@ impl TauExtension for StdNotificationsExtension {
     }
 }
 
-fn subscribed_events() -> [tau_proto::EventName; 20] {
+fn subscribed_events() -> [tau_proto::EventName; 21] {
     [
         tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
         tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
@@ -648,6 +648,7 @@ fn subscribed_events() -> [tau_proto::EventName; 20] {
         tau_proto::EventName::AGENT_STARTED,
         tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
         tau_proto::EventName::AGENT_STATE,
+        tau_proto::EventName::SESSION_STARTED,
         tau_proto::EventName::SESSION_AGENT_LOADED,
         tau_proto::EventName::SESSION_AGENT_UNLOADED,
         tau_proto::EventName::SESSION_SHUTDOWN,
@@ -687,6 +688,8 @@ fn handle_live_delivery(cx: RawEventContext<'_, NotificationLoop>) -> tau_client
 /// while user-visible prompt/end hooks must ignore extension side
 /// conversations.
 struct NotificationLoop {
+    /// Immutable Tau session identity observed from the first lifecycle fact.
+    bound_session_id: Option<tau_proto::SessionId>,
     /// Default idle window used for hooks without an explicit delay.
     idle_duration: Duration,
     /// Last valid live extension configuration accepted from the harness.
@@ -765,6 +768,7 @@ impl NotificationLoop {
     fn new(idle_duration: Duration) -> Self {
         Self {
             idle_duration,
+            bound_session_id: None,
             config: ExtConfig::default(),
             idle: Vec::new(),
             idle_all: Vec::new(),
@@ -866,6 +870,40 @@ impl NotificationLoop {
         event: Event,
         handle: &ClientHandle,
     ) -> tau_client::ClientResult<()> {
+        match &event {
+            Event::SessionStarted(started) => match self.bound_session_id.as_ref() {
+                Some(bound) if bound != &started.session_id => {
+                    return Err(ClientError::handler(format!(
+                        "immutable session mismatch: expected `{bound}`, received `{}`",
+                        started.session_id
+                    )));
+                }
+                Some(_) => return Ok(()),
+                None => self.bound_session_id = Some(started.session_id.clone()),
+            },
+            Event::SessionAgentLoaded(loaded)
+                if self.bound_session_id.as_ref() != Some(&loaded.session_id) =>
+            {
+                return Err(ClientError::handler(
+                    "loaded-agent event does not match immutable session",
+                ));
+            }
+            Event::SessionAgentUnloaded(unloaded)
+                if self.bound_session_id.as_ref() != Some(&unloaded.session_id) =>
+            {
+                return Err(ClientError::handler(
+                    "unloaded-agent event does not match immutable session",
+                ));
+            }
+            Event::SessionShutdown(shutdown)
+                if self.bound_session_id.as_ref() != Some(&shutdown.session_id) =>
+            {
+                return Err(ClientError::handler(
+                    "shutdown event does not match immutable session",
+                ));
+            }
+            _ => {}
+        }
         tracing::trace!(target: LOG_TARGET, name = %event.name(), "event received");
         self.update_all_idle_tracking(&event, self.idle_duration);
         if is_sub_agent_event(&event) {

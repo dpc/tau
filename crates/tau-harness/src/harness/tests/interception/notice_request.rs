@@ -637,15 +637,8 @@ fn debug_jsonl_keeps_request_and_published_output_separate() {
     );
     harness.log_event(&event);
     let mut served_clients = 0;
-    let mut exit_on_disconnect = false;
-    let mut ever_attached = false;
     harness
-        .handle_runtime_event(
-            event,
-            &mut served_clients,
-            &mut exit_on_disconnect,
-            &mut ever_attached,
-        )
+        .handle_runtime_event(event, &mut served_clients)
         .expect("handle notice request");
 
     let entries = std::fs::read_to_string(debug_path)

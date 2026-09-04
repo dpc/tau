@@ -41,9 +41,9 @@ Tau follows the XDG directory layout on Linux:
   - `secrets/ext/<extension>/providers/<provider>/` — typed provider credentials.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`.
 
-  - `<pid>-<instance>.sock` — daemon socket.
-  - `<pid>-<instance>.json` — discovery metadata with pid, project root, version, and the
-    daemon's current active `session_id` (updated after successful `:session new`).
+  - `sockets/<session-key>.sock` — deterministic socket for one immutable session.
+  - `claims/<session-key>.lock` — lifetime claim for that session; diagnostic JSON
+    inside the lock is not routing authority.
 
 Extension stderr under `sessions/<session_id>/logs/` follows whole-session
 retention (disabled by default). The default 30-day diagnostic cleanup applies to

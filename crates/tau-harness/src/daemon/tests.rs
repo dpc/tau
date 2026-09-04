@@ -189,56 +189,6 @@ fn component_launch_selects_private_transport_only_for_spawned_child() {
     );
 }
 
-/// Locks the CLI-to-harness runtime identity boundary: spawned children consume
-/// an exact valid value, self-mint when absent, and reject malformed values.
-#[test]
-fn spawned_component_resolves_runtime_instance_transport() {
-    let launch = ComponentLaunch::SpawnedInitialUiStdio;
-    let supplied = "0123456789abcdef";
-
-    assert_eq!(
-        launch
-            .runtime_instance_id(Some(supplied.into()))
-            .expect("valid supplied instance")
-            .as_str(),
-        supplied
-    );
-    let minted = launch
-        .runtime_instance_id(None)
-        .expect("missing transport mints");
-    assert_eq!(minted.as_str().len(), 16);
-    assert!(
-        minted
-            .as_str()
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    );
-    assert!(
-        launch
-            .runtime_instance_id(Some("not-an-instance".into()))
-            .is_err(),
-        "malformed supplied identities must fail closed"
-    );
-}
-
-/// Ensures direct harness components always self-mint instead of consuming a
-/// private identity inherited from an unrelated CLI-managed spawn.
-#[test]
-fn direct_component_self_mints_runtime_instance() {
-    let inherited = "not-an-instance";
-    let instance = ComponentLaunch::Direct(Vec::new())
-        .runtime_instance_id(Some(inherited.into()))
-        .expect("direct launch instance");
-
-    assert_eq!(instance.as_str().len(), 16);
-    assert!(
-        instance
-            .as_str()
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    );
-}
-
 /// Ensures the synchronous daemon-message helper subscribes only to the
 /// concrete trace events it consumes, instead of receiving every future event
 /// in broad protocol categories.

@@ -272,7 +272,7 @@ fn spawn_daemon_inner(
         .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
         .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))
         .env("XDG_CACHE_HOME", fixture.root().join("xdg-cache"))
-        .env("XDG_RUNTIME_DIR", fixture.root().join("xdg-runtime"))
+        .env("XDG_RUNTIME_DIR", fixture.runtime_dir())
         .env("LANG", "C.UTF-8")
         .process_group(0)
         .arg(socket)

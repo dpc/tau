@@ -280,6 +280,10 @@ pub(super) struct State {
     last_agent_stats: BTreeMap<AgentComparisonKey, AgentStatsUpdated>,
     /// Last quota snapshot within each traffic scope and provider.
     last_provider_quota: BTreeMap<QuotaComparisonKey, HarnessProviderQuotaChanged>,
+    /// Immutable session identity observed from the first lifecycle fact.
+    bound_session_id: Option<tau_proto::SessionId>,
+    /// Whether a conflicting lifecycle fact disabled further diagnostics.
+    session_binding_failed: bool,
 }
 
 impl Default for State {
@@ -289,6 +293,8 @@ impl Default for State {
             attach_phase: AttachPhase::ColdAttach,
             last_agent_stats: BTreeMap::new(),
             last_provider_quota: BTreeMap::new(),
+            bound_session_id: None,
+            session_binding_failed: false,
         }
     }
 }
@@ -303,6 +309,45 @@ impl State {
         frame_bytes: u64,
         measurements: Vec<MeasurementSample>,
     ) {
+        if self.session_binding_failed {
+            return;
+        }
+        let lifecycle_session_id = match event {
+            Event::SessionStarted(started) => Some((&started.session_id, true)),
+            Event::SessionShutdown(shutdown) => Some((&shutdown.session_id, false)),
+            _ => None,
+        };
+        if let Some((received, may_bind)) = lifecycle_session_id {
+            match self.bound_session_id.as_ref() {
+                Some(bound) if bound == received => {}
+                Some(bound) => {
+                    tracing::warn!(
+                        expected_session_id = %bound,
+                        received_session_id = %received,
+                        "disabled protocol diagnostics after immutable-session mismatch"
+                    );
+                    self.last_agent_stats.clear();
+                    self.last_provider_quota.clear();
+                    self.session_binding_failed = true;
+                    return;
+                }
+                None if may_bind => {
+                    self.last_agent_stats.clear();
+                    self.last_provider_quota.clear();
+                    self.bound_session_id = Some(received.clone());
+                }
+                None => {
+                    tracing::warn!(
+                        received_session_id = %received,
+                        "disabled protocol diagnostics after shutdown before session binding"
+                    );
+                    self.last_agent_stats.clear();
+                    self.last_provider_quota.clear();
+                    self.session_binding_failed = true;
+                    return;
+                }
+            }
+        }
         let scope = DeliveryScope {
             attach: self.attach_phase,
             delivery: delivery_kind,
@@ -377,7 +422,7 @@ impl State {
             Event::SessionAgentUnloaded(unloaded) => self
                 .last_agent_stats
                 .retain(|key, _| key.agent_id != unloaded.agent_id),
-            Event::SessionStarted(_) => {
+            Event::SessionShutdown(_) => {
                 self.last_agent_stats.clear();
                 self.last_provider_quota.clear();
             }

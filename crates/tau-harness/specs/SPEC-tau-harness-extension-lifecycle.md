@@ -161,12 +161,10 @@ configured inter-session receiver; exact capabilities preserve known-address
 delivery to agents without receiver capability. Authenticated peer bodies remain
 escaped agent content in a typed peer-message prompt envelope, never harness
 instructions.
-Runtime-dir discovery verifies matching candidates by connecting to their
-sockets. Discovery never unlinks runtime files because a failed probe, metadata
-PID liveness check, and pathname identity check cannot atomically exclude PID
-reuse or a replacement listener. Owned CLI shutdown closes the initial-client
-transport first so the daemon's exit-on-disconnect cleanup normally removes its
-own lifecycle pair; forced termination remains a bounded fallback.
+Runtime-dir discovery verifies matching session claims by exact socket
+admission. Discovery never unlinks a contended claim or its socket; only the
+daemon holding that session's lifetime lock may reclaim a stale socket before
+binding or remove its own runtime paths during final authority retirement.
 
 ## Extension configuration errors
 
@@ -328,5 +326,5 @@ Configured Tool/Core extensions may publish a complete bounded set of ambient
 runtime indicators for each live agent. The harness aggregates current
 configured-source contributions by union. It clears a source contribution when
 that connection disconnects, clears an agent's contributions when the agent
-unloads, and clears all contributions on session rollover; these transient
+unloads, and clears all contributions on final shutdown; these transient
 declarations never enter replay.

@@ -88,7 +88,7 @@ pub(super) struct AgentDiscoveryState {
     pub(super) ephemeral_agents: Arc<Mutex<HashSet<tau_proto::AgentId>>>,
 }
 
-/// Input-routing authority shared with the renderer.
+/// Current input target, visible transcript, and detached transcript snapshots.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SelectionIntent {
     /// Monotonic local-selection claim epoch.
@@ -97,12 +97,32 @@ pub(crate) struct SelectionIntent {
     pub(crate) selected_agent_id: Option<tau_proto::AgentId>,
 }
 
+impl SelectionIntent {
+    /// Returns the selected agent as a borrowed string-like identifier.
+    #[cfg(test)]
+    pub(crate) fn as_ref(&self) -> Option<&tau_proto::AgentId> {
+        self.selected_agent_id.as_ref()
+    }
+
+    /// Returns the selected agent's validated text.
+    #[cfg(test)]
+    pub(crate) fn as_deref(&self) -> Option<&str> {
+        self.selected_agent_id.as_deref()
+    }
+}
+
 impl From<Option<tau_proto::AgentId>> for SelectionIntent {
     fn from(selected_agent_id: Option<tau_proto::AgentId>) -> Self {
         Self {
             epoch: 0,
             selected_agent_id,
         }
+    }
+}
+
+impl PartialEq<Option<tau_proto::AgentId>> for SelectionIntent {
+    fn eq(&self, other: &Option<tau_proto::AgentId>) -> bool {
+        self.selected_agent_id == *other
     }
 }
 
@@ -122,9 +142,7 @@ pub(super) struct AgentSelectionState {
     pub(super) overview_message_ids:
         HashSet<(Option<tau_proto::SessionId>, tau_proto::AgentMessageId)>,
     /// Input-thread mirror of the selected agent.
-    pub(super) current_agent_state: Arc<Mutex<Option<tau_proto::AgentId>>>,
-    /// Input-thread selection authority and local-intent epoch.
-    pub(super) selection_intent: Arc<Mutex<SelectionIntent>>,
+    pub(super) current_agent_state: Arc<Mutex<SelectionIntent>>,
     /// Mailbox used to retarget pending drafts.
     pub(super) draft_retargeter: Option<DraftRetargeter>,
 }
@@ -296,6 +314,8 @@ pub(super) struct SessionPresentationState {
     pub(super) ready_extensions: HashSet<String>,
     /// Current session identity.
     pub(super) current_session_id: Option<tau_proto::SessionId>,
+    /// Irreversible fail-closed latch after a conflicting session identity.
+    pub(super) session_binding_failed: bool,
     /// Session-wide provider token totals.
     pub(super) session_token_usage: tau_proto::TokenUsageCounts,
     /// Startup profile selection.

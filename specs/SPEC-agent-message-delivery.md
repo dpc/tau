@@ -232,9 +232,9 @@ uncovered receive remains outstanding.
 
 Checkpoint coverage and settled-empty selected-branch retirement release the
 exact wake and peer byte weight. Endpoint termination/unload, pending-start
-cancellation, session rollover, and shutdown clear applicable runtime wakes,
+cancellation and final session shutdown clear applicable runtime wakes,
 waits, watch isolation state, and admission weights; committed facts remain.
-Stale-generation completions cannot install wakes in a replacement session. If
+Stale-generation completions cannot install wakes after final session shutdown. If
 this cleanup destructively cancels an already delivered interception request, the
 responder follows the one-reply suspension contract in
 [SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md):

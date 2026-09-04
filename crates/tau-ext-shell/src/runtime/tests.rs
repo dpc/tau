@@ -997,11 +997,10 @@ fn awaiting_workdir_cancel_terminalizes_at_correlated_commit() {
     );
 }
 
-/// Ensures a session-level shutdown cleans shell-owned state without
-/// dropping the scheduler needed by a subsequent session in the same
-/// extension process.
+/// Ensures final session shutdown cleans shell-owned state without dropping the
+/// scheduler before the extension process exits.
 #[test]
-fn session_shutdown_keeps_scheduler_for_later_sessions() {
+fn session_shutdown_keeps_scheduler_until_process_exit() {
     let (tx, _rx) = mpsc::channel();
     let mut runtime = ShellRuntime::new(
         Output::channel(tx),
@@ -1009,6 +1008,15 @@ fn session_shutdown_keeps_scheduler_for_later_sessions() {
         DiscoverySourcePolicy::Environment,
     );
 
+    runtime
+        .handle_event(
+            Event::SessionStarted(tau_proto::SessionStarted {
+                session_id: "session-1".parse().expect("session id"),
+                reason: tau_proto::SessionStartReason::Initial,
+            }),
+            false,
+        )
+        .expect("session start");
     runtime
         .handle_event(
             Event::SessionShutdown(tau_proto::SessionShutdown {
@@ -1111,7 +1119,7 @@ fn initialization_output_failure_fails_event_dispatch() {
         .handle_event(
             Event::SessionStarted(tau_proto::SessionStarted {
                 session_id: tau_proto::SessionId::parse("session-failure").expect("session id"),
-                reason: tau_proto::SessionStartReason::New,
+                reason: tau_proto::SessionStartReason::Initial,
             }),
             false,
         )

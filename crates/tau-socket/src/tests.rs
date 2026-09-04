@@ -2,7 +2,6 @@
 use std::io::ErrorKind;
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;

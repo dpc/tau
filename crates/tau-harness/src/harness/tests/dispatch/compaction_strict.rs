@@ -15,7 +15,7 @@ fn strict_provider_vertical_slice_accepts_closed_post_tool_compaction() {
         .expect("queue later prompt");
 
     let error = h
-        .run_event_loop(None, false)
+        .run_event_loop(None)
         .expect_err("test provider disconnects after completing the later prompt");
     assert!(matches!(
         error,

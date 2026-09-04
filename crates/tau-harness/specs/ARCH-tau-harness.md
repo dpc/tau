@@ -19,9 +19,9 @@ restart skips that id even after an indeterminate failure, preserving at-most-on
 rather than exactly-once semantics.
 
 One Harness-owned `SemanticPersistenceOwner` prepares every durable agent,
-ordinary-session, and restore stream. Startup and switch prepare `New` or strict
-`Resume` authority before exposing runtime state. Switch closes the complete old
-lease set under one deadline; failure after canonical shutdown fail-stops
+ordinary-session, and restore stream for the daemon's immutable session. Startup
+prepares `New` or strict `Resume` authority before exposing runtime state. Final
+shutdown closes the complete lease set under one deadline; failure fail-stops
 persistence rather than forging a second owner.
 
 Canonical publication first admits the semantic frame and complete in-memory
@@ -90,7 +90,7 @@ journal tail), symlinked, or locked state fails unchanged.
 All modes install process-level SIGINT and SIGTERM handling
 that wakes the central event loop. Coordinated shutdown retires listener
 admission first, then shuts down harness connections and extensions, removes the
-runtime socket and metadata, and returns normally to the supervisor. A second
+session-keyed runtime socket and lifetime claim, and returns normally to the supervisor. A second
 SIGINT or SIGTERM restores that signal's default forced termination; it may
 interrupt extension cleanup and runtime-file removal. Signal handlers perform no
 semantic work themselves.
@@ -100,7 +100,7 @@ session, agent, diagnostic, retention, and extension storage;
 session-ephemeral mode suppresses only session-owned artifacts; memory-only
 mode replaces both semantic stores with process-local stores and disables every
 harness-managed persistent capability while preserving the ordinary event and
-extension lifecycle. Only the unique runtime discovery pair may exist while a
+extension lifecycle. Only the unique session claim/socket may exist while a
 memory-only daemon runs. Owned effective-prompt and tool-preview daemons combine
 session-ephemeral mode with a process-local agent store so their one preview
 agent cannot create durable state; provider and extension storage retain
@@ -119,11 +119,10 @@ required by
 [SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md).
 The metadata slice covers request-to-canonical publication; rejection outcomes
 remain unspecified and preserve silent rejection.
-UI extension-counter inspection now uses the dedicated
+UI extension-counter inspection uses the dedicated
 `ui_debug_event_stats_request` message with attached-socket-UI authority and a
-directed, non-published notice result. UI detach now uses the dedicated
-`ui_detach_request` message with the same authority and direct
-connection-control behavior. Unconditional UI-requested shutdown uses the
+directed, non-published notice result. UI disconnect and `:detach` have no
+session-lifetime authority. Unconditional UI-requested shutdown uses the
 payload-free `ui_shutdown_request` with the same attached-socket-UI authority;
 it enters the same canonical lifecycle as signal or policy shutdown and does
 not itself become an event. UI tree inspection uses `ui_tree_request` and
@@ -152,11 +151,10 @@ accepted during indefinite suspension; disconnect clears it and a new connection
 starts unsuspended. See
 [SPEC-tau-harness-event-processing](SPEC-tau-harness-event-processing.md).
 
-Peer frames retain their admission session/generation through activation
-staging. Rollover raw-commits documented session-bound observations but blocks
-their downstream semantics at one shared generation boundary. Process-global
-tool/prompt-fragment/model declarations and provider-quota current-state reports
-survive rollover and run only under exact live connection/instance checks.
+Peer frames retain their immutable admitted session and connection generation
+through activation staging. Session-bound observations and downstream semantics
+must match that daemon session. Process-global tool, prompt-fragment, model, and
+provider-quota state also requires exact live connection/instance checks.
 
 Per-agent context registration, correlated values, discovery snapshots, and
 readiness commit before the harness updates runtime prompt projections or releases
@@ -290,7 +288,7 @@ generation, frame-admission session, and private routed command before publishin
 harness-sourced canonical progress/completion; transcript injection follows
 canonical completion commit. Immutable original-route classification and
 process-lifetime harness-route tombstones keep ephemeral report payloads out of
-durable debug JSONL across interception and session rollover; unknown
+durable debug JSONL across interception and final shutdown; unknown
 peer-chosen routes retain ordinary audit treatment. See
 [SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
 Configured Provider/Tool/Core peers submit `tool.request` through generic
@@ -331,7 +329,7 @@ message with Provider-supplied session/prompt attribution. The harness accepts
 them only from the current authenticated Provider connection and a known
 durable session, derives the configured-instance path itself, and queues exact
 zstd bytes on a bounded filesystem worker without parsing or decompression.
-Late captures retain their attributed old session across rollover; missing
+Captures retain their attributed immutable session; missing
 session roots, overload, failures, and shutdown omit the best-effort artifact.
 The writer creates capture directories with owner-only access and capture files
 with owner read/write access, tightening existing capture-directory modes before
@@ -422,10 +420,8 @@ also carries the stable configured provider publisher so replacement and empty
 snapshots remain attributable even though their delivery source is the harness.
 Subscribe-time current-state catch-up synthesizes canonical updates with that stable
 publisher and harness source metadata only. It is not durable replay, never
-regenerates declarations, and never reruns their side effects. Session rollover
-retains a deferred declaration and applies it
-when the captured connection/configured instance remains exact because model state
-is process-global. The payload and event-name contract is documented in
+regenerates declarations, and never reruns their side effects. A deferred declaration applies only when the captured connection/configured
+instance remains exact because model state is process-global. The payload and event-name contract is documented in
 [SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-model-declarations-and-canonical-state).
 
 Configured Provider peers publish explicitly transient
@@ -441,9 +437,9 @@ clients and extensions, sequences events, applies interception, persists durable
 session/agent facts, and delivers committed events to subscribers.
 
 The harness also owns bounded, redacted peer and local-agent discovery
-snapshots. Runtime metadata advertises only an untrusted entrypoint hint; the
-live harness confirms its current session and effective policy through a narrow
-probe.
+snapshots. A deterministic session-keyed runtime claim identifies the only
+candidate socket; an exact admission handshake confirms the daemon's immutable
+session and effective policy.
 The same event loop owns inter-session receiver admission, fair live selection,
 and configured-order role auto-start. It admits bounded count/bytes/rate before
 creation, treats accepted startup placeholders and busy eligible agents as
@@ -537,29 +533,24 @@ block Ready while parked; prompt assembly consumes only committed active
 fragments. See
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 
-The harness daemon listener is local IPC for trusted same-user Tau clients and
-runtime discovery. Listener ownership and cleanup must preserve the socket
-identity checks in `tau-socket`; a daemon-owned listener should outlive cloned raw
-listener fds used by accept-forwarder threads, and socket-activated listeners must
-not be unlinked by the harness.
+The harness daemon listener is cooperative same-user local IPC. Each shared
+runtime daemon first acquires one exclusive lifetime `flock` at a full-BLAKE3
+session key, reclaims only that session's stale socket, then binds the matching
+deterministic socket before taking the separate durable store lock. The daemon
+holds the claim until listener retirement, transport shutdown, and all session
+storage authority have ended. PIDs and process generations never participate in
+routing or liveness decisions.
 
-Discovery is non-destructive because liveness and filesystem identity checks
-cannot be made atomic with PID reuse and listener replacement. Before the
-interactive UI owns daemon disposition, CLI error cleanup closes the initial
-transport and gives exit-on-disconnect a bounded grace to remove the runtime
-pair, with forced termination only as fallback. Once the UI runs, every UI exit
-leaves child lifetime to exit-on-disconnect, detach policy, or an explicit
-canonical shutdown request; it does not directly force-terminate the child.
-Targeted session lookup
-may traverse a larger bounded raw catalog than general peer discovery so stale
-unrelated pairs do not consume the much smaller matching-candidate budget.
-Local running-session listing isolates bounded runtime-path traversal, then uses
-a per-candidate, correlation-matched local socket RPC to obtain each responsive harness's
-in-memory current session id and immutable canonical startup project root.
-Runtime metadata and persisted session directories provide neither live records
-nor returned field authority. The overall scan has a fixed deadline and fails
-instead of returning a partial snapshot when candidate traversal or the total
-probe budget is incomplete.
+Exact lookup opens only the requested claim. An absent or safely unlocked claim
+linearizes as not running; a contended claim whose socket cannot complete exact
+session admission is incomplete. Listing scans bounded contended claims and
+fails wholly rather than returning a partial snapshot. Every routed socket
+client declares the expected session and receives `session_accepted` before
+semantic traffic.
+The built-in `tau-runtime-probe` remains semantically quarantined after exact
+admission: it may request only `get_current_session` diagnostics or disconnect.
+It cannot subscribe, inspect agents/debug/tree state, request shutdown, or
+consume the completed-client `max_clients` retirement budget.
 The wire contract is specified by
 [SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
 
@@ -572,19 +563,18 @@ client.
 
 The harness validates provider prompt ownership and derives public routing identity, but providers retain streaming and response-throughput authority under [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md). Public stats are content-free and transient; they never become transcript, editor, prompt-stdin, or final-response content.
 
-The harness owns an active-session `AgentCreatorTopology` and separate
+The harness owns a session-bound `AgentCreatorTopology` and separate
 `AgentCostLedger`. Topology accepts only authenticated same-session
 `AgentStarted.creator = AgentCreator::Agent` edges, preserves the first valid
 edge, and retains relationships through individual runtime retirement.
 `parent_agent`, remote provenance, and legacy missing creators contribute no
 edge. Accepted response usage increments self cost and every creator ancestor's
-inclusive subtree cost with saturation; costs reset at rollover while resume
-re-seeds only loaded creation edges. Complete transient stats snapshots update
+inclusive subtree cost with saturation; resume re-seeds only loaded creation edges. Complete transient stats snapshots update
 the changed agent and each loaded creator ancestor.
 
 ## Agent navigation authority
 
-Current-session runtime owns loaded-agent navigation modes alongside membership
+The immutable session runtime owns loaded-agent navigation modes alongside membership
 and routing. Modes affect UI eligibility only, never loading, routing, delivery,
 watches, execution, or model behavior.
 

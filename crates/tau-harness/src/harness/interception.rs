@@ -1015,14 +1015,14 @@ fn event_is_effectively_must_pass(event: &Event, caller_must_pass: bool) -> bool
         )
 }
 
-/// Return whether a deferred peer publication must cross session rollover.
+/// Return whether a deferred peer publication must commit during shutdown.
 ///
 /// Process-global declarations/reports retain their semantic effect for the
 /// still-current extension generation. Session-bound observation families
 /// retain only their raw committed fact; the downstream admission-generation
 /// barrier suppresses stale semantics.
-fn rollover_publication_must_commit(event: &Event) -> bool {
-    Harness::peer_event_semantics_survive_rollover(event)
+fn shutdown_publication_must_commit(event: &Event) -> bool {
+    Harness::peer_event_semantics_survive_shutdown(event)
         || matches!(
             event,
             Event::ToolRequest(_)
@@ -1672,11 +1672,11 @@ impl Harness {
         }
     }
 
-    /// Quiesce synchronized publications for rollover: cancel old-session
+    /// Quiesce synchronized publications for final session shutdown: cancel
     /// checkpoints/completions, retain required publications, run
     /// Drop-equivalent cleanup, suspend in-flight responders, and drain the
     /// retained FIFO.
-    pub(crate) fn quiesce_synchronized_publications_for_rollover(&mut self) {
+    pub(crate) fn quiesce_synchronized_publications_for_shutdown(&mut self) {
         if let Some(pending) = self.runtime_io.publication.pending_intercept.take() {
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             if Self::is_synchronized_agent_checkpoint_or_completion(
@@ -1700,22 +1700,22 @@ impl Harness {
                     self.publish_initial_prompt_failed(
                         correlation.clone(),
                         tau_proto::AgentPromptFailureStage::LifecycleTeardown,
-                        "session switch discarded initial prompt submission",
+                        "session shutdown discarded initial prompt submission",
                     );
                 }
                 self.rollback_rejected_activation_successor(&pending.event);
             } else {
-                // The switch already advanced session generation. Commit the
+                // Shutdown already advanced session generation. Commit the
                 // accepted observation through its normal path; stale admission
                 // can no longer create or retarget work in the replacement
-                // session.
+                // shutting-down session.
                 self.advance_pending_intercept(pending, InterceptAction::Pass(None));
             }
         }
         // Specialized session teardown has already completed admission, ACK,
         // shell, and peer failure paths. Retain mandatory terminal/lifecycle
         // publications, including SessionShutdown, and force their interception
-        // chains to completion before changing the bound session.
+        // chains to completion before retiring the bound session.
         let mut retained = VecDeque::with_capacity(self.runtime_io.publication.deferred.len());
         while let Some(publish) = self.runtime_io.publication.deferred.pop_front() {
             if let Some(AgentPublishCompletion::InitialPromptSubmission { correlation }) = publish
@@ -1726,21 +1726,21 @@ impl Harness {
                 let correlation = correlation.clone();
                 self.discard_deferred_publish(
                     publish,
-                    "session rollover canceled initial prompt submission",
+                    "session shutdown canceled initial prompt submission",
                 );
                 self.publish_initial_prompt_failed(
                     correlation,
                     tau_proto::AgentPromptFailureStage::LifecycleTeardown,
-                    "session switch discarded initial prompt submission",
+                    "session shutdown discarded initial prompt submission",
                 );
                 continue;
             }
             if event_is_effectively_must_pass(&publish.event, publish.must_pass)
-                || rollover_publication_must_commit(&publish.event)
+                || shutdown_publication_must_commit(&publish.event)
             {
                 retained.push_back(publish);
             } else {
-                self.discard_deferred_publish(publish, "session rollover canceled publication");
+                self.discard_deferred_publish(publish, "session shutdown canceled publication");
             }
         }
         self.runtime_io.publication.deferred = retained;

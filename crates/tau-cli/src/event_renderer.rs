@@ -54,7 +54,7 @@ use crate::tool_render::{
 use crate::turn_stats_projection::TurnStatsPresentationProjection;
 use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
 use crate::{
-    MUTEX_POISONED, build_banner, message_fact_render as path_crate_message_fact_render,
+    MUTEX_POISONED, message_fact_render as path_crate_message_fact_render,
     provider_quota as path_crate_provider_quota,
 };
 
@@ -739,8 +739,6 @@ struct DiagnosticBlockEntry {
 
 /// Typed lifecycle diagnostic data retained independently of theme.
 enum DiagnosticProjection {
-    /// Process-local startup banner.
-    Banner,
     /// Extension lifecycle status.
     ExtensionStatus {
         /// Stable extension name.
@@ -785,8 +783,6 @@ enum ExtensionLifecycleStatus {
     Ready,
     /// Extension exited.
     Exited,
-    /// Extension remained ready across a session reset.
-    Kept,
 }
 
 impl ExtensionLifecycleStatus {
@@ -796,7 +792,6 @@ impl ExtensionLifecycleStatus {
             Self::Starting => "starting",
             Self::Ready => "ready",
             Self::Exited => "exited",
-            Self::Kept => "kept",
         }
     }
 }
@@ -1846,8 +1841,9 @@ impl EventRenderer {
                 no_agent_ui_state: AgentUiState::default(),
                 agents_ui_state: HashMap::new(),
                 overview_message_ids: HashSet::new(),
-                current_agent_state: Arc::new(Mutex::new(None)),
-                selection_intent: Arc::new(Mutex::new(renderer_state::SelectionIntent::default())),
+                current_agent_state: Arc::new(Mutex::new(
+                    renderer_state::SelectionIntent::default(),
+                )),
                 draft_retargeter: None,
             },
             event_owners: renderer_state::EventOwnershipState::default(),
@@ -2030,17 +2026,15 @@ impl EventRenderer {
         self.discovery.agent_navigation.clone()
     }
 
-    #[cfg(test)]
     pub(crate) fn current_agent_state(
         &self,
-    ) -> std::sync::Arc<std::sync::Mutex<Option<tau_proto::AgentId>>> {
+    ) -> std::sync::Arc<std::sync::Mutex<renderer_state::SelectionIntent>> {
         self.selection.current_agent_state.clone()
     }
 
-    pub(crate) fn selection_intent(
-        &self,
-    ) -> std::sync::Arc<std::sync::Mutex<renderer_state::SelectionIntent>> {
-        self.selection.selection_intent.clone()
+    #[cfg(test)]
+    pub(crate) fn displayed_agent_id_for_test(&self) -> Option<&tau_proto::AgentId> {
+        self.selection.displayed_agent_id.as_ref()
     }
 
     #[cfg(test)]
@@ -2056,10 +2050,11 @@ impl EventRenderer {
 
     #[cfg(test)]
     pub(crate) fn switch_agent(&mut self, agent_id: tau_proto::AgentId) {
-        self.switch_agent_after_display_update_inner(agent_id, || {}, true);
+        self.switch_agent_after_display_update(agent_id, || {});
     }
 
-    /// Applies a display command whose input target was already claimed.
+    /// Applies a target already claimed by the input or attach CAS boundary
+    /// only while the exact intent epoch and target remain current.
     pub(crate) fn apply_claimed_agent(&mut self, agent_id: tau_proto::AgentId, intent_epoch: u64) {
         if !self.selection_intent_matches(intent_epoch, Some(&agent_id)) {
             return;
@@ -2072,6 +2067,15 @@ impl EventRenderer {
     /// transcript but before updating the selected target, status, or
     /// placeholder.
     pub(crate) fn switch_agent_after_display_update_for_test(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        after_display_update: impl FnOnce(),
+    ) {
+        self.switch_agent_after_display_update(agent_id, after_display_update);
+    }
+
+    #[cfg(test)]
+    fn switch_agent_after_display_update(
         &mut self,
         agent_id: tau_proto::AgentId,
         after_display_update: impl FnOnce(),
@@ -2112,11 +2116,13 @@ impl EventRenderer {
         self.flush_pending_initial_discovery();
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_selected_agent(&mut self) {
-        self.clear_selected_agent_after_display_update_inner(|| {}, true);
+        self.clear_selected_agent_after_display_update(|| {});
     }
 
-    /// Applies a clear command whose input target was already claimed.
+    /// Applies an empty target already claimed by the input boundary only while
+    /// the exact intent epoch remains current.
     pub(crate) fn apply_claimed_clear(&mut self, intent_epoch: u64) {
         if !self.selection_intent_matches(intent_epoch, None) {
             return;
@@ -2129,9 +2135,12 @@ impl EventRenderer {
         intent_epoch: u64,
         agent_id: Option<&tau_proto::AgentId>,
     ) -> bool {
-        self.selection.selection_intent.lock().is_ok_and(|intent| {
-            intent.epoch == intent_epoch && intent.selected_agent_id.as_ref() == agent_id
-        })
+        self.selection
+            .current_agent_state
+            .lock()
+            .is_ok_and(|intent| {
+                intent.epoch == intent_epoch && intent.selected_agent_id.as_ref() == agent_id
+            })
     }
 
     #[cfg(test)]
@@ -2141,6 +2150,11 @@ impl EventRenderer {
         &mut self,
         after_display_update: impl FnOnce(),
     ) {
+        self.clear_selected_agent_after_display_update(after_display_update);
+    }
+
+    #[cfg(test)]
+    fn clear_selected_agent_after_display_update(&mut self, after_display_update: impl FnOnce()) {
         self.clear_selected_agent_after_display_update_inner(after_display_update, true);
     }
 
@@ -2156,10 +2170,10 @@ impl EventRenderer {
                 let display_changed = self.selection.displayed_agent_id.is_some();
                 if target_changed || display_changed {
                     // Only a clear that actually leaves an agent creates the explicit
-                    // no-agent boundary. A delayed clear command that arrives after
-                    // `:session new` while the UI is already on the fresh initial
-                    // screen must stay a no-op, otherwise the first new-session agent
-                    // would incorrectly clear startup history instead of adopting it.
+                    // no-agent boundary. A delayed clear command that arrives while
+                    // the UI is already on the no-agent screen must stay a no-op,
+                    // otherwise the next agent would incorrectly clear startup
+                    // history instead of adopting it.
                     self.selection.awaiting_new_agent_selection = true;
                 }
 
@@ -2325,12 +2339,9 @@ impl EventRenderer {
         update_intent: bool,
     ) {
         self.selection.current_agent_id = agent_id.clone();
-        if let Ok(mut current) = self.selection.current_agent_state.lock() {
-            *current = agent_id.clone();
-        }
-        if update_intent && let Ok(mut intent) = self.selection.selection_intent.lock() {
-            intent.epoch = intent.epoch.saturating_add(1);
-            intent.selected_agent_id = agent_id;
+        if update_intent && let Ok(mut current) = self.selection.current_agent_state.lock() {
+            current.epoch = current.epoch.saturating_add(1);
+            current.selected_agent_id = agent_id;
         }
         if retarget_draft {
             self.retarget_prompt_draft();
@@ -3837,9 +3848,6 @@ impl EventRenderer {
             return Self::empty_block();
         }
         match projection {
-            DiagnosticProjection::Banner => {
-                tau_cli_term::StyledBlock::new(build_banner(&self.resources.theme))
-            }
             DiagnosticProjection::ExtensionStatus {
                 extension_name,
                 status,
@@ -3936,122 +3944,6 @@ impl EventRenderer {
         self.presentation.verbose_mode = !self.presentation.verbose_mode;
         self.rerender_visible_for_current_settings();
         self.invalidate_for_retroactive_toggle();
-    }
-
-    /// Clears all session-scoped UI state and re-renders an empty
-    /// transcript. Persistent user preferences such as `show-diff`
-    /// and `show-thinking` are intentionally preserved.
-    fn clear_for_new_session(&mut self) {
-        self.selection.agents_ui_state.clear();
-        self.selection.no_agent_ui_state = AgentUiState::default();
-        self.selection.overview_message_ids.clear();
-        self.event_owners.query_agents.clear();
-        self.event_owners.prompt_agents.clear();
-        self.event_owners.tool_agents.clear();
-        self.event_owners.shell_agents.clear();
-        self.watches.watched_agents.clear();
-        self.watches.agent_watchers.clear();
-        self.watches.agent_stats.clear();
-        self.watches.agent_estimated_api_costs.clear();
-        self.watches.watched_agent_work_statuses.clear();
-        self.watches.active_agent_prompts.clear();
-        self.watches.terminal_agent_prompts.clear();
-        self.session.session_token_usage = tau_proto::TokenUsageCounts::default();
-        self.clear_watched_agent_blocks();
-        if let Ok(mut agents) = self.discovery.known_agents.lock() {
-            agents.clear();
-        }
-        if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
-            navigation.clear();
-        }
-        if let Ok(mut agents) = self.discovery.ephemeral_agents.lock() {
-            agents.clear();
-        }
-        self.clear_agent_display_names();
-        self.clear_selected_agent();
-        // A new session starts from the same append-in-place no-agent state as
-        // process startup. Unlike explicit `:agent none`, there is no previous
-        // in-session agent transcript to protect from the first new agent.
-        self.selection.awaiting_new_agent_selection = false;
-        self.selection.agents_ui_state.clear();
-        self.transcript.runtime.prompts.clear();
-        self.transcript
-            .runtime
-            .standalone_compaction_transactions
-            .clear();
-        self.transcript.runtime.self_compaction_tools.clear();
-        self.transcript.runtime.last_user_block = None;
-        self.transcript.runtime.queued_user_blocks.clear();
-        self.transcript.runtime.submitted_prompt_ctx_ids.clear();
-        self.transcript.runtime.accepted_submission_block = None;
-        self.transcript.runtime.tool_calls.clear();
-        if let Some(timer) = &self.activity.tool_timer {
-            timer.clear_active();
-        }
-        self.transcript.runtime.shell_blocks.clear();
-        self.session.extension_blocks.clear();
-        self.event_owners.action_invocation_owners.clear();
-        self.transcript.runtime.model_status_block = None;
-        self.transcript.history.diff_blocks.clear();
-        self.transcript.history.thinking_history.clear();
-        self.transcript.history.turn_stats_history.clear();
-        self.transcript.history.tool_history.clear();
-        self.transcript.history.message_history.clear();
-        self.transcript.history.notice_history.clear();
-        self.transcript.history.diagnostic_history.clear();
-        self.transcript.history.internal_prompt_history.clear();
-        self.transcript.status.tool_summaries.clear();
-        self.transcript.status.prompt_tool_summary = None;
-        self.transcript.status.prompt_tool_summary_active = false;
-        self.transcript.ownership.preserve_on_fresh_agent_switch = false;
-        self.transcript.ownership.contains_global_message_fact = false;
-        self.transcript.ownership.contains_overview_message = false;
-        // Model selection and effort are harness-global, not
-        // session-scoped. `:session new` only causes a SessionStarted event;
-        // the harness does not re-emit HarnessRoleSelected for the
-        // unchanged model. Keep the cached selection so the status bar
-        // can be recreated after clearing the terminal output.
-        self.transcript.status.current_context_percent = None;
-        self.transcript.status.current_context_input_tokens = None;
-        self.transcript.status.main_tools_completed = 0;
-        self.transcript.status.main_tools_total = 0;
-        self.transcript.status.main_backgrounded_tools.clear();
-        self.transcript.status.main_agent_turn_active = false;
-        self.transcript.status.main_tools_visible = false;
-        self.transcript.status.cumulative_agent_latency = Duration::ZERO;
-        self.transcript.status.cumulative_agent_token_usage =
-            tau_proto::TokenUsageCounts::default();
-        self.transcript.status.agent_activity.clear();
-        self.update_agent_in_progress();
-        self.resources.handle.clear_output();
-        self.render_session_preamble();
-        if self.session.current_session_id.is_some()
-            || self.role.current_model.is_some()
-            || self.role.current_role.is_some()
-        {
-            self.render_model_status();
-        }
-    }
-
-    fn render_session_preamble(&mut self) {
-        self.retain_diagnostic_block(
-            "banner",
-            tau_proto::NoticeLevel::Info,
-            DiagnosticProjection::Banner,
-        );
-        let mut extensions: Vec<_> = self.session.ready_extensions.iter().cloned().collect();
-        extensions.sort();
-        for extension_name in extensions {
-            self.retain_diagnostic_block(
-                "extension-kept",
-                tau_proto::NoticeLevel::Info,
-                DiagnosticProjection::ExtensionStatus {
-                    extension_name: tau_proto::ExtensionName::parse(extension_name)
-                        .expect("ready extension names were validated on intake"),
-                    status: ExtensionLifecycleStatus::Kept,
-                },
-            );
-        }
     }
 
     fn build_model_status_block(&mut self) -> tau_cli_term::StyledBlock {
@@ -5033,7 +4925,7 @@ impl EventRenderer {
 
     fn claim_initial_selection_intent(&self, target_agent_id: &tau_proto::AgentId) -> Option<u64> {
         self.selection
-            .selection_intent
+            .current_agent_state
             .lock()
             .ok()
             .and_then(|mut intent| {
@@ -5055,6 +4947,41 @@ impl EventRenderer {
         replay_selection_guard: bool,
         suppress_auto_selection: bool,
     ) {
+        if self.session.session_binding_failed {
+            return;
+        }
+        match event {
+            Event::SessionStarted(started) => match self.session.current_session_id.as_ref() {
+                Some(bound) if bound == &started.session_id => return,
+                Some(bound) => {
+                    tracing::error!(
+                        expected_session_id = %bound,
+                        received_session_id = %started.session_id,
+                        "terminal renderer rejected conflicting immutable session"
+                    );
+                    self.session.session_binding_failed = true;
+                    self.watches.agent_estimated_api_costs.clear();
+                    self.session.session_token_usage = tau_proto::TokenUsageCounts::default();
+                    self.clear_agent_display_names();
+                    self.clear_accepted_submission_indicators_everywhere();
+                    self.clear_main_agent_turn_active_everywhere();
+                    self.transcript.status.agent_activity.clear();
+                    return;
+                }
+                None => {}
+            },
+            Event::SessionShutdown(shutdown)
+                if self.session.current_session_id.as_ref() != Some(&shutdown.session_id) =>
+            {
+                tracing::error!(
+                    received_session_id = %shutdown.session_id,
+                    "terminal renderer rejected shutdown outside immutable session"
+                );
+                self.session.session_binding_failed = true;
+                return;
+            }
+            _ => {}
+        }
         let prepared = PreparedRendererEvent::new(event);
         if let Some((_, calls)) = prepared.finished() {
             let work = calls.work();
@@ -6784,12 +6711,6 @@ impl EventRenderer {
 
     fn handle_session_events(&mut self, event: &Event) -> bool {
         match event {
-            Event::SessionStarted(started)
-                if matches!(started.reason, tau_proto::SessionStartReason::New) =>
-            {
-                self.handle_new_session_started(started);
-                true
-            }
             Event::SessionStarted(started) => {
                 self.handle_existing_session_started(started);
                 true
@@ -6798,23 +6719,17 @@ impl EventRenderer {
         }
     }
 
-    fn handle_new_session_started(&mut self, started: &tau_proto::SessionStarted) {
-        self.session.current_session_id = Some(started.session_id.clone());
-        self.reconcile_session_context(&started.session_id);
-        self.clear_for_new_session();
-    }
-
     fn handle_existing_session_started(&mut self, started: &tau_proto::SessionStarted) {
         // Work status is runtime-only. A resume must wait for its fresh watch
         // snapshots instead of carrying presentation metadata across a daemon
         // generation, even when the session id is unchanged.
         self.watches.watched_agent_work_statuses.clear();
-        if self.session.current_session_id.as_ref() != Some(&started.session_id) {
-            self.watches.agent_estimated_api_costs.clear();
-            self.session.session_token_usage = tau_proto::TokenUsageCounts::default();
-            self.clear_agent_display_names();
-            self.rerender_message_history();
-        }
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(self.session.current_session_id.is_none());
+        self.watches.agent_estimated_api_costs.clear();
+        self.session.session_token_usage = tau_proto::TokenUsageCounts::default();
+        self.clear_agent_display_names();
+        self.rerender_message_history();
         self.session.current_session_id = Some(started.session_id.clone());
         self.reconcile_session_context(&started.session_id);
         self.render_model_status();

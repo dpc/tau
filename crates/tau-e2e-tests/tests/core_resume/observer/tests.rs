@@ -31,6 +31,16 @@ fn delayed_session_replay_keeps_one_accepted_observer_connection() {
             reader.read_message().expect("read hello"),
             Some(HarnessInputMessage::Hello(_))
         ));
+        let mut writer =
+            HarnessOutputWriter::new(BufWriter::new(stream.try_clone().expect("clone writer")));
+        writer
+            .write_message(&HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: server_expected.clone(),
+                },
+            ))
+            .expect("write acceptance");
+        writer.flush().expect("flush acceptance");
         assert!(matches!(
             reader.read_message().expect("read subscribe"),
             Some(HarnessInputMessage::Subscribe(_))
@@ -130,24 +140,36 @@ fn expired_session_replay_deadline_does_not_reconnect() {
     let socket = tempdir.path().join("observer.sock");
     let listener = UnixListener::bind(&socket).expect("bind observer listener");
     let reconnect_probe = listener.try_clone().expect("clone listener");
+    let server_expected = SessionId::parse("observer-expired-replay").expect("valid session id");
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept observer");
-        let mut reader = HarnessInputReader::new(BufReader::new(stream));
+        let mut reader =
+            HarnessInputReader::new(BufReader::new(stream.try_clone().expect("clone stream")));
         assert!(matches!(
             reader.read_message().expect("read hello"),
             Some(HarnessInputMessage::Hello(_))
         ));
+        let mut writer = HarnessOutputWriter::new(BufWriter::new(stream));
+        writer
+            .write_message(&HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: server_expected,
+                },
+            ))
+            .expect("write acceptance");
+        writer.flush().expect("flush acceptance");
         assert!(matches!(
             reader.read_message().expect("read subscribe"),
             Some(HarnessInputMessage::Subscribe(_))
         ));
+        std::thread::sleep(Duration::from_millis(150));
     });
     let expected = SessionId::parse("observer-expired-replay").expect("valid session id");
     let error = match SideObserver::connect(
         &socket,
         &expected,
         tempdir.path().join("observer.json"),
-        Instant::now(),
+        Instant::now() + Duration::from_millis(100),
     ) {
         Ok(_) => panic!("expired replay deadline must fail"),
         Err(error) => error,

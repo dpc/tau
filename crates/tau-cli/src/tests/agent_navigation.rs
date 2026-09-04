@@ -66,6 +66,7 @@ fn attach_boundary_selects_only_from_unclaimed_empty_state() {
         selected.lock().expect("selected agent").as_ref(),
         Some(&agent_id("restored-agent"))
     );
+    assert_eq!(selected.lock().expect("selected agent").epoch, 1);
 
     renderer.handle_attach_agent_selection_socket_delivery(
         &boundary,
@@ -79,13 +80,13 @@ fn attach_boundary_selects_only_from_unclaimed_empty_state() {
     );
 }
 
-/// A local input claim made before the delayed replay boundary wins its
-/// selection-intent epoch and cannot be overwritten by stale renderer work.
+/// A delayed attach boundary and stale renderer command must not overwrite a
+/// newer synchronous local input-routing claim.
 #[test]
 fn attach_boundary_cas_preserves_newer_local_intent() {
     let (_term, handle, _vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle);
-    let selected = renderer.selection_intent();
+    let selected = renderer.current_agent_state();
     let routing = InputRoutingState::new(
         selected.clone(),
         Arc::new(Mutex::new(Vec::new())),
@@ -116,6 +117,17 @@ fn attach_boundary_cas_preserves_newer_local_intent() {
         Some("local-agent"),
         "display-only renderer commands must not write into input authority"
     );
+
+    routing.set_selected_agent(None);
+    renderer.handle_attach_agent_selection_socket_delivery(
+        &boundary,
+        &agent_id("other-restored-agent"),
+        tau_proto::UnixMicros::new(2),
+        tau_cli_term::RendererDeliveryId::new(2),
+    );
+    let intent = selected.lock().expect("selected agent");
+    assert!(intent.selected_agent_id.is_none());
+    assert_eq!(intent.epoch, 2);
 }
 
 /// A replay target admitted before local input but rendered afterward cannot
@@ -124,7 +136,7 @@ fn attach_boundary_cas_preserves_newer_local_intent() {
 fn admitted_attach_selection_cannot_render_after_newer_local_intent() {
     let (_term, handle, _vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle);
-    let selected = renderer.selection_intent();
+    let selected = renderer.current_agent_state();
     let routing = InputRoutingState::new(
         selected.clone(),
         Arc::new(Mutex::new(Vec::new())),
@@ -143,15 +155,7 @@ fn admitted_attach_selection_cannot_render_after_newer_local_intent() {
     renderer.apply_claimed_agent(restored, admitted_epoch);
 
     assert_eq!(routing.selected_agent_id().as_deref(), Some("local-agent"));
-    assert_eq!(
-        renderer
-            .current_agent_state()
-            .lock()
-            .expect("renderer selection")
-            .as_deref(),
-        None,
-        "stale admitted display command must be discarded"
-    );
+    assert_eq!(renderer.displayed_agent_id_for_test(), None);
 }
 
 /// Retained replay rows drained before a queued local display command cannot
@@ -160,7 +164,7 @@ fn admitted_attach_selection_cannot_render_after_newer_local_intent() {
 fn admitted_replay_before_local_display_preserves_input_intent() {
     let (_term, handle, _vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle);
-    let selected = renderer.selection_intent();
+    let selected = renderer.current_agent_state();
     let routing = InputRoutingState::new(
         selected,
         Arc::new(Mutex::new(Vec::new())),
@@ -186,27 +190,17 @@ fn admitted_replay_before_local_display_preserves_input_intent() {
     );
 
     assert_eq!(routing.selected_agent_id().as_ref(), Some(&local));
-    assert!(
-        renderer
-            .current_agent_state()
-            .lock()
-            .expect("renderer selection")
-            .is_none(),
+    assert_eq!(
+        renderer.displayed_agent_id_for_test(),
+        None,
         "replay must wait for the queued local display command"
     );
     renderer.apply_claimed_agent(local.clone(), local_epoch);
-    assert_eq!(
-        renderer
-            .current_agent_state()
-            .lock()
-            .expect("renderer selection")
-            .as_ref(),
-        Some(&local)
-    );
+    assert_eq!(renderer.displayed_agent_id_for_test(), Some(&local));
 
     let (_term, handle, _vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle);
-    let selected = renderer.selection_intent();
+    let selected = renderer.current_agent_state();
     let routing = InputRoutingState::new(
         selected,
         Arc::new(Mutex::new(Vec::new())),
@@ -220,12 +214,7 @@ fn admitted_replay_before_local_display_preserves_input_intent() {
         tau_cli_term::RendererDeliveryId::new(2),
     );
     assert!(
-        routing.selected_agent_id().is_none()
-            && renderer
-                .current_agent_state()
-                .lock()
-                .expect("renderer selection")
-                .is_none(),
+        routing.selected_agent_id().is_none() && renderer.displayed_agent_id_for_test().is_none(),
         "explicit clearing must also prevent replay-derived selection"
     );
 }
@@ -299,6 +288,7 @@ fn first_agent_event_does_not_force_full_redraw() {
         session_id: test_session_id("s1"),
         reason: tau_proto::SessionStartReason::Initial,
     }));
+    let initial_render_count = handle.full_render_count();
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         creator: Some(tau_proto::AgentCreator::default()),
 
@@ -314,99 +304,8 @@ fn first_agent_event_does_not_force_full_redraw() {
         ..agent_prompt_created("sp1", "s1")
     }));
     sync(&handle);
-    assert_eq!(handle.full_render_count(), 0);
+    assert_eq!(handle.full_render_count(), initial_render_count);
 }
-
-#[test]
-fn new_agent_after_new_session_does_not_force_full_redraw() {
-    // `:session new` intentionally moves to the start-new-agent screen and clears
-    // the old transcript. Starting the next agent from that already-visible
-    // empty screen should only update target/status metadata, not redraw
-    // scrollback.
-    let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s1"),
-        reason: SessionStartReason::Initial,
-    }));
-    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "first".into(),
-        agent_id: tau_proto::AgentId::parse("engineer_one").expect("agent id"),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
-    }));
-    sync(&handle);
-    let full_render_count = handle.full_render_count();
-
-    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s2"),
-        text: "second".into(),
-        agent_id: tau_proto::AgentId::parse("engineer_two").expect("agent id"),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    }));
-    sync(&handle);
-
-    assert_eq!(handle.full_render_count(), full_render_count);
-}
-
-#[test]
-fn new_session_initial_history_appends_to_first_agent() {
-    // `:session new` can be reached after an explicit no-agent state, but the new
-    // session's start screen is a fresh initial screen. Visible startup history
-    // there should be adopted by the first agent instead of preserved as an
-    // explicit no-agent snapshot.
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    renderer.switch_agent(agent_id("previous-agent"));
-    renderer.clear_selected_agent();
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
-    }));
-    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
-        instance_id: 88.into(),
-        extension_name: tau_proto::ExtensionName::parse("std-session")
-            .expect("test identifier must satisfy its grammar"),
-        pid: Some(456),
-    }));
-    sync(&handle);
-    assert!(vt.screen_contains(80, "extension std-session starting"));
-
-    let full_render_count = handle.full_render_count();
-    renderer.switch_agent(agent_id("fresh-agent"));
-    sync(&handle);
-    assert!(vt.screen_contains(80, "extension std-session starting"));
-    assert_eq!(handle.full_render_count(), full_render_count);
-
-    renderer.handle(&Event::ExtensionReady(ExtensionReady {
-        instance_id: 88.into(),
-        extension_name: tau_proto::ExtensionName::parse("std-session")
-            .expect("test identifier must satisfy its grammar"),
-        pid: Some(456),
-    }));
-    sync(&handle);
-    assert!(!vt.screen_contains(80, "extension std-session starting"));
-    assert!(vt.screen_contains(80, "extension std-session ready"));
-}
-
 #[test]
 fn selecting_same_agent_does_not_force_full_redraw() {
     // Regression: selecting the already-displayed target agent is a pure no-op
@@ -1860,35 +1759,6 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
     assert!(vt.screen_contains(100, "Message from @agent-a (late sender) to @agent-c:"));
     assert!(vt.screen_contains(100, "overview message history"));
 }
-
-/// A new session discards compact-hidden no-agent notices, so toggling verbose
-/// later cannot revive transcript state from the previous session.
-#[test]
-fn new_session_discards_compact_hidden_no_agent_notices() {
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
-        "test.info",
-        "old no-agent notice",
-        tau_proto::NoticeLevel::Info,
-    )));
-    renderer.toggle_verbose_mode();
-    sync(&handle);
-    assert!(!vt.screen_contains(80, "old no-agent notice"));
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("new-session"),
-        reason: SessionStartReason::New,
-    }));
-    renderer.toggle_verbose_mode();
-    sync(&handle);
-    assert!(!vt.screen_contains(80, "old no-agent notice"));
-}
-
 /// The production lightweight prompt lifecycle supplies the selected agent's
 /// model and repaints pacing whether quota catch-up arrives before or after it.
 #[test]
@@ -2016,7 +1886,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     sync(&handle);
 
@@ -2088,7 +1958,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s3"),
-        reason: SessionStartReason::New,
+        reason: SessionStartReason::Initial,
     }));
     sync(&handle);
 

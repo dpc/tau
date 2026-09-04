@@ -50,7 +50,7 @@ Retry results use independent pending request correlation: exact request id, pro
 source, and prompt id. A valid result consumes the request once and sends a
 harness-sourced `ui.retry_prompt_result` only to the captured requester. Prompt terminal
 closure does not clear this correlation; existing provider disconnect, requester
-disconnect, and session rollover cleanup does. There is no canonical
+disconnect, and final shutdown cleanup does. There is no canonical
 `provider.retry_prompt_result` event.
 
 ## Terminal response behavior

@@ -57,7 +57,7 @@ unvalidated directory. A target deleted after CLI selection therefore fails
 startup instead of being recreated as an empty session. New-session startup
 retains the separate creating lock path.
 
-Session startup, resume, switching, durable session-journal appends, and accepted
+Session startup, resume, durable session-journal appends, and accepted
 prompt, message-wake, or replay activation of a loaded durable agent refresh
 `last_touched`. The activation refresh projects operational use once per accepted
 dispatch rather than once per transcript event or through a periodic heartbeat.
@@ -335,15 +335,14 @@ identity. See
 ## Navigation classification
 
 The harness owns a daemon-lifetime mode for every loaded current-session agent.
-UI disconnect preserves it; committed unload, session switch, and process exit
-forget it. Cold restore recomputes ordinary/delegated defaults and does not
+UI disconnect preserves it; committed unload and process exit forget it. Cold restore recomputes ordinary/delegated defaults and does not
 restore explicit overrides.
 
 An authenticated visible human prompt accepted for an existing loaded target
 performs an implicit absolute `active` write. Selection alone, rejected prompts,
 internal or extension inputs, queue promotion, steering, and replay do not write.
 The implicit value survives same-daemon disconnect/reconnect like an explicit
-override, but unload or session switch clears it and cold restore recomputes the
+override, but unload clears it and cold restore recomputes the
 ordinary/delegated default despite durable historical prompt facts.
 
 A newly created authenticated bare peer-entrypoint recipient similarly receives

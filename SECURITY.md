@@ -606,7 +606,7 @@ remains unresolved. Entering Working resets the budget even after Unreported
 challenges in the same outer turn. Escape invalidates Working to Unknown but
 leaves Unreported unchanged. Prompts without `status` bypass this guard.
 Waiting, Done, Blocked, an unsuccessful terminal that invalidates Working to Unknown,
-budget escape, unload, and session rollover release that runtime ownership;
+budget escape, unload, and final shutdown release that runtime ownership;
 append failure and interception rejection cannot project a challenged candidate. Work-status state
 tests, harness gated-final/interception tests, and the deterministic current-status
 provider scenario cover these boundaries. Revisit them whenever internal-tool
@@ -680,17 +680,11 @@ forbidden. Pre-Ready requests retain normal activation ordering and bounded
 admission. `ConfigError` remains a separate mandatory replayable path. Security
 review must preserve those distinctions and the non-persistence guarantee. See
 [`SPEC-extension-notice-requests`](specs/SPEC-extension-notice-requests.md).
-Only an attached socket UI may send the payload-free `ui_detach_request` that
-keeps the daemon alive after that UI disconnects. Other socket peers,
-embedded/non-socket UIs, dedicated external-message peers, and configured
-extensions are silently denied; they cannot mutate the daemon's
-exit-on-disconnect control. Configured extension attempts retain normal protocol
-phase validation and metering but are denied before activation staging.
 Only an attached socket UI may send the payload-free `ui_shutdown_request` that
 unconditionally enters canonical harness shutdown. Other socket peers,
 embedded/non-socket UIs, dedicated external-message peers, and configured
 extensions are silently denied; they cannot stop the session. The request does
-not alter exit-on-disconnect policy or become a published or persisted event.
+not become a published or persisted event.
 Only an attached socket UI may send `ui_tree_request` and inspect agent prompt
 anchors/previews. The harness returns exactly one requester-directed multiline
 notice and does not publish the request or result. Other client origins and
@@ -725,8 +719,8 @@ Tau-state operators can read these records, there is no automatic redaction,
 and agents must not put secrets in reports. The harness serializes User-scope
 appends across harness processes sharing that state root and instance. This is
 explicitly best-effort diagnostic data: memory-only denial, quota/RPC failure,
-and the accepted rare session-rollover mismatch can lose or misattribute a
-record; ephemeral sessions intentionally use the same durable file. These
+and a final-shutdown race can lose a record; ephemeral sessions intentionally
+use the same durable file. These
 limitations do not expand the configured-local extension boundary or imply
 hostile-process hardening.
 
@@ -856,9 +850,9 @@ After acceptance, exactly one compact `agent.start_failed` terminal owns failure
 projection and runtime cleanup; no cross-event reservation or journal transaction
 is implied.
 
-Clean session switch or process shutdown terminalizes every accepted start before
-generation rollover and rejects a still-uncommitted acceptance without inventing a
-failure fact. A hard crash can leave only the already committed durable prefix.
+Clean process shutdown terminalizes every accepted start before revoking
+admission and rejects a still-uncommitted acceptance without inventing a failure
+fact. A hard crash can leave only the already committed durable prefix.
 Cold restore keeps that prefix inspectable but never reconstructs requester routes,
 buffered wakes, coordinator state, or initial-prompt dispatch. Only a committed
 startup inference checkpoint permits ordinary post-start inference recovery.
@@ -950,19 +944,13 @@ features must not be expanded into slowloris, connection-flood, or sandbox
 hardening without an approved threat-model design.
 
 Runtime discovery is non-destructive under the cooperative local boundary.
-Daemon runtime pairs use `<pid>-<16-lowercase-hex-instance>` stems so separate
-PID namespaces sharing one runtime directory cannot collide on an active path.
-A CLI-owned launch mints one instance value, passes its validated form to the
-child, and derives the same path itself; direct launches mint locally.
-Checking a metadata PID, socket reachability, and pathname identity cannot be
-atomic with PID reuse and a daemon replacing that pathname, so scanners must
-not unlink apparently stale lifecycle pairs. Owned CLI shutdown closes the
-initial transport first so the daemon normally removes its own pair, with
-bounded forced termination retained as a last-resort availability safeguard.
-Targeted session lookup bounds raw traversal, matching candidates, metadata
-bytes, and total time and fails closed when uniqueness remains unproven,
-including unreadable current PID-prefixed or legacy numeric metadata owned by
-a live or liveness-unknown PID.
+Each durable session maps to one deterministic full-BLAKE3 lock basename and
+socket basename. The daemon holds the lifetime `flock` before binding the socket
+and keeps it through transport and durable-store teardown. The lock winner may
+reclaim that session's stale socket; scanners never unlink it. PIDs are
+diagnostic only and do not participate in lookup, routing, or liveness.
+Targeted lookup bounds raw traversal and total time and fails closed when an
+exact admitted connection cannot be proven.
 Local running-session listing isolates bounded raw traversal from its caller and
 uses runtime paths only as socket candidates. Each responsive daemon returns its
 in-memory current session id and immutable canonical startup project root
@@ -1108,23 +1096,23 @@ Exact committed publication envelopes create or transfer activation ownership.
 A retained completion envelope or standalone `AwaitingCheckpoint` tuple represents
 durable work and remains bound to its owning branch. Queue/in-flight attempt
 markers are ephemeral: every prevalidation or persistence rejection clears them,
-and agent unload or session rollover discards all warm-process retry state.
+and agent unload or final shutdown discards all warm-process retry state.
 Transaction-owned publications carry their enqueue-time session generation and
 must still match an exact live runtime owner before commit. Destructive lifecycle
 cancellation suspends that interceptor's registration until its one outstanding
-uncorrelated stale reply is consumed, so the reply cannot bind to later session
-work without changing the extension connection lifecycle. Registration
+uncorrelated stale reply is consumed, so the reply cannot bind to later work
+without changing the extension connection lifecycle. Registration
 replacement remains suspended, no timeout applies, exactly one reply is consumed,
 and disconnect clears suspension. The interface contract is specified by
 [`SPEC-tau-harness-event-processing`](crates/tau-harness/specs/SPEC-tau-harness-event-processing.md).
 Unrelated accepted publications retain FIFO order and complete or fail through
 their normal path.
-Rollover advances the session admission generation before quiescence. Raw
+Final shutdown advances the session admission generation before quiescence. Raw
 session-bound events whose contracts require observation may still commit, but a
 central post-commit peer guard suppresses their semantic effects and releases
 activation reservations. Process-global tool/prompt-fragment/model declarations
-and provider-quota current-state reports are explicit exceptions: they survive
-rollover only while exact captured connection/instance identity remains current.
+and provider-quota current-state reports may finish only while exact captured
+connection-generation identity remains current.
 
 The model-callable self `compact` capability is enabled by default and can act
 only on the calling agent. Effective role policy may revoke it by exact tool
@@ -1197,7 +1185,7 @@ harness-internal exception: after durable identity and current-session membershi
 setup, the harness writes `active` only for its newly created recipient and
 publishes complete stats. The peer never chooses a mode, and exact/existing
 recipients and all other start paths cannot acquire this write. The runtime-only
-classification is forgotten on unload, session switch, or process exit; cold
+classification is forgotten on unload or process exit; cold
 restore recomputes the extension-origin `active_auto` default. Receive-commit ACK
 authority remains independent of this UI-only state.
 Modes do not authorize loading, routing, prompt delivery, watches, execution, or
@@ -1407,16 +1395,16 @@ grant boundary: any loaded agent granted `task_info` may replace metadata for
 any valid task ID in its current session. Revisit this authority boundary if
 task ownership or narrower grants are introduced.
 Tau Swarm binds commands and active lifecycle state to a collision-resistant
-extension-process incarnation. Ordinary reconnects and session switches retain
-the process command table; a replacement process declares a fresh incarnation,
+extension-process incarnation. Ordinary reconnects retain the process command
+table; a replacement process declares a fresh incarnation,
 so the server fences ambiguous old commands and supersedes old active lifecycle
 state. A peer that sends many unique, otherwise valid commands can fill the
 no-eviction command table and deny later remote commands until process restart. Large
 configured bounds can exhaust extension memory; they are operator trust and
 capacity choices rather than untrusted local-IPC hardening boundaries.
 
-Ordinary Iroh reconnect retains current task metadata. A session switch or
-extension-process restart loses it; the fresh process's complete snapshot
+Ordinary Iroh reconnect retains current task metadata. An extension-process
+restart loses it; the fresh process's complete snapshot
 converges the peer by omitting the old incarnation's metadata. Revisit this
 accepted non-durability if task metadata gains journaling, persistence, or
 different session/process lifecycle ownership.

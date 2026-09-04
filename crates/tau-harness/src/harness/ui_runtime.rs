@@ -11,7 +11,7 @@ use super::*;
 /// Lifetimes intentionally differ within this owner: client writers follow
 /// connection lifetime; pending commands follow their session or provider;
 /// retry and action tombstones plus private shell-route identities survive for
-/// the process lifetime. Session rollover resolves or invalidates session-bound
+/// the process lifetime. Final shutdown resolves or invalidates session-bound
 /// work field by field instead of resetting the whole state. Normal connection
 /// teardown removes its writer lifecycle, while the startup-failure path may
 /// explicitly close a socket writer; the lifecycle owns no join handle or drop
@@ -55,8 +55,10 @@ pub(crate) struct UiRuntimeState {
         VecDeque<(tau_proto::ConnectionId, tau_proto::RetryPromptRequestId)>,
     /// Live-log cursors and transport lifecycles for attached clients.
     pub(crate) client_writers: HashMap<tau_proto::ConnectionId, ClientWriterLifecycle>,
-    /// Startup-gated detach request awaiting main-loop consumption.
-    pub(super) startup_detach_requested: bool,
+    /// Semantically quarantined exact-discovery probes.
+    pub(super) runtime_probe_peers: HashSet<tau_proto::ConnectionId>,
+    /// Socket connections that have not completed their exact Hello admission.
+    pub(crate) pending_socket_admission: HashSet<tau_proto::ConnectionId>,
     /// Authorized UI request for unconditional canonical harness shutdown.
     pub(super) shutdown_requested: bool,
 }
@@ -78,7 +80,8 @@ impl Default for UiRuntimeState {
             seen_retry_prompt_requests: HashSet::new(),
             seen_retry_prompt_request_order: VecDeque::new(),
             client_writers: HashMap::new(),
-            startup_detach_requested: false,
+            runtime_probe_peers: HashSet::new(),
+            pending_socket_admission: HashSet::new(),
             shutdown_requested: false,
         }
     }
@@ -1667,6 +1670,7 @@ impl Harness {
             .is_some_and(|connection| {
                 connection.kind == ClientKind::Ui && connection.origin == ConnectionOrigin::Socket
             })
+            && !self.ui_runtime.runtime_probe_peers.contains(client_id)
             && !self
                 .peer_messaging
                 .external_message_peers
@@ -1709,9 +1713,6 @@ impl Harness {
             | Event::ActionResult(_)
             | Event::ActionErrorReported(_)
             | Event::ActionError(_) => Ok((true, None)),
-            Event::UiSwitchSession(req) => self
-                .handle_ui_switch_session(client_id, req)
-                .map(|keep_going| (keep_going, None)),
             Event::UiCreateAgent(req) => {
                 if self.is_attached_socket_ui(client_id) {
                     self.handle_ui_create_agent_from(client_id, req)
@@ -2289,43 +2290,6 @@ impl Harness {
                 display_name,
             }),
         );
-        Ok(true)
-    }
-
-    pub(super) fn handle_ui_switch_session(
-        &mut self,
-        client_id: &tau_proto::ConnectionId,
-        req: tau_proto::UiSwitchSession,
-    ) -> Result<bool, HarnessError> {
-        self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
-        if self.session_runtime.session_pinned {
-            self.send_ui_error_response(
-                client_id,
-                format!(
-                    "session `{}` is pinned by the foreground server",
-                    self.session_runtime.current_session_id
-                ),
-            );
-            let _ = self.runtime_io.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(Event::SessionStarted(tau_proto::SessionStarted {
-                    session_id: self.session_runtime.current_session_id.clone(),
-                    reason: self.session_runtime.current_session_start_reason,
-                })),
-            );
-            return Ok(true);
-        }
-        if req.new_session_id == self.session_runtime.current_session_id
-            && !matches!(req.reason, tau_proto::SessionStartReason::New)
-        {
-            self.send_ui_error_response(
-                client_id,
-                format!("already on session `{}`", req.new_session_id.as_str()),
-            );
-            return Ok(true);
-        }
-        self.switch_session(req.new_session_id, req.reason)?;
         Ok(true)
     }
 

@@ -46,10 +46,10 @@ fn redraw_history_size_only_redraws_immediately_when_increased() {
     assert_eq!(handle.full_render_count(), initial_full_renders + 1);
 }
 
-/// A theme refresh between an optimistic session switch and its authoritative
-/// echo must preserve routing, drafts, and the new prompt-context session.
+/// A theme refresh preserves routing, drafts, and the immutable prompt-context
+/// session.
 #[test]
-fn theme_refresh_preserves_optimistic_session_context() {
+fn theme_refresh_preserves_session_context() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -76,14 +76,12 @@ fn theme_refresh_preserves_optimistic_session_context() {
         draft.pending = Some((
             7,
             tau_proto::UiPromptDraft {
-                session_id: test_session_id("new-session"),
+                session_id: test_session_id("old-session"),
                 target_agent_id: None,
                 text: Some("draft".to_owned()),
             },
         ));
     }
-    *active_session.lock().expect("active session") =
-        tau_proto::SessionId::parse("new-session").expect("session id");
     let themed =
         tau_themes::Theme::parse(r##"{ styles: { "prompt.cwd": { fg: "red", bold: true } } }"##)
             .expect("theme parses");
@@ -92,13 +90,12 @@ fn theme_refresh_preserves_optimistic_session_context() {
 
     assert_eq!(
         active_session.lock().expect("active session").as_str(),
-        "new-session"
+        "old-session"
     );
     let draft = draft_handle.0.lock().expect("draft");
     assert_eq!(draft.epoch, 7);
     assert!(draft.pending.is_some());
-    assert!(vt.screen_contains(80, "/tmp/project &new-session"));
-    assert!(!vt.screen_contains(80, "&old-session"));
+    assert!(vt.screen_contains(80, "/tmp/project &old-session"));
 }
 
 /// A typed WatchProviderStatus strips only the canonical production envelope in
@@ -405,45 +402,9 @@ fn observed_response_delta_update_does_not_use_ellipsis_prefix() {
     assert!(vt.screen_contains(80, "hello"));
     assert!(!vt.screen_contains(80, "…hello"));
 }
-
+/// Replayed terminals populate flat totals for the resumed immutable session.
 #[test]
-fn delayed_clear_after_new_session_keeps_initial_history_adoptable() {
-    // The input thread also queues a local ClearSelectedAgent when starting a
-    // new session. If the remote SessionStarted(New) wins the race, that delayed
-    // clear must not convert the fresh initial screen into an explicit protected
-    // no-agent snapshot.
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    renderer.switch_agent(agent_id("previous-agent"));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
-    }));
-    renderer.clear_selected_agent();
-    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
-        instance_id: 89.into(),
-        extension_name: tau_proto::ExtensionName::parse("std-race")
-            .expect("test identifier must satisfy its grammar"),
-        pid: Some(456),
-    }));
-    sync(&handle);
-    assert!(vt.screen_contains(80, "extension std-race starting"));
-
-    let full_render_count = handle.full_render_count();
-    renderer.switch_agent(agent_id("fresh-agent"));
-    sync(&handle);
-    assert!(vt.screen_contains(80, "extension std-race starting"));
-    assert_eq!(handle.full_render_count(), full_render_count);
-}
-
-/// Replayed terminals after an existing-session switch must replace, rather
-/// than add to, the flat totals from the former session.
-#[test]
-fn session_stats_reset_before_resumed_session_replay() {
+fn resumed_session_replay_populates_session_stats() {
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
@@ -452,22 +413,10 @@ fn session_stats_reset_before_resumed_session_replay() {
     );
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("session-a"),
-        reason: SessionStartReason::Initial,
-    }));
-    renderer.handle(&Event::ProviderResponseFinished(
-        finished_response_with_usage("agent-a-sp-0", "agent-a", 100, 90, 10, "session A response"),
-    ));
-    assert_eq!(
-        renderer.session_token_stats_text(),
-        "session token totals: ↑90/100 ↓10"
-    );
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("session-b"),
         reason: SessionStartReason::Resume,
     }));
     renderer.handle(&Event::ProviderResponseFinished(
-        finished_response_with_usage("agent-b-sp-0", "agent-b", 7, 3, 2, "session B replay"),
+        finished_response_with_usage("agent-a-sp-0", "agent-a", 7, 3, 2, "session replay"),
     ));
 
     assert_eq!(
@@ -698,10 +647,10 @@ fn show_messages_summary_modes_do_not_show_body() {
     assert!(!vt.screen_contains(80, "secret summarized body"));
 }
 
-/// Retained history keeps its originating session's name authority when a
-/// different resumed session later publishes metadata for the same agent id.
+/// A conflicting session start fails closed before it can relabel retained
+/// history or append another session's message.
 #[test]
-fn resumed_session_names_do_not_relabel_prior_message_history() {
+fn conflicting_session_cannot_relabel_message_history() {
     let (_term, handle, vt) = setup(100, 12);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -736,18 +685,9 @@ fn resumed_session_names_do_not_relabel_prior_message_history() {
     renderer.handle(&agent_message("agent-a", "agent-b", "session B body"));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b:"));
-    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b (session B worker):"));
-    assert_eq!(
-        vt.screen_text(100)
-            .iter()
-            .filter(|row| row.contains("session B worker"))
-            .count(),
-        1,
-        "only the session-B message may use session-B metadata"
-    );
+    assert!(!vt.screen_contains(100, "session B worker"));
     assert!(vt.screen_contains(100, "session A body"));
-    assert!(vt.screen_contains(100, "session B body"));
+    assert!(!vt.screen_contains(100, "session B body"));
 }
 
 #[test]
@@ -774,87 +714,6 @@ fn show_messages_toggle_retroactively_hides_and_shows_history() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "Message from @agent-a to @agent-b"));
     assert!(!vt.screen_contains(80, "retro body"));
-}
-
-#[test]
-fn new_session_clears_session_ui_state() {
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-
-    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "old prompt".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    }));
-    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
-        "sp-0", "s1",
-    )));
-    renderer.handle(&Event::ProviderResponseFinished(finished_response(
-        "sp-0",
-        vec![
-            assistant_message_item("old response"),
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "call-1".into(),
-                name: tau_proto::ToolName::new("read"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(vec![(
-                    CborValue::Text("path".into()),
-                    CborValue::Text("src/lib.rs".into()),
-                )]),
-                raw_arguments_json: None,
-                responses_envelope: None,
-            }),
-        ],
-    )));
-    renderer.handle(&Event::ToolResult(ToolResult {
-        presentation: Default::default(),
-        call_id: "call-1".into(),
-        tool_name: tau_proto::ToolName::new("read"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Map(vec![
-            (
-                CborValue::Text("path".into()),
-                CborValue::Text("src/lib.rs".into()),
-            ),
-            (
-                CborValue::Text("content".into()),
-                CborValue::Text("fn main() {}\n".into()),
-            ),
-        ]),
-        provider_content: Vec::new(),
-        kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolUseState {
-            args: "src/lib.rs".into(),
-            status: tau_proto::ToolUseStatus::Success,
-            status_text: "ok".into(),
-            ..Default::default()
-        }),
-        originator: tau_proto::PromptOriginator::User,
-    }));
-    sync(&handle);
-    assert!(vt.screen_contains(80, "old prompt"));
-    assert!(vt.screen_contains(80, "old response"));
-    assert!(vt.screen_contains(80, "read src/lib.rs"));
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: SessionStartReason::New,
-    }));
-    sync(&handle);
-
-    assert!(!vt.screen_contains(80, "old prompt"));
-    assert!(!vt.screen_contains(80, "old response"));
-    assert!(!vt.screen_contains(80, "read src/lib.rs"));
-    assert!(!vt.screen_contains(80, "&s2"));
-    assert!(!vt.screen_contains(80, "no role selected"));
 }
 /// `notice-level=warning` hides routine informational chatter while mandatory
 /// warnings such as configuration errors still reach the UI.

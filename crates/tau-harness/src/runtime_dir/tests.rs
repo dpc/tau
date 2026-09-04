@@ -1,1631 +1,792 @@
-use std::os::unix as path_std_os_unix;
-use std::os::unix::fs::PermissionsExt as _;
+use std::fs::Permissions;
+use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixListener;
-use std::process::{Child, Command};
-use std::sync::{Barrier, Mutex};
+use std::sync::Barrier;
+use std::thread::JoinHandle;
 
 use tempfile::TempDir;
 
 use super::*;
 
-/// Ensures low-level runtime scopes prepare separate private catalogs while two
-/// calling threads overlap.
-#[test]
-fn scoped_runtime_directories_do_not_cross_concurrent_threads() {
-    let first = TempDir::new().expect("first runtime root");
-    let second = TempDir::new().expect("second runtime root");
-    let first_path = first.path().to_path_buf();
-    let second_path = second.path().to_path_buf();
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let mut releases = Vec::new();
+fn session(value: &str) -> tau_proto::SessionId {
+    tau_proto::SessionId::parse(value).expect("valid test session")
+}
 
-    let threads = [first_path, second_path].map(|path| {
-        let ready_tx = ready_tx.clone();
-        let (release_tx, release_rx) = mpsc::channel();
-        releases.push(release_tx);
-        std::thread::spawn(move || {
-            with_runtime_dir(Some(&path), || {
-                assert_eq!(root_runtime_dir(), path.join("tau"));
-                let harnesses = prepare_harnesses_dir().expect("private harness catalog");
-                assert!(harnesses.starts_with(&path));
-                assert_eq!(
-                    std::fs::metadata(&harnesses)
-                        .expect("harness catalog metadata")
-                        .permissions()
-                        .mode()
-                        & 0o777,
-                    0o700
-                );
-                ready_tx.send(()).expect("report prepared catalog");
-                release_rx
-                    .recv_timeout(Duration::from_secs(1))
-                    .expect("release overlapping runtime scope");
-                assert_eq!(root_runtime_dir(), path.join("tau"));
-            });
-        })
+fn bounded_runtime_root() -> TempDir {
+    const SOCKET_SUFFIX_BYTES: usize = 1 + 3 + 1 + 9 + 1 + 7 + 1 + 64 + 5;
+    let configured = tempfile::env::temp_dir();
+    for parent in [
+        Path::new("/tmp"),
+        Path::new("/dev/shm"),
+        configured.parent().unwrap_or(configured.as_path()),
+    ] {
+        if let Ok(root) = tempfile::Builder::new().prefix("t").tempdir_in(parent)
+            && root.path().as_os_str().as_encoded_bytes().len() + SOCKET_SUFFIX_BYTES <= 107
+        {
+            return root;
+        }
+    }
+    panic!("no bounded runtime root");
+}
+
+fn spawn_peer_daemon(
+    root: &TempDir,
+    session_id: &str,
+    available: bool,
+) -> (SessionClaim, JoinHandle<()>) {
+    let id = session(session_id);
+    let mut claim = claim_session(root.path(), &id).expect("claim peer session");
+    claim.reclaim_stale_socket().expect("reclaim peer socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind peer socket");
+    claim.publish(true).expect("publish peer claim");
+    let thread = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept peer probe");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("peer read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .expect("peer write timeout");
+        let reader_stream = stream.try_clone().expect("clone peer stream");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(reader_stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
+        match reader.read_message().expect("read peer hello") {
+            Some(tau_proto::HarnessInputMessage::Hello(hello))
+                if hello.expected_session_id.as_ref() == Some(&id) => {}
+            other => panic!("expected exact peer hello, got {other:?}"),
+        }
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: id.clone(),
+                },
+            ))
+            .expect("write peer acceptance");
+        writer.flush().expect("flush peer acceptance");
+        let request = match reader.read_message().expect("read peer request") {
+            Some(tau_proto::HarnessInputMessage::PeerSessionProbe(request)) => request,
+            other => panic!("expected peer probe, got {other:?}"),
+        };
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::PeerSessionProbeResult(
+                tau_proto::PeerSessionProbeResult {
+                    request_id: request.request_id,
+                    available,
+                },
+            ))
+            .expect("write peer result");
+        writer.flush().expect("flush peer result");
     });
-    drop(ready_tx);
-
-    let first_ready = ready_rx.recv_timeout(Duration::from_secs(1));
-    let second_ready = ready_rx.recv_timeout(Duration::from_secs(1));
-    for release in releases {
-        let _ = release.send(());
-    }
-    for thread in threads {
-        thread.join().expect("runtime-root thread");
-    }
-    first_ready.expect("first catalog prepared");
-    second_ready.expect("second catalog prepared");
+    (claim, thread)
 }
 
-const TEST_DIRECTORY_ENTRY_LIMIT: usize = 3;
-
-fn runtime_override(temp: &TempDir) -> RuntimeDirOverride {
-    override_test_runtime_dir(temp.path())
+#[derive(Clone, Copy)]
+enum ExactProbeReply {
+    Correlated,
+    Close,
+    Timeout,
 }
 
-fn discover_for_test(
-    query: Option<&str>,
-    limit: usize,
-    current_session_id: &str,
-) -> PeerSessionSnapshot {
-    discover_peer_sessions_for_test(query, limit, current_session_id)
-}
-
-fn list_running_sessions_for_semantic_test(
-    probe: TestRunningSessionProbe,
-) -> Result<Vec<RunningSession>, std::io::Error> {
-    list_running_sessions_with_policy(
-        SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
-        RunningSessionListPolicy::non_expiring(None, probe),
-    )
-}
-
-fn list_running_sessions_with_entry_limit_for_semantic_test(
-    entry_limit: usize,
-    probe: TestRunningSessionProbe,
-) -> Result<Vec<RunningSession>, std::io::Error> {
-    list_running_sessions_with_policy(
-        entry_limit,
-        RunningSessionListPolicy::non_expiring(None, probe),
-    )
-}
-
-fn unexpected_running_session_probe() -> TestRunningSessionProbe {
-    Arc::new(|path, _| panic!("unexpected running-session probe for {}", path.display()))
-}
-
-fn running_session_probe_fixture(
-    sessions: impl IntoIterator<Item = (PathBuf, RunningSession)>,
-) -> TestRunningSessionProbe {
-    let sessions = sessions
-        .into_iter()
-        .collect::<path_std_collections::HashMap<_, _>>();
-    Arc::new(move |path, _| {
-        sessions.get(path).cloned().map_or(
-            CurrentSessionProbe::Unresponsive,
-            CurrentSessionProbe::Reported,
-        )
-    })
-}
-
-fn fixture_running_session(path: &Path, session_id: &str) -> RunningSession {
-    RunningSession {
-        session_id: session_id
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        project_root: path
-            .parent()
-            .expect("runtime path parent")
-            .canonicalize()
-            .expect("canonical project root"),
-    }
-}
-
-/// Deterministic in-memory transport for current-session probe protocol tests.
-struct ProbeTransportFixture {
-    /// Client messages sent by the probe.
-    sent: Vec<tau_proto::HarnessInputMessage>,
-    /// Ordered receive outcomes supplied to the probe.
-    received: path_std_collections::VecDeque<ProbeTransportReceive>,
-}
-
-impl ProbeTransport for ProbeTransportFixture {
-    fn send_probe_input(&mut self, message: &tau_proto::HarnessInputMessage) -> bool {
-        self.sent.push(message.clone());
-        true
-    }
-
-    fn receive_probe_output(&mut self, _timeout: Duration) -> ProbeTransportReceive {
-        self.received
-            .pop_front()
-            .expect("probe fixture receive outcome")
-    }
-}
-
-/// Ensures the production current-session probe protocol sends its UI greeting
-/// and request, ignores an unrelated result, and accepts the correlated result.
-#[test]
-fn current_session_probe_protocol_correlates_authoritative_response() {
-    let request_id = "current-session-test";
-    let expected_session = "reported-session"
-        .parse::<tau_proto::SessionId>()
-        .expect("known-safe SessionId must be valid");
-    let expected_root = PathBuf::from("/reported/project");
-    let mut transport = ProbeTransportFixture {
-        sent: Vec::new(),
-        received: path_std_collections::VecDeque::from([
-            ProbeTransportReceive::Message(tau_proto::HarnessOutputMessage::CurrentSessionResult(
+fn spawn_exact_probe_daemon(
+    root: &TempDir,
+    session_id: &str,
+    reply: ExactProbeReply,
+) -> (SessionClaim, JoinHandle<()>) {
+    let id = session(session_id);
+    let mut claim = claim_session(root.path(), &id).expect("claim exact session");
+    claim.reclaim_stale_socket().expect("reclaim exact socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind exact socket");
+    claim.publish(false).expect("publish exact claim");
+    let wrong_project = root.path().join("wrong");
+    let project = root.path().join("project");
+    let thread = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept exact probe");
+        if matches!(reply, ExactProbeReply::Close) {
+            return;
+        }
+        if matches!(reply, ExactProbeReply::Timeout) {
+            std::thread::sleep(PROBE_TIMEOUT + Duration::from_millis(50));
+            return;
+        }
+        let reader_stream = stream.try_clone().expect("clone exact stream");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(reader_stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
+        match reader.read_message().expect("read exact hello") {
+            Some(tau_proto::HarnessInputMessage::Hello(hello))
+                if hello.expected_session_id.as_ref() == Some(&id) => {}
+            other => panic!("expected exact hello, got {other:?}"),
+        }
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: id.clone(),
+                },
+            ))
+            .expect("write exact acceptance");
+        writer.flush().expect("flush exact acceptance");
+        let request = match reader.read_message().expect("read exact request") {
+            Some(tau_proto::HarnessInputMessage::GetCurrentSession(request)) => request,
+            other => panic!("expected current-session request, got {other:?}"),
+        };
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
                 tau_proto::CurrentSessionResult {
                     request_id: "unrelated".to_owned(),
-                    session_id: "wrong-session"
-                        .parse::<tau_proto::SessionId>()
-                        .expect("known-safe SessionId must be valid"),
-                    project_root: PathBuf::from("/wrong/project"),
+                    session_id: id.clone(),
+                    project_root: wrong_project,
                 },
-            )),
-            ProbeTransportReceive::Message(tau_proto::HarnessOutputMessage::CurrentSessionResult(
+            ))
+            .expect("write unrelated result");
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
                 tau_proto::CurrentSessionResult {
-                    request_id: request_id.to_owned(),
-                    session_id: expected_session.clone(),
-                    project_root: expected_root.clone(),
+                    request_id: request.request_id,
+                    session_id: id,
+                    project_root: project,
                 },
-            )),
-        ]),
-    };
-
-    assert!(send_probe_hello(
-        &mut transport,
-        tau_proto::ExtensionName::parse("tau-session-list")
-            .expect("built-in extension name must be valid"),
-        tau_proto::ClientKind::Ui,
-    ));
-    assert_eq!(
-        request_current_session(&mut transport, request_id, || Some(Duration::ZERO)),
-        Some(RunningSession {
-            session_id: expected_session,
-            project_root: expected_root,
-        })
-    );
-    assert!(matches!(
-        &transport.sent[0],
-        tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
-            client_name,
-            client_kind: tau_proto::ClientKind::Ui,
-            ..
-        }) if client_name.as_str() == "tau-session-list"
-    ));
-    assert!(matches!(
-        &transport.sent[1],
-        tau_proto::HarnessInputMessage::GetCurrentSession(request)
-            if request.request_id == request_id
-    ));
-}
-
-/// Ensures current-session probe timeout and closure outcomes both reject a
-/// partial or invented response without wall-clock waits.
-#[test]
-fn current_session_probe_protocol_maps_timeout_and_closure_to_unresponsive() {
-    for outcome in [
-        ProbeTransportReceive::Timeout,
-        ProbeTransportReceive::Closed,
-    ] {
-        let mut transport = ProbeTransportFixture {
-            sent: Vec::new(),
-            received: path_std_collections::VecDeque::from([outcome]),
-        };
-
-        assert_eq!(
-            request_current_session(&mut transport, "current-session-test", || {
-                Some(Duration::ZERO)
-            }),
-            None
-        );
-    }
-}
-
-fn write_peer_metadata(path: &Path, session_id: &str, project_root: &Path, opted_in: bool) {
-    std::fs::write(
-        metadata_path(path),
-        serde_json::to_vec(&DaemonMetadata {
-            version: DAEMON_METADATA_VERSION,
-            pid: std::process::id(),
-            project_root: Some(project_root.to_path_buf()),
-            session_id: session_id.to_owned(),
-            peer_entrypoint: opted_in,
-        })
-        .expect("metadata json"),
-    )
-    .expect("write metadata");
-}
-
-/// Attach metadata is untrusted discovery input; an invalid controlled
-/// session identifier must fail closed before the CLI stores it.
-#[test]
-fn read_session_id_rejects_invalid_runtime_metadata() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let harness_path = temp.path().join("harness");
-    write_peer_metadata(&harness_path, "bad.id", temp.path(), false);
-
-    let error = read_session_id(&harness_path).expect_err("invalid id must fail closed");
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("invalid daemon session id"));
-}
-
-/// Metadata readers preserve missing and malformed diagnostics instead of
-/// collapsing both into an absent session id.
-#[test]
-fn read_session_id_distinguishes_missing_and_malformed_metadata() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let harness_path = temp.path().join("harness");
-
-    let missing = read_session_id(&harness_path).expect_err("missing metadata");
-    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
-
-    std::fs::write(metadata_path(&harness_path), b"{").expect("malformed metadata");
-    let malformed = read_session_id(&harness_path).expect_err("malformed metadata");
-    assert_eq!(malformed.kind(), std::io::ErrorKind::InvalidData);
-    assert!(malformed.to_string().contains("malformed daemon metadata"));
-}
-
-fn spawn_probe_daemon(
-    path: &Path,
-    expected_session: &str,
-    requests: usize,
-    respond: bool,
-) -> std::thread::JoinHandle<()> {
-    let listener = tau_socket::SocketListener::bind(socket_path(path)).expect("probe listener");
-    let expected_session = expected_session.to_owned();
-    std::thread::spawn(move || {
-        for _ in 0..requests {
-            let mut client = listener.accept().expect("accept probe");
-            assert!(matches!(
-                client.recv().expect("hello"),
-                Some(tau_proto::HarnessInputMessage::Hello(_))
-            ));
-            let Some(tau_proto::HarnessInputMessage::PeerSessionProbe(probe)) =
-                client.recv().expect("probe")
-            else {
-                panic!("expected peer session probe");
-            };
-            assert_eq!(probe.session_id, expected_session);
-            if respond {
-                client
-                    .send(&tau_proto::HarnessOutputMessage::PeerSessionProbeResult(
-                        tau_proto::PeerSessionProbeResult {
-                            request_id: probe.request_id,
-                            available: true,
-                        },
-                    ))
-                    .expect("probe result");
-            } else {
-                std::thread::sleep(SESSION_DISCOVERY_PROBE_TIMEOUT * 2);
-            }
-        }
-    })
-}
-
-/// Exercises live opt-in confirmation against two daemon sockets while
-/// proving a non-opted daemon is not probed and full project paths are
-/// never returned.
-#[test]
-fn peer_discovery_two_daemons_requires_opt_in_and_redacts_project_root() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let opted = harnesses_dir().join("a");
-    let private = harnesses_dir().join("b");
-    let opted_daemon = spawn_probe_daemon(&opted, "live-session", 1, true);
-    let _private_listener =
-        tau_socket::SocketListener::bind(socket_path(&private)).expect("private listener");
-    write_peer_metadata(
-        &opted,
-        "live-session",
-        Path::new("/secret/parent/public-project"),
-        true,
-    );
-    write_peer_metadata(
-        &private,
-        "private-session",
-        Path::new("/secret/parent/private-project"),
-        false,
-    );
-
-    let snapshot = discover_for_test(None, 50, "live-session");
-
-    assert_eq!(
-        snapshot.sessions,
-        vec![PeerSession {
-            session_id: "live-session".to_owned(),
-            project_label: Some("public-project".to_owned()),
-            current: true,
-        }]
-    );
-    assert!(!format!("{snapshot:?}").contains("/secret/"));
-    opted_daemon.join().expect("opted daemon");
-}
-
-/// Ensures a daemon's rewritten active session is authoritative and stale
-/// metadata is omitted from the same discovery snapshot.
-#[test]
-fn peer_discovery_tracks_active_session_and_omits_stale_record() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let live = harnesses_dir().join("live");
-    let stale = harnesses_dir().join("stale");
-    let daemon = spawn_probe_daemon(&live, "new-session", 1, true);
-    write_peer_metadata(&live, "old-session", Path::new("/project"), true);
-    update_session_id(&live, "new-session").expect("rewrite active session");
-    write_peer_metadata(&stale, "stale-session", Path::new("/stale"), true);
-    std::fs::write(socket_path(&stale), b"not a socket").expect("stale socket");
-
-    let snapshot = discover_for_test(None, 50, "");
-
-    assert_eq!(snapshot.sessions.len(), 1);
-    assert_eq!(snapshot.sessions[0].session_id, "new-session");
-    daemon.join().expect("live daemon");
-}
-
-/// Ensures two live daemons claiming one routing key are conservatively
-/// omitted instead of exposing a nondeterministic peer destination.
-#[test]
-fn peer_discovery_omits_ambiguous_live_session() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let first = harnesses_dir().join("first");
-    let second = harnesses_dir().join("second");
-    let first_daemon = spawn_probe_daemon(&first, "same", 1, true);
-    let second_daemon = spawn_probe_daemon(&second, "same", 1, true);
-    write_peer_metadata(&first, "same", Path::new("/one"), true);
-    write_peer_metadata(&second, "same", Path::new("/two"), true);
-
-    assert!(discover_for_test(None, 50, "").sessions.is_empty());
-
-    first_daemon.join().expect("first daemon");
-    second_daemon.join().expect("second daemon");
-}
-
-/// Proves traversal counts every directory entry before filtering, so a
-/// directory dominated by unrelated files cannot cause unbounded scanning.
-#[test]
-fn peer_discovery_counts_non_candidates_toward_scan_bound() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    for index in 0..=SESSION_DISCOVERY_MAX_CANDIDATES {
-        std::fs::write(harnesses_dir().join(format!("{index}.unrelated")), b"x")
-            .expect("unrelated entry");
-    }
-
-    let snapshot = discover_for_test(None, 50, "");
-
-    assert!(snapshot.scan_truncated);
-    assert!(snapshot.sessions.is_empty());
-}
-
-/// Cancellation raised by one directory dequeue is observed before the
-/// iterator can perform another filesystem dequeue.
-#[test]
-fn bounded_directory_iteration_stops_before_post_cancel_dequeue() {
-    let cancelled = AtomicBool::new(false);
-    let dequeues = AtomicUsize::new(0);
-    let entries = std::iter::from_fn(|| {
-        dequeues.fetch_add(1, Ordering::AcqRel);
-        cancelled.store(true, Ordering::Release);
-        Some(())
+            ))
+            .expect("write correlated result");
+        writer.flush().expect("flush exact results");
     });
-
-    assert!(
-        collect_directory_entries_bounded(
-            entries,
-            Instant::now() + Duration::from_secs(1),
-            &cancelled
-        )
-        .is_err()
-    );
-    assert_eq!(dequeues.load(Ordering::Acquire), 1);
+    (claim, thread)
 }
 
-/// Whole-call admission rejects a ninth concurrent coordinator without
-/// spawning or queueing and restores every slot after completion.
+/// Session ids, rather than process ids or runtime generations, must produce
+/// stable bounded claim and socket paths.
+#[test]
+fn session_keyed_paths_are_deterministic_and_short() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session(&"s".repeat(tau_proto::SESSION_SCOPED_ID_MAX_LEN));
+    let first = harness_path_for_session(&id);
+    assert_eq!(first, harness_path_for_session(&id));
+    assert_eq!(
+        first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::len),
+        Some(64)
+    );
+    assert!(
+        !first
+            .to_string_lossy()
+            .contains(&std::process::id().to_string())
+    );
+}
+
+/// An absent claim and an unlocked stale claim both linearize as not running;
+/// ordinary resolution must never create or delete runtime paths.
+#[test]
+fn absent_and_unlocked_claims_are_not_running() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-a");
+    assert_eq!(
+        find_harness_for_session(id.as_str()).expect("absent lookup"),
+        None
+    );
+    let claim = claim_session(root.path(), &id).expect("claim session");
+    let path = claim.claim_path.clone();
+    drop(claim);
+    std::fs::write(&path, b"stale").expect("stale residue");
+    std::fs::set_permissions(&path, Permissions::from_mode(0o600)).expect("claim mode");
+    assert_eq!(
+        find_harness_for_session(id.as_str()).expect("unlocked lookup"),
+        None
+    );
+    assert!(path.exists(), "resolver must not clean unlocked residue");
+}
+
+/// Exactly one concurrent daemon may own a session claim, and a losing starter
+/// must not disturb the winner's deterministic socket path.
+#[test]
+fn concurrent_claim_loser_cannot_reclaim_winner() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-race");
+    let winner = claim_session(root.path(), &id).expect("winner claim");
+    let error = claim_session(root.path(), &id)
+        .err()
+        .expect("loser must fail");
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(
+        winner.socket_path(),
+        socket_path(&harness_path_for_session(&id))
+    );
+}
+
+/// A contended claim without a ready exact responder is incomplete rather than
+/// absent, preventing a caller from routing around startup.
+#[test]
+fn contended_unreachable_claim_is_incomplete() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-starting");
+    let mut claim = claim_session(root.path(), &id).expect("claim session");
+    claim.publish(false).expect("publish diagnostics");
+    assert!(matches!(
+        find_harness_for_session(id.as_str()),
+        Err(FindHarnessForSessionError::Incomplete { session_id }) if session_id == id.as_str()
+    ));
+}
+
+/// Only the lock winner may reclaim a same-owner stale socket, while a
+/// non-socket path at the deterministic address fails closed.
+#[test]
+fn claim_owner_reclaims_only_stale_socket() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-stale");
+    let claim = claim_session(root.path(), &id).expect("claim session");
+    let stale = UnixListener::bind(claim.socket_path()).expect("create stale socket");
+    drop(stale);
+    claim.reclaim_stale_socket().expect("reclaim stale socket");
+    assert!(!claim.socket_path().exists());
+    std::fs::write(claim.socket_path(), b"not a socket").expect("blocking file");
+    let error = claim
+        .reclaim_stale_socket()
+        .expect_err("non-socket must fail");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+}
+
+/// Pathname replacement cannot trick claim retirement into deleting a file the
+/// daemon never locked.
+#[test]
+fn claim_retirement_preserves_replacement_inode() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-replaced-claim");
+    let claim = claim_session(root.path(), &id).expect("claim session");
+    let path = claim.claim_path.clone();
+    std::fs::remove_file(&path).expect("unlink locked claim pathname");
+    std::fs::write(&path, b"replacement").expect("create replacement claim");
+    std::fs::set_permissions(&path, Permissions::from_mode(0o600)).expect("replacement mode");
+
+    drop(claim);
+
+    assert_eq!(
+        std::fs::read(path).expect("replacement survives"),
+        b"replacement"
+    );
+}
+
+/// A contended record whose identity does not match its deterministic key is
+/// incomplete and never routes to the key owner's socket.
+#[test]
+fn mismatched_contended_record_fails_closed() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let requested = session("session-requested");
+    let other = session("session-other");
+    let mut claim = claim_session(root.path(), &requested).expect("claim session");
+    claim.record.session_id = other;
+    claim
+        .publish(false)
+        .expect("publish mismatched diagnostics");
+
+    assert!(matches!(
+        find_harness_for_session(requested.as_str()),
+        Err(FindHarnessForSessionError::Incomplete { session_id })
+            if session_id == requested.as_str()
+    ));
+}
+
+/// Orderly retirement removes exactly the lock pathname owned by the claim.
+#[test]
+fn orderly_retirement_removes_owned_claim() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-retired");
+    let claim = claim_session(root.path(), &id).expect("claim session");
+    let path = claim.claim_path.clone();
+
+    claim.retire().expect("retire claim");
+
+    assert!(!path.exists());
+    assert_eq!(
+        find_harness_for_session(id.as_str()).expect("retired lookup"),
+        None
+    );
+}
+
+/// Both local listing and peer discovery bound raw directory traversal, not
+/// only the number of valid live records they happen to return.
+#[test]
+fn ignored_entry_flood_marks_local_and_peer_listing_incomplete() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("entry-flood-bootstrap");
+    drop(claim_session(root.path(), &id).expect("prepare claim directory"));
+    let claims = claims_dir();
+    for index in 0..=MAX_DIRECTORY_ENTRIES {
+        std::fs::write(claims.join(format!("ignored-{index}")), b"").expect("ignored entry");
+    }
+
+    let error = list_running_sessions().expect_err("local listing must reject exhaustion");
+    assert!(
+        error
+            .to_string()
+            .contains("could not list every running session claim")
+    );
+    assert!(
+        list_running_claim_records().is_err(),
+        "peer listing must reject the same raw-entry exhaustion"
+    );
+}
+
+/// Whole-call admission is non-queued and restores every slot after release.
 #[test]
 fn peer_discovery_whole_call_admission_is_non_queued() {
-    let _serial = TEST_DISCOVERY_SERIAL
-        .lock()
-        .expect("test discovery serial lock poisoned");
-    let wait_deadline = Instant::now() + Duration::from_secs(1);
-    while ACTIVE_DISCOVERY_CALLS.load(Ordering::Acquire) != 0 {
-        assert!(
-            Instant::now() < wait_deadline,
-            "discovery lease did not retire"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let permits = (0..SESSION_DISCOVERY_MAX_CALLS)
-        .map(|_| DiscoveryCallPermit::try_acquire().expect("discovery call slot"))
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let permits = (0..MAX_DISCOVERY_CALLS)
+        .map(|_| DiscoveryCallPermit::try_acquire().expect("discovery permit"))
         .collect::<Vec<_>>();
     assert!(DiscoveryCallPermit::try_acquire().is_none());
     drop(permits);
     assert!(DiscoveryCallPermit::try_acquire().is_some());
 }
 
-/// A stalled storage scan cannot retain the caller beyond the total
-/// deadline; its bounded lease remains charged until the isolated
-/// worker exits.
+/// A blocked claim-directory scan returns at the one whole-call deadline while
+/// its permit remains charged until the isolated worker exits.
 #[test]
 fn peer_discovery_slow_storage_isolated_by_total_deadline() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("slow-scan-bootstrap");
+    drop(claim_session(root.path(), &id).expect("prepare claim directory"));
     *TEST_DISCOVERY_SCAN_DELAY
         .lock()
-        .expect("test scan delay lock poisoned") = Some((harnesses_dir(), 2_100));
-    let _serial = TEST_DISCOVERY_SERIAL
-        .lock()
-        .expect("test discovery serial lock poisoned");
+        .expect("scan delay lock poisoned") = Some((claims_dir(), 2_100));
     let started = Instant::now();
 
     let snapshot = discover_peer_sessions(
         None,
-        50,
+        SESSION_DISCOVERY_MAX_RESULTS,
         "",
-        DiscoveryCallPermit::try_acquire().expect("discovery call permit"),
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
     );
 
     *TEST_DISCOVERY_SCAN_DELAY
         .lock()
-        .expect("test scan delay lock poisoned") = None;
-    assert!(started.elapsed() < Duration::from_millis(2_200));
+        .expect("scan delay lock poisoned") = None;
+    assert!(started.elapsed() < DISCOVERY_TIMEOUT + Duration::from_secs(1));
     assert!(snapshot.sessions.is_empty());
     assert!(snapshot.scan_truncated);
-    std::thread::sleep(Duration::from_millis(150));
+    let worker_deadline = Instant::now() + Duration::from_secs(1);
+    while ACTIVE_DISCOVERY_WORKERS.load(Ordering::Acquire) != 0 {
+        assert!(
+            Instant::now() < worker_deadline,
+            "isolated discovery worker did not retire"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
-/// Proves the metadata reader accepts the exact 16 KiB boundary and rejects
-/// one additional byte without parsing or allocating an unbounded payload.
-#[test]
-fn peer_discovery_metadata_byte_limit_is_inclusive_and_bounded() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let path = harnesses_dir().join("metadata-boundary");
-    let base = serde_json::to_vec(&DaemonMetadata {
-        version: DAEMON_METADATA_VERSION,
-        pid: std::process::id(),
-        project_root: None,
-        session_id: "boundary".to_owned(),
-        peer_entrypoint: true,
-    })
-    .expect("metadata");
-    let mut exact = base.clone();
-    exact.resize(SESSION_DISCOVERY_MAX_METADATA_BYTES as usize, b' ');
-    std::fs::write(metadata_path(&path), &exact).expect("exact metadata");
-    let cancelled = AtomicBool::new(false);
-    assert!(
-        read_metadata_bounded(&path, Instant::now() + Duration::from_secs(1), &cancelled).is_some()
-    );
-
-    exact.push(b' ');
-    std::fs::write(metadata_path(&path), exact).expect("oversized metadata");
-    assert!(
-        read_metadata_bounded(&path, Instant::now() + Duration::from_secs(1), &cancelled).is_none()
-    );
-}
-
-/// Proves result truncation remains explicit after live confirmation.
+/// Result-limit truncation remains explicit after exact admission and a
+/// positive peer-entrypoint response.
 #[test]
 fn peer_discovery_reports_result_truncation() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let count = SESSION_DISCOVERY_MAX_RESULTS + 1;
-    let mut daemons = Vec::new();
-    for index in 0..count {
-        let path = harnesses_dir().join(format!("{index:03}"));
-        let session = format!("session-{index:03}");
-        daemons.push(spawn_probe_daemon(&path, &session, 1, true));
-        write_peer_metadata(&path, &session, Path::new("/project"), true);
-    }
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let (claim, daemon) = spawn_peer_daemon(&root, "peer-result-limit", true);
 
-    let snapshot = discover_for_test(None, SESSION_DISCOVERY_MAX_RESULTS, "");
+    let snapshot = discover_peer_sessions(
+        None,
+        0,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+    );
 
-    assert_eq!(snapshot.sessions.len(), SESSION_DISCOVERY_MAX_RESULTS);
+    assert!(snapshot.sessions.is_empty());
     assert!(snapshot.truncated);
-    for daemon in daemons {
-        daemon.join().expect("probe daemon");
-    }
+    assert!(!snapshot.scan_truncated);
+    daemon.join().expect("peer daemon");
+    drop(claim);
 }
 
-/// Repeated timed-out probes must return only after scoped workers exit,
-/// preventing deadline cancellation from accumulating background workers.
+/// A failed opted-in probe makes the whole snapshot incomplete rather than
+/// returning a partial set of successfully probed peers.
 #[test]
-fn peer_discovery_deadline_cancellation_leaves_no_workers() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let calls = 3;
-    let mut daemons = Vec::new();
-    for index in 0..(SESSION_DISCOVERY_MAX_PROBES + 1) {
-        let path = harnesses_dir().join(format!("blocked-{index}"));
-        let session = format!("blocked-session-{index}");
-        daemons.push(spawn_probe_daemon(&path, &session, calls, false));
-        write_peer_metadata(&path, &session, Path::new("/project"), true);
-    }
+fn peer_discovery_rejects_partial_results_after_probe_failure() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let (live_claim, live_daemon) = spawn_peer_daemon(&root, "peer-live", true);
+    let blocked_id = session("peer-blocked");
+    let mut blocked_claim =
+        claim_session(root.path(), &blocked_id).expect("claim blocked peer session");
+    blocked_claim
+        .reclaim_stale_socket()
+        .expect("reclaim blocked socket");
+    let blocked_listener =
+        UnixListener::bind(blocked_claim.socket_path()).expect("bind blocked peer socket");
+    blocked_claim
+        .publish(true)
+        .expect("publish blocked peer claim");
 
-    for _ in 0..calls {
-        assert!(discover_for_test(None, 50, "").sessions.is_empty());
-        assert_eq!(ACTIVE_DISCOVERY_WORKERS.load(Ordering::Acquire), 0);
-    }
-    for daemon in daemons {
-        daemon.join().expect("blocked daemon");
-    }
+    let snapshot = discover_peer_sessions(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+    );
+
+    assert!(snapshot.sessions.is_empty());
+    assert!(snapshot.scan_truncated);
+    live_daemon.join().expect("live peer daemon");
+    drop(live_claim);
+    drop(blocked_listener);
+    drop(blocked_claim);
 }
 
-/// Saturated global probe slots keep candidates queued through the total
-/// deadline; cancellation prevents a later socket connect after return.
+/// Saturated global probe slots keep the candidate queued through the total
+/// deadline; cancellation prevents a socket connect after return.
 #[test]
 fn peer_discovery_total_deadline_cancels_queued_probe_before_io() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let path = harnesses_dir().join("queued");
-    let listener = UnixListener::bind(socket_path(&path)).expect("queued listener");
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("peer-queued");
+    let mut claim = claim_session(root.path(), &id).expect("claim queued peer");
+    claim.reclaim_stale_socket().expect("reclaim queued socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind queued socket");
     listener
         .set_nonblocking(true)
-        .expect("nonblocking listener");
-    write_peer_metadata(&path, "queued-session", Path::new("/project"), true);
-    let _serial = TEST_DISCOVERY_SERIAL
-        .lock()
-        .expect("test discovery serial lock poisoned");
+        .expect("set queued listener nonblocking");
+    claim.publish(true).expect("publish queued peer");
     let cancelled = AtomicBool::new(false);
-    let slots = (0..SESSION_DISCOVERY_MAX_PROBES)
+    let slots = (0..MAX_DISCOVERY_PROBES)
         .map(|_| {
-            DiscoveryProbeSlot::acquire(Instant::now() + Duration::from_secs(5), &cancelled)
+            DiscoveryProbeSlot::acquire(Instant::now() + Duration::from_secs(3), &cancelled)
                 .expect("probe slot")
         })
         .collect::<Vec<_>>();
-    let started = Instant::now();
 
     let snapshot = discover_peer_sessions(
         None,
-        50,
+        SESSION_DISCOVERY_MAX_RESULTS,
         "",
-        DiscoveryCallPermit::try_acquire().expect("discovery call permit"),
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
     );
 
-    assert!(started.elapsed() < Duration::from_millis(2_200));
     assert!(snapshot.sessions.is_empty());
-    assert!(
-        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
-    );
+    assert!(snapshot.scan_truncated);
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
     assert_eq!(ACTIVE_DISCOVERY_WORKERS.load(Ordering::Acquire), 0);
     drop(slots);
 }
 
-/// Ensures daemon metadata's `session_id` field is the active session and
-/// can be updated in place without losing the stable pid/project fields.
+/// Exact resolution rechecks cancellation after reading the authoritative
+/// claim and before performing any socket I/O.
 #[test]
-fn update_session_id_rewrites_active_session_metadata() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let paths = prepare_harness_paths(&project_root, "old-session").expect("paths");
-    paths.write_metadata().expect("write metadata");
-
-    update_session_id(paths.path(), "new-session").expect("update session");
-
-    let metadata = read_metadata(paths.path()).expect("metadata");
-    assert_eq!(metadata.session_id, "new-session");
-    assert_eq!(metadata.pid, std::process::id());
-    assert_eq!(
-        metadata.project_root.as_deref(),
-        Some(project_root.as_path())
-    );
-}
-
-/// Pins the publication boundary so a reader deterministically sees the old
-/// complete document until the new complete document is atomically installed.
-#[test]
-fn metadata_replacement_keeps_previous_document_visible_until_rename() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let paths = prepare_harness_paths(&project_root, "session-a").expect("paths");
-    paths.write_metadata().expect("initial metadata");
-    let path = paths.path().to_path_buf();
-    let metadata_path = metadata_path(&path);
-    let (reached_tx, reached_rx) = mpsc::sync_channel(0);
-    let (resume_tx, resume_rx) = mpsc::sync_channel(0);
-    *TEST_METADATA_RENAME_PAUSE
-        .lock()
-        .expect("metadata rename pause lock poisoned") = Some(MetadataRenamePause {
-        path: metadata_path.clone(),
-        reached: reached_tx,
-        resume: resume_rx,
-    });
-
-    let writer_path = path.clone();
-    let writer = std::thread::spawn(move || {
-        update_session_id(&writer_path, "session-b").expect("replace active session");
-    });
-    reached_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("writer reached publication boundary");
-
-    let old: DaemonMetadata = serde_json::from_slice(
-        &std::fs::read(&metadata_path).expect("read metadata before publication"),
-    )
-    .expect("old metadata remains complete before publication");
-    assert_eq!(old.session_id, "session-a");
-
-    resume_tx.send(()).expect("resume metadata publication");
-    writer.join().expect("metadata writer");
-    let new = read_metadata(&path).expect("new metadata");
-    assert_eq!(new.session_id, "session-b");
-}
-
-/// Ensures repeated production metadata replacements remain complete JSON for
-/// concurrent discovery readers instead of exposing the truncate/write window.
-#[test]
-fn metadata_replacement_is_atomic_under_concurrent_read_pressure() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let paths = prepare_harness_paths(&project_root, "session-a").expect("paths");
-    paths.write_metadata().expect("initial metadata");
-
-    let path = paths.path().to_path_buf();
-    let finished = Arc::new(AtomicBool::new(false));
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let readers = (0..4)
-        .map(|_| {
-            let path = path.clone();
-            let finished = Arc::clone(&finished);
-            let ready_tx = ready_tx.clone();
-            std::thread::spawn(move || {
-                let encoded =
-                    std::fs::read(metadata_path(&path)).expect("initial published metadata");
-                serde_json::from_slice::<DaemonMetadata>(&encoded)
-                    .expect("initial published metadata is complete");
-                ready_tx.send(()).expect("report active metadata reader");
-                while !finished.load(Ordering::Acquire) {
-                    let encoded =
-                        std::fs::read(metadata_path(&path)).expect("published metadata remains");
-                    let metadata: DaemonMetadata =
-                        serde_json::from_slice(&encoded).expect("published metadata is complete");
-                    assert!(matches!(
-                        metadata.session_id.as_str(),
-                        "session-a" | "session-b"
-                    ));
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    drop(ready_tx);
-    for _ in 0..readers.len() {
-        ready_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("metadata reader became active");
-    }
-
-    for index in 0..2_000 {
-        let session_id = if index % 2 == 0 {
-            "session-b"
-        } else {
-            "session-a"
-        };
-        update_session_id(&path, session_id).expect("replace active session");
-    }
-    finished.store(true, Ordering::Release);
-    for reader in readers {
-        reader.join().expect("metadata reader");
-    }
-
-    let metadata = read_metadata(&path).expect("final metadata");
-    assert_eq!(metadata.session_id, "session-a");
-    assert_eq!(
-        std::fs::read_dir(path.parent().expect("runtime directory"))
-            .expect("runtime entries")
-            .filter_map(Result::ok)
-            .filter(|entry| { entry.file_name().to_string_lossy().contains(".json.tmp-") })
-            .count(),
-        0,
-        "successful replacements left temporary publication files"
-    );
-}
-
-/// Runtime metadata writers reject identifiers their reader cannot accept.
-#[test]
-fn runtime_metadata_writers_reject_invalid_session_ids() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-
-    let prepare_error = match prepare_harness_paths(&project_root, "bad.id") {
-        Ok(_) => panic!("invalid initial id must fail"),
-        Err(error) => error,
-    };
-    assert_eq!(prepare_error.kind(), std::io::ErrorKind::InvalidInput);
-
-    let paths = prepare_harness_paths(&project_root, "valid").expect("paths");
-    paths.write_metadata().expect("write metadata");
-    let update_error = update_session_id(paths.path(), "bad.id").expect_err("invalid updated id");
-    assert_eq!(update_error.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(
-        read_session_id(paths.path())
-            .expect("unchanged valid id")
-            .as_str(),
-        "valid"
-    );
-}
-
-/// Models two daemons that report the same PID from separate PID namespaces
-/// and ensures their shared runtime directory still receives distinct
-/// sockets.
-#[test]
-fn process_instance_ids_disambiguate_equal_pid_socket_paths() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let first_instance = HarnessInstanceId::parse("0000000000000001").expect("first instance id");
-    let second_instance = HarnessInstanceId::parse("0000000000000002").expect("second instance id");
-
-    let first = prepare_harness_paths_for_instance(&project_root, "first", &first_instance)
-        .expect("first paths");
-    let second = prepare_harness_paths_for_instance(&project_root, "second", &second_instance)
-        .expect("second paths");
-    let _first_listener = UnixListener::bind(first.socket_path()).expect("first same-PID socket");
-    let _second_listener =
-        UnixListener::bind(second.socket_path()).expect("second same-PID socket");
-
-    assert_ne!(first.path(), second.path());
-    assert!(
-        first
-            .path()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(&format!("{}-", std::process::id())))
-    );
-}
-
-/// Ensures running-session listing derives lifecycle from responsive daemon
-/// memory rather than persisted sessions, runtime metadata, or stale paths.
-#[test]
-fn running_session_list_includes_only_reachable_active_sessions() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let live = harnesses_dir().join("live");
-    let stale = harnesses_dir().join(std::process::id().to_string());
-    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
-    write_peer_metadata(&stale, "historical-session", Path::new("/stale"), false);
-    std::fs::write(socket_path(&stale), b"not a socket").expect("stale socket");
-    let running_session = fixture_running_session(&live, "running-session");
-
-    assert_eq!(
-        list_running_sessions_for_semantic_test(running_session_probe_fixture([(
-            live,
-            running_session.clone(),
-        )]))
-        .expect("running sessions"),
-        vec![running_session]
-    );
-}
-
-/// Ensures absence of runtime candidates is a successful empty,
-/// pipe-friendly listing rather than a synthesized placeholder row, even when
-/// the scan worker is held after spawning.
-#[test]
-fn running_session_list_is_empty_without_runtime_directory() {
-    let temp = TempDir::new().expect("temp runtime");
-    let runtime_root = temp.path().to_path_buf();
-    let scan_started = Arc::new(Barrier::new(2));
-    let release_scan = Arc::new(Barrier::new(2));
-    let worker_started = Arc::clone(&scan_started);
-    let worker_release = Arc::clone(&release_scan);
-    let policy = RunningSessionListPolicy::non_expiring(
-        Some(Arc::new(move || {
-            worker_started.wait();
-            worker_release.wait();
-        })),
-        unexpected_running_session_probe(),
-    );
-    let (result_tx, result_rx) = mpsc::sync_channel(1);
-    let listing = std::thread::spawn(move || {
-        with_runtime_dir(Some(&runtime_root), || {
-            result_tx
-                .send(list_running_sessions_with_policy(
-                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
-                    policy,
-                ))
-                .expect("report listing result");
-        });
-    });
-
-    scan_started.wait();
-    assert!(
-        result_rx.try_recv().is_err(),
-        "scan result must remain pending while worker start is gated"
-    );
-    release_scan.wait();
-    assert!(
-        result_rx
-            .recv()
-            .expect("listing result")
-            .expect("running sessions")
-            .is_empty()
-    );
-    listing.join().expect("listing thread");
-    assert!(!temp.path().join("tau/harnesses").exists());
-}
-
-/// Ensures daemon memory remains authoritative when adjacent metadata is
-/// missing or unreadable during a rewrite or startup window.
-#[test]
-fn running_session_list_ignores_invalid_runtime_metadata() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let live = harnesses_dir().join("live");
-    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
-    std::fs::write(metadata_path(&live), b"{").expect("invalid metadata");
-    let running_session = fixture_running_session(&live, "authoritative-session");
-
-    assert_eq!(
-        list_running_sessions_for_semantic_test(running_session_probe_fixture([(
-            live,
-            running_session.clone(),
-        )]))
-        .expect("running sessions"),
-        vec![running_session]
-    );
-}
-
-/// Ensures listing sorts responsive records while retaining
-/// indistinguishable identities so callers can detect multiple
-/// harnesses for one directory.
-#[test]
-fn running_session_list_sorts_and_retains_duplicate_identities() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let z = harnesses_dir().join("a");
-    let duplicate = harnesses_dir().join("b");
-    let a = harnesses_dir().join("c");
-    for candidate in [&z, &duplicate, &a] {
-        std::fs::write(socket_path(candidate), b"fixture").expect("socket candidate");
-    }
-    let z_session = fixture_running_session(&z, "z-session");
-    let duplicate_session = fixture_running_session(&duplicate, "a-session");
-    let a_session = fixture_running_session(&a, "a-session");
-
-    assert_eq!(
-        list_running_sessions_for_semantic_test(running_session_probe_fixture([
-            (z, z_session.clone()),
-            (duplicate, duplicate_session.clone()),
-            (a, a_session.clone()),
-        ]))
-        .expect("running sessions"),
-        vec![duplicate_session, a_session, z_session]
-    );
-}
-
-/// Ensures the raw directory-entry bound fails the whole listing rather
-/// than returning a partial set after a stale-file flood.
-#[test]
-fn running_session_list_fails_at_directory_entry_bound() {
-    assert_eq!(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES, 4_096);
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    for index in 0..=TEST_DIRECTORY_ENTRY_LIMIT {
-        std::fs::write(harnesses_dir().join(format!("junk-{index}")), b"junk")
-            .expect("junk runtime entry");
-    }
-
-    let error = list_running_sessions_with_entry_limit_for_semantic_test(
-        TEST_DIRECTORY_ENTRY_LIMIT,
-        unexpected_running_session_probe(),
-    )
-    .expect_err("bounded listing");
-    assert!(
-        error
-            .to_string()
-            .contains("runtime directory entry limit reached")
-    );
-}
-
-/// Ensures one responsive non-Tau or stalled socket consumes only its
-/// per-probe budget and cannot hide a later responsive harness.
-#[test]
-fn running_session_list_continues_after_one_probe_timeout() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let blocked = harnesses_dir().join("a-blocked");
-    let live = harnesses_dir().join("b-live");
-    std::fs::write(socket_path(&blocked), b"fixture").expect("blocked socket candidate");
-    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
-    let running_session = fixture_running_session(&live, "responsive-session");
-    let probe_started = Arc::new(Barrier::new(2));
-    let release_probe = Arc::new(Barrier::new(2));
-    let blocked_timed_out = Arc::new(AtomicBool::new(false));
-    let trace = Arc::new(Mutex::new(Vec::new()));
-    let fixture_started = Arc::clone(&probe_started);
-    let fixture_release = Arc::clone(&release_probe);
-    let fixture_timed_out = Arc::clone(&blocked_timed_out);
-    let fixture_trace = Arc::clone(&trace);
-    let fixture_blocked = blocked.clone();
-    let fixture_live = live.clone();
-    let fixture_session = running_session.clone();
-    let probe = Arc::new(move |path: &Path, _deadline: &RunningSessionListDeadline| {
-        fixture_trace
-            .lock()
-            .expect("probe trace lock poisoned")
-            .push(path.to_path_buf());
-        if path == fixture_blocked {
-            fixture_started.wait();
-            fixture_release.wait();
-            assert!(
-                fixture_timed_out.load(Ordering::Acquire),
-                "blocked probe released before manual timeout"
-            );
-            return CurrentSessionProbe::Unresponsive;
-        }
-        assert_eq!(path, fixture_live);
-        CurrentSessionProbe::Reported(fixture_session.clone())
-    });
-    let policy = RunningSessionListPolicy::non_expiring(None, probe);
-    let runtime_root = temp.path().to_path_buf();
-    let (result_tx, result_rx) = mpsc::sync_channel(1);
-    let listing = std::thread::spawn(move || {
-        with_runtime_dir(Some(&runtime_root), || {
-            result_tx
-                .send(list_running_sessions_with_policy(
-                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
-                    policy,
-                ))
-                .expect("report listing result");
-        });
-    });
-
-    probe_started.wait();
-    assert!(
-        result_rx.try_recv().is_err(),
-        "listing must wait for the blocked probe timeout"
-    );
-    blocked_timed_out.store(true, Ordering::Release);
-    release_probe.wait();
-    assert_eq!(
-        result_rx
-            .recv()
-            .expect("listing result")
-            .expect("running sessions"),
-        vec![running_session]
-    );
-    listing.join().expect("listing thread");
-    assert_eq!(
-        *trace.lock().expect("probe trace lock poisoned"),
-        [blocked, live]
-    );
-}
-
-/// Ensures the isolated scan reports timeout only after its owning test
-/// explicitly advances the per-call deadline.
-#[test]
-fn running_session_list_isolates_slow_storage() {
-    let temp = TempDir::new().expect("temp runtime");
-    let runtime_root = temp.path().to_path_buf();
-    let scan_started = Arc::new(Barrier::new(2));
-    let release_scan = Arc::new(Barrier::new(2));
-    let worker_started = Arc::clone(&scan_started);
-    let worker_release = Arc::clone(&release_scan);
-    let expired = Arc::new(AtomicBool::new(false));
-    let policy = RunningSessionListPolicy::manual(
-        Arc::clone(&expired),
-        Some(Arc::new(move || {
-            worker_started.wait();
-            worker_release.wait();
-        })),
-        unexpected_running_session_probe(),
-    );
-    let (result_tx, result_rx) = mpsc::sync_channel(1);
-    let listing = std::thread::spawn(move || {
-        with_runtime_dir(Some(&runtime_root), || {
-            std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-            result_tx
-                .send(list_running_sessions_with_policy(
-                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
-                    policy,
-                ))
-                .expect("report listing result");
-        });
-    });
-
-    scan_started.wait();
-    assert!(
-        result_rx.try_recv().is_err(),
-        "scan must not time out before manual deadline advancement"
-    );
-    expired.store(true, Ordering::Release);
-    release_scan.wait();
-    let error = result_rx
-        .recv()
-        .expect("listing result")
-        .expect_err("scan deadline");
-
-    assert!(error.to_string().contains("runtime scan timed out"));
-    listing.join().expect("listing thread");
-}
-
-/// Ensures manually advancing the total deadline while the final probe is
-/// blocked rejects the already collected partial result.
-#[test]
-fn running_session_list_rejects_partial_result_on_final_probe_deadline() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    let live = harnesses_dir().join("a-live");
-    let blocked = harnesses_dir().join("z-blocked");
-    std::fs::write(socket_path(&live), b"fixture").expect("live socket candidate");
-    std::fs::write(socket_path(&blocked), b"fixture").expect("blocked socket candidate");
-    let collected = fixture_running_session(&live, "collected");
-    let request_received = Arc::new(Barrier::new(2));
-    let release_request = Arc::new(Barrier::new(2));
-    let probe_received = Arc::clone(&request_received);
-    let probe_release = Arc::clone(&release_request);
-    let probe_live = live.clone();
-    let probe_blocked = blocked.clone();
-    let probe_collected = collected.clone();
-    let trace = Arc::new(Mutex::new(Vec::new()));
-    let probe_trace = Arc::clone(&trace);
-    let probe = Arc::new(move |path: &Path, deadline: &RunningSessionListDeadline| {
-        let mut trace = probe_trace.lock().expect("probe trace lock poisoned");
-        trace.push(path.to_path_buf());
-        if path == probe_live {
-            return CurrentSessionProbe::Reported(probe_collected.clone());
-        }
-        assert_eq!(path, probe_blocked);
-        assert_eq!(
-            trace.as_slice(),
-            [probe_live.clone(), probe_blocked.clone()],
-            "final blocked probe must follow one collected live report"
-        );
-        drop(trace);
-        probe_received.wait();
-        probe_release.wait();
-        if deadline.expired() {
-            CurrentSessionProbe::DeadlineExpired
-        } else {
-            CurrentSessionProbe::Unresponsive
-        }
-    });
-    let expired = Arc::new(AtomicBool::new(false));
-    let policy = RunningSessionListPolicy::manual(Arc::clone(&expired), None, probe);
-    let runtime_root = temp.path().to_path_buf();
-    let (result_tx, result_rx) = mpsc::sync_channel(1);
-    let listing = std::thread::spawn(move || {
-        with_runtime_dir(Some(&runtime_root), || {
-            result_tx
-                .send(list_running_sessions_with_policy(
-                    SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
-                    policy,
-                ))
-                .expect("report listing result");
-        });
-    });
-
-    request_received.wait();
-    assert!(
-        result_rx.try_recv().is_err(),
-        "final probe must remain pending before manual deadline advancement"
-    );
-    expired.store(true, Ordering::Release);
-    release_request.wait();
-    let error = result_rx
-        .recv()
-        .expect("listing result")
-        .expect_err("global probe deadline");
-    assert!(error.to_string().contains("probe deadline expired"));
-    listing.join().expect("listing thread");
-    assert_eq!(
-        *trace.lock().expect("probe trace lock poisoned"),
-        [live, blocked]
-    );
-}
-
-/// Ensures session discovery ignores the old active-session value after a
-/// metadata rewrite and still finds the same live socket under the new id.
-#[test]
-fn find_harness_for_session_tracks_updated_active_session() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let paths = prepare_harness_paths(&project_root, "old-session").expect("paths");
-    let _listener = UnixListener::bind(paths.socket_path()).expect("socket");
-    paths.write_metadata().expect("write metadata");
-
-    update_session_id(paths.path(), "new-session").expect("update session");
-
-    assert_eq!(
-        find_harness_for_session("old-session").expect("old lookup"),
-        None
-    );
-    assert_eq!(
-        find_harness_for_session("new-session").expect("new lookup"),
-        Some(paths.path().to_path_buf())
-    );
-}
-
-/// A dead unreachable claimant is ignored but preserved because discovery
-/// cannot atomically exclude a concurrent PID-reuse/startup replacement.
-#[cfg(target_os = "linux")]
-#[test]
-fn find_harness_for_session_preserves_dead_socket() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let paths = prepare_harness_paths(&project_root, "session").expect("paths");
-    write_metadata_with_pid(paths.path(), &project_root, "session", dead_pid());
-    std::fs::write(paths.socket_path(), b"not a listener").expect("stale socket marker");
-
-    assert_eq!(find_harness_for_session("session").expect("lookup"), None);
-    assert!(metadata_path(paths.path()).exists());
-    assert!(paths.socket_path().exists());
-}
-
-/// Ensures a transient connection failure cannot unlink runtime metadata
-/// for a harness whose process still exists. This protects
-/// external-message discovery from turning one failed liveness probe
-/// into a permanent "no running daemon" failure for a live session.
-#[test]
-fn find_harness_for_session_keeps_files_when_pid_is_alive() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let child = ChildGuard::new();
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let paths = prepare_harness_paths(&project_root, "session").expect("paths");
-    write_metadata_with_pid(paths.path(), &project_root, "session", child.id());
-    std::fs::write(paths.socket_path(), b"not a listener").expect("stale socket marker");
-
-    assert!(matches!(
-        find_harness_for_session("session"),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
-    assert!(metadata_path(paths.path()).exists());
-    assert!(paths.socket_path().exists());
-}
-
-/// Hundreds of unrelated stale lifecycle pairs must not hide one live
-/// claimant merely because they exceed the general discovery candidate cap.
-#[cfg(target_os = "linux")]
-#[test]
-fn find_harness_for_session_crosses_unrelated_stale_flood() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let pid_max: u32 = std::fs::read_to_string("/proc/sys/kernel/pid_max")
-        .expect("pid max")
-        .trim()
-        .parse()
-        .expect("numeric pid max");
-    for offset in 1..=300 {
-        let pid = pid_max + offset;
-        let path = dir.join(pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "unrelated-session", pid);
-    }
-    let live = dir.join("live-target");
-    let _listener = UnixListener::bind(socket_path(&live)).expect("live socket");
-    write_peer_metadata(&live, "live-session", temp.path(), true);
-
-    assert_eq!(
-        find_harness_for_session("live-session").expect("bounded lookup"),
-        Some(live)
-    );
-    assert_eq!(
-        std::fs::read_dir(&dir).expect("runtime entries").count(),
-        602,
-        "lookup must remain non-destructive"
-    );
-}
-
-/// More session-matching records than the candidate budget keep uniqueness
-/// incomplete even when one early claimant is live.
-#[cfg(target_os = "linux")]
-#[test]
-fn find_harness_for_session_fails_closed_at_matching_candidate_bound() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let live = dir.join("live-target");
-    let _listener = UnixListener::bind(socket_path(&live)).expect("live socket");
-    write_peer_metadata(&live, "bounded-session", temp.path(), true);
-    let pid_max: u32 = std::fs::read_to_string("/proc/sys/kernel/pid_max")
-        .expect("pid max")
-        .trim()
-        .parse()
-        .expect("numeric pid max");
-    for offset in 1..=SESSION_DISCOVERY_MAX_CANDIDATES as u32 {
-        let pid = pid_max + offset;
-        let path = dir.join(pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "bounded-session", pid);
-    }
-
-    assert!(matches!(
-        find_harness_for_session("bounded-session"),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
-    assert_eq!(
-        std::fs::read_dir(&dir).expect("runtime entries").count(),
-        (SESSION_DISCOVERY_MAX_CANDIDATES + 1) * 2
-    );
-}
-
-/// Cancellation that arrives after parsing the final unrelated metadata
-/// record must still prevent a false complete `None` result.
-#[test]
-fn find_harness_for_session_checks_cancellation_after_metadata_read() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let unrelated = dir.join("unrelated");
-    write_peer_metadata(&unrelated, "other-session", temp.path(), true);
-    TEST_CANCEL_AFTER_SESSION_METADATA_READ.with(|enabled| enabled.set(true));
+fn find_harness_for_session_checks_cancellation_after_claim_read() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("cancel-after-claim");
+    let mut claim = claim_session(root.path(), &id).expect("claim session");
+    claim.reclaim_stale_socket().expect("reclaim socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind socket");
+    listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+    claim.publish(false).expect("publish claim");
+    TEST_CANCEL_AFTER_CLAIM_READ.store(true, Ordering::Release);
+    let cancelled = AtomicBool::new(false);
 
     assert!(matches!(
         find_harness_for_session_until(
-            "missing-session",
+            id.as_str(),
             Instant::now() + Duration::from_secs(1),
-            &AtomicBool::new(false)
+            &cancelled,
         ),
         Err(FindHarnessForSessionError::Incomplete { .. })
     ));
-}
-
-/// Project and session discovery are both non-destructive: a failed probe
-/// cannot destroy live daemon markers during a transient failure.
-#[test]
-fn find_harness_for_dir_keeps_files_when_pid_is_alive() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let child = ChildGuard::new();
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let paths = prepare_harness_paths(&project_root, "session").expect("paths");
-    write_metadata_with_pid(paths.path(), &project_root, "session", child.id());
-    std::fs::write(paths.socket_path(), b"not a listener").expect("stale socket marker");
-
-    assert_eq!(find_harness_for_dir(&project_root), None);
-    assert!(metadata_path(paths.path()).exists());
-    assert!(paths.socket_path().exists());
-}
-
-/// Ensures discovery reports ambiguity when two live harnesses advertise
-/// the same active session, preventing nondeterministic cross-harness
-/// sends.
-#[test]
-fn find_harness_for_session_reports_ambiguity() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let path_a = dir.join("a");
-    let path_b = dir.join("b");
-    let _listener_a = UnixListener::bind(socket_path(&path_a)).expect("socket a");
-    let _listener_b = UnixListener::bind(socket_path(&path_b)).expect("socket b");
-    for path in [&path_a, &path_b] {
-        std::fs::write(
-            metadata_path(path),
-            serde_json::to_vec(&DaemonMetadata {
-                version: DAEMON_METADATA_VERSION,
-                pid: std::process::id(),
-                project_root: None,
-                session_id: "same-session".to_owned(),
-                peer_entrypoint: false,
-            })
-            .expect("metadata json"),
-        )
-        .expect("write metadata");
-    }
-
+    assert!(cancelled.load(Ordering::Acquire));
     assert!(matches!(
-        find_harness_for_session("same-session"),
-        Err(FindHarnessForSessionError::Ambiguous { .. })
+        listener.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
     ));
 }
 
-/// Once two live claimants are proven, later truncation, cancellation, or
-/// storage failure must retain the stronger true-ambiguity classification.
+/// Exact discovery ignores unrelated current-session responses and accepts only
+/// the correlated response for the admitted immutable session.
 #[test]
-fn incomplete_scan_preserves_proven_ambiguity() {
-    let matches = vec![PathBuf::from("first"), PathBuf::from("second")];
+fn exact_session_probe_correlates_authoritative_response() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("exact-correlated");
+    let (claim, daemon) = spawn_exact_probe_daemon(&root, id.as_str(), ExactProbeReply::Correlated);
+    let expected_project = root.path().join("project");
 
-    assert!(matches!(
-        incomplete_or_ambiguous("same-session", &matches),
-        FindHarnessForSessionError::Ambiguous {
-            session_id,
-            matches: classified,
-        } if session_id == "same-session" && classified == matches
-    ));
-}
-
-/// A lookup that exhausts the expanded raw-entry budget must not return a
-/// live claimant because an omitted entry could advertise the same session.
-#[test]
-fn find_harness_for_session_fails_closed_when_scan_is_incomplete() {
-    assert_eq!(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES, 4_096);
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    for index in 0..=TEST_DIRECTORY_ENTRY_LIMIT {
-        std::fs::write(dir.join(format!("junk-{index:04}")), b"x").expect("junk entry");
-    }
-    let claimant = dir.join("claimant");
-    let _listener = UnixListener::bind(socket_path(&claimant)).expect("claimant socket");
-    write_peer_metadata(&claimant, "bounded-session", temp.path(), true);
-
-    assert!(matches!(
-        find_harness_for_session_until_with_entry_limit(
-            "bounded-session",
-            Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT,
-            &AtomicBool::new(false),
-            TEST_DIRECTORY_ENTRY_LIMIT,
-        ),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
-    assert!(socket_path(&claimant).exists());
-    assert!(metadata_path(&claimant).exists());
-}
-
-/// A same-session record owned by a live process but temporarily
-/// unreachable keeps uniqueness unproven even when another claimant
-/// answers.
-#[test]
-fn find_harness_for_session_fails_closed_for_unreachable_live_claimant() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let reachable = dir.join("reachable");
-    let _listener = UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
-    let unreachable = dir.join("unreachable");
-    drop(UnixListener::bind(socket_path(&unreachable)).expect("unreachable socket"));
-    for path in [&reachable, &unreachable] {
-        std::fs::write(
-            metadata_path(path),
-            serde_json::to_vec(&DaemonMetadata {
-                version: DAEMON_METADATA_VERSION,
-                pid: std::process::id(),
-                project_root: None,
-                session_id: "same-session".to_owned(),
-                peer_entrypoint: true,
-            })
-            .expect("metadata"),
-        )
-        .expect("write metadata");
-    }
-
-    assert!(matches!(
-        find_harness_for_session("same-session"),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
-}
-
-/// A partial metadata rewrite under a canonical live-PID instance stem may
-/// hide a second claimant, so one valid live match cannot prove uniqueness.
-#[test]
-fn find_harness_for_session_fails_closed_for_malformed_live_metadata() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let reachable = dir.join("reachable");
-    let _reachable_listener =
-        UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
-    write_peer_metadata(&reachable, "same-session", temp.path(), true);
-    let instance = HarnessInstanceId::parse("0123456789abcdef").expect("canonical instance id");
-    let unresolved = harness_path_for_process(std::process::id(), &instance);
-    let _unresolved_listener =
-        UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
-    std::fs::write(metadata_path(&unresolved), b"{\"session_id\":").expect("partial metadata");
-
-    assert!(matches!(
-        find_harness_for_session("same-session"),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
-    assert!(socket_path(&unresolved).exists());
-    assert!(metadata_path(&unresolved).exists());
-}
-
-/// A symlinked legacy numeric live-PID metadata record is never followed or
-/// ignored when doing so could hide a second session claimant.
-#[cfg(unix)]
-#[test]
-fn find_harness_for_session_fails_closed_for_symlinked_live_metadata() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let reachable = dir.join("reachable");
-    let _reachable_listener =
-        UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
-    write_peer_metadata(&reachable, "same-session", temp.path(), true);
-    let unresolved = dir.join(std::process::id().to_string());
-    let _unresolved_listener =
-        UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
-    let target = temp.path().join("metadata-target");
-    std::fs::write(&target, b"{}").expect("symlink target");
-    path_std_os_unix::fs::symlink(&target, metadata_path(&unresolved)).expect("symlink metadata");
-
-    assert!(matches!(
-        find_harness_for_session("same-session"),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
-    assert!(socket_path(&unresolved).exists());
-    assert!(metadata_path(&unresolved).is_symlink());
-}
-
-/// Oversized live-PID metadata remains unresolved without reading beyond
-/// the byte bound or returning an early live match as unique.
-#[test]
-fn find_harness_for_session_fails_closed_for_oversized_live_metadata() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let dir = harnesses_dir();
-    std::fs::create_dir_all(&dir).expect("harnesses dir");
-    let reachable = dir.join("reachable");
-    let _reachable_listener =
-        UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
-    write_peer_metadata(&reachable, "same-session", temp.path(), true);
-    let unresolved = dir.join(std::process::id().to_string());
-    let _unresolved_listener =
-        UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
-    std::fs::write(
-        metadata_path(&unresolved),
-        vec![b' '; SESSION_DISCOVERY_MAX_METADATA_BYTES as usize + 1],
-    )
-    .expect("oversized metadata");
-
-    assert!(matches!(
-        find_harness_for_session("same-session"),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
     assert_eq!(
-        std::fs::metadata(metadata_path(&unresolved))
-            .expect("metadata remains")
-            .len(),
-        SESSION_DISCOVERY_MAX_METADATA_BYTES + 1
-    );
-}
-
-/// Failure to enumerate an existing runtime catalog is incomplete rather
-/// than evidence that no matching daemon exists.
-#[test]
-fn find_harness_for_session_fails_closed_when_catalog_is_not_a_directory() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    std::fs::create_dir_all(root_runtime_dir()).expect("runtime root");
-    std::fs::write(harnesses_dir(), b"not a directory").expect("catalog marker");
-
-    assert!(matches!(
-        find_harness_for_session("missing-session"),
-        Err(FindHarnessForSessionError::Incomplete { .. })
-    ));
-}
-
-/// Ensures daemon startup creates private runtime directories rather than
-/// relying on the process umask, protecting fallback IPC sockets and
-/// metadata from other local users.
-#[cfg(unix)]
-#[test]
-fn prepare_harness_paths_creates_private_runtime_dirs() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-
-    let paths = prepare_harness_paths(&project_root, "session").expect("paths");
-
-    let root_mode = std::fs::metadata(root_runtime_dir())
-        .expect("root metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    let harnesses_mode = std::fs::metadata(harnesses_dir())
-        .expect("harnesses metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(root_mode, 0o700);
-    assert_eq!(harnesses_mode, 0o700);
-    assert_eq!(paths.path().parent(), Some(harnesses_dir().as_path()));
-}
-
-/// Ensures a pre-existing runtime symlink is refused instead of followed
-/// before binding daemon IPC sockets or writing discovery metadata.
-#[cfg(unix)]
-#[test]
-fn prepare_harness_paths_rejects_symlink_runtime_root() {
-    let temp = TempDir::new().expect("temp runtime");
-    let _guard = runtime_override(&temp);
-    let real = temp.path().join("real");
-    std::fs::create_dir_all(&real).expect("real runtime target");
-    path_std_os_unix::fs::symlink(&real, root_runtime_dir()).expect("runtime symlink");
-    let project_root = temp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-
-    let error = match prepare_harness_paths(&project_root, "session") {
-        Ok(_) => panic!("symlink runtime root must be rejected"),
-        Err(error) => error,
-    };
-
-    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-    assert!(error.to_string().contains("must not be a symlink"));
-}
-
-fn write_metadata_with_pid(path: &Path, project_root: &Path, session_id: &str, pid: u32) {
-    std::fs::write(
-        metadata_path(path),
-        serde_json::to_vec(&DaemonMetadata {
-            version: DAEMON_METADATA_VERSION,
-            pid,
-            project_root: Some(project_root.to_path_buf()),
-            session_id: session_id.to_owned(),
-            peer_entrypoint: false,
+        probe_exact_session(
+            &harness_path_for_session(&id),
+            &id,
+            Instant::now() + Duration::from_secs(1),
+            &AtomicBool::new(false),
+        ),
+        Some(RunningSession {
+            session_id: id,
+            project_root: expected_project,
         })
-        .expect("metadata json"),
-    )
-    .expect("write metadata");
+    );
+    daemon.join().expect("exact daemon");
+    drop(claim);
 }
 
-struct ChildGuard {
-    child: Child,
+/// Timeout and closure before a complete correlated response both classify the
+/// exact claimed daemon as unresponsive.
+#[test]
+fn exact_session_probe_maps_timeout_and_closure_to_unresponsive() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    for (suffix, reply) in [
+        ("close", ExactProbeReply::Close),
+        ("timeout", ExactProbeReply::Timeout),
+    ] {
+        let root = bounded_runtime_root();
+        let _override = override_runtime_dir(root.path());
+        let id = session(&format!("exact-{suffix}"));
+        let (claim, daemon) = spawn_exact_probe_daemon(&root, id.as_str(), reply);
+
+        assert_eq!(
+            probe_exact_session(
+                &harness_path_for_session(&id),
+                &id,
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(false),
+            ),
+            None
+        );
+        daemon.join().expect("exact daemon");
+        drop(claim);
+    }
 }
 
-impl ChildGuard {
-    fn new() -> Self {
-        Self {
-            child: Command::new("sleep")
-                .arg("30")
-                .spawn()
-                .expect("spawn sleep"),
-        }
+/// Every blocking probe stage derives its remaining allowance from one absolute
+/// deadline rather than restarting the per-probe cap.
+#[test]
+fn probe_stage_budget_observes_one_absolute_deadline() {
+    let cancelled = AtomicBool::new(false);
+    let started = Instant::now();
+    let deadline = started + PROBE_TIMEOUT;
+
+    assert_eq!(
+        probe_remaining_at(deadline, &cancelled, started),
+        Some(PROBE_TIMEOUT)
+    );
+    assert_eq!(
+        probe_remaining_at(
+            deadline,
+            &cancelled,
+            started + PROBE_TIMEOUT - Duration::from_millis(10),
+        ),
+        Some(Duration::from_millis(10))
+    );
+    assert_eq!(
+        probe_remaining_at(deadline, &cancelled, deadline),
+        Some(Duration::ZERO)
+    );
+    assert_eq!(
+        probe_remaining_at(deadline, &cancelled, deadline + Duration::from_nanos(1)),
+        None
+    );
+    cancelled.store(true, Ordering::Release);
+    assert_eq!(probe_remaining_at(deadline, &cancelled, started), None);
+}
+
+/// Public running-session listing isolates blocking claim traversal behind the
+/// same whole-call deadline as peer discovery.
+#[test]
+fn running_session_list_isolates_slow_storage() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("slow-list-bootstrap");
+    drop(claim_session(root.path(), &id).expect("prepare claim directory"));
+    *TEST_DISCOVERY_SCAN_DELAY
+        .lock()
+        .expect("scan delay lock poisoned") = Some((claims_dir(), 2_100));
+    let started = Instant::now();
+
+    let result = list_running_sessions();
+
+    *TEST_DISCOVERY_SCAN_DELAY
+        .lock()
+        .expect("scan delay lock poisoned") = None;
+    assert!(result.is_err());
+    assert!(started.elapsed() < DISCOVERY_TIMEOUT + Duration::from_secs(1));
+    let worker_deadline = Instant::now() + Duration::from_secs(1);
+    while ACTIVE_DISCOVERY_WORKERS.load(Ordering::Acquire) != 0 {
+        assert!(
+            Instant::now() < worker_deadline,
+            "isolated listing worker did not retire"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Public listing returns only reachable claims and sorts their exact session
+/// identities; an empty claim directory remains a successful empty result.
+#[test]
+fn running_session_list_is_reachable_sorted_and_empty_when_absent() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let empty = bounded_runtime_root();
+    {
+        let _override = override_runtime_dir(empty.path());
+        assert!(list_running_sessions().expect("empty listing").is_empty());
     }
 
-    fn id(&self) -> u32 {
-        self.child.id()
-    }
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let (claim_b, daemon_b) =
+        spawn_exact_probe_daemon(&root, "session-b", ExactProbeReply::Correlated);
+    let (claim_a, daemon_a) =
+        spawn_exact_probe_daemon(&root, "session-a", ExactProbeReply::Correlated);
+
+    let sessions = list_running_sessions().expect("reachable listing");
+
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-a", "session-b"]
+    );
+    daemon_a.join().expect("session-a daemon");
+    daemon_b.join().expect("session-b daemon");
+    drop((claim_a, claim_b));
 }
 
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+/// Peer discovery ignores claims that did not opt in and exposes only the
+/// project basename for an admitted peer.
+#[test]
+fn peer_discovery_requires_opt_in_and_redacts_project_path() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let (live_claim, live_daemon) = spawn_peer_daemon(&root, "peer-redacted", true);
+    let quiet_id = session("peer-not-opted-in");
+    let mut quiet_claim = claim_session(root.path(), &quiet_id).expect("claim quiet session");
+    quiet_claim
+        .reclaim_stale_socket()
+        .expect("reclaim quiet socket");
+    let quiet_listener = UnixListener::bind(quiet_claim.socket_path()).expect("bind quiet socket");
+    quiet_listener
+        .set_nonblocking(true)
+        .expect("quiet nonblocking");
+    quiet_claim.publish(false).expect("publish quiet claim");
+
+    let snapshot = discover_peer_sessions(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+    );
+
+    assert_eq!(snapshot.sessions.len(), 1);
+    assert_eq!(snapshot.sessions[0].session_id, "peer-redacted");
+    assert_eq!(
+        snapshot.sessions[0].project_label.as_deref(),
+        root.path().file_name().and_then(|name| name.to_str())
+    );
+    assert!(!format!("{:?}", snapshot.sessions).contains(&root.path().display().to_string()));
+    assert!(matches!(
+        quiet_listener.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
+    live_daemon.join().expect("live daemon");
+    drop((live_claim, quiet_claim));
 }
 
-#[cfg(target_os = "linux")]
-fn dead_pid() -> u32 {
-    let mut child = Command::new("true").spawn().expect("spawn true");
-    let pid = child.id();
-    child.wait().expect("wait true");
-    pid
+/// Claim decoding accepts the exact byte limit and rejects one byte more.
+#[test]
+fn claim_record_byte_limit_is_inclusive_and_bounded() {
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("claim-byte-boundary");
+    let mut claim = claim_session(root.path(), &id).expect("claim session");
+    let base = serde_json::to_vec(&claim.record).expect("encode claim");
+    let mut exact = base;
+    exact.resize(MAX_CLAIM_BYTES as usize, b' ');
+    claim.file.set_len(0).expect("truncate claim");
+    claim.file.write_all(&exact).expect("write exact claim");
+    claim.file.flush().expect("flush exact claim");
+    assert_eq!(
+        read_claim(&mut claim.file)
+            .expect("read exact claim")
+            .session_id,
+        id
+    );
+
+    claim.file.set_len(0).expect("truncate oversized claim");
+    exact.push(b' ');
+    claim.file.write_all(&exact).expect("write oversized claim");
+    claim.file.flush().expect("flush oversized claim");
+    assert!(read_claim(&mut claim.file).is_err());
+}
+
+/// Thread-scoped runtime overrides remain independent across overlapping
+/// embedded operations.
+#[test]
+fn scoped_runtime_directories_do_not_cross_concurrent_threads() {
+    let first = bounded_runtime_root();
+    let second = bounded_runtime_root();
+    let first_path = first.path().to_path_buf();
+    let second_path = second.path().to_path_buf();
+    let barrier = Arc::new(Barrier::new(2));
+    let threads = [first_path.clone(), second_path.clone()].map(|path| {
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            with_runtime_dir(Some(&path), || {
+                barrier.wait();
+                assert_eq!(root_runtime_dir(), path.join("tau"));
+                prepare_harnesses_dir().expect("prepare scoped runtime");
+                assert!(claims_dir().starts_with(&path));
+            });
+        })
+    });
+    for thread in threads {
+        thread.join().expect("runtime scope");
+    }
+    assert_ne!(first_path, second_path);
+}
+
+/// Runtime coordination directories are private and a symlink at the authority
+/// boundary is rejected rather than followed.
+#[test]
+fn runtime_directories_are_private_and_reject_symlink_authority() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let harnesses = prepare_harnesses_dir().expect("prepare runtime");
+    for path in [harnesses.clone(), claims_dir(), sockets_dir()] {
+        assert_eq!(
+            std::fs::metadata(path)
+                .expect("runtime metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    std::fs::remove_dir_all(&harnesses).expect("remove harness directory");
+    let target = root.path().join("symlink-target");
+    std::fs::create_dir(&target).expect("create symlink target");
+    symlink(&target, &harnesses).expect("install harness symlink");
+    assert_eq!(
+        prepare_harnesses_dir()
+            .expect_err("symlink authority must fail")
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
 }

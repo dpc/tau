@@ -354,7 +354,7 @@ checkpoint, the harness retains the exact `AwaitingCheckpoint` tuple. Neither
 path retries off branch: owning-branch reselection republishes one exact suffix
 or checkpoint, and ownership transfers only after the durable successor commits.
 In-flight attempt markers are ephemeral and clear on every noncommit.
-Agent unload or rollover may destructively cancel an already-delivered
+Agent unload or final shutdown may destructively cancel an already-delivered
 interception request for a checkpoint or completion envelope. The registration
 then remains installed but its connection is bypassed until exactly one stale
 reply is consumed; registration replacement, indefinite suspension, and
