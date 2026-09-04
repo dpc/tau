@@ -405,13 +405,14 @@ a TTL or permits a renewal schedule.
 OpenAI's
 [prompt-caching documentation](https://developers.openai.com/api/docs/guides/prompt-caching)
 defines different contracts for GPT-5.6-and-later and older models. An exact
-GPT-5.6 generic route that opts into Tau's typed explicit breakpoint controls
-may declare `kind: explicit_breakpoint`, `ttl: { kind: minimum, seconds: 1800 }`,
-`renewal: unsupported`, and `output_floor: unknown`. The 30 minutes is a
-minimum eligibility lifetime, not a deadline: OpenAI may retain the prefix
-longer and does not document a cache read as resetting a sliding timer. Tau
-therefore schedules no refresh before 30 minutes—or afterward—and ordinary
-read/write observations never convert that minimum into a hard TTL.
+GPT-5.6 generic route that opts into Tau's typed OpenAI cache controls may
+declare `kind: explicit_breakpoint`, `ttl: { kind: sliding_known, seconds: 1800 }`,
+`renewal: read`, and `output_floor: unknown`. Cache creation and each successful
+cache reuse start a fresh 30-minute window. This is a provider-owned sliding
+lifetime, not Tau keepalive traffic: Tau sends no standalone cache refresh
+unless the separately disabled-by-default refresh scheduler is explicitly
+configured and admits one under its own policy. Ordinary read/write observations
+still do not establish this contract for another route.
 
 The same exact GPT-5.6 route may publish OpenAI's explicit ordinary-input,
 cached-read, and cache-write prices. For example, the short-context

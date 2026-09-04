@@ -311,13 +311,13 @@ residency, unsupported renewal, and unknown output floor unless the exact
 compatibility route documents stronger facts. Tau keeps compatible request
 prefixes stable but sends no keepalive, prewarm, or lifecycle traffic.
 
-For an exact generic GPT-5.6 route using typed explicit OpenAI breakpoints,
-publish the 1,800-second lifetime as `minimum`, with unsupported renewal and an
-unknown output floor. OpenAI documents eligibility for at least 30 minutes and
-possible longer retention, not sliding renewal. Older models need a separate
-conservative policy: typical eviction is not a hard TTL, so use unknown
-residency and unsupported renewal unless the exact route has a stronger documented
-contract. OpenAI read/write counters remain observations, never TTL evidence.
+For an exact generic GPT-5.6 route using typed OpenAI controls, publish the
+1,800-second lifetime as `sliding_known` with `read` renewal and an unknown
+output floor. Cache creation and each successful cache reuse renew the full
+30-minute window. Older models need a separate conservative policy: typical
+eviction is not a hard TTL, so use unknown residency and unsupported renewal
+unless the exact route has a stronger documented contract. OpenAI read/write
+counters remain observations, never TTL evidence.
 The harness cache-refresh scheduler is disabled by default and requires explicit
 global opt-in. It accepts only safe sliding read-renewal contracts, explicit
 prices, concrete quota policy, and measured writes plus break-even reads. One

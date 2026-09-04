@@ -33,6 +33,44 @@ fn tool_choice_capability_lowers_explicitly() {
     assert!(!lower_compat(compat).tool_choice);
     assert!(lower_compat(Default::default()).tool_choice);
 }
+
+/// Both structurally valid public cache variants must reach the matching
+/// adapter mode without a fallback that could discard explicit ownership.
+#[test]
+fn public_cache_options_lower_by_variant() {
+    let lower = |options| {
+        let compat: super::super::ChatCompletionsCompat =
+            serde_json::from_value(serde_json::json!({
+                "openai_prompt_cache": {
+                    "key": "agent",
+                    "options": options
+                }
+            }))
+            .expect("valid public cache compatibility");
+        lower_compat(compat)
+            .prompt_cache
+            .expect("lowered cache policy")
+    };
+
+    assert_eq!(
+        lower(serde_json::json!({"mode": "implicit", "ttl": "30m"})),
+        tau_provider_chat_completions::PromptCache {
+            mode: tau_provider_chat_completions::PromptCacheMode::Implicit,
+            ttl: tau_provider_chat_completions::PromptCacheTtl::Minutes30,
+        }
+    );
+    assert_eq!(
+        lower(serde_json::json!({
+            "mode": "explicit",
+            "ttl": "30m",
+            "boundary": "system_prompt"
+        })),
+        tau_provider_chat_completions::PromptCache {
+            mode: tau_provider_chat_completions::PromptCacheMode::Explicit,
+            ttl: tau_provider_chat_completions::PromptCacheTtl::Minutes30,
+        }
+    );
+}
 use crate::chat_completions::LocalSummaryCompactionConfig;
 
 /// Ensures a bounded free-form narrative becomes one private harness envelope

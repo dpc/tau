@@ -476,6 +476,43 @@ fn local_summary_compaction_uses_generic_defaults_and_partial_overrides() {
     );
 }
 
+/// Public Responses cache modes have distinct serializable variants, so direct
+/// Rust construction cannot attach a boundary to implicit mode or omit one from
+/// explicit mode.
+#[test]
+fn public_cache_options_are_structurally_mode_tagged() {
+    let options = [
+        (
+            OpenAiPromptCacheOptions::Implicit {
+                ttl: OpenAiPromptCacheTtl::Minutes30,
+            },
+            serde_json::json!({"mode": "implicit", "ttl": "30m"}),
+        ),
+        (
+            OpenAiPromptCacheOptions::Explicit {
+                ttl: OpenAiPromptCacheTtl::Minutes30,
+                boundary: OpenAiPromptCacheBoundary::FirstInputText,
+            },
+            serde_json::json!({
+                "mode": "explicit",
+                "ttl": "30m",
+                "boundary": "first_input_text"
+            }),
+        ),
+    ];
+    for (options, wire) in options {
+        assert_eq!(
+            serde_json::to_value(options).expect("serialize valid cache options"),
+            wire
+        );
+        assert_eq!(
+            serde_json::from_value::<OpenAiPromptCacheOptions>(wire)
+                .expect("deserialize valid cache options"),
+            options
+        );
+    }
+}
+
 /// Public Responses accepts implicit caching without a marker, requires its
 /// explicit boundary, and rejects retired or nonsensical cache controls.
 #[test]
@@ -496,10 +533,8 @@ fn profile_validates_independent_cache_mode_lifetime_and_boundary() {
         implicit.compat.openai_prompt_cache,
         Some(OpenAiPromptCache {
             key: crate::OpenAiPromptCacheKey::Agent,
-            options: OpenAiPromptCacheOptions {
-                mode: OpenAiPromptCacheMode::Implicit,
+            options: OpenAiPromptCacheOptions::Implicit {
                 ttl: OpenAiPromptCacheTtl::Minutes30,
-                boundary: None,
             },
         })
     );
@@ -520,10 +555,9 @@ fn profile_validates_independent_cache_mode_lifetime_and_boundary() {
     assert!(matches!(
         explicit.compat.openai_prompt_cache,
         Some(OpenAiPromptCache {
-            options: OpenAiPromptCacheOptions {
-                mode: OpenAiPromptCacheMode::Explicit,
-                boundary: Some(OpenAiPromptCacheBoundary::FirstInputText),
-                ..
+            options: OpenAiPromptCacheOptions::Explicit {
+                ttl: OpenAiPromptCacheTtl::Minutes30,
+                boundary: OpenAiPromptCacheBoundary::FirstInputText,
             },
             ..
         })

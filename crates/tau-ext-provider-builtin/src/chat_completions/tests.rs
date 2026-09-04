@@ -373,6 +373,43 @@ fn profile_rejects_retired_prompt_cache_key_flag() {
     assert!(result.is_err());
 }
 
+/// Chat Completions cache modes have distinct serializable variants, so direct
+/// Rust construction cannot attach a boundary to implicit mode or omit one from
+/// explicit mode.
+#[test]
+fn public_cache_options_are_structurally_mode_tagged() {
+    let options = [
+        (
+            OpenAiPromptCacheOptions::Implicit {
+                ttl: OpenAiPromptCacheTtl::Minutes30,
+            },
+            serde_json::json!({"mode": "implicit", "ttl": "30m"}),
+        ),
+        (
+            OpenAiPromptCacheOptions::Explicit {
+                ttl: OpenAiPromptCacheTtl::Minutes30,
+                boundary: OpenAiPromptCacheBoundary::SystemPrompt,
+            },
+            serde_json::json!({
+                "mode": "explicit",
+                "ttl": "30m",
+                "boundary": "system_prompt"
+            }),
+        ),
+    ];
+    for (options, wire) in options {
+        assert_eq!(
+            serde_json::to_value(options).expect("serialize valid cache options"),
+            wire
+        );
+        assert_eq!(
+            serde_json::from_value::<OpenAiPromptCacheOptions>(wire)
+                .expect("deserialize valid cache options"),
+            options
+        );
+    }
+}
+
 /// A Chat Completions route may select only one typed OpenAI cache policy,
 /// making the legacy automatic and explicit-boundary wire paths unambiguous.
 #[test]
@@ -388,7 +425,16 @@ fn profile_validates_exclusive_openai_prompt_cache_policies() {
         }
     }))
     .expect("explicit policy");
-    assert!(explicit.openai_prompt_cache.is_some());
+    assert!(matches!(
+        explicit.openai_prompt_cache,
+        Some(OpenAiPromptCache {
+            options: OpenAiPromptCacheOptions::Explicit {
+                ttl: OpenAiPromptCacheTtl::Minutes30,
+                boundary: OpenAiPromptCacheBoundary::SystemPrompt,
+            },
+            ..
+        })
+    ));
 
     let ambiguous = serde_json::from_value::<ChatCompletionsCompat>(serde_json::json!({
         "openai_prompt_cache": {
@@ -401,12 +447,14 @@ fn profile_validates_exclusive_openai_prompt_cache_policies() {
             }
         }
     }));
-    assert!(ambiguous.is_err());
+    let error = ambiguous.expect_err("retired cache configuration");
+    assert!(error.to_string().contains("retention is retired"));
 
     let empty = serde_json::from_value::<ChatCompletionsCompat>(serde_json::json!({
         "openai_prompt_cache": {"key": "agent"}
     }));
-    assert!(empty.is_err());
+    let error = empty.expect_err("missing cache options");
+    assert!(error.to_string().contains("requires `options`"));
 }
 
 /// Cache telemetry must request the compatible stream usage field rather than
@@ -1389,7 +1437,7 @@ fn gemini_explicit_object_profile_publishes_policy_without_lifecycle_state() {
 
 /// Proves the generic Chat Completions config owner keeps explicit and implicit
 /// breakpoints independent from their common 30-minute lifetime while
-/// publishing their distinct cache contracts.
+/// publishing GPT-5.6's documented sliding read-renewal contract.
 #[test]
 fn openai_model_configs_publish_distinct_cache_policies() {
     let gpt_5_6: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
@@ -1407,8 +1455,8 @@ fn openai_model_configs_publish_distinct_cache_policies() {
         },
         "cache_contract": {
             "kind": "explicit_breakpoint",
-            "ttl": {"kind": "minimum", "seconds": 1800},
-            "renewal": "unsupported",
+            "ttl": {"kind": "sliding_known", "seconds": 1800},
+            "renewal": "read",
             "output_floor": "unknown",
             "quota": {
                 "requests": "unknown",
@@ -1465,9 +1513,8 @@ fn openai_model_configs_publish_distinct_cache_policies() {
             .expect("GPT-5.6 compatibility")
             .openai_prompt_cache
             .expect("GPT-5.6 cache request control")
-            .options
-            .mode,
-        OpenAiPromptCacheMode::Explicit
+            .options,
+        OpenAiPromptCacheOptions::Explicit { .. }
     ));
     assert!(matches!(
         older
@@ -1475,9 +1522,8 @@ fn openai_model_configs_publish_distinct_cache_policies() {
             .expect("older compatibility")
             .openai_prompt_cache
             .expect("older cache request control")
-            .options
-            .mode,
-        OpenAiPromptCacheMode::Implicit
+            .options,
+        OpenAiPromptCacheOptions::Implicit { .. }
     ));
 
     let provider = ChatCompletionsProvider {
@@ -1493,12 +1539,9 @@ fn openai_model_configs_publish_distinct_cache_policies() {
     );
     assert!(matches!(
         gpt_policy.ttl,
-        tau_proto::ProviderCacheTtl::Minimum { seconds } if seconds.get() == 1_800
+        tau_proto::ProviderCacheTtl::SlidingKnown { seconds } if seconds.get() == 1_800
     ));
-    assert_eq!(
-        gpt_policy.renewal,
-        tau_proto::ProviderCacheRenewal::Unsupported
-    );
+    assert_eq!(gpt_policy.renewal, tau_proto::ProviderCacheRenewal::Read);
     assert_eq!(
         (
             gpt_5_6

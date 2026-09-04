@@ -349,20 +349,19 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
         ),
         transport: provider.transport,
         prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
-            OpenAiPromptCacheKey::Agent => tau_provider_responses::PromptCachePolicy {
-                mode: match cache.options.mode {
-                    OpenAiPromptCacheMode::Implicit => {
-                        tau_provider_responses::PromptCacheMode::Implicit
+            OpenAiPromptCacheKey::Agent => match cache.options {
+                OpenAiPromptCacheOptions::Implicit { ttl } => {
+                    tau_provider_responses::PromptCachePolicy {
+                        mode: tau_provider_responses::PromptCacheMode::Implicit,
+                        ttl: lower_prompt_cache_ttl(ttl),
                     }
-                    OpenAiPromptCacheMode::Explicit => {
-                        tau_provider_responses::PromptCacheMode::Explicit
+                }
+                OpenAiPromptCacheOptions::Explicit { ttl, boundary: _ } => {
+                    tau_provider_responses::PromptCachePolicy {
+                        mode: tau_provider_responses::PromptCacheMode::Explicit,
+                        ttl: lower_prompt_cache_ttl(ttl),
                     }
-                },
-                ttl: match cache.options.ttl {
-                    OpenAiPromptCacheTtl::Minutes30 => {
-                        tau_provider_responses::PromptCacheTtl::Minutes30
-                    }
-                },
+                }
             },
         }),
     };
@@ -485,6 +484,13 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 progress: failure.progress,
             }
         }
+    }
+}
+
+/// Convert a validated public cache lifetime into the Responses adapter type.
+fn lower_prompt_cache_ttl(ttl: OpenAiPromptCacheTtl) -> tau_provider_responses::PromptCacheTtl {
+    match ttl {
+        OpenAiPromptCacheTtl::Minutes30 => tau_provider_responses::PromptCacheTtl::Minutes30,
     }
 }
 

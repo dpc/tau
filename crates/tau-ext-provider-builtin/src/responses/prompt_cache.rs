@@ -15,17 +15,24 @@ pub struct OpenAiPromptCache {
 }
 
 /// Typed OpenAI prompt-cache options for public Responses.
+///
+/// The representation makes implicit and explicit selection disjoint: implicit
+/// options cannot carry a Tau boundary, and explicit options always carry one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenAiPromptCacheOptions {
-    /// Select whether OpenAI or Tau chooses the cache breakpoint.
-    pub mode: OpenAiPromptCacheMode,
-    /// Current OpenAI cache lifetime.
-    pub ttl: OpenAiPromptCacheTtl,
-    /// Required Tau-owned breakpoint for explicit mode and absent for implicit
-    /// mode.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub boundary: Option<OpenAiPromptCacheBoundary>,
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum OpenAiPromptCacheOptions {
+    /// Let OpenAI select an automatic breakpoint without a Tau content marker.
+    Implicit {
+        /// Current OpenAI cache lifetime.
+        ttl: OpenAiPromptCacheTtl,
+    },
+    /// Mark Tau's typed input-text breakpoint and disable implicit selection.
+    Explicit {
+        /// Current OpenAI cache lifetime.
+        ttl: OpenAiPromptCacheTtl,
+        /// Tau-owned breakpoint required for explicit selection.
+        boundary: OpenAiPromptCacheBoundary,
+    },
 }
 
 /// Public Responses cache breakpoint selection.
@@ -133,11 +140,10 @@ impl<'de> Deserialize<'de> for OpenAiPromptCacheOptions {
 
         let raw = UnvalidatedOpenAiPromptCacheOptions::deserialize(deserializer)?;
         match (raw.mode, raw.boundary) {
-            (OpenAiPromptCacheMode::Implicit, None)
-            | (OpenAiPromptCacheMode::Explicit, Some(_)) => Ok(Self {
-                mode: raw.mode,
+            (OpenAiPromptCacheMode::Implicit, None) => Ok(Self::Implicit { ttl: raw.ttl }),
+            (OpenAiPromptCacheMode::Explicit, Some(boundary)) => Ok(Self::Explicit {
                 ttl: raw.ttl,
-                boundary: raw.boundary,
+                boundary,
             }),
             (OpenAiPromptCacheMode::Implicit, Some(_)) => Err(D::Error::custom(
                 "openai_prompt_cache.options.boundary requires `mode: explicit`",

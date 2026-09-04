@@ -269,20 +269,19 @@ fn lower_compat(
         parallel_tool_calls: compat.parallel_tool_calls,
         tool_choice: compat.tool_choice,
         prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
-            crate::OpenAiPromptCacheKey::Agent => tau_provider_chat_completions::PromptCache {
-                mode: match cache.options.mode {
-                    super::OpenAiPromptCacheMode::Implicit => {
-                        tau_provider_chat_completions::PromptCacheMode::Implicit
+            crate::OpenAiPromptCacheKey::Agent => match cache.options {
+                super::OpenAiPromptCacheOptions::Implicit { ttl } => {
+                    tau_provider_chat_completions::PromptCache {
+                        mode: tau_provider_chat_completions::PromptCacheMode::Implicit,
+                        ttl: lower_prompt_cache_ttl(ttl),
                     }
-                    super::OpenAiPromptCacheMode::Explicit => {
-                        tau_provider_chat_completions::PromptCacheMode::Explicit
+                }
+                super::OpenAiPromptCacheOptions::Explicit { ttl, boundary: _ } => {
+                    tau_provider_chat_completions::PromptCache {
+                        mode: tau_provider_chat_completions::PromptCacheMode::Explicit,
+                        ttl: lower_prompt_cache_ttl(ttl),
                     }
-                },
-                ttl: match cache.options.ttl {
-                    super::OpenAiPromptCacheTtl::Minutes30 => {
-                        tau_provider_chat_completions::PromptCacheTtl::Minutes30
-                    }
-                },
+                }
             },
         }),
         reasoning_effort: compat
@@ -318,6 +317,18 @@ fn lower_compat(
                 tau_provider_chat_completions::CacheUsageCompat::DeepSeek
             }
         },
+    }
+}
+
+/// Convert a validated public cache lifetime into the Chat Completions adapter
+/// type.
+fn lower_prompt_cache_ttl(
+    ttl: super::OpenAiPromptCacheTtl,
+) -> tau_provider_chat_completions::PromptCacheTtl {
+    match ttl {
+        super::OpenAiPromptCacheTtl::Minutes30 => {
+            tau_provider_chat_completions::PromptCacheTtl::Minutes30
+        }
     }
 }
 
