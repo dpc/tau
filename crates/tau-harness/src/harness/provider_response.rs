@@ -1166,7 +1166,7 @@ impl Harness {
             .provider_runtime
             .model_info
             .get(model)
-            .map(|info| info.context_window)
+            .map(tau_proto::ProviderModelInfo::input_token_limit)
             .filter(|window| *window > tau_proto::TokenCount::ZERO);
         let transcript_delta_bytes = self.agent_runtime.agent_registry.agents.get(cid).map_or(
             Some(tau_proto::ByteCount::ZERO),

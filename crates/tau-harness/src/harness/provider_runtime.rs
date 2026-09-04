@@ -36,6 +36,9 @@ impl Harness {
             if model.context_window == tau_proto::TokenCount::ZERO {
                 issues.push(tau_proto::ProviderModelDeclarationIssue::ContextWindowZero);
             }
+            if model.max_output_tokens == Some(tau_proto::TokenCount::ZERO) {
+                issues.push(tau_proto::ProviderModelDeclarationIssue::MaxOutputTokensZero);
+            }
             let has_standalone_metadata = model.standalone_compaction_threshold.is_some()
                 || model.standalone_compaction_prefix_budget.is_some();
             if has_standalone_metadata && !model.supports_explicit_standalone_compaction() {
@@ -53,6 +56,13 @@ impl Harness {
             {
                 issues.push(
                     tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdExceedsContextWindow,
+                );
+            } else if model
+                .standalone_compaction_threshold
+                .is_some_and(|threshold| threshold > model.input_token_limit())
+            {
+                issues.push(
+                    tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdExceedsInputLimit,
                 );
             }
             if model.standalone_compaction_prefix_budget == Some(tau_proto::ByteCount::ZERO) {

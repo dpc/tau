@@ -36,7 +36,9 @@ cap is derived only within the token domain and its narrative byte cap is an
 independent resource bound. `local_summary_compaction` contains only independent
 optional prefix-byte, output-token, and output-byte overrides layered over those
 defaults; the selected provider-qualified model's `context_window` is the sole
-context source. Removed duplicate-context and serialization-selector fields are
+context source for those defaults and override validation. A separately
+published model `max_output_tokens` then narrows the resolved summary request.
+Removed duplicate-context and serialization-selector fields are
 configuration errors with migration diagnostics. Override validation occurs
 before any model publication or Ready signal. These bounds publish no proactive
 threshold. Provider-native ChatGPT/Codex compaction remains preferred and
@@ -466,8 +468,10 @@ trigger.
 Configured automatic-compaction boundaries may be an absolute used-context
 `threshold` or a remaining-context `reserve`, but never both in one policy.
 Reserve resolution uses the selected provider-qualified model declaration's
-context window and computes the exact threshold as `context_window - reserve`.
-Zero reserve selects the full window; equality resolves to zero and therefore
+legal input boundary and computes the exact threshold as
+`input_token_limit - reserve`. This boundary is the smaller of `context_window`
+and a published `max_input_tokens`; omission falls back to `context_window`.
+Zero reserve selects the full input boundary; equality resolves to zero and therefore
 does not create the nonzero proactive scheduling authority required above.
 Larger reserves fail explicitly instead of saturating, and unavailable model
 metadata cannot be replaced with a provider default or guessed window.

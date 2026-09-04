@@ -155,10 +155,17 @@ replacement declaration when a later credential observation changes.
 plus `publisher_extension_id`, the stable configured provider identity whose
 current state the snapshot replaces. Empty canonical lists therefore withdraw only
 that publisher's state and remain attributable during live delivery and replay.
-The harness validates each declared model independently. It rejects entries with
-a zero `context_window`, standalone-only numeric metadata without effective
+The harness validates each declared model independently. `context_window` is the
+total model window. Optional `max_input_tokens` and `max_output_tokens` publish
+separate exact-route capabilities. Omitted input metadata falls back to
+`context_window`; omitted output metadata remains unknown. The legal input
+boundary is the smaller of the total window and a published input maximum.
+The harness rejects entries with a zero `context_window` or `max_output_tokens`,
+standalone-only numeric metadata without effective
 standalone support, a zero standalone threshold or prefix budget, or a standalone
-threshold larger than the model context window. Effective standalone support is
+threshold larger than the legal input boundary. Thresholds above the total
+window and thresholds above only the separate input maximum use distinct
+diagnostics. Effective standalone support is
 `supports_standalone_compaction || standalone_compaction_generation_negative`, so
 generation-negative routes retain their standalone metadata. Every rejected entry produces one transient
 `provider.model_declaration_diagnostic` containing the publisher, model id, and

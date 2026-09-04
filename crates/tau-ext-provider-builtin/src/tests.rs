@@ -3212,6 +3212,8 @@ fn test_chat_model(id: &str) -> ChatCompletionsModel {
         id: ModelName::try_new(id.to_owned()).expect("valid model name"),
         display_name: None,
         context_window: tau_proto::TokenCount::new(128_000),
+        max_input_tokens: None,
+        max_output_tokens: None,
         compat: None,
         tags: Vec::new(),
         hosted_tool_capabilities: Vec::new(),

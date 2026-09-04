@@ -13,6 +13,8 @@ fn quota_model() -> tau_proto::ProviderModelInfo {
         supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window: tau_proto::TokenCount::new(100_000),
+        max_input_tokens: None,
+        max_output_tokens: None,
         efforts: vec![tau_proto::Effort::Off],
         verbosities: vec![tau_proto::Verbosity::Low],
         thinking_summaries: vec![tau_proto::ThinkingSummary::Off],

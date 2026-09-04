@@ -40,6 +40,10 @@ pub fn models_for_provider(
                         .contains(&tau_proto::ToolType::Function),
                 default_affinity: 0,
                 context_window: model.context_window,
+                max_input_tokens: model.max_input_tokens,
+                max_output_tokens: model
+                    .max_output_tokens
+                    .map(|tokens| tau_proto::TokenCount::new(u64::from(tokens.get()))),
                 efforts: compat.reasoning_effort.as_ref().map_or_else(
                     || vec![tau_proto::Effort::Off],
                     |config| config.efforts.canonical(),
@@ -49,14 +53,14 @@ pub fn models_for_provider(
                 supports_compaction: false,
                 supports_standalone_compaction: super::resolved_local_summary_compaction(
                     model.local_summary_compaction,
-                    model.context_window,
+                    model,
                 )
                 .is_some(),
                 standalone_compaction_generation_negative: false,
                 standalone_compaction_threshold: None,
                 standalone_compaction_prefix_budget: super::resolved_local_summary_compaction(
                     model.local_summary_compaction,
-                    model.context_window,
+                    model,
                 )
                 .and_then(SummaryCompactionConfig::max_input_bytes),
                 cache_policy: model.cache_contract.map(|contract| {
@@ -95,10 +99,10 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     let config = tau_provider_chat_completions::AttemptConfig {
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
-        max_output_tokens: provider.max_output_tokens,
+        max_output_tokens: model.requested_output_tokens(provider.max_output_tokens),
         local_summary_compaction: super::resolved_local_summary_compaction(
             model.local_summary_compaction,
-            model.context_window,
+            model,
         ),
         extra_body: provider.extra_body.clone(),
         compat: lower_compat(compat),
@@ -152,11 +156,8 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 }
                 match validate_resolved_narrative_output(
                     success.output_items,
-                    super::resolved_local_summary_compaction(
-                        model.local_summary_compaction,
-                        model.context_window,
-                    )
-                    .expect("standalone compaction is dispatched only for a supported model"),
+                    super::resolved_local_summary_compaction(model.local_summary_compaction, model)
+                        .expect("standalone compaction is dispatched only for a supported model"),
                 ) {
                     Ok(output) => success.output_items = vec![output],
                     Err(error) => {

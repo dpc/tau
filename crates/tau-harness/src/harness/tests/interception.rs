@@ -58,6 +58,8 @@ fn provider_models_declaration(model: &str, context_window: u64) -> Event {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(context_window),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![tau_proto::Effort::Medium],
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],

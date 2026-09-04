@@ -1537,7 +1537,9 @@ fn model_info(
         },
         supports_parallel_tool_calls: !mode.is_lite_compatibility(),
         default_affinity: default_affinity_for_model(model),
-        context_window: effective_context_window_for_model(model),
+        context_window: raw_context_window_for_model(model),
+        max_input_tokens: Some(effective_context_window_for_model(model)),
+        max_output_tokens: None,
         efforts: efforts_for_model(model),
         verbosities: verbosities_for_model(model),
         thinking_summaries: vec![

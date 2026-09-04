@@ -1770,6 +1770,8 @@ where
                 supports_parallel_tool_calls: true,
                 default_affinity: 0,
                 context_window: tau_proto::TokenCount::new(128_000),
+                max_input_tokens: None,
+                max_output_tokens: None,
                 efforts: vec![Effort::Off],
                 verbosities: vec![Verbosity::Low],
                 thinking_summaries: vec![ThinkingSummary::Off],

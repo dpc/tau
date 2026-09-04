@@ -52,9 +52,15 @@ pub struct ChatCompletionsModel {
     /// Optional display label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Published context window.
+    /// Total model context window.
     #[serde(default = "default_context_window")]
     pub context_window: TokenCount,
+    /// Optional maximum legal input tokens for this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<TokenCount>,
+    /// Optional maximum output capability for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<NonZeroU32>,
     /// Optional model-level wire compatibility override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ChatCompletionsCompat>,
@@ -140,6 +146,15 @@ impl LocalSummaryCompactionConfig {
 }
 
 impl ChatCompletionsModel {
+    /// Apply the model capability to the provider-wide output policy.
+    pub(crate) fn requested_output_tokens(&self, policy_cap: u32) -> u32 {
+        if policy_cap == 0 {
+            return 0;
+        }
+        self.max_output_tokens
+            .map_or(policy_cap, |capability| policy_cap.min(capability.get()))
+    }
+
     /// Validate this model's optional summary limits against its sole context
     /// window.
     pub(crate) fn validate_local_summary_compaction(
@@ -155,14 +170,19 @@ impl ChatCompletionsModel {
 /// Resolve an explicit profile or the generic no-byte-cap fallback.
 fn resolved_local_summary_compaction(
     override_config: Option<LocalSummaryCompactionConfig>,
-    context_window: TokenCount,
+    model: &ChatCompletionsModel,
 ) -> Option<SummaryCompactionConfig> {
-    match override_config {
+    let config = match override_config {
         Some(config) => config
-            .validated_for(context_window)
+            .validated_for(model.context_window)
             .expect("validated provider profile must retain valid summary limits"),
-        None => SummaryCompactionConfig::default_for(context_window.get()),
-    }
+        None => SummaryCompactionConfig::default_for(model.context_window.get()),
+    };
+    model.max_output_tokens.map_or(config, |capability| {
+        config.and_then(|config| {
+            config.capped_output_tokens(TokenCount::new(u64::from(capability.get())))
+        })
+    })
 }
 
 /// Built-in default estimated prices for compatible models whose profile omits

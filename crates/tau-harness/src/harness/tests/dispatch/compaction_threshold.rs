@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// A reserve boundary resolves against the selected model context window and
-/// preserves threshold equality when deciding proactive compaction.
+/// A reserve boundary resolves against the selected model's separate legal
+/// input limit and preserves threshold equality for proactive compaction.
 #[test]
 fn reserve_policy_schedules_at_selected_model_boundary() {
     let td = TempDir::new().expect("tempdir");
@@ -16,7 +16,8 @@ fn reserve_policy_schedules_at_selected_model_boundary() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model");
-    info.context_window = tau_proto::TokenCount::new(100);
+    info.context_window = tau_proto::TokenCount::new(120);
+    info.max_input_tokens = Some(tau_proto::TokenCount::new(100));
     info.supports_standalone_compaction = true;
     let role = h
         .config
@@ -266,8 +267,8 @@ fn legacy_reserve_fallback_records_role_threshold_source() {
     h.shutdown().expect("shutdown");
 }
 
-/// Cold-restored usage must pass the same reserve validation before a valid
-/// sibling can schedule standalone work.
+/// Cold-restored usage must validate reserves against the separate legal input
+/// limit before a valid sibling can schedule standalone work.
 #[test]
 fn invalid_reserve_blocks_cold_activation_before_eligible_sibling() {
     let td = TempDir::new().expect("tempdir");
@@ -290,7 +291,8 @@ fn invalid_reserve_blocks_cold_activation_before_eligible_sibling() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model");
-    info.context_window = tau_proto::TokenCount::new(100);
+    info.context_window = tau_proto::TokenCount::new(200);
+    info.max_input_tokens = Some(tau_proto::TokenCount::new(100));
     info.supports_standalone_compaction = true;
     let role = h
         .config

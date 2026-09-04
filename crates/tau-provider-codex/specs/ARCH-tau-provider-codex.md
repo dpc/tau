@@ -183,10 +183,11 @@ Custom definitions and snapshots it in each transient provider prompt. Lite
 never advertises or lowers hosted search. Completed hosted-call items remain
 bounded provider-owned opaque replay data and never enter Tau tool dispatch.
 
-ChatGPT model metadata distinguishes the raw provider context window from the
-effective window published to the harness. Standalone compaction thresholds
-derive from the raw window, while UI usage and local context limits use the
-provider's 95-percent effective ceiling.
+ChatGPT model metadata publishes the raw provider context window as the total
+window and the provider's 95-percent effective ceiling as the separate legal
+input maximum. Standalone compaction thresholds derive from the raw window,
+while runtime usage, local context limits, and reserve scheduling use the
+effective input maximum.
 
 The same model metadata publishes fixed-point equivalent API prices from
 OpenAI's basic public pricing table. This estimate deliberately excludes tiers,

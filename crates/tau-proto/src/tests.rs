@@ -2058,6 +2058,8 @@ fn representative_events() -> Vec<Event> {
                 supports_parallel_tool_calls: true,
                 default_affinity: 0,
                 context_window: TokenCount::new(128_000),
+                max_input_tokens: None,
+                max_output_tokens: None,
                 efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
                 verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],

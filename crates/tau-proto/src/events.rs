@@ -478,7 +478,7 @@ pub struct HarnessRoleSelected {
     /// model is not provider-published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
-    /// Total context window size, in tokens, if known for the resolved model.
+    /// Effective legal input limit, in tokens, if known for the resolved model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     /// Effective role/provider baseline parameters, ignoring persisted state.
@@ -504,8 +504,8 @@ pub struct HarnessContextUsageChanged {
     /// if the provider reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
-    /// Percentage of the context window currently used. `None` when
-    /// the selected provider model metadata is unavailable, so the UI
+    /// Percentage of the effective legal input limit currently used. `None`
+    /// when the selected provider model metadata is unavailable, so the UI
     /// can fall back to showing raw token count instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
@@ -524,12 +524,12 @@ pub struct HarnessAgentContextUsageChanged {
     /// the provider reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
-    /// Total context window size for the model that produced the response, if
+    /// Effective legal input limit for the model that produced the response, if
     /// known from provider metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
-    /// Percentage of the context window currently used. `None` when either
-    /// usage or provider model metadata is unavailable.
+    /// Percentage of the effective legal input limit currently used. `None`
+    /// when either usage or provider model metadata is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
 }
@@ -2039,7 +2039,7 @@ pub struct DelegateProgress {
     /// Most recent input-token count the sub-agent reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_input_tokens: Option<u64>,
-    /// Sub-agent's model context window size, when known.
+    /// Sub-agent's effective legal model input limit, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_window: Option<u64>,
     /// Number of tool calls currently in flight in the sub-agent.
@@ -3190,10 +3190,10 @@ pub struct AgentContextStats {
     /// Latest provider-reported cached input token count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
-    /// Model context window in tokens, if known.
+    /// Effective legal model input limit in tokens, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
-    /// Percent of the context window used, if known.
+    /// Percent of the effective legal input limit used, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
 }
@@ -3356,6 +3356,18 @@ pub struct ProviderModelInfo {
     /// Total model context window in tokens. Required so harness/UI state does
     /// not have to fall back to provider-specific config.
     pub context_window: crate::TokenCount,
+    /// Maximum legal input tokens for this exact route.
+    ///
+    /// Omission preserves legacy declarations by using [`Self::context_window`]
+    /// as the effective input boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<crate::TokenCount>,
+    /// Maximum model output tokens for this exact route.
+    ///
+    /// Omission means the provider has not published a separate model
+    /// capability; Tau must not invent one from the context window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<crate::TokenCount>,
     /// Reasoning-effort levels accepted by this model, in UI cycling order.
     /// Empty means the model does not support reasoning-effort selection.
     pub efforts: Vec<Effort>,
@@ -3421,6 +3433,31 @@ pub struct ProviderModelInfo {
 }
 
 impl ProviderModelInfo {
+    /// Return the legal input boundary used for admission and scheduling.
+    ///
+    /// The total context window remains an independent upper bound even when a
+    /// malformed or optimistic declaration publishes a larger input maximum.
+    #[must_use]
+    pub fn input_token_limit(&self) -> crate::TokenCount {
+        self.max_input_tokens
+            .unwrap_or(self.context_window)
+            .min(self.context_window)
+    }
+
+    /// Apply the published model output capability to a nonzero policy cap.
+    ///
+    /// A zero policy continues to mean “omit the request cap”, and an omitted
+    /// model capability preserves the configured policy unchanged.
+    #[must_use]
+    pub fn apply_output_token_cap(&self, policy_cap: u32) -> u32 {
+        if policy_cap == 0 {
+            return 0;
+        }
+        self.max_output_tokens.map_or(policy_cap, |capability| {
+            policy_cap.min(u32::try_from(capability.get()).unwrap_or(u32::MAX))
+        })
+    }
+
     /// Returns whether an explicit compaction request may either dispatch now
     /// or ask the provider to refresh generation-scoped negative evidence.
     #[must_use]
@@ -3488,6 +3525,8 @@ pub struct ProviderModelDeclarationDiagnostic {
 pub enum ProviderModelDeclarationIssue {
     /// The required total model context window is zero.
     ContextWindowZero,
+    /// The optional maximum model output capability is zero.
+    MaxOutputTokensZero,
     /// Standalone-only numeric metadata was supplied for a route that does not
     /// support explicit standalone compaction.
     StandaloneMetadataUnsupported,
@@ -3495,6 +3534,9 @@ pub enum ProviderModelDeclarationIssue {
     StandaloneCompactionThresholdZero,
     /// The standalone threshold exceeds the route's total context window.
     StandaloneCompactionThresholdExceedsContextWindow,
+    /// The standalone threshold exceeds a separately published legal input
+    /// maximum without exceeding the total context window.
+    StandaloneCompactionThresholdExceedsInputLimit,
     /// The optional standalone historical-prefix byte budget is zero.
     StandaloneCompactionPrefixBudgetZero,
 }
@@ -6136,7 +6178,7 @@ pub struct ContextLimitTelemetry {
     /// total cannot be represented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_delta_bytes: Option<crate::ByteCount>,
-    /// Provider-published context window observed for this exact model.
+    /// Effective legal input limit observed for this exact model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertised_context_window: Option<crate::TokenCount>,
     /// Provider-reported input usage attached to the rejection, when present.

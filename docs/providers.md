@@ -126,9 +126,11 @@ carry metadata, not just IDs:
 The harness validates every proposed model independently. A malformed entry is
 omitted from the accepted snapshot and produces a structured
 `provider.model_declaration_diagnostic`; valid siblings remain unchanged. Tau
-rejects zero context windows, standalone-only metadata without effective
-standalone support, zero standalone thresholds or prefix budgets, and standalone
-thresholds larger than the route context window. Effective support is
+rejects zero context windows or model output capabilities, standalone-only
+metadata without effective standalone support, zero standalone thresholds or
+prefix budgets, and standalone thresholds larger than the route's effective
+legal input limit. Diagnostics distinguish thresholds above the total window
+from those above only a separate input maximum. Effective support is
 `supports_standalone_compaction || standalone_compaction_generation_negative`;
 generation-negative routes keep their standalone metadata. Tau does not strip or
 default invalid fields.
@@ -144,6 +146,8 @@ struct ProviderModelInfo {
     supports_parallel_tool_calls: bool,
     default_affinity: i32,
     context_window: TokenCount,
+    max_input_tokens: Option<TokenCount>,
+    max_output_tokens: Option<TokenCount>,
     efforts: Vec<Effort>,
     verbosities: Vec<Verbosity>,
     thinking_summaries: Vec<ThinkingSummary>,
@@ -161,7 +165,13 @@ struct ProviderModelInfo {
 }
 ```
 
-`context_window` is required for every published model.
+`context_window` is the required total model window. `max_input_tokens`
+optionally narrows the exact route's legal input boundary; omission falls back
+to `context_window`. `max_output_tokens` is the model's separate output
+capability; omission leaves it unknown rather than inventing a value from the
+window. The provider profile's `max_output_tokens` remains Tau's request-policy
+cap: a nonzero request uses the smaller policy and model-capability value, while
+zero continues to omit the request cap.
 `standalone_compaction_prefix_budget`, when present, is a nonzero `ByteCount`
 of the canonical JSON-serialized historical `PromptContext`. The native trigger
 is excluded. The harness fits a prefix in this byte domain, and the adapter

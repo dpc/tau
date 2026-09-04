@@ -491,16 +491,18 @@ pub(crate) fn thinking_summaries_for_model(
         .unwrap_or_default()
 }
 
-/// Returns the context window published for `model` by its provider.
+/// Returns the legal input context shown for `model` by runtime consumers.
 pub(crate) fn context_window_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
 ) -> Option<tau_proto::TokenCount> {
-    provider_models.get(model).map(|info| info.context_window)
+    provider_models
+        .get(model)
+        .map(ProviderModelInfo::input_token_limit)
 }
 
-/// Resolves a reserve against the selected provider-qualified model's published
-/// context window.
+/// Resolves a reserve against the selected provider-qualified model's legal
+/// input boundary.
 pub(crate) fn compaction_threshold_from_reserve(
     model: &ModelId,
     info: Option<&ProviderModelInfo>,
@@ -512,7 +514,7 @@ pub(crate) fn compaction_threshold_from_reserve(
              provider model metadata is unavailable"
         )
     })?;
-    tau_config::settings::compaction_threshold_from_reserve(info.context_window.get(), reserve)
+    tau_config::settings::compaction_threshold_from_reserve(info.input_token_limit().get(), reserve)
         .map(tau_proto::TokenCount::new)
         .map_err(|error| format!("cannot resolve compaction reserve for model `{model}`: {error}"))
 }

@@ -20,7 +20,7 @@
       ],
       "supports_parallel_tool_calls": false,
       "default_affinity": 700,
-      "context_window": 353400,
+      "context_window": 372000,
       "efforts": [
         "off",
         "minimal",
@@ -66,7 +66,8 @@
         }
       },
       "est_uncached_input_cost_1m_usd": "5",
-      "est_output_cost_1m_usd": "30"
+      "est_output_cost_1m_usd": "30",
+      "max_input_tokens": 353400
     },
     {
       "id": "chatgpt/gpt-5.6-terra",
@@ -88,7 +89,7 @@
       ],
       "supports_parallel_tool_calls": false,
       "default_affinity": 600,
-      "context_window": 353400,
+      "context_window": 372000,
       "efforts": [
         "off",
         "minimal",
@@ -134,7 +135,8 @@
         }
       },
       "est_uncached_input_cost_1m_usd": "2",
-      "est_output_cost_1m_usd": "12"
+      "est_output_cost_1m_usd": "12",
+      "max_input_tokens": 353400
     },
     {
       "id": "chatgpt/gpt-5.6-luna",
@@ -156,7 +158,7 @@
       ],
       "supports_parallel_tool_calls": false,
       "default_affinity": 500,
-      "context_window": 353400,
+      "context_window": 372000,
       "efforts": [
         "off",
         "minimal",
@@ -202,7 +204,8 @@
         }
       },
       "est_uncached_input_cost_1m_usd": "0.2",
-      "est_output_cost_1m_usd": "1.2"
+      "est_output_cost_1m_usd": "1.2",
+      "max_input_tokens": 353400
     },
     {
       "id": "chatgpt/gpt-5.5",
@@ -233,7 +236,7 @@
       ],
       "supports_parallel_tool_calls": true,
       "default_affinity": 400,
-      "context_window": 258400,
+      "context_window": 272000,
       "efforts": [
         "off",
         "minimal",
@@ -277,7 +280,8 @@
         }
       },
       "est_uncached_input_cost_1m_usd": "5",
-      "est_output_cost_1m_usd": "30"
+      "est_output_cost_1m_usd": "30",
+      "max_input_tokens": 258400
     },
     {
       "id": "chatgpt/gpt-5.4",
@@ -308,7 +312,7 @@
       ],
       "supports_parallel_tool_calls": true,
       "default_affinity": 300,
-      "context_window": 258400,
+      "context_window": 272000,
       "efforts": [
         "off",
         "minimal",
@@ -352,7 +356,8 @@
         }
       },
       "est_uncached_input_cost_1m_usd": "2.5",
-      "est_output_cost_1m_usd": "15"
+      "est_output_cost_1m_usd": "15",
+      "max_input_tokens": 258400
     },
     {
       "id": "chatgpt/gpt-5.4-mini",
@@ -383,7 +388,7 @@
       ],
       "supports_parallel_tool_calls": true,
       "default_affinity": 100,
-      "context_window": 258400,
+      "context_window": 272000,
       "efforts": [
         "off",
         "minimal",
@@ -426,7 +431,8 @@
         }
       },
       "est_uncached_input_cost_1m_usd": "0.75",
-      "est_output_cost_1m_usd": "4.5"
+      "est_output_cost_1m_usd": "4.5",
+      "max_input_tokens": 258400
     },
     {
       "id": "chatgpt/gpt-5.3-codex",
@@ -457,7 +463,7 @@
       ],
       "supports_parallel_tool_calls": true,
       "default_affinity": 200,
-      "context_window": 258400,
+      "context_window": 272000,
       "efforts": [
         "off",
         "minimal",
@@ -501,7 +507,8 @@
         }
       },
       "est_uncached_input_cost_1m_usd": "1.75",
-      "est_output_cost_1m_usd": "14"
+      "est_output_cost_1m_usd": "14",
+      "max_input_tokens": 258400
     },
     {
       "id": "local/local-model",

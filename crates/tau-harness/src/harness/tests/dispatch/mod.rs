@@ -1254,6 +1254,8 @@ fn provider_model_info(
         supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window: tau_proto::TokenCount::new(context_window),
+        max_input_tokens: None,
+        max_output_tokens: None,
         efforts: vec![tau_proto::Effort::Off, tau_proto::Effort::High],
         verbosities: vec![tau_proto::Verbosity::Low, tau_proto::Verbosity::High],
         thinking_summaries: vec![
@@ -1631,6 +1633,8 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(1_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![tau_proto::Effort::Medium],
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],

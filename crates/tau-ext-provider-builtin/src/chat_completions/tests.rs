@@ -354,6 +354,8 @@ fn cache_usage_requires_stream_options() {
         id: tau_proto::ModelName::new("deepseek-v4-flash"),
         display_name: None,
         context_window: tau_proto::TokenCount::new(128_000),
+        max_input_tokens: None,
+        max_output_tokens: None,
         compat: Some(ChatCompletionsCompat {
             cache_usage: CacheUsageCompat::DeepSeek,
             ..ChatCompletionsCompat::default()
@@ -411,7 +413,7 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
         models_for_provider(
             &tau_proto::ProviderName::new("local"),
             &ChatCompletionsProvider {
-                models: vec![configured],
+                models: vec![configured.clone()],
                 ..ChatCompletionsProvider::default()
             },
         )[0]
@@ -419,7 +421,7 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
         tau_proto::TokenCount::new(8192)
     );
     assert_eq!(
-        resolved_local_summary_compaction(None, tau_proto::TokenCount::new(8192))
+        resolved_local_summary_compaction(None, &configured)
             .expect("positive context window")
             .max_output_tokens(),
         1024
@@ -435,8 +437,59 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
         serde_json::from_str(r#"{"id":"zero","context_window":0}"#).expect("zero model");
     assert_eq!(zero.context_window, tau_proto::TokenCount::ZERO);
     assert!(
-        resolved_local_summary_compaction(None, zero.context_window).is_none(),
+        resolved_local_summary_compaction(None, &zero).is_none(),
         "zero retains the prior disabled generic summary fallback"
+    );
+}
+
+/// Separate route capabilities must serialize independently, constrain policy
+/// output requests, and leave legacy context-only profiles unchanged.
+#[test]
+fn model_token_limits_are_independent_from_provider_output_policy() {
+    let zero = serde_json::from_str::<ChatCompletionsModel>(
+        r#"{"id":"zero","context_window":8192,"max_output_tokens":0}"#,
+    )
+    .expect_err("zero output capability must not collide with omit-policy sentinel");
+    assert!(zero.to_string().contains("nonzero"));
+    let model: ChatCompletionsModel = serde_json::from_str(
+        r#"{"id":"wide","context_window":1050000,"max_input_tokens":922000,"max_output_tokens":128000}"#,
+    )
+    .expect("configured model limits");
+    assert_eq!(model.requested_output_tokens(200_000), 128_000);
+    assert_eq!(model.requested_output_tokens(8_192), 8_192);
+    assert_eq!(model.requested_output_tokens(0), 0);
+    let published = models_for_provider(
+        &tau_proto::ProviderName::new("local"),
+        &ChatCompletionsProvider {
+            models: vec![model],
+            max_output_tokens: 200_000,
+            ..ChatCompletionsProvider::default()
+        },
+    );
+    assert_eq!(
+        published[0].context_window,
+        tau_proto::TokenCount::new(1_050_000)
+    );
+    assert_eq!(
+        published[0].max_input_tokens,
+        Some(tau_proto::TokenCount::new(922_000))
+    );
+    assert_eq!(
+        published[0].max_output_tokens,
+        Some(tau_proto::TokenCount::new(128_000))
+    );
+    assert_eq!(
+        published[0].input_token_limit(),
+        tau_proto::TokenCount::new(922_000)
+    );
+    let summary_limited: ChatCompletionsModel =
+        serde_json::from_str(r#"{"id":"summary","context_window":8192,"max_output_tokens":64}"#)
+            .expect("summary-limited model");
+    assert_eq!(
+        resolved_local_summary_compaction(None, &summary_limited)
+            .expect("summary support")
+            .max_output_tokens(),
+        64
     );
 }
 
@@ -484,16 +537,16 @@ fn local_summary_compaction_defaults_without_model_profile() {
     assert_eq!(
         resolved_local_summary_compaction(
             provider.models[0].local_summary_compaction,
-            provider.models[0].context_window,
+            &provider.models[0],
         ),
         resolved_local_summary_compaction(
             provider.models[1].local_summary_compaction,
-            provider.models[1].context_window,
+            &provider.models[1],
         )
     );
     let resolved = resolved_local_summary_compaction(
         provider.models[2].local_summary_compaction,
-        provider.models[2].context_window,
+        &provider.models[2],
     )
     .expect("partial override remains enabled");
     assert_eq!(resolved.max_output_tokens(), 512);
@@ -565,6 +618,8 @@ fn openrouter_defaults_to_telemetry_without_cache_policy() {
         id: tau_proto::ModelName::new("upstream/model"),
         display_name: None,
         context_window: tau_proto::TokenCount::new(128_000),
+        max_input_tokens: None,
+        max_output_tokens: None,
         compat: None,
         tags: Vec::new(),
         hosted_tool_capabilities: Vec::new(),
@@ -894,6 +949,8 @@ fn unpriced_local_model_uses_central_fallback() {
             id: ModelName::new("local-free"),
             display_name: None,
             context_window: tau_proto::TokenCount::new(4096),
+            max_input_tokens: None,
+            max_output_tokens: None,
             compat: None,
             tags: Vec::new(),
             hosted_tool_capabilities: Vec::new(),
@@ -955,6 +1012,8 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
             id: ModelName::new("deepseek-v4-flash"),
             display_name: None,
             context_window: tau_proto::TokenCount::new(4096),
+            max_input_tokens: None,
+            max_output_tokens: None,
             compat: None,
             tags: Vec::new(),
             hosted_tool_capabilities: Vec::new(),
@@ -1038,6 +1097,8 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
             id: ModelName::new("serial-tools"),
             display_name: None,
             context_window: tau_proto::TokenCount::new(4096),
+            max_input_tokens: None,
+            max_output_tokens: None,
             compat: Some(ChatCompletionsCompat {
                 parallel_tool_calls: true,
                 ..ChatCompletionsCompat::default()

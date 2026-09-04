@@ -56,6 +56,8 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window: tau_proto::TokenCount::new(context_window),
+        max_input_tokens: None,
+        max_output_tokens: None,
         efforts: vec![Effort::High],
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
@@ -376,6 +378,8 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
     let mut zero_context = provider_model("openai/zero-context".into(), 0);
     zero_context.standalone_compaction_threshold = Some(tau_proto::TokenCount::ZERO);
     zero_context.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::ZERO);
+    let mut zero_output = provider_model("openai/zero-output".into(), 1_000);
+    zero_output.max_output_tokens = Some(tau_proto::TokenCount::ZERO);
     let mut unsupported_metadata = provider_model("openai/unsupported-metadata".into(), 1_000);
     unsupported_metadata.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(500));
     let mut zero_threshold = provider_model("openai/zero-threshold".into(), 1_000);
@@ -384,6 +388,12 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
     let mut excessive_threshold = provider_model("openai/excessive-threshold".into(), 1_000);
     excessive_threshold.supports_standalone_compaction = true;
     excessive_threshold.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1_001));
+    let mut excessive_input_threshold =
+        provider_model("openai/excessive-input-threshold".into(), 1_000);
+    excessive_input_threshold.max_input_tokens = Some(tau_proto::TokenCount::new(800));
+    excessive_input_threshold.supports_standalone_compaction = true;
+    excessive_input_threshold.standalone_compaction_threshold =
+        Some(tau_proto::TokenCount::new(801));
     let mut zero_prefix_budget = provider_model("openai/zero-prefix-budget".into(), 1_000);
     zero_prefix_budget.supports_standalone_compaction = true;
     zero_prefix_budget.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::ZERO);
@@ -393,11 +403,13 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
         TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![
                 zero_context,
+                zero_output,
                 valid.clone(),
                 generation_negative.clone(),
                 unsupported_metadata,
                 zero_threshold,
                 excessive_threshold,
+                excessive_input_threshold,
                 zero_prefix_budget,
             ],
         })),
@@ -433,7 +445,7 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
             _ => None,
         })
         .expect("committed raw declaration");
-    assert_eq!(declaration.models.len(), 7);
+    assert_eq!(declaration.models.len(), 9);
     assert_eq!(
         declaration
             .models
@@ -466,7 +478,7 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
-    assert_eq!(diagnostics.len(), 5);
+    assert_eq!(diagnostics.len(), 7);
     assert_eq!(
         diagnostics["openai/zero-context"],
         vec![
@@ -481,6 +493,10 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
         vec![tau_proto::ProviderModelDeclarationIssue::StandaloneMetadataUnsupported]
     );
     assert_eq!(
+        diagnostics["openai/zero-output"],
+        vec![tau_proto::ProviderModelDeclarationIssue::MaxOutputTokensZero]
+    );
+    assert_eq!(
         diagnostics["openai/zero-threshold"],
         vec![tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdZero]
     );
@@ -488,6 +504,12 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
         diagnostics["openai/excessive-threshold"],
         vec![
             tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdExceedsContextWindow
+        ]
+    );
+    assert_eq!(
+        diagnostics["openai/excessive-input-threshold"],
+        vec![
+            tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdExceedsInputLimit
         ]
     );
     assert_eq!(
@@ -1776,6 +1798,8 @@ fn provider_model_metadata_drives_selection_state() {
                 supports_parallel_tool_calls: true,
                 default_affinity: 0,
                 context_window: tau_proto::TokenCount::new(654_321),
+                max_input_tokens: None,
+                max_output_tokens: None,
                 efforts: vec![Effort::Off],
                 verbosities: vec![Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],
@@ -1871,6 +1895,8 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off, Effort::High],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -1897,6 +1923,8 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(8_192),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2013,6 +2041,8 @@ fn role_without_effort_picks_middle_provider_effort() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![
                 Effort::Off,
                 Effort::Minimal,
@@ -2045,6 +2075,8 @@ fn role_without_effort_picks_middle_provider_effort() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(8_192),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2217,6 +2249,8 @@ fn role_missing_fields_use_model_defaults() {
         supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window: tau_proto::TokenCount::new(8_192),
+        max_input_tokens: None,
+        max_output_tokens: None,
         efforts: vec![Effort::Off, Effort::Low, Effort::High],
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],
@@ -2255,6 +2289,8 @@ fn role_without_verbosity_picks_low_when_supported() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2281,6 +2317,8 @@ fn role_without_verbosity_picks_low_when_supported() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(8_192),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2740,6 +2778,8 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![L::Medium, L::High, L::XHigh],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2766,6 +2806,8 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(8_192),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![L::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2841,6 +2883,8 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![V::Low, V::Medium, V::High],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2867,6 +2911,8 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![V::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2921,6 +2967,8 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off, T::Auto, T::Concise, T::Detailed],
@@ -2947,6 +2995,8 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: tau_proto::TokenCount::new(8_192),
+            max_input_tokens: None,
+            max_output_tokens: None,
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off],
@@ -3002,6 +3052,8 @@ fn selected_params_use_runtime_role_fields() {
         supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window: tau_proto::TokenCount::new(128_000),
+        max_input_tokens: None,
+        max_output_tokens: None,
         efforts: vec![Effort::Off, Effort::Low, Effort::High],
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![
@@ -3043,6 +3095,26 @@ fn compaction_reserve_uses_selected_model_context_window() {
         compaction_threshold_from_reserve(&selected, models.get(&selected), 25_000)
             .expect("selected model reserve"),
         tau_proto::TokenCount::new(175_000)
+    );
+}
+
+/// Reserve resolution must use a separately published legal input maximum
+/// instead of scheduling into the output-only portion of the total context.
+#[test]
+fn compaction_reserve_uses_selected_model_input_limit() {
+    let selected: ModelId = "provider/selected".parse().expect("selected model");
+    let mut info = provider_model(selected.clone(), 1_050_000);
+    info.max_input_tokens = Some(tau_proto::TokenCount::new(922_000));
+    let models = provider_models([info.clone()]);
+
+    assert_eq!(
+        compaction_threshold_from_reserve(&selected, Some(&info), 22_000)
+            .expect("selected model reserve"),
+        tau_proto::TokenCount::new(900_000)
+    );
+    assert_eq!(
+        crate::model::context_window_for_model(&models, &selected),
+        Some(tau_proto::TokenCount::new(922_000))
     );
 }
 

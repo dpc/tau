@@ -1275,9 +1275,15 @@ fn publishes_chatgpt_model_metadata() {
             .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
             .expect("gpt-5.6-sol model")
             .context_window,
-        tau_proto::TokenCount::new(
-            GPT_5_6_RAW_CONTEXT_WINDOW.get() * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
-        )
+        GPT_5_6_RAW_CONTEXT_WINDOW
+    );
+    assert_eq!(
+        models
+            .iter()
+            .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
+            .expect("gpt-5.6-sol model")
+            .max_input_tokens,
+        Some(effective_context_window_for_model("gpt-5.6-sol"))
     );
     assert_eq!(
         models
@@ -1285,9 +1291,15 @@ fn publishes_chatgpt_model_metadata() {
             .find(|model| model.id.model.as_str() == "gpt-5.5")
             .expect("gpt-5.5 model")
             .context_window,
-        tau_proto::TokenCount::new(
-            DEFAULT_RAW_CONTEXT_WINDOW.get() * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
-        )
+        DEFAULT_RAW_CONTEXT_WINDOW
+    );
+    assert_eq!(
+        models
+            .iter()
+            .find(|model| model.id.model.as_str() == "gpt-5.5")
+            .expect("gpt-5.5 model")
+            .max_input_tokens,
+        Some(effective_context_window_for_model("gpt-5.5"))
     );
     assert!(
         models

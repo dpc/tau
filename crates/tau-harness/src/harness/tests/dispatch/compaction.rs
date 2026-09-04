@@ -6745,6 +6745,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         .expect("test model");
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
+    info.max_input_tokens = Some(tau_proto::TokenCount::new(900));
     let cid = ensure_test_user_agent(&mut h);
     seed_reactive_compaction_prefix(&mut h, &cid);
     let model: tau_proto::ModelId = "test/model".into();
@@ -6850,7 +6851,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
     assert_eq!(telemetry.operation, tau_proto::PromptOperation::Inference);
     assert_eq!(
         telemetry.advertised_context_window,
-        Some(tau_proto::TokenCount::new(1000))
+        Some(tau_proto::TokenCount::new(900))
     );
     assert!(
         telemetry

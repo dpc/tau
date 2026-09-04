@@ -8,6 +8,7 @@ mod tests;
 
 #[cfg(test)]
 use std::cell::RefCell;
+use std::num::NonZeroU32;
 
 pub use prompt_cache::{
     OpenAiExplicitPromptCacheMode, OpenAiPromptCache, OpenAiPromptCacheBoundary,
@@ -90,9 +91,15 @@ pub struct ResponsesModel {
     /// Optional user-facing label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Advertised input context window.
+    /// Total model context window.
     #[serde(default = "default_context_window")]
     pub context_window: TokenCount,
+    /// Optional maximum legal input tokens for this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<TokenCount>,
+    /// Optional maximum output capability for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<NonZeroU32>,
     /// Model-specific tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<tau_proto::ModelTag>,
@@ -121,6 +128,17 @@ pub struct ResponsesModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_cache_storage_cost_1m_token_hour_usd:
         Option<tau_proto::EstimatedUsdPerMillionTokenHours>,
+}
+
+impl ResponsesModel {
+    /// Apply the model capability to the provider-wide output policy.
+    fn requested_output_tokens(&self, policy_cap: u32) -> u32 {
+        if policy_cap == 0 {
+            return 0;
+        }
+        self.max_output_tokens
+            .map_or(policy_cap, |capability| policy_cap.min(capability.get()))
+    }
 }
 
 /// Serialized public Responses request controls.
@@ -249,6 +267,10 @@ pub fn models_for_provider(
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 default_affinity: 0,
                 context_window: model.context_window,
+                max_input_tokens: model.max_input_tokens,
+                max_output_tokens: model
+                    .max_output_tokens
+                    .map(|tokens| TokenCount::new(u64::from(tokens.get()))),
                 efforts: model_efforts(model),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
@@ -321,7 +343,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
         max_output_tokens: attempt_output_tokens(
-            provider.max_output_tokens,
+            model.requested_output_tokens(provider.max_output_tokens),
             summary_config,
             compact_prompt.is_some(),
         ),
@@ -501,12 +523,17 @@ fn materialize_summary_prompt(
 }
 
 fn resolved_summary_config(model: &ResponsesModel) -> Option<SummaryCompactionConfig> {
-    match model.local_summary_compaction {
+    let config = match model.local_summary_compaction {
         Some(config) => config
             .validated_for(model.context_window)
             .expect("validated provider profile must retain valid summary limits"),
         None => SummaryCompactionConfig::default_for(model.context_window.get()),
-    }
+    };
+    model.max_output_tokens.map_or(config, |capability| {
+        config.and_then(|config| {
+            config.capped_output_tokens(TokenCount::new(u64::from(capability.get())))
+        })
+    })
 }
 
 fn validate_responses_narrative_output(

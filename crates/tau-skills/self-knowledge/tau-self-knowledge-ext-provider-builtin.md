@@ -125,6 +125,13 @@ Start local
 operation with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY=1`; increase it only
 after measuring server batching, KV cache, and memory headroom.
 
+Generic Chat Completions and Responses model entries may additionally publish
+`max_input_tokens` and `max_output_tokens`. The former narrows request admission
+and reserve-based compaction below the total `context_window`; omission preserves
+the legacy context-window boundary. The latter describes model capability and
+clamps a nonzero provider-profile output policy, while omission leaves that
+policy unchanged and policy zero still omits the wire cap.
+
 When the exact llama.cpp route loads and accepts vision, add
 `input_modalities: ["text", "image"]` and
 `tool_result_modalities: ["text", "image"]` to only that model entry. Both
@@ -478,8 +485,8 @@ Omitting `local_summary_compaction` uses no prefix byte cap, derives the
 output-token cap by clamping `context_window / 8` to `1..=4096`, uses a 256 KiB output-byte
 bound, and publishes no proactive threshold. The object accepts independent
 optional `max_input_bytes`, `max_output_tokens`, and `max_output_bytes`
-overrides; `{}` keeps all defaults. The selected model's `context_window` is the
-sole context source. Tau rejects the retired `serialization_profile` and
+overrides; `{}` keeps all defaults. The model output capability narrows the
+resolved summary request when present. Tau rejects the retired `serialization_profile` and
 `context_window_tokens` keys with migration guidance and rejects output limits
 that exceed the model token window or Tau's byte ceiling before model
 publication. Tau sends the ordinary provider request prefix for the immutable cut,

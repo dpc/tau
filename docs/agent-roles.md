@@ -292,9 +292,11 @@ than shadowing it. Set `compactions.default.enable: false` to opt out; legacy
 resolves the adapter-published safe scheduling threshold;
 `provider_default` remains a compatibility spelling for the same value.
 An explicit `reserve: N` resolves against the selected provider-qualified
-model as `context_window - N`; `threshold` and `reserve` are mutually exclusive.
-`reserve: 0` selects the full context window. A reserve equal to the context
-window resolves to zero and therefore supplies no proactive scheduling
+model as `input_token_limit - N`; `threshold` and `reserve` are mutually
+exclusive. The input limit is `min(context_window, max_input_tokens)` when the
+provider publishes the optional maximum and otherwise falls back to
+`context_window`. `reserve: 0` selects the full input limit. A reserve equal to
+that limit resolves to zero and therefore supplies no proactive scheduling
 authority; a larger reserve fails prompt validation with an actionable
 role/policy/model diagnostic.
 

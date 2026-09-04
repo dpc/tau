@@ -130,6 +130,15 @@ impl Config {
     pub const fn max_output_bytes(self) -> u64 {
         self.max_output_bytes.get()
     }
+
+    /// Narrow the summary request to a separately published model output
+    /// capability.
+    #[must_use]
+    pub fn capped_output_tokens(mut self, capability: tau_proto::TokenCount) -> Option<Self> {
+        let capability = u32::try_from(capability.get()).unwrap_or(u32::MAX);
+        self.max_output_tokens = NonZeroU32::new(self.max_output_tokens.get().min(capability))?;
+        Some(self)
+    }
 }
 
 /// Harness-authored user message appended after the ordinary request prefix.

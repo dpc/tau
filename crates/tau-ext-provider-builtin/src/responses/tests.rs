@@ -611,6 +611,8 @@ fn profile_publishes_default_responses_efforts() {
             compat: None,
             display_name: None,
             context_window: tau_proto::TokenCount::new(128_000),
+            max_input_tokens: None,
+            max_output_tokens: None,
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
@@ -680,6 +682,8 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
             compat: None,
             display_name: None,
             context_window: tau_proto::TokenCount::new(8192),
+            max_input_tokens: None,
+            max_output_tokens: None,
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
@@ -707,6 +711,57 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
     assert!(
         resolved_summary_config(&zero).is_none(),
         "zero retains the prior disabled generic summary fallback"
+    );
+}
+
+/// Public Responses profiles keep total, legal-input, model-output, and
+/// provider policy limits distinct while legacy profiles retain old defaults.
+#[test]
+fn model_token_limits_are_independent_from_provider_output_policy() {
+    let zero = serde_json::from_str::<ResponsesModel>(
+        r#"{"id":"zero","context_window":8192,"max_output_tokens":0}"#,
+    )
+    .expect_err("zero output capability must not collide with omit-policy sentinel");
+    assert!(zero.to_string().contains("nonzero"));
+    let model: ResponsesModel = serde_json::from_str(
+        r#"{"id":"wide","context_window":1050000,"max_input_tokens":922000,"max_output_tokens":128000}"#,
+    )
+    .expect("configured model limits");
+    assert_eq!(model.requested_output_tokens(200_000), 128_000);
+    assert_eq!(model.requested_output_tokens(8_192), 8_192);
+    assert_eq!(model.requested_output_tokens(0), 0);
+    let published = models_for_provider(
+        &ProviderName::new("responses"),
+        &ResponsesProvider {
+            models: vec![model],
+            max_output_tokens: 200_000,
+            ..ResponsesProvider::default()
+        },
+    );
+    assert_eq!(
+        published[0].context_window,
+        tau_proto::TokenCount::new(1_050_000)
+    );
+    assert_eq!(
+        published[0].max_input_tokens,
+        Some(tau_proto::TokenCount::new(922_000))
+    );
+    assert_eq!(
+        published[0].max_output_tokens,
+        Some(tau_proto::TokenCount::new(128_000))
+    );
+    assert_eq!(
+        published[0].input_token_limit(),
+        tau_proto::TokenCount::new(922_000)
+    );
+    let summary_limited: ResponsesModel =
+        serde_json::from_str(r#"{"id":"summary","context_window":8192,"max_output_tokens":64}"#)
+            .expect("summary-limited model");
+    assert_eq!(
+        resolved_summary_config(&summary_limited)
+            .expect("summary support")
+            .max_output_tokens(),
+        64
     );
 }
 
