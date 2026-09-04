@@ -46,7 +46,7 @@ fn compatibility_request_snapshot(mode: ResponsesMode) -> serde_json::Value {
         hosted_tools: &[],
         tools: &tools,
         params: tau_proto::ModelParams {
-            effort: tau_proto::Effort::High,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High),
             thinking_summary: tau_proto::ThinkingSummary::Detailed,
             verbosity: tau_proto::Verbosity::Low,
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -113,7 +113,7 @@ fn compatibility_compact_request_snapshot(mode: ResponsesMode) -> serde_json::Va
         hosted_tools: &[],
         tools: &tools,
         params: tau_proto::ModelParams {
-            effort: tau_proto::Effort::High,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High),
             thinking_summary: tau_proto::ThinkingSummary::Detailed,
             verbosity: tau_proto::Verbosity::Low,
             service_tier: Some(tau_proto::ServiceTier::Fast),

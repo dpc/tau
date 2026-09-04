@@ -10,12 +10,11 @@
         "stream_options": true,
         "reasoning_effort": {
           "efforts": [
-            "off",
+            "none",
             "minimal",
             "low",
             "medium",
-            "high",
-            "xhigh"
+            "high"
           ],
           "wire": "open_ai"
         },

@@ -534,37 +534,35 @@ pub struct HarnessAgentContextUsageChanged {
     pub percent_used: Option<u8>,
 }
 
-/// Reasoning effort level. Maps to provider-specific reasoning
-/// controls (OpenAI `reasoning.effort`, Anthropic
-/// `thinking.budget_tokens`). `Off` disables it entirely.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+/// Closed semantic vocabulary for exact provider-native reasoning levels.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
-pub enum Effort {
+pub enum NativeReasoningEffort {
+    /// Provider-native disabled/none reasoning.
     #[default]
-    Off = 0,
+    None = 0,
+    /// Provider-native minimal reasoning.
     Minimal = 1,
+    /// Provider-native low reasoning.
     Low = 2,
+    /// Provider-native medium reasoning.
     Medium = 3,
+    /// Provider-native high reasoning.
     High = 4,
-    /// `rename_all = "snake_case"` would emit `x_high` for this
-    /// variant, but the canonical wire string is `xhigh` everywhere
-    /// else (`:role engineer effort xhigh`, OpenAI's `reasoning_effort` field,
-    /// `Display`, `FromStr`, `effort_wire`). Pin it explicitly so
-    /// serde-driven config paths (`default_efforts`,
-    /// `reasoningEfforts`) agree with the rest.
+    /// Provider-native extended-high reasoning.
     #[serde(rename = "xhigh")]
     XHigh = 5,
-    /// Maximum model reasoning effort.
+    /// Provider-native maximum reasoning.
     Max = 6,
 }
 
-impl Effort {
-    const LEVEL_COUNT: usize = 7;
-
-    /// Every effort level in stable UI cycling order.
-    pub const ALL: [Self; Self::LEVEL_COUNT] = [
-        Self::Off,
+impl NativeReasoningEffort {
+    /// Every native level in increasing semantic order.
+    pub const ALL: [Self; 7] = [
+        Self::None,
         Self::Minimal,
         Self::Low,
         Self::Medium,
@@ -573,70 +571,11 @@ impl Effort {
         Self::Max,
     ];
 
-    /// Cycles to the next level (wraps `Max → Off`).
+    /// Canonical provider-independent native label.
     #[must_use]
-    pub const fn next(self) -> Self {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Off => Self::Minimal,
-            Self::Minimal => Self::Low,
-            Self::Low => Self::Medium,
-            Self::Medium => Self::High,
-            Self::High => Self::XHigh,
-            Self::XHigh => Self::Max,
-            Self::Max => Self::Off,
-        }
-    }
-
-    /// Applies a positive relative adjustment without wrapping past either end.
-    #[must_use]
-    pub fn adjust(self, adjustment: UiRoleSettingAdjustment) -> Self {
-        (0..adjustment.amount().get()).fold(self, |value, _| match adjustment {
-            UiRoleSettingAdjustment::Increase(_) => match value {
-                Self::Off => Self::Minimal,
-                Self::Minimal => Self::Low,
-                Self::Low => Self::Medium,
-                Self::Medium => Self::High,
-                Self::High => Self::XHigh,
-                Self::XHigh | Self::Max => Self::Max,
-            },
-            UiRoleSettingAdjustment::Decrease(_) => match value {
-                Self::Off | Self::Minimal => Self::Off,
-                Self::Low => Self::Minimal,
-                Self::Medium => Self::Low,
-                Self::High => Self::Medium,
-                Self::XHigh => Self::High,
-                Self::Max => Self::XHigh,
-            },
-        })
-    }
-
-    /// Cycle in the canonical order, but only through levels that are
-    /// in `allowed` so callers don't land on a level the current model
-    /// doesn't support (e.g. xhigh on `gpt-5.4-mini`). Falls back to
-    /// [`Effort::next`] when `allowed` is empty.
-    #[must_use]
-    pub fn next_in(self, allowed: &[Self]) -> Self {
-        if allowed.is_empty() {
-            return self.next();
-        }
-        let mut candidate = self.next();
-        // Bounded by `Effort` variant count — at most one full
-        // wrap-around before we either land on an allowed level or
-        // confirm none exist.
-        for _ in 0..Self::LEVEL_COUNT {
-            if allowed.contains(&candidate) {
-                return candidate;
-            }
-            candidate = candidate.next();
-        }
-        self
-    }
-
-    /// Short label for status display (`off` / `low` / `high` / etc).
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Off => "off",
+            Self::None => "none",
             Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
@@ -646,86 +585,16 @@ impl Effort {
         }
     }
 
-    /// Numeric tag suitable for storing in an `AtomicU8`. Round-trips
-    /// through [`Effort::from_u8`].
-    #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Inverse of [`Effort::as_u8`]. Returns `None` for unknown tags so
-    /// callers can decide how to recover; the common case (loading from
-    /// an atomic mirror) maps `None` to [`Effort::Off`].
-    #[must_use]
-    pub const fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Self::Off),
-            1 => Some(Self::Minimal),
-            2 => Some(Self::Low),
-            3 => Some(Self::Medium),
-            4 => Some(Self::High),
-            5 => Some(Self::XHigh),
-            6 => Some(Self::Max),
-            _ => None,
-        }
-    }
-
-    /// True for the default level (`Off`). Used by `ModelParams`'
-    /// `#[serde(skip_serializing_if)]` so untouched values stay out
-    /// of the wire form.
+    /// Returns whether this is the default native value.
     #[must_use]
     pub const fn is_default(&self) -> bool {
-        matches!(self, Self::Off)
+        matches!(self, Self::None)
     }
 }
 
-impl std::str::FromStr for Effort {
-    type Err = ParseEffortError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "off" => Ok(Self::Off),
-            "minimal" => Ok(Self::Minimal),
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "xhigh" => Ok(Self::XHigh),
-            "max" => Ok(Self::Max),
-            other => Err(ParseEffortError {
-                input: other.to_owned(),
-            }),
-        }
-    }
-}
-
-/// Error returned when an effort string is not one of the well-known
-/// levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParseEffortError {
-    input: String,
-}
-
-impl ParseEffortError {
-    #[must_use]
-    pub fn input(&self) -> &str {
-        &self.input
-    }
-}
-
-impl fmt::Display for ParseEffortError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "unknown effort level `{}`; expected off/minimal/low/medium/high/xhigh/max",
-            self.input
-        )
-    }
-}
-
-impl std::error::Error for ParseEffortError {}
-
-impl std::fmt::Display for Effort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+impl std::fmt::Display for NativeReasoningEffort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -1080,13 +949,13 @@ pub struct HarnessThinkingSummariesAvailable {
 /// Per-prompt model knobs the harness selects, persists, and stamps
 /// onto every [`AgentPromptCreated`]. Bundling these together lets
 /// providers and backends thread one struct through instead of a
-/// growing list of fields. Each component independently falls back to
-/// "omit the field" when its [`Verbosity::is_default`] / `is_default`
-/// helper says it's still at the default.
+/// growing list of fields. Reasoning stores both portable request and frozen
+/// effective result; each provider sends only an effective native selector.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModelParams {
-    #[serde(default, skip_serializing_if = "Effort::is_default")]
-    pub effort: Effort,
+    /// Portable request and frozen model-specific reasoning result.
+    #[serde(default)]
+    pub effort: crate::ReasoningSelection,
     #[serde(default, skip_serializing_if = "Verbosity::is_default")]
     pub verbosity: Verbosity,
     #[serde(default, skip_serializing_if = "ThinkingSummary::is_default")]
@@ -1102,13 +971,13 @@ impl ModelParams {
         self == &Self::default()
     }
 }
-/// The harness announces which efforts are valid for the selected role's
-/// resolved model. Updated on startup and whenever the resolved model changes.
-/// Empty list means no effort applies (the selected role has no resolved model,
-/// or the provider doesn't support reasoning).
+/// The harness announces the exact reasoning capability for the selected
+/// role's resolved model. Updated on startup and whenever the resolved model
+/// changes; unsupported control represents no usable selector.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessEffortsAvailable {
-    pub levels: Vec<Effort>,
+    /// Exact reasoning capability of the selected route.
+    pub capability: crate::ReasoningEffortCapability,
 }
 
 // ---------------------------------------------------------------------------
@@ -3368,9 +3237,9 @@ pub struct ProviderModelInfo {
     /// capability; Tau must not invent one from the context window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<crate::TokenCount>,
-    /// Reasoning-effort levels accepted by this model, in UI cycling order.
-    /// Empty means the model does not support reasoning-effort selection.
-    pub efforts: Vec<Effort>,
+    /// Portable-to-native reasoning-effort mapping for this exact route.
+    #[serde(default)]
+    pub efforts: crate::ReasoningEffortCapability,
     /// Output-verbosity levels accepted by this model, in UI cycling order.
     /// Providers that do not expose verbosity selection should publish
     /// [`Verbosity::Medium`] rather than an empty list.
@@ -3539,6 +3408,10 @@ pub enum ProviderModelDeclarationIssue {
     StandaloneCompactionThresholdExceedsInputLimit,
     /// The optional standalone historical-prefix byte budget is zero.
     StandaloneCompactionPrefixBudgetZero,
+    /// The reasoning capability has inconsistent provider-default metadata, or
+    /// its mapping is empty, does not start at zero, uses an out-of-range or
+    /// non-increasing threshold, or repeats/reorders native levels.
+    InvalidReasoningEffortCapability,
 }
 
 /// Extension-defined event payload.
@@ -3908,14 +3781,16 @@ pub enum UiRoleUpdateAction {
     },
     /// Set or clear the role's reasoning effort.
     SetEffort {
-        /// Reasoning effort to store, or `None` to use the model fallback.
+        /// Portable reasoning intent to store, or `None` to reveal
+        /// configuration. Numeric absolute values must be in `0.0..=1.0`;
+        /// only [`Self::AdjustEffort`] may create retained out-of-range intent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        effort: Option<Effort>,
+        effort: Option<crate::ReasoningIntent>,
     },
-    /// Adjust the role's current effective reasoning effort.
+    /// Adjust the role's current portable requested reasoning intensity.
     AdjustEffort {
-        /// Saturating direction and number of effort levels to move.
-        adjustment: UiRoleSettingAdjustment,
+        /// Exact signed-millionth portable intensity change.
+        adjustment: crate::ReasoningIntensityDelta,
     },
     /// Set or clear the role's output verbosity.
     SetVerbosity {

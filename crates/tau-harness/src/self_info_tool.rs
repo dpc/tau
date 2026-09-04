@@ -138,11 +138,15 @@ fn format_headers(info: &InternalSelfInfo) -> String {
     let task_name = work_status.title().unwrap_or("(none)");
     let model = model.to_string();
     format!(
-        "agent_id: {}\nsession_id: {}\nsession_dir: {session_dir}\nmodel: {}\neffort: {}\nstatus: {}\nstatus_task_name: {task_name}",
+        "agent_id: {}\nsession_id: {}\nsession_dir: {session_dir}\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: {}\nstatus_task_name: {task_name}",
         agent_id,
         session_id,
         escape_header_bytes(model.as_bytes()),
-        effort.as_str(),
+        effort.requested,
+        effort
+            .effective
+            .native()
+            .map_or_else(|| effort.effective.to_string(), |level| level.to_string()),
         status_name(work_status.phase()),
     )
 }

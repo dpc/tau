@@ -1340,10 +1340,8 @@ fn manual_compaction_selects_agent_from_empty_state() {
     );
 }
 
-/// Role-update parsing must keep explicit `off` distinct from clearing a field;
-/// otherwise `:role <role> effort off` and `:role <role> thinking-summary off`
-/// would accidentally reset the selected role instead of storing the user's
-/// requested off state. `reset` is the only textual way to clear a setting.
+/// Role-update parsing must keep explicit disabled values distinct from
+/// clearing a field. `reset` is the only textual way to clear a setting.
 #[test]
 fn role_setting_updates_are_typed_and_reset_aware() {
     use std::num::NonZeroU8;
@@ -1373,9 +1371,9 @@ fn role_setting_updates_are_typed_and_reset_aware() {
         ),
         (
             "effort",
-            "off",
+            "disabled",
             UiRoleUpdateAction::SetEffort {
-                effort: Some(Effort::Off),
+                effort: Some(tau_proto::ReasoningIntent::Disabled),
             },
         ),
         (
@@ -1387,9 +1385,7 @@ fn role_setting_updates_are_typed_and_reset_aware() {
             "effort",
             "increase:2",
             UiRoleUpdateAction::AdjustEffort {
-                adjustment: tau_proto::UiRoleSettingAdjustment::Increase(
-                    NonZeroU8::new(2).expect("positive"),
-                ),
+                adjustment: tau_proto::ReasoningIntensityDelta::new(2_000_000).expect("nonzero"),
             },
         ),
         (
@@ -1514,6 +1510,18 @@ fn role_setting_updates_are_typed_and_reset_aware() {
 
     assert!(parse_role_setting_update("service-tier", "off").is_err());
     assert!(parse_role_setting_update("compaction-threshold", "999").is_err());
+    for value in ["increase:0", "increase:-0.25", "decrease:-0.25"] {
+        assert!(
+            parse_role_setting_update("effort", value).is_err(),
+            "{value} must not reverse or erase its named direction"
+        );
+    }
+    for value in ["-0.25", "1.000001", "2.0"] {
+        assert!(
+            parse_role_setting_update("effort", value).is_err(),
+            "{value} must not bypass the absolute portable range"
+        );
+    }
     assert_eq!(
         parse_role_setting_update("unknown", "value").expect_err("unknown setting"),
         "unknown setting"
@@ -1799,13 +1807,13 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
         context_window: Some(200_000),
         role: "engineer".into(),
         model_params: tau_proto::ModelParams {
-            effort: tau_proto::Effort::Medium,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Medium),
             verbosity: Verbosity::Medium,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             service_tier: None,
         },
         baseline_params: Some(tau_proto::ModelParams {
-            effort: tau_proto::Effort::Medium,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Medium),
             verbosity: Verbosity::Medium,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             service_tier: None,
@@ -1826,13 +1834,13 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
         context_window: Some(200_000),
         role: "engineer".into(),
         model_params: tau_proto::ModelParams {
-            effort: tau_proto::Effort::Medium,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Medium),
             verbosity: Verbosity::High,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             service_tier: None,
         },
         baseline_params: Some(tau_proto::ModelParams {
-            effort: tau_proto::Effort::Medium,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Medium),
             verbosity: Verbosity::Medium,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             service_tier: None,
@@ -1871,13 +1879,13 @@ fn role_state_overrides_are_compared_to_role_baseline() {
         context_window: None,
         role: "engineer".into(),
         model_params: tau_proto::ModelParams {
-            effort: tau_proto::Effort::Low,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Low),
             verbosity: Verbosity::High,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             service_tier: None,
         },
         baseline_params: Some(tau_proto::ModelParams {
-            effort: tau_proto::Effort::Medium,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Medium),
             verbosity: Verbosity::Medium,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -1889,7 +1897,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+engineer ^low ~high !off"));
+    assert!(vt.screen_contains(80, "+engineer ^0.25→low ~high !off"));
 }
 
 /// A pending agent response must remain above watched-agent status rows whether

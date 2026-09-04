@@ -244,14 +244,12 @@ pub(crate) fn selected_params_for_role(
 fn selected_params_for_role_with_allowed(
     roles: &HashMap<String, AgentRole>,
     role: &str,
-    allowed_effort: &[tau_proto::Effort],
+    effort_capability: &tau_proto::ReasoningEffortCapability,
     allowed_verbosity: &[tau_proto::Verbosity],
     allowed_thinking: &[tau_proto::ThinkingSummary],
 ) -> ModelParams {
     let current = roles.get(role);
-    let effort = current
-        .and_then(|r| r.effort)
-        .unwrap_or_else(|| middle_effort(allowed_effort));
+    let requested_effort = current.and_then(|r| r.effort).unwrap_or_default();
     let verbosity = current
         .and_then(|r| r.verbosity)
         .unwrap_or_else(|| default_verbosity(allowed_verbosity));
@@ -261,7 +259,10 @@ fn selected_params_for_role_with_allowed(
     let service_tier = current.and_then(|r| r.service_tier);
 
     ModelParams {
-        effort: clamp_effort(effort, allowed_effort),
+        effort: tau_proto::ReasoningSelection {
+            requested: requested_effort,
+            effective: effort_capability.select(requested_effort),
+        },
         verbosity: clamp_verbosity(verbosity, allowed_verbosity),
         thinking_summary: clamp_thinking_summary(thinking_summary, allowed_thinking),
         service_tier,
@@ -462,7 +463,7 @@ fn format_role_compaction(value: tau_config::settings::RoleCompaction) -> String
 pub(crate) fn efforts_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
-) -> Vec<tau_proto::Effort> {
+) -> tau_proto::ReasoningEffortCapability {
     provider_models
         .get(model)
         .map(|info| info.efforts.clone())
@@ -614,32 +615,6 @@ pub(crate) fn context_percent_used(
     percent.min(100) as u8
 }
 
-/// Clamp a requested effort against the levels supported by the selected model.
-pub(crate) fn clamp_effort(
-    requested: tau_proto::Effort,
-    allowed: &[tau_proto::Effort],
-) -> tau_proto::Effort {
-    use tau_proto::Effort as L;
-    if allowed.contains(&requested) {
-        return requested;
-    }
-    if requested == L::XHigh && allowed.contains(&L::High) {
-        return L::High;
-    }
-    if requested == L::Max {
-        if allowed.contains(&L::XHigh) {
-            return L::XHigh;
-        }
-        if allowed.contains(&L::High) {
-            return L::High;
-        }
-    }
-    if allowed.contains(&L::Off) {
-        return L::Off;
-    }
-    allowed.first().copied().unwrap_or(L::Off)
-}
-
 /// Clamp a requested verbosity against the levels supported by the selected
 /// model.
 pub(crate) fn clamp_verbosity(
@@ -683,12 +658,15 @@ pub(crate) fn baseline_params_for_model(
 }
 
 fn baseline_params_for_model_with_allowed(
-    allowed_effort: &[tau_proto::Effort],
+    effort_capability: &tau_proto::ReasoningEffortCapability,
     allowed_verbosity: &[tau_proto::Verbosity],
     allowed_thinking: &[tau_proto::ThinkingSummary],
 ) -> ModelParams {
     ModelParams {
-        effort: middle_effort(allowed_effort),
+        effort: tau_proto::ReasoningSelection {
+            requested: tau_proto::ReasoningIntent::ProviderDefault,
+            effective: effort_capability.select(tau_proto::ReasoningIntent::ProviderDefault),
+        },
         verbosity: default_verbosity(allowed_verbosity),
         thinking_summary: default_thinking_summary(allowed_thinking),
         service_tier: None,
@@ -707,14 +685,6 @@ pub(crate) fn baseline_params_for_selection(
     }
 
     baseline_params_for_model(provider_models, model)
-}
-
-/// Pick the middle element of `allowed`, or `Off` for an empty list.
-pub(crate) fn middle_effort(allowed: &[tau_proto::Effort]) -> tau_proto::Effort {
-    if allowed.is_empty() {
-        return tau_proto::Effort::Off;
-    }
-    allowed[allowed.len() / 2]
 }
 
 /// Default verbosity when no role preference exists.

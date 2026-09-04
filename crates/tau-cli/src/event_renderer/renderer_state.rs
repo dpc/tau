@@ -341,7 +341,6 @@ pub(super) struct RolePresentationState {
     /// Effective model parameters.
     pub(super) model_params: tau_proto::ModelParams,
     /// Shared effort control.
-    pub(super) effort_state: Arc<path_std_sync_atomic::AtomicU8>,
     /// Shared fast-service-tier control.
     pub(super) fast_service_tier_state: Arc<AtomicBool>,
     /// Shared active role.

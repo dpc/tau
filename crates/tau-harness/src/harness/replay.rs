@@ -945,7 +945,7 @@ impl Harness {
             .unwrap_or_default();
         let effort_levels_event =
             Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
-                levels: effort_levels,
+                capability: effort_levels,
             });
         if selector_matches_event(selectors, &effort_levels_event) {
             self.send_catch_up_event(client_id, None, effort_levels_event);

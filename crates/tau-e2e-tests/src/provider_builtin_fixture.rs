@@ -154,11 +154,7 @@ impl ProviderBuiltinFixture {
             "local/retry-model"
         };
         let tools = if qwen { "[restart_test_dummy]" } else { "[]" };
-        let effort = if qwen {
-            "          effort: xhigh\n"
-        } else {
-            ""
-        };
+        let effort = if qwen { "          effort: 1.0\n" } else { "" };
         let dummy_extension = if let Some(dummy_bin) = dummy_bin {
             format!(
                 concat!(

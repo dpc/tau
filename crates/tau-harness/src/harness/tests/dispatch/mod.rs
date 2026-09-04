@@ -1256,7 +1256,10 @@ fn provider_model_info(
         context_window: tau_proto::TokenCount::new(context_window),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![tau_proto::Effort::Off, tau_proto::Effort::High],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+            tau_proto::NativeReasoningEffort::None,
+            tau_proto::NativeReasoningEffort::High,
+        ]),
         verbosities: vec![tau_proto::Verbosity::Low, tau_proto::Verbosity::High],
         thinking_summaries: vec![
             tau_proto::ThinkingSummary::Off,
@@ -1635,7 +1638,9 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             context_window: tau_proto::TokenCount::new(1_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![tau_proto::Effort::Medium],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                tau_proto::NativeReasoningEffort::Medium,
+            ]),
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: true,

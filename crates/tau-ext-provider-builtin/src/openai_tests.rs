@@ -10,8 +10,8 @@ use std::{
 };
 
 use tau_proto::{
-    Effort, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
-    ProviderBackendKind, Verbosity,
+    HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
+    NativeReasoningEffort, ProviderBackendKind, Verbosity,
 };
 
 use super::*;
@@ -2762,7 +2762,7 @@ fn xhigh_metadata_is_model_specific() {
     let models = models_for_auth(&chatgpt_auth());
     let ids_with_xhigh = models
         .iter()
-        .filter(|model| model.efforts.contains(&Effort::XHigh))
+        .filter(|model| model.efforts.contains(NativeReasoningEffort::XHigh))
         .map(|model| model.id.to_string())
         .collect::<Vec<_>>();
 

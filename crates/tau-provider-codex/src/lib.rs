@@ -22,8 +22,8 @@ use compact_v2::build_v2_compacted_window;
 use responses::pool as path_responses_pool;
 use responses::ws::ResponseMode;
 use tau_proto::{
-    Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
-    ProviderName, ThinkingSummary, Verbosity,
+    ModelId, ModelName, ModelTag, NativeReasoningEffort, ProviderBackendTransport,
+    ProviderModelInfo, ProviderName, ThinkingSummary, Verbosity,
 };
 use tau_provider::{
     debug_capture_writer as path_tau_provider_debug_capture_writer,
@@ -1540,7 +1540,7 @@ fn model_info(
         context_window: raw_context_window_for_model(model),
         max_input_tokens: Some(effective_context_window_for_model(model)),
         max_output_tokens: None,
-        efforts: efforts_for_model(model),
+        efforts: tau_proto::ReasoningEffortCapability::mapped(efforts_for_model(model)),
         verbosities: verbosities_for_model(model),
         thinking_summaries: vec![
             ThinkingSummary::Off,
@@ -1655,19 +1655,19 @@ fn is_gpt_5_6(model: &str) -> bool {
     matches!(model, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
 }
 
-fn efforts_for_model(model: &str) -> Vec<Effort> {
+fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {
     let mut efforts = vec![
-        Effort::Off,
-        Effort::Minimal,
-        Effort::Low,
-        Effort::Medium,
-        Effort::High,
+        NativeReasoningEffort::None,
+        NativeReasoningEffort::Minimal,
+        NativeReasoningEffort::Low,
+        NativeReasoningEffort::Medium,
+        NativeReasoningEffort::High,
     ];
     if supports_xhigh(model) {
-        efforts.push(Effort::XHigh);
+        efforts.push(NativeReasoningEffort::XHigh);
     }
     if is_gpt_5_6(model) {
-        efforts.push(Effort::Max);
+        efforts.push(NativeReasoningEffort::Max);
     }
     efforts
 }

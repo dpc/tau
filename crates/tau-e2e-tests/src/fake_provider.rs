@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension, TauExtensionRunner};
 use tau_proto::{
     AgentMessageReceived, CborValue, ClientKind, ContentPart, ContextItem,
-    ContextRecoveryDisposition, ContextRole, Effort, Event, EventName, InputModality, MessageItem,
+    ContextRecoveryDisposition, ContextRole, Event, EventName, InputModality, MessageItem,
     ProviderModelInfo, ProviderModelsDeclared, ProviderPromptSubmitted, ProviderResponseFinished,
     ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ThinkingSummary,
     ToolCallId, ToolCallItem, ToolName, ToolType, Verbosity,
@@ -556,7 +556,7 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             context_window: tau_proto::TokenCount::new(16_384),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::default(),
             verbosities: vec![Verbosity::Low],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,

@@ -637,15 +637,15 @@ fn profile_publishes_default_responses_efforts() {
     );
     assert_eq!(
         models[0].efforts,
-        [
-            tau_proto::Effort::Off,
-            tau_proto::Effort::Minimal,
-            tau_proto::Effort::Low,
-            tau_proto::Effort::Medium,
-            tau_proto::Effort::High,
-            tau_proto::Effort::XHigh,
-            tau_proto::Effort::Max,
-        ]
+        tau_proto::ReasoningEffortCapability::mapped([
+            tau_proto::NativeReasoningEffort::None,
+            tau_proto::NativeReasoningEffort::Minimal,
+            tau_proto::NativeReasoningEffort::Low,
+            tau_proto::NativeReasoningEffort::Medium,
+            tau_proto::NativeReasoningEffort::High,
+            tau_proto::NativeReasoningEffort::XHigh,
+            tau_proto::NativeReasoningEffort::Max,
+        ])
     );
     assert!(!models[0].supports_compaction);
     assert!(models[0].supports_standalone_compaction);
@@ -925,19 +925,19 @@ fn profile_canonicalizes_responses_effort_override() {
     let provider: ResponsesProvider = serde_json::from_value(serde_json::json!({
         "models": [{
             "id": "example-model",
-            "efforts": ["max", "low", "off", "xhigh"]
+            "efforts": ["max", "low", "none", "xhigh"]
         }]
     }))
     .expect("profile");
 
     assert_eq!(
         models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0].efforts,
-        vec![
-            tau_proto::Effort::Off,
-            tau_proto::Effort::Low,
-            tau_proto::Effort::XHigh,
-            tau_proto::Effort::Max,
-        ]
+        tau_proto::ReasoningEffortCapability::mapped([
+            tau_proto::NativeReasoningEffort::None,
+            tau_proto::NativeReasoningEffort::Low,
+            tau_proto::NativeReasoningEffort::XHigh,
+            tau_proto::NativeReasoningEffort::Max,
+        ])
     );
     assert_eq!(
         provider.models[0]
@@ -946,10 +946,10 @@ fn profile_canonicalizes_responses_effort_override() {
             .expect("configured effort override")
             .as_slice(),
         &[
-            tau_proto::Effort::Off,
-            tau_proto::Effort::Low,
-            tau_proto::Effort::XHigh,
-            tau_proto::Effort::Max,
+            tau_proto::NativeReasoningEffort::None,
+            tau_proto::NativeReasoningEffort::Low,
+            tau_proto::NativeReasoningEffort::XHigh,
+            tau_proto::NativeReasoningEffort::Max,
         ]
     );
 }
@@ -971,12 +971,16 @@ fn profile_rejects_duplicate_responses_efforts() {
 #[test]
 fn responses_efforts_reject_duplicates() {
     assert!(
-        ResponsesEfforts::try_from(vec![tau_proto::Effort::Low, tau_proto::Effort::Low]).is_err()
+        ResponsesNativeReasoningEfforts::try_from(vec![
+            tau_proto::NativeReasoningEffort::Low,
+            tau_proto::NativeReasoningEffort::Low
+        ])
+        .is_err()
     );
 }
 
-/// An explicit empty effort override must publish no reasoning-effort
-/// capability, which lets the harness clamp requests to its off value.
+/// An explicit empty effort override must publish unsupported reasoning-effort
+/// control so the provider omits a selector instead of inventing native none.
 #[test]
 fn profile_empty_responses_effort_override_disables_capability() {
     let provider: ResponsesProvider = serde_json::from_value(serde_json::json!({
@@ -986,7 +990,7 @@ fn profile_empty_responses_effort_override_disables_capability() {
 
     assert_eq!(
         models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0].efforts,
-        Vec::new()
+        tau_proto::ReasoningEffortCapability::default()
     );
 }
 

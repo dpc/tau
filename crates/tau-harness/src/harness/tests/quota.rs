@@ -15,7 +15,9 @@ fn quota_model() -> tau_proto::ProviderModelInfo {
         context_window: tau_proto::TokenCount::new(100_000),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![tau_proto::Effort::Off],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+            tau_proto::NativeReasoningEffort::None,
+        ]),
         verbosities: vec![tau_proto::Verbosity::Low],
         thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
         supports_compaction: false,

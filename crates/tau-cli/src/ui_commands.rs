@@ -131,12 +131,30 @@ fn parse_relative_role_setting(
 }
 
 fn parse_effort_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
-    if let Some(adjustment) = parse_relative_role_setting(value)? {
-        return Ok(tau_proto::UiRoleUpdateAction::AdjustEffort { adjustment });
+    if let Some((direction, amount)) = value.split_once(':')
+        && matches!(direction, "increase" | "decrease")
+    {
+        let amount = amount
+            .parse::<tau_proto::ReasoningIntensity>()
+            .map_err(|error| error.to_string())?;
+        if amount.millionths() <= 0 {
+            return Err("relative reasoning intensity magnitude must be positive".to_owned());
+        }
+        let signed = if direction == "decrease" {
+            amount.millionths().saturating_neg()
+        } else {
+            amount.millionths()
+        };
+        return Ok(tau_proto::UiRoleUpdateAction::AdjustEffort {
+            adjustment: tau_proto::ReasoningIntensityDelta::new(signed)
+                .expect("parsed effort delta is nonzero"),
+        });
     }
-    Ok(tau_proto::UiRoleUpdateAction::SetEffort {
-        effort: parse_resettable(value)?,
-    })
+    let effort = parse_resettable(value)?;
+    if effort.is_some_and(|intent: tau_proto::ReasoningIntent| !intent.is_nominal()) {
+        return Err("absolute reasoning intensity must be between 0.0 and 1.0".to_owned());
+    }
+    Ok(tau_proto::UiRoleUpdateAction::SetEffort { effort })
 }
 
 fn parse_verbosity_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {

@@ -16,7 +16,7 @@ pub use prompt_cache::{
 };
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName, TokenCount};
+use tau_proto::{ModelName, NativeReasoningEffort, ProviderModelInfo, ProviderName, TokenCount};
 use tau_provider::local_summary_compaction::{
     Config as SummaryCompactionConfig, ConfigError as SummaryCompactionConfigError,
 };
@@ -84,7 +84,7 @@ pub struct ResponsesModel {
     /// Optional supported reasoning-effort set. Omission uses every canonical
     /// effort, while an empty list disables reasoning-effort selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub efforts: Option<ResponsesEfforts>,
+    pub efforts: Option<ResponsesNativeReasoningEfforts>,
     /// Optional model-specific public Responses wire compatibility override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ResponsesCompat>,
@@ -159,20 +159,20 @@ impl ResponsesCompat {
 
 /// A validated canonical set of public Responses reasoning-effort levels.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResponsesEfforts {
+pub struct ResponsesNativeReasoningEfforts {
     /// Unique configured levels in canonical UI cycling order.
-    levels: Vec<Effort>,
+    levels: Vec<NativeReasoningEffort>,
 }
 
-impl ResponsesEfforts {
+impl ResponsesNativeReasoningEfforts {
     /// Returns the validated levels in canonical UI cycling order.
     #[must_use]
-    pub fn as_slice(&self) -> &[Effort] {
+    pub fn as_slice(&self) -> &[NativeReasoningEffort] {
         &self.levels
     }
 }
 
-impl Serialize for ResponsesEfforts {
+impl Serialize for ResponsesNativeReasoningEfforts {
     /// Serializes validated effort levels as the profile's direct array value.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -182,7 +182,7 @@ impl Serialize for ResponsesEfforts {
     }
 }
 
-impl<'de> Deserialize<'de> for ResponsesEfforts {
+impl<'de> Deserialize<'de> for ResponsesNativeReasoningEfforts {
     /// Deserializes and validates the profile's direct effort array value.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -192,11 +192,11 @@ impl<'de> Deserialize<'de> for ResponsesEfforts {
     }
 }
 
-impl TryFrom<Vec<Effort>> for ResponsesEfforts {
+impl TryFrom<Vec<NativeReasoningEffort>> for ResponsesNativeReasoningEfforts {
     type Error = &'static str;
 
     /// Validates unique configured levels and stores them in canonical order.
-    fn try_from(configured: Vec<Effort>) -> Result<Self, Self::Error> {
+    fn try_from(configured: Vec<NativeReasoningEffort>) -> Result<Self, Self::Error> {
         if configured
             .iter()
             .enumerate()
@@ -206,7 +206,7 @@ impl TryFrom<Vec<Effort>> for ResponsesEfforts {
         }
 
         Ok(Self {
-            levels: Effort::ALL
+            levels: NativeReasoningEffort::ALL
                 .into_iter()
                 .filter(|effort| configured.contains(effort))
                 .collect(),
@@ -214,9 +214,9 @@ impl TryFrom<Vec<Effort>> for ResponsesEfforts {
     }
 }
 
-fn model_efforts(model: &ResponsesModel) -> Vec<Effort> {
+fn model_efforts(model: &ResponsesModel) -> Vec<NativeReasoningEffort> {
     model.efforts.as_ref().map_or_else(
-        || Effort::ALL.to_vec(),
+        || NativeReasoningEffort::ALL.to_vec(),
         |efforts| efforts.as_slice().to_vec(),
     )
 }
@@ -271,7 +271,7 @@ pub fn models_for_provider(
                 max_output_tokens: model
                     .max_output_tokens
                     .map(|tokens| TokenCount::new(u64::from(tokens.get()))),
-                efforts: model_efforts(model),
+                efforts: tau_proto::ReasoningEffortCapability::mapped(model_efforts(model)),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,

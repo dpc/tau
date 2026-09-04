@@ -25,13 +25,13 @@ fn info(status: tau_proto::SessionAgentWorkStatus) -> InternalSelfInfo {
         session_id: "session-test".parse().expect("session id"),
         session_dir: None,
         model: "provider/model".parse().expect("model id"),
-        effort: tau_proto::Effort::High,
+        effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High),
         work_status: status,
     }
 }
 
-/// The production resolver emits the exact seven-line current-status result and
-/// names nondurable session storage explicitly.
+/// The production resolver emits requested and frozen effective effort
+/// separately and names nondurable session storage explicitly.
 #[test]
 fn production_result_has_exact_current_status_headers() {
     let info = info(
@@ -42,7 +42,7 @@ fn production_result_has_exact_current_status_headers() {
         .expect("work status"),
     );
     assert_eq!(resolve_result(&CborValue::Map(Vec::new()), Some(&info)), Ok(
-        "agent_id: engineer-test\nsession_id: session-test\nsession_dir: (none)\nmodel: provider/model\neffort: high\nstatus: working\nstatus_task_name: Implement self information".to_owned()
+        "agent_id: engineer-test\nsession_id: session-test\nsession_dir: (none)\nmodel: provider/model\neffort_requested: 0.75\neffort_effective: high\nstatus: working\nstatus_task_name: Implement self information".to_owned()
     ));
 }
 
@@ -78,5 +78,5 @@ fn headers_escape_controls_backslashes_and_invalid_path_bytes() {
     let output = format_headers(&info);
     assert!(output.contains("session_dir: /tmp/a\\\\b\\x0A\\xFF"));
     assert!(output.contains("model: provider/model\\x0Aforged: yes"));
-    assert_eq!(output.lines().count(), 7);
+    assert_eq!(output.lines().count(), 8);
 }

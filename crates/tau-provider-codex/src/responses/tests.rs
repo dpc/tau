@@ -775,11 +775,10 @@ fn build_request_includes_service_tier_when_configured() {
     assert_eq!(body["service_tier"], "priority");
 }
 
-/// Tau's `off` is a user-visible request for no reasoning, not "use the
-/// provider default". GPT-5.5 defaults omitted effort to `medium`, so the
-/// OpenAI provider must send the explicit `none` value when effort is off.
+/// Explicit disabled intent must send `none` rather than accidentally using
+/// the provider's omitted-field default.
 #[test]
-fn build_request_maps_off_effort_to_openai_none() {
+fn build_request_maps_disabled_effort_to_openai_none() {
     let config = ResponsesConfig {
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
@@ -791,7 +790,15 @@ fn build_request_maps_off_effort_to_openai_none() {
         context: context(&[]),
         hosted_tools: &[],
         tools: &[],
-        params: tau_proto::ModelParams::default(),
+        params: tau_proto::ModelParams {
+            effort: tau_proto::ReasoningSelection {
+                requested: tau_proto::ReasoningIntent::Disabled,
+                effective: tau_proto::EffectiveReasoningEffort::Native(
+                    tau_proto::NativeReasoningEffort::None,
+                ),
+            },
+            ..Default::default()
+        },
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
@@ -807,6 +814,26 @@ fn build_request_maps_off_effort_to_openai_none() {
     assert_eq!(body["reasoning"]["effort"], "none");
 }
 
+/// Provider-default intent must omit `reasoning.effort` so the upstream route
+/// remains authoritative for its default.
+#[test]
+fn build_request_omits_provider_default_effort() {
+    let config = ResponsesConfig {
+        profile_namespace: tau_proto::ProviderName::new("chatgpt"),
+        mode: ResponsesMode::Standard,
+        supports_reasoning_effort: true,
+        ..chain_test_config()
+    };
+    let request = PromptPayload {
+        params: tau_proto::ModelParams::default(),
+        ..basic_prompt_payload()
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+
+    assert!(body.get("reasoning").is_none());
+}
+
 /// Ensures GPT-5.6 maximum effort reaches the Responses API using the
 /// provider's exact `max` wire value.
 #[test]
@@ -820,7 +847,7 @@ fn build_request_maps_max_effort_to_openai_max() {
     };
     let request = PromptPayload {
         params: tau_proto::ModelParams {
-            effort: tau_proto::Effort::Max,
+            effort: tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Max),
             ..Default::default()
         },
         ..basic_prompt_payload()

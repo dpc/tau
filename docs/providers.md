@@ -132,7 +132,9 @@ prefix budgets, and standalone thresholds larger than the route's effective
 legal input limit. Diagnostics distinguish thresholds above the total window
 from those above only a separate input maximum. Effective support is
 `supports_standalone_compaction || standalone_compaction_generation_negative`;
-generation-negative routes keep their standalone metadata. Tau does not strip or
+generation-negative routes keep their standalone metadata. Reasoning mappings
+must be non-empty, start at `0.0`, keep thresholds within `0.0..=1.0`, and
+strictly increase both thresholds and native levels. Tau does not strip or
 default invalid fields.
 
 ```rust
@@ -148,7 +150,7 @@ struct ProviderModelInfo {
     context_window: TokenCount,
     max_input_tokens: Option<TokenCount>,
     max_output_tokens: Option<TokenCount>,
-    efforts: Vec<Effort>,
+    efforts: ReasoningEffortCapability,
     verbosities: Vec<Verbosity>,
     thinking_summaries: Vec<ThinkingSummary>,
     supports_compaction: bool,
@@ -622,15 +624,15 @@ backend performs one finite typed attempt.
 
 `compat` may appear at provider or model level. When a model has `compat`, that
 object fully replaces the provider object; fields do not merge. A configured
-`reasoning_effort` requires a non-empty list of unique Tau effort values and
+`reasoning_effort` requires a non-empty list of unique native effort values and
 publishes exactly that set in canonical order. Its wire policy is:
 
-- `open_ai`: send OpenAI spellings and fold `xhigh`/`max` to `high`;
+- `open_ai`: publish and send the distinct `none` through `high` spellings;
 - `literal`: preserve extended `xhigh`/`max` instead of folding them to `high`
-  while retaining the shared provider spellings (`off` remains `none`);
-- `omit`: publish the effective configured effort but send no top-level field.
+  while retaining the shared provider spellings;
+- `omit`: publish one fixed configured effort but send no top-level field.
 
-Omitting `reasoning_effort` publishes only `off` and sends no field. Use `omit`
+Omitting `reasoning_effort` publishes unsupported control and sends no field. Use `omit`
 only for one fixed server-side effort, such as `efforts: ["xhigh"]`; publishing
 several values would imply a choice the wire cannot convey.
 `reasoning_replay` selects `reasoning_content`, `reasoning`, or `both` for
@@ -685,12 +687,13 @@ text-first profile intentionally does not advertise image input:
 }
 ```
 
-Select `effort: xhigh` in the Tau role for Qwen's recommended/default thinking
-mode. The adapter sends literal `low`, `medium`, or `xhigh` only when the profile
-publishes them. Some local servers, including current llama.cpp releases, do not
-accept the top-level `reasoning_effort` extension. For those servers, configure
+Select a numeric role intensity whose published mapping resolves to `xhigh` for
+Qwen's recommended/default thinking mode. The adapter sends literal `low`,
+`medium`, or `xhigh` only when the profile publishes them. Some local servers,
+including current llama.cpp releases, do not accept the top-level
+`reasoning_effort` extension. For those servers, configure
 `"reasoning_effort": {"efforts": ["xhigh"], "wire": "omit"}` so Tau publishes
-the effective effort while relying on Qwen's default `xhigh` template behavior.
+fixed `xhigh` behavior while relying on Qwen's default template behavior.
 Keep `preserve_thinking: true` and `reasoning_replay: "both"` for tool
 continuations.
 
@@ -1000,18 +1003,19 @@ reasoning-effort levels its upstream model accepts:
 ```json
 {
   "id": "quirky-model",
-  "efforts": ["off", "low", "medium", "high"]
+  "efforts": ["none", "low", "medium", "high"]
 }
 ```
 
 Omitting `efforts` publishes the full canonical set
-`[off, minimal, low, medium, high, xhigh, max]`, including for existing
+`[none, minimal, low, medium, high, xhigh, max]`, including for existing
 profiles. An explicit `efforts: []` publishes no reasoning-effort capability.
 Non-empty overrides are sets: Tau rejects duplicates and publishes the selected
 levels in that canonical order, regardless of their order in JSON or YAML.
-The harness clamps each request to the published set; the public Responses
-backend always sends the resulting `reasoning: { effort: ... }`, spelling Tau's
-`off` as API `none`. `tau provider add` intentionally omits this field, so new
+The harness clamps numeric portable intent only while mapping each prompt to the
+published native levels. Disabled selects `none` when available, or the minimum
+native level otherwise. Provider-default intent omits the effort selector.
+`tau provider add` intentionally omits this field, so new
 profiles receive the full default; edit the profile only when a model needs an
 override.
 

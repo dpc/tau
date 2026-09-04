@@ -860,7 +860,7 @@ fn markdown_table_cell_count_mismatch_seals_prior_table() {
 fn reported_markdown_table_aligns_long_scope_and_right_effort() {
     let theme = markdown_test_theme();
     let source = concat!(
-        "| Scope | Effort |\n",
+        "| Scope | NativeReasoningEffort |\n",
         "| --- | ---: |\n",
         "| Formed 7-guardian federation, connected gateway, configured/advertising FLIP, log paths, working `fman-cli` | **4–7 engineer-days** |\n",
         "| Complete FI-requested/funded liquidity and register the gateway in federation consensus | **8–15 days total** |\n",
@@ -872,7 +872,7 @@ fn reported_markdown_table_aligns_long_scope_and_right_effort() {
     assert_eq!(
         rendered_text(&block),
         concat!(
-            "| Scope                                                                                                       |                    Effort |\n",
+            "| Scope                                                                                                       |     NativeReasoningEffort |\n",
             "| ----------------------------------------------------------------------------------------------------------- | ------------------------: |\n",
             "| Formed 7-guardian federation, connected gateway, configured/advertising FLIP, log paths, working `fman-cli` |     **4–7 engineer-days** |\n",
             "| Complete FI-requested/funded liquidity and register the gateway in federation consensus                     |       **8–15 days total** |\n",

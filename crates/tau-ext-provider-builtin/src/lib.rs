@@ -81,8 +81,8 @@ pub use responses::{
     OpenAiPromptCacheBoundary as ResponsesOpenAiPromptCacheBoundary,
     OpenAiPromptCacheOptions as ResponsesOpenAiPromptCacheOptions,
     OpenAiPromptCachePolicy as ResponsesOpenAiPromptCachePolicy,
-    OpenAiPromptCacheTtl as ResponsesOpenAiPromptCacheTtl, ResponsesCompat, ResponsesEfforts,
-    ResponsesModel, ResponsesProvider,
+    OpenAiPromptCacheTtl as ResponsesOpenAiPromptCacheTtl, ResponsesCompat, ResponsesModel,
+    ResponsesNativeReasoningEfforts, ResponsesProvider,
 };
 use responses::{
     PromptAttemptOutcome as ResponsesAttemptOutcome,

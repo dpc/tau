@@ -1202,7 +1202,7 @@ struct AgentsSettings {
     #[serde(default, deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
     #[serde(default, deserialize_with = "present_option")]
-    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(default, deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
     #[serde(
@@ -1552,7 +1552,7 @@ struct HarnessProfileAgentOverrides {
     model: Option<Option<ModelId>>,
     /// Default effort patch.
     #[serde(default, deserialize_with = "present_option")]
-    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    effort: Option<Option<ConfiguredReasoningIntent>>,
     /// Default verbosity patch.
     #[serde(default, deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
@@ -1660,7 +1660,7 @@ struct HarnessAgentRoleOverrides {
     #[serde(default, deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
     #[serde(default, deserialize_with = "present_option")]
-    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(default, deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
     #[serde(
@@ -1800,7 +1800,7 @@ struct RawRoleGroup {
     #[serde(deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
     #[serde(deserialize_with = "present_option")]
-    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
     #[serde(alias = "thinkingSummary", deserialize_with = "present_option")]
@@ -1858,6 +1858,87 @@ enum ConfiguredRoleSetting<T> {
     Absolute(T),
     /// Adjusts the inherited value by validated saturating levels.
     Relative(tau_proto::UiRoleSettingAdjustment),
+}
+
+/// Absolute portable reasoning intent or an exact relative intensity change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfiguredReasoningIntent {
+    /// A concrete portable intent replaces the inherited value.
+    Absolute(tau_proto::ReasoningIntent),
+    /// An exact signed-millionth change adjusts inherited portable intent.
+    Relative(tau_proto::ReasoningIntensityDelta),
+}
+
+impl<'de> Deserialize<'de> for ConfiguredReasoningIntent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Text(String),
+            Value(tau_proto::ReasoningIntent),
+        }
+
+        fn absolute<E: serde::de::Error>(
+            value: tau_proto::ReasoningIntent,
+        ) -> Result<ConfiguredReasoningIntent, E> {
+            if let tau_proto::ReasoningIntent::Intensity(intensity) = value
+                && !intensity.is_nominal()
+            {
+                return Err(E::custom(
+                    "absolute reasoning intensity must be between 0.0 and 1.0",
+                ));
+            }
+            Ok(ConfiguredReasoningIntent::Absolute(value))
+        }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Value(value) => absolute::<D::Error>(value),
+            Wire::Text(value) => {
+                if let Some((direction, amount)) = value.split_once(':') {
+                    let amount = amount
+                        .parse::<tau_proto::ReasoningIntensity>()
+                        .map_err(D::Error::custom)?;
+                    if amount.millionths() <= 0 {
+                        return Err(D::Error::custom(
+                            "relative reasoning intensity magnitude must be positive",
+                        ));
+                    }
+                    let signed = match direction {
+                        "increase" => amount.millionths(),
+                        "decrease" => amount.millionths().saturating_neg(),
+                        _ => {
+                            return Err(D::Error::custom(
+                                "relative reasoning intensity must use increase:<decimal> or decrease:<decimal>",
+                            ));
+                        }
+                    };
+                    let delta =
+                        tau_proto::ReasoningIntensityDelta::new(signed).ok_or_else(|| {
+                            D::Error::custom("reasoning intensity delta must be nonzero")
+                        })?;
+                    Ok(Self::Relative(delta))
+                } else {
+                    value
+                        .parse::<tau_proto::ReasoningIntent>()
+                        .map_err(D::Error::custom)
+                        .and_then(absolute::<D::Error>)
+                }
+            }
+        }
+    }
+}
+
+impl ConfiguredReasoningIntent {
+    /// Resolves this setting against inherited portable intent.
+    fn resolve(self, inherited: tau_proto::ReasoningIntent) -> tau_proto::ReasoningIntent {
+        match self {
+            Self::Absolute(value) => value,
+            Self::Relative(delta) => inherited.adjust(delta),
+        }
+    }
 }
 
 impl<'de, T> Deserialize<'de> for ConfiguredRoleSetting<T>
@@ -1919,12 +2000,6 @@ trait RelativeRoleSettingValue: Copy {
     fn adjust(self, adjustment: tau_proto::UiRoleSettingAdjustment) -> Self;
 }
 
-impl RelativeRoleSettingValue for tau_proto::Effort {
-    fn adjust(self, adjustment: tau_proto::UiRoleSettingAdjustment) -> Self {
-        tau_proto::Effort::adjust(self, adjustment)
-    }
-}
-
 impl RelativeRoleSettingValue for tau_proto::Verbosity {
     fn adjust(self, adjustment: tau_proto::UiRoleSettingAdjustment) -> Self {
         tau_proto::Verbosity::adjust(self, adjustment)
@@ -1981,7 +2056,7 @@ struct AgentRolePatch {
     #[serde(deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
     #[serde(deserialize_with = "present_option")]
-    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
     #[serde(alias = "thinkingSummary", deserialize_with = "present_option")]
@@ -2778,7 +2853,7 @@ pub struct AgentRole {
     pub model: Option<ModelId>,
     /// Reasoning effort preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<tau_proto::Effort>,
+    pub effort: Option<tau_proto::ReasoningIntent>,
     /// Output verbosity preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbosity: Option<tau_proto::Verbosity>,
@@ -3572,8 +3647,12 @@ impl AgentRole {
             self.model = model.clone();
         }
         if let Some(effort) = patch.effort {
-            self.effort = effort
-                .map(|setting| setting.resolve(self.effort.unwrap_or(tau_proto::Effort::Medium)));
+            self.effort = effort.map(|setting| {
+                setting.resolve(
+                    self.effort
+                        .unwrap_or(tau_proto::ReasoningIntent::ProviderDefault),
+                )
+            });
         }
         if let Some(verbosity) = patch.verbosity {
             self.verbosity = verbosity.map(|setting| {

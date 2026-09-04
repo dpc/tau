@@ -3,10 +3,10 @@ use std::collections::BTreeSet;
 use tau_core::{AgentEventParent, PersistedAgentEvent, PersistedAgentEventSeq, SessionStore};
 use tau_proto::{
     AgentHead, AgentId, AgentOuterTurnFinished, AgentOuterTurnStarted, AgentPromptId,
-    AgentPromptStarted, ContextItem, Effort, EstimatedApiCost, EstimatedApiCostRates,
-    EstimatedUsdPerMillion, Event, ModelParams, PromptOperation, ProviderResponseFinished,
-    ProviderStopReason, ProviderTokenUsage, SessionId, ToolCallItem, ToolName, ToolType,
-    UnixMicros,
+    AgentPromptStarted, ContextItem, EstimatedApiCost, EstimatedApiCostRates,
+    EstimatedUsdPerMillion, Event, ModelParams, NativeReasoningEffort, PromptOperation,
+    ProviderResponseFinished, ProviderStopReason, ProviderTokenUsage, SessionId, ToolCallItem,
+    ToolName, ToolType, UnixMicros,
 };
 
 use super::{aggregate_agent, read_session_stats};
@@ -36,7 +36,7 @@ fn activity_counts_serialize_estimated_cost_as_rounded_dollars() {
     }
 
     let toon = serde_toon::to_string(&super::SessionStats {
-        schema_version: 2,
+        schema_version: 3,
         session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         complete: true,
         missing_data: Vec::new(),
@@ -47,7 +47,7 @@ fn activity_counts_serialize_estimated_cost_as_rounded_dollars() {
         agents: Vec::new(),
     })
     .expect("serialize activity counts as TOON");
-    assert!(toon.contains("schema_version: 2"));
+    assert!(toon.contains("schema_version: 3"));
     assert!(toon.contains("estimated_api_cost_dollars: 18.728644"));
     assert!(!toon.contains("estimated_api_cost_picodollars"));
 }
@@ -117,7 +117,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
                 session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 model: model.clone(),
                 model_params: Some(ModelParams {
-                    effort: Effort::High,
+                    effort: tau_proto::ReasoningSelection::native(NativeReasoningEffort::High),
                     ..ModelParams::default()
                 }),
                 outer_turn_id: Some(test_agent_outer_turn_id("ot-ap-engineer_0-0")),
@@ -256,7 +256,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     assert_eq!(stats.totals.uncached_input_tokens, 40);
     assert_eq!(stats.totals.output_tokens, 20);
     assert_eq!(stats.totals.estimated_api_cost.as_picodollars(), 123);
-    assert_eq!(stats.models[0].effort, Effort::High);
+    assert_eq!(stats.models[0].effort, NativeReasoningEffort::High);
     assert_eq!(stats.tools[0].calls, 1);
     assert_eq!(stats.totals.tool_results, 1);
 }
@@ -544,6 +544,57 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
     );
 }
 
+/// Present modern prompt parameters remain complete even when their effective
+/// selection has no native bucket; only an actually absent legacy snapshot is
+/// reported as missing.
+#[test]
+fn aggregation_distinguishes_nonnative_effort_from_missing_model_params() {
+    let agent_id = AgentId::parse("nonnative_0").expect("agent id");
+    let session_id = SessionId::parse("s1").expect("session id");
+    let model: tau_proto::ModelId = "openai/gpt-5".parse().expect("model");
+    let started = |index: u8, model_params| {
+        Event::AgentPromptStarted(AgentPromptStarted {
+            agent_prompt_id: format!("ap-nonnative_0-{index}")
+                .parse()
+                .expect("prompt id"),
+            agent_id: agent_id.clone(),
+            session_id: session_id.clone(),
+            model: model.clone(),
+            model_params,
+            outer_turn_id: Some(test_agent_outer_turn_id(format!(
+                "ot-ap-nonnative_0-{index}"
+            ))),
+            operation: PromptOperation::Inference,
+            originator: Default::default(),
+            ctx_id: None,
+        })
+    };
+    let unsupported = ModelParams {
+        effort: tau_proto::ReasoningSelection {
+            requested: tau_proto::ReasoningIntent::Intensity(tau_proto::ReasoningIntensity::MEDIUM),
+            effective: tau_proto::EffectiveReasoningEffort::Unsupported,
+        },
+        ..Default::default()
+    };
+    let events = vec![
+        record(0, started(0, Some(ModelParams::default()))),
+        record(1, started(1, Some(unsupported))),
+        record(2, started(2, None)),
+    ];
+    let mut missing = BTreeSet::new();
+    let stats = aggregate_agent(&session_id, &agent_id, &events, &mut missing);
+
+    assert_eq!(stats.totals.inner_turns, 3);
+    assert!(stats.models.is_empty());
+    assert_eq!(
+        missing
+            .iter()
+            .filter(|gap| gap.fact == super::MissingAccountingFact::PromptModelParams)
+            .count(),
+        1
+    );
+}
+
 /// A membership reference without its authoritative agent journal must produce
 /// an explicitly incomplete public report without creating an agents directory.
 #[test]
@@ -573,7 +624,7 @@ fn persisted_traversal_reports_missing_member_journal() {
     )
     .expect("stats")
     .expect("session");
-    assert_eq!(report.schema_version, 2);
+    assert_eq!(report.schema_version, 3);
     assert!(!report.complete);
     assert_eq!(
         report.missing_data[0].fact,

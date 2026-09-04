@@ -354,7 +354,9 @@ fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
         context_window: tau_proto::TokenCount::new(4_096),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![tau_proto::Effort::Medium],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+            tau_proto::NativeReasoningEffort::Medium,
+        ]),
         verbosities: vec![tau_proto::Verbosity::Medium],
         thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
         supports_compaction: false,

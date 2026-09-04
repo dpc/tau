@@ -2275,8 +2275,8 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
 }
 
 /// Ensures relative role updates start from the selected model's effective
-/// defaults, then retain explicit saturated endpoints through the dispatch
-/// path.
+/// defaults, then retain out-of-range effort intent while the other level
+/// settings saturate through the dispatch path.
 #[test]
 fn relative_role_updates_use_model_fallbacks_and_saturate() {
     use std::num::NonZeroU8;
@@ -2291,13 +2291,13 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         .model_info
         .get_mut(&model)
         .expect("selected model settings");
-    settings.efforts = vec![
-        tau_proto::Effort::Off,
-        tau_proto::Effort::Low,
-        tau_proto::Effort::Medium,
-        tau_proto::Effort::High,
-        tau_proto::Effort::Max,
-    ];
+    settings.efforts = tau_proto::ReasoningEffortCapability::mapped(vec![
+        tau_proto::NativeReasoningEffort::None,
+        tau_proto::NativeReasoningEffort::Low,
+        tau_proto::NativeReasoningEffort::Medium,
+        tau_proto::NativeReasoningEffort::High,
+        tau_proto::NativeReasoningEffort::Max,
+    ]);
     settings.verbosities = vec![
         tau_proto::Verbosity::Low,
         tau_proto::Verbosity::Medium,
@@ -2321,7 +2321,7 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
     let one = NonZeroU8::new(1).expect("positive adjustment");
     for action in [
         tau_proto::UiRoleUpdateAction::AdjustEffort {
-            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(one),
+            adjustment: tau_proto::ReasoningIntensityDelta::new(250_000).expect("nonzero"),
         },
         tau_proto::UiRoleUpdateAction::AdjustVerbosity {
             adjustment: tau_proto::UiRoleSettingAdjustment::Increase(one),
@@ -2340,7 +2340,10 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         .expect("apply relative role update");
     }
     let updated_role = h.config.available_roles.get(&role).expect("updated role");
-    assert_eq!(updated_role.effort, Some(tau_proto::Effort::High));
+    assert_eq!(
+        updated_role.effort,
+        Some(tau_proto::NativeReasoningEffort::High.into())
+    );
     assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::Medium));
     assert_eq!(
         updated_role.thinking_summary,
@@ -2350,7 +2353,7 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
     let far = NonZeroU8::new(99).expect("positive adjustment");
     for action in [
         tau_proto::UiRoleUpdateAction::AdjustEffort {
-            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(far),
+            adjustment: tau_proto::ReasoningIntensityDelta::new(-2_000_000).expect("nonzero"),
         },
         tau_proto::UiRoleUpdateAction::AdjustVerbosity {
             adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(far),
@@ -2369,7 +2372,12 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         .expect("saturate role setting downward");
     }
     let updated_role = h.config.available_roles.get(&role).expect("updated role");
-    assert_eq!(updated_role.effort, Some(tau_proto::Effort::Off));
+    assert_eq!(
+        updated_role.effort,
+        Some(tau_proto::ReasoningIntent::Intensity(
+            tau_proto::ReasoningIntensity::from_millionths(-1_250_000)
+        ))
+    );
     assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::Low));
     assert_eq!(
         updated_role.thinking_summary,
@@ -2378,7 +2386,7 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
 
     for action in [
         tau_proto::UiRoleUpdateAction::AdjustEffort {
-            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(far),
+            adjustment: tau_proto::ReasoningIntensityDelta::new(2_000_000).expect("nonzero"),
         },
         tau_proto::UiRoleUpdateAction::AdjustVerbosity {
             adjustment: tau_proto::UiRoleSettingAdjustment::Increase(far),
@@ -2397,7 +2405,12 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         .expect("saturate role setting upward");
     }
     let updated_role = h.config.available_roles.get(&role).expect("updated role");
-    assert_eq!(updated_role.effort, Some(tau_proto::Effort::Max));
+    assert_eq!(
+        updated_role.effort,
+        Some(tau_proto::ReasoningIntent::Intensity(
+            tau_proto::ReasoningIntensity::from_millionths(750_000)
+        ))
+    );
     assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::High));
     assert_eq!(
         updated_role.thinking_summary,
@@ -2409,7 +2422,10 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         .model_info
         .get_mut(&model)
         .expect("selected model settings");
-    settings.efforts = vec![tau_proto::Effort::Medium, tau_proto::Effort::High];
+    settings.efforts = tau_proto::ReasoningEffortCapability::mapped(vec![
+        tau_proto::NativeReasoningEffort::Medium,
+        tau_proto::NativeReasoningEffort::High,
+    ]);
     settings.verbosities = vec![tau_proto::Verbosity::Low, tau_proto::Verbosity::Medium];
     settings.thinking_summaries = vec![
         tau_proto::ThinkingSummary::Off,
@@ -2418,7 +2434,7 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
     ];
     for action in [
         tau_proto::UiRoleUpdateAction::AdjustEffort {
-            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(one),
+            adjustment: tau_proto::ReasoningIntensityDelta::new(-250_000).expect("nonzero"),
         },
         tau_proto::UiRoleUpdateAction::AdjustVerbosity {
             adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(one),
@@ -2437,7 +2453,10 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         .expect("adjust the model-clamped role setting");
     }
     let updated_role = h.config.available_roles.get(&role).expect("updated role");
-    assert_eq!(updated_role.effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(
+        updated_role.effort,
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
+    );
     assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::Low));
     assert_eq!(
         updated_role.thinking_summary,
@@ -2449,13 +2468,13 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         .model_info
         .get_mut(&model)
         .expect("selected model settings");
-    settings.efforts = vec![
-        tau_proto::Effort::Off,
-        tau_proto::Effort::Low,
-        tau_proto::Effort::Medium,
-        tau_proto::Effort::High,
-        tau_proto::Effort::Max,
-    ];
+    settings.efforts = tau_proto::ReasoningEffortCapability::mapped(vec![
+        tau_proto::NativeReasoningEffort::None,
+        tau_proto::NativeReasoningEffort::Low,
+        tau_proto::NativeReasoningEffort::Medium,
+        tau_proto::NativeReasoningEffort::High,
+        tau_proto::NativeReasoningEffort::Max,
+    ]);
     settings.verbosities = vec![
         tau_proto::Verbosity::Low,
         tau_proto::Verbosity::Medium,
@@ -2467,7 +2486,10 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
         tau_proto::ThinkingSummary::Concise,
         tau_proto::ThinkingSummary::Detailed,
     ];
-    assert_eq!(h.selected_model_params().effort, tau_proto::Effort::Medium);
+    assert_eq!(
+        h.selected_model_params().effort,
+        tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Medium)
+    );
     assert_eq!(
         h.selected_model_params().verbosity,
         tau_proto::Verbosity::Low
@@ -2921,7 +2943,7 @@ fn params_drift_invalidates_chain_anchor() {
         .available_roles
         .get_mut(&h.config.selected_role.clone())
         .expect("selected role")
-        .effort = Some(tau_proto::Effort::Low);
+        .effort = Some(tau_proto::NativeReasoningEffort::Low.into());
 
     h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
@@ -2978,7 +3000,7 @@ fn params_drift_invalidates_chain_anchor() {
         .available_roles
         .get_mut(&h.config.selected_role.clone())
         .expect("selected role")
-        .effort = Some(tau_proto::Effort::High);
+        .effort = Some(tau_proto::NativeReasoningEffort::High.into());
 
     h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");

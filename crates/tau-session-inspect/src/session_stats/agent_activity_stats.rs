@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tau_proto::{AgentCreator, AgentId};
 
-use super::{ActivityCounts, ModelEffortStats, ToolActivityStats};
+use super::{ActivityCounts, ModelNativeReasoningEffortStats, ToolActivityStats};
 
 /// Exact journal-derived activity for one session member.
 #[derive(Clone, Debug, Serialize)]
@@ -17,7 +17,7 @@ pub struct AgentActivityStats {
     /// Exact aggregate for this agent.
     pub totals: ActivityCounts,
     /// Breakdowns by captured provider model and effort.
-    pub models: Vec<ModelEffortStats>,
+    pub models: Vec<ModelNativeReasoningEffortStats>,
     /// Tool counts grouped by stable tool name.
     pub tools: Vec<ToolActivityStats>,
 }

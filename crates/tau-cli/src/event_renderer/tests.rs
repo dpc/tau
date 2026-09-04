@@ -4318,7 +4318,9 @@ fn role_details_prefer_structured_fields_over_description_text() {
             compactions: Vec::new(),
             model: Some("provider/model".into()),
             params: tau_proto::ModelParams {
-                effort: tau_proto::Effort::High,
+                effort: tau_proto::ReasoningSelection::native(
+                    tau_proto::NativeReasoningEffort::High,
+                ),
                 verbosity: tau_proto::Verbosity::Low,
                 thinking_summary: tau_proto::ThinkingSummary::Concise,
                 service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -4333,7 +4335,7 @@ fn role_details_prefer_structured_fields_over_description_text() {
 
     assert_eq!(
         details.completion_description(false),
-        "provider/model e=high v=low ts=concise st=fast"
+        "provider/model e=0.75→high v=low ts=concise st=fast"
     );
 }
 
@@ -4358,7 +4360,7 @@ fn role_completion_shows_divergent_compaction_policies_without_tool_details() {
 
     assert_eq!(
         details.completion_description(false),
-        "provider/model e=off v=low ts=off inference-compaction=disabled compactions=eager=160000@outer_turn_finished[done],fallback=provider_default@before_inference[*]"
+        "provider/model e=provider_default v=low ts=off inference-compaction=disabled compactions=eager=160000@outer_turn_finished[done],fallback=provider_default@before_inference[*]"
     );
 }
 
@@ -4417,10 +4419,19 @@ fn role_setting_values_have_descriptions_and_filtering() {
         (
             "effort",
             &[
-                "reset", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+                "reset",
+                "provider_default",
+                "disabled",
+                "0.0",
+                "0.25",
+                "0.5",
+                "0.75",
+                "1.0",
+                "increase:0.25",
+                "decrease:0.25",
             ][..],
-            "max",
-            &["max"][..],
+            "crease",
+            &["increase:0.25", "decrease:0.25"][..],
         ),
         (
             "verbosity",
@@ -4472,15 +4483,15 @@ fn role_setting_values_have_descriptions_and_filtering() {
     }
 }
 
-/// Ensures `:role ... effort` completion exposes GPT-5.6 maximum effort with a
-/// description distinct from `xhigh`.
+/// Ensures `:role ... effort` completion explains the portable maximum without
+/// coupling the role command to one model's native vocabulary.
 #[test]
-fn role_effort_completions_include_max() {
-    let items = role_setting_value_completions("effort", "max");
+fn role_effort_completions_include_portable_maximum() {
+    let items = role_setting_value_completions("effort", "1.0");
 
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].value, "max");
-    assert_eq!(items[0].description, "maximum reasoning effort for GPT-5.6");
+    assert_eq!(items[0].value, "1.0");
+    assert_eq!(items[0].description, "maximum portable reasoning intensity");
 }
 
 /// Ensures the real embedded harness tool/continuation event sequence leaves

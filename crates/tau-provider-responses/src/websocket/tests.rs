@@ -27,7 +27,9 @@ fn borrowed_request_envelope_matches_value_reference_bytes() {
             ),
         ],
         stream: true,
-        reasoning: super::super::Reasoning { effort: "high" },
+        reasoning: super::super::Reasoning {
+            effort: Some("high"),
+        },
         instructions: Some("system".to_owned()),
         prompt_cache_key: Some("tau:agent".to_owned()),
         prompt_cache_retention: Some("24h"),

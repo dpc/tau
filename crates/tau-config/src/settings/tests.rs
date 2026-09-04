@@ -772,7 +772,7 @@ fn selected_profiles_apply_all_layers_in_exact_order() {
         r#"
 tau_state_access: legacy
 agents:
-  effort: low
+  effort: 0.25
   role_groups:
     base:
       roles:
@@ -787,7 +787,7 @@ profiles:
   xyz:
     tau_state_access: read_only
     agents:
-      effort: increase
+      effort: increase:0.25
     extensions:
       core-shell:
         config:
@@ -835,7 +835,7 @@ profiles:
     .expect("replay duplicate profile");
     assert_eq!(
         duplicated.roles["layered"].effort,
-        Some(tau_proto::Effort::High)
+        Some(tau_proto::NativeReasoningEffort::High.into())
     );
 
     let error = load_harness_settings_with_profile_and_cli_overrides_in(
@@ -2524,14 +2524,17 @@ fn harness_config_cli_overrides_can_update_roles() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.engineer.effort=low",
+        "agents.role_groups.engineer.roles.engineer.effort=0.25",
     )
     .expect("override")];
 
     let s = load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
         .expect("load");
 
-    assert_eq!(s.roles["engineer"].effort, Some(tau_proto::Effort::Low));
+    assert_eq!(
+        s.roles["engineer"].effort,
+        Some(tau_proto::NativeReasoningEffort::Low.into())
+    );
 }
 
 /// Ensures malformed CLI config overrides fail explicitly at parse time.
@@ -2566,7 +2569,7 @@ fn harness_config_cli_overrides_normalize_legacy_agents_role_aliases() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.roleGroups.engineer.roles.engineer.effort=low",
+        "agents.roleGroups.engineer.roles.engineer.effort=0.25",
     )
     .expect("override")];
 
@@ -2576,7 +2579,7 @@ fn harness_config_cli_overrides_normalize_legacy_agents_role_aliases() {
 
     assert_eq!(
         settings.roles["engineer"].effort,
-        Some(tau_proto::Effort::Low)
+        Some(tau_proto::NativeReasoningEffort::Low.into())
     );
 }
 
@@ -3346,7 +3349,7 @@ fn harness_settings_allow_new_role_group() {
                 reviewers: {
                     disable_tools: ["email"],
                     roles: {
-                        reviewer: { effort: "high" },
+                        reviewer: { effort: 0.75 },
                     },
                 },
             },
@@ -3376,7 +3379,7 @@ fn harness_settings_rejects_role_in_multiple_groups() {
                 role_groups: {
                 reviewers: {
                     roles: {
-                        engineer: { effort: "high" },
+                        engineer: { effort: 0.75 },
                     },
                 },
             },
@@ -3827,7 +3830,7 @@ fn harness_agent_provider_defaults_apply_to_all_roles() {
         r#"
         agents:
           model: openai/global-model
-          effort: medium
+          effort: 0.5
           verbosity: high
           thinkingSummary: concise
           serviceTier: flex
@@ -3846,7 +3849,10 @@ fn harness_agent_provider_defaults_apply_to_all_roles() {
         inherited.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/global-model")
     );
-    assert_eq!(inherited.effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(
+        inherited.effort,
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
+    );
     assert_eq!(inherited.verbosity, Some(tau_proto::Verbosity::High));
     assert_eq!(
         inherited.thinking_summary,
@@ -3908,18 +3914,18 @@ fn harness_agent_provider_defaults_precede_groups_and_roles_across_layers() {
         r#"
         agents:
           model: openai/base-global
-          effort: minimal
+          effort: 0.1
           verbosity: high
           thinking_summary: detailed
           service_tier: fast
           role_groups:
             custom:
               model: openai/base-group
-              effort: low
+              effort: 0.25
               roles:
                 reviewer:
                   model: openai/base-role
-                  effort: high
+                  effort: 0.75
                   service_tier: fast
         "#,
     )
@@ -3930,12 +3936,12 @@ fn harness_agent_provider_defaults_precede_groups_and_roles_across_layers() {
         r#"
         agents:
           model: openai/drop-in-global
-          effort: off
+          effort: disabled
           thinking_summary: null
           service_tier: flex
           role_groups:
             custom:
-              effort: medium
+              effort: 0.5
               roles:
                 reviewer:
                   model: openai/drop-in-role
@@ -3950,7 +3956,10 @@ fn harness_agent_provider_defaults_precede_groups_and_roles_across_layers() {
         reviewer.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/drop-in-role")
     );
-    assert_eq!(reviewer.effort, Some(tau_proto::Effort::High));
+    assert_eq!(
+        reviewer.effort,
+        Some(tau_proto::NativeReasoningEffort::High.into())
+    );
     assert_eq!(reviewer.thinking_summary, None);
     assert_eq!(reviewer.service_tier, Some(tau_proto::ServiceTier::Fast));
     assert_eq!(
@@ -3969,16 +3978,16 @@ fn harness_relative_provider_settings_merge_and_saturate() {
         dir.join("harness.yaml"),
         r#"
         agents:
-          effort: increase
+          effort: increase:0.25
           verbosity: decrease:99
           thinking_summary: decrease
           role_groups:
             custom:
-              effort: increase:99
+              effort: increase:99.0
               thinking_summary: increase:2
               roles:
                 reviewer:
-                  effort: decrease:99
+                  effort: decrease:99.0
                   verbosity: increase
                   thinking_summary: increase:99
         "#,
@@ -3987,7 +3996,10 @@ fn harness_relative_provider_settings_merge_and_saturate() {
 
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let reviewer = &settings.roles["reviewer"];
-    assert_eq!(reviewer.effort, Some(tau_proto::Effort::Off));
+    assert_eq!(
+        reviewer.effort,
+        Some(tau_proto::NativeReasoningEffort::High.into())
+    );
     assert_eq!(reviewer.verbosity, Some(tau_proto::Verbosity::Medium));
     assert_eq!(
         reviewer.thinking_summary,
@@ -4010,7 +4022,7 @@ agents:
       verbosity: low
       roles:
         precedence-junior:
-          effort: decrease
+          effort: decrease:0.25
         precedence:
           enable: true
 "#,
@@ -4024,11 +4036,11 @@ agents:
   role_groups:
     precedence:
       model: chatgpt/gpt-5.6-terra
-      effort: high
+      effort: 0.75
       roles:
         precedence-senior:
           model: chatgpt/gpt-5.6-sol
-          effort: medium
+          effort: 0.5
 "#,
     )
     .expect("write drop-in");
@@ -4036,11 +4048,11 @@ agents:
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     assert_eq!(
         settings.roles["precedence-junior"].effort,
-        Some(tau_proto::Effort::Medium)
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
     );
     assert_eq!(
         settings.roles["precedence"].effort,
-        Some(tau_proto::Effort::High)
+        Some(tau_proto::NativeReasoningEffort::High.into())
     );
     assert_eq!(
         settings.roles["precedence-junior"]
@@ -4060,7 +4072,7 @@ agents:
     );
     assert_eq!(
         settings.roles["precedence-senior"].effort,
-        Some(tau_proto::Effort::Medium)
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
     );
     assert_eq!(
         settings.roles["precedence-senior"].verbosity,
@@ -4302,21 +4314,23 @@ agents:
     precedence:
       roles:
         precedence-role:
-          effort: decrease
+          effort: decrease:0.25
 profiles:
   focused:
     agents:
       role_groups:
         precedence:
-          effort: high
+          effort: 0.75
 "#,
     )
     .expect("write profile");
     let profile = profile_selection("focused");
     let overrides =
         [
-            HarnessConfigCliOverride::from_str("agents.role_groups.precedence.effort=increase")
-                .expect("CLI group override"),
+            HarnessConfigCliOverride::from_str(
+                "agents.role_groups.precedence.effort=increase:0.25",
+            )
+            .expect("CLI group override"),
         ];
 
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
@@ -4328,7 +4342,7 @@ profiles:
     .expect("load selected profile");
     assert_eq!(
         settings.roles["precedence-role"].effort,
-        Some(tau_proto::Effort::High)
+        Some(tau_proto::NativeReasoningEffort::High.into())
     );
 }
 
@@ -4341,7 +4355,7 @@ fn selected_profile_merges_roles_before_cli_and_extensions() {
         td.path().join("harness.yaml"),
         r#"
 agents:
-  effort: low
+  effort: 0.25
   role_groups:
     base:
       roles:
@@ -4349,7 +4363,7 @@ agents:
 profiles:
   focused:
     agents:
-      effort: increase
+      effort: increase:0.25
       role_groups:
         profile:
           roles:
@@ -4378,11 +4392,11 @@ profiles:
 
     assert_eq!(
         settings.roles["base-role"].effort,
-        Some(tau_proto::Effort::Medium)
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
     );
     assert_eq!(
         settings.roles["profile-role"].effort,
-        Some(tau_proto::Effort::Medium)
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
     );
     assert_eq!(
         settings.roles["profile-role"].verbosity,
@@ -4506,7 +4520,7 @@ fn selected_profile_replays_relative_settings_from_each_drop_in() {
         td.path().join("harness.yaml"),
         r#"
 agents:
-  effort: low
+  effort: 0.25
   role_groups:
     profile:
       roles:
@@ -4514,7 +4528,7 @@ agents:
 profiles:
   focused:
     agents:
-      effort: increase
+      effort: increase:0.25
     extensions:
       core-shell:
         enable: false
@@ -4528,7 +4542,7 @@ profiles:
 profiles:
   focused:
     agents:
-      effort: increase
+      effort: increase:0.25
     extensions:
       core-shell:
         enable: true
@@ -4546,7 +4560,7 @@ profiles:
     .expect("load selected profile");
     assert_eq!(
         settings.roles["profile-role"].effort,
-        Some(tau_proto::Effort::High)
+        Some(tau_proto::NativeReasoningEffort::High.into())
     );
     assert_eq!(settings.extensions["core-shell"].enable, Some(true));
 }
@@ -4838,7 +4852,8 @@ profiles:
 }
 
 /// Ensures one-shot harness config accepts relative provider defaults, starts
-/// otherwise-unset values from neutral bases, and rejects a zero adjustment.
+/// otherwise-unset values from neutral bases, and rejects non-positive
+/// directional magnitudes before they can reverse or erase the named direction.
 #[test]
 fn harness_config_cli_relative_provider_defaults_use_neutral_bases() {
     let td = TempDir::new().expect("tempdir");
@@ -4855,7 +4870,7 @@ fn harness_config_cli_relative_provider_defaults_use_neutral_bases() {
     )
     .expect("write harness");
     let overrides = [
-        HarnessConfigCliOverride::from_str("agents.effort=increase").expect("effort"),
+        HarnessConfigCliOverride::from_str("agents.effort=increase:0.25").expect("effort"),
         HarnessConfigCliOverride::from_str("agents.verbosity=decrease:99").expect("verbosity"),
         HarnessConfigCliOverride::from_str("agents.thinking_summary=increase:99")
             .expect("thinking summary"),
@@ -4865,7 +4880,10 @@ fn harness_config_cli_relative_provider_defaults_use_neutral_bases() {
         load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
             .expect("load");
     let inherited = &settings.roles["inherited"];
-    assert_eq!(inherited.effort, Some(tau_proto::Effort::High));
+    assert_eq!(
+        inherited.effort,
+        Some(tau_proto::NativeReasoningEffort::High.into())
+    );
     assert_eq!(inherited.verbosity, Some(tau_proto::Verbosity::Low));
     assert_eq!(
         inherited.thinking_summary,
@@ -4876,6 +4894,22 @@ fn harness_config_cli_relative_provider_defaults_use_neutral_bases() {
     assert!(
         load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &zero).is_err()
     );
+    for value in ["increase:-0.25", "decrease:-0.25", "decrease:0"] {
+        let override_value =
+            [
+                HarnessConfigCliOverride::from_str(&format!("agents.effort={value}"))
+                    .expect("parse"),
+            ];
+        assert!(
+            load_harness_settings_with_cli_overrides_in(
+                &dirs_with_config(dir),
+                &[],
+                &override_value
+            )
+            .is_err(),
+            "{value} must be rejected"
+        );
+    }
 }
 
 /// Ensures command-line provider defaults, including legacy aliases, use the
@@ -4989,7 +5023,7 @@ fn harness_roles_merge_with_built_ins() {
                 engineer: {
                     roles: {
                         engineer: { model: "openai/gpt-5.5", tools: ["read"] },
-                        custom: { description: "Custom local role", effort: "medium", disable_tools: ["shell"] },
+                        custom: { description: "Custom local role", effort: 0.5, disable_tools: ["shell"] },
                     },
                 },
                 manager: {
@@ -5016,7 +5050,10 @@ fn harness_roles_merge_with_built_ins() {
         s.roles["custom"].description.as_deref(),
         Some("Custom local role")
     );
-    assert_eq!(s.roles["custom"].effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(
+        s.roles["custom"].effort,
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
+    );
     assert_eq!(
         s.roles["custom"].disable_tools,
         vec![tau_proto::ToolName::new("shell")]
@@ -5057,7 +5094,7 @@ fn harness_role_group_fields_apply_as_role_defaults() {
             agents: {
                 role_groups: {
                 review: {
-                    effort: "low",
+                    effort: 0.25,
                     tools: ["read"],
                     enable_tools: ["grep"],
                     prompt_fragments: [
@@ -5066,7 +5103,7 @@ fn harness_role_group_fields_apply_as_role_defaults() {
                     roles: {
                         quick: {},
                         deep: {
-                            effort: "xhigh",
+                            effort: 0.9,
                             prompt_fragments: [
                                 { name: "review.deep", priority: 90, text: "Look for subtle issues." },
                             ],
@@ -5081,7 +5118,10 @@ fn harness_role_group_fields_apply_as_role_defaults() {
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let quick = &s.roles["quick"];
-    assert_eq!(quick.effort, Some(tau_proto::Effort::Low));
+    assert_eq!(
+        quick.effort,
+        Some(tau_proto::NativeReasoningEffort::Low.into())
+    );
     assert_eq!(quick.tools, Some(vec![tau_proto::ToolName::new("read")]));
     assert_eq!(quick.enable_tools, vec![tau_proto::ToolName::new("grep")]);
     assert!(
@@ -5092,7 +5132,10 @@ fn harness_role_group_fields_apply_as_role_defaults() {
     );
 
     let deep = &s.roles["deep"];
-    assert_eq!(deep.effort, Some(tau_proto::Effort::XHigh));
+    assert_eq!(
+        deep.effort,
+        Some(tau_proto::NativeReasoningEffort::XHigh.into())
+    );
     assert!(
         deep.prompt_fragments
             .iter()
@@ -5178,7 +5221,10 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
         vec!["engineer", "engineer-junior", "engineer-senior"]
     );
     let engineer_junior = &s.roles["engineer-junior"];
-    assert_eq!(engineer_junior.effort, Some(tau_proto::Effort::Low));
+    assert_eq!(
+        engineer_junior.effort,
+        Some(tau_proto::NativeReasoningEffort::Low.into())
+    );
     let engineer = &s.roles["engineer"];
     let delegate_roles = engineer
         .prompt_fragments
@@ -5220,7 +5266,10 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
     );
     assert!(!s.roles.contains_key("assistant"));
     let engineer_senior = &s.roles["engineer-senior"];
-    assert_eq!(engineer_senior.effort, Some(tau_proto::Effort::High));
+    assert_eq!(
+        engineer_senior.effort,
+        Some(tau_proto::NativeReasoningEffort::Max.into())
+    );
 }
 
 /// Ensures user-defined role groups can load custom role definitions.
@@ -5236,7 +5285,7 @@ fn harness_role_groups_load_custom_roles() {
                 role_groups: {
                 coding: {
                     roles: {
-                        custom: { effort: "medium", tools: ["read"] },
+                        custom: { effort: 0.5, tools: ["read"] },
                     },
                 },
             },
@@ -5246,7 +5295,10 @@ fn harness_role_groups_load_custom_roles() {
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.roles["custom"].effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(
+        s.roles["custom"].effort,
+        Some(tau_proto::NativeReasoningEffort::Medium.into())
+    );
     assert_eq!(
         s.roles["custom"].tools.as_ref().expect("tools"),
         &vec![tau_proto::ToolName::new("read")]
@@ -5863,7 +5915,7 @@ fn harness_role_enable_can_be_reenabled_by_later_layers() {
     .expect("write base");
     std::fs::write(
         dir.join("harness.d/10-enable.yaml"),
-        r#"{ agents: { role_groups: { engineer: { roles: { "engineer-senior": { enable: true, effort: "xhigh" } } } } } }"#,
+        r#"{ agents: { role_groups: { engineer: { roles: { "engineer-senior": { enable: true, effort: 0.9 } } } } } }"#,
     )
     .expect("write drop-in");
 

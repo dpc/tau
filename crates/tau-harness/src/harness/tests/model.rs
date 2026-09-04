@@ -2,8 +2,8 @@ use std::collections as path_std_collections;
 
 use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
-    Effort, ModelId, NoticeLevel, ProviderModelInfo, ProviderModelsDeclared, ProviderModelsUpdated,
-    ThinkingSummary, Verbosity,
+    ModelId, NativeReasoningEffort, NoticeLevel, ProviderModelInfo, ProviderModelsDeclared,
+    ProviderModelsUpdated, ThinkingSummary, Verbosity,
 };
 
 use super::*;
@@ -58,7 +58,7 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         context_window: tau_proto::TokenCount::new(context_window),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![Effort::High],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![NativeReasoningEffort::High]),
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
         supports_compaction: false,
@@ -154,7 +154,7 @@ fn role_infos_include_configured_role_description() {
         tau_config::settings::AgentRole {
             description: Some("Balanced coding helper".to_owned()),
             model: Some(model.clone()),
-            effort: Some(Effort::High),
+            effort: Some(NativeReasoningEffort::High.into()),
             ..Default::default()
         },
     );
@@ -169,7 +169,10 @@ fn role_infos_include_configured_role_description() {
     );
     let details = infos[0].details.as_ref().expect("structured role details");
     assert_eq!(details.model.as_ref(), Some(&model));
-    assert_eq!(details.params.effort, Effort::High);
+    assert_eq!(
+        details.params.effort,
+        tau_proto::ReasoningSelection::native(NativeReasoningEffort::High)
+    );
 }
 
 /// Ensures role group navigation honors explicit role `order` values before
@@ -397,6 +400,16 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
     let mut zero_prefix_budget = provider_model("openai/zero-prefix-budget".into(), 1_000);
     zero_prefix_budget.supports_standalone_compaction = true;
     zero_prefix_budget.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::ZERO);
+    let mut invalid_effort = provider_model("openai/invalid-effort".into(), 1_000);
+    invalid_effort.efforts = tau_proto::ReasoningEffortCapability {
+        control: tau_proto::ReasoningEffortControl::Mapped {
+            mapping: vec![tau_proto::ReasoningEffortBand {
+                from: tau_proto::ReasoningIntensity::MEDIUM,
+                level: NativeReasoningEffort::Medium,
+            }],
+        },
+        provider_default: None,
+    };
 
     h.handle_extension_event(
         "provider-ext",
@@ -411,6 +424,7 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
                 excessive_threshold,
                 excessive_input_threshold,
                 zero_prefix_budget,
+                invalid_effort,
             ],
         })),
     )
@@ -445,7 +459,7 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
             _ => None,
         })
         .expect("committed raw declaration");
-    assert_eq!(declaration.models.len(), 9);
+    assert_eq!(declaration.models.len(), 10);
     assert_eq!(
         declaration
             .models
@@ -478,7 +492,7 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
-    assert_eq!(diagnostics.len(), 7);
+    assert_eq!(diagnostics.len(), 8);
     assert_eq!(
         diagnostics["openai/zero-context"],
         vec![
@@ -515,6 +529,10 @@ fn provider_model_declaration_rejects_invalid_entries_independently() {
     assert_eq!(
         diagnostics["openai/zero-prefix-budget"],
         vec![tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionPrefixBudgetZero]
+    );
+    assert_eq!(
+        diagnostics["openai/invalid-effort"],
+        vec![tau_proto::ProviderModelDeclarationIssue::InvalidReasoningEffortCapability]
     );
 }
 
@@ -883,7 +901,10 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     .expect("handle provider snapshot");
 
     assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
-    assert_eq!(h.selected_model_params().effort, Effort::High);
+    assert_eq!(
+        h.selected_model_params().effort,
+        tau_proto::ReasoningSelection::default()
+    );
     let conv = &h.agent_runtime.agent_registry.agents[&test_user_agent(&h)];
     assert!(conv.dispatch.pending_prompts.is_empty());
     assert!(matches!(
@@ -1764,7 +1785,10 @@ fn provider_model_metadata_drives_selection_state() {
 
     assert_eq!(h.config.selected_role, "engineer");
     assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
-    assert_eq!(h.selected_model_params().effort, Effort::High);
+    assert_eq!(
+        h.selected_model_params().effort,
+        tau_proto::ReasoningSelection::default()
+    );
     assert_eq!(h.selected_model_params().verbosity, Verbosity::Low);
     assert_eq!(
         h.selected_model_params().thinking_summary,
@@ -1800,7 +1824,9 @@ fn provider_model_metadata_drives_selection_state() {
                 context_window: tau_proto::TokenCount::new(654_321),
                 max_input_tokens: None,
                 max_output_tokens: None,
-                efforts: vec![Effort::Off],
+                efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                    NativeReasoningEffort::None,
+                ]),
                 verbosities: vec![Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],
                 supports_compaction: false,
@@ -1819,7 +1845,10 @@ fn provider_model_metadata_drives_selection_state() {
     )
     .expect("refresh provider metadata");
 
-    assert_eq!(h.selected_model_params().effort, Effort::Off);
+    assert_eq!(
+        h.selected_model_params().effort,
+        tau_proto::ReasoningSelection::default()
+    );
     assert_eq!(h.selected_model_params().verbosity, Verbosity::High);
     assert_eq!(
         h.selected_model_params().thinking_summary,
@@ -1851,7 +1880,6 @@ fn omitted_tool_capabilities_canonicalize_to_non_parallel() {
     let model: ProviderModelInfo = serde_json::from_value(serde_json::json!({
         "id": "local/no-tools",
         "context_window": 4096,
-        "efforts": [],
         "verbosities": [],
         "thinking_summaries": [],
         "supports_compaction": false,
@@ -1897,7 +1925,10 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             context_window: tau_proto::TokenCount::new(128_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off, Effort::High],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+                NativeReasoningEffort::High,
+            ]),
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -1925,7 +1956,9 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             context_window: tau_proto::TokenCount::new(8_192),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -1945,7 +1978,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
     let mut roles = path_std_collections::HashMap::new();
     let mut openai_role = tau_config::settings::AgentRole {
         model: Some(openai.clone()),
-        effort: Some(Effort::High),
+        effort: Some(NativeReasoningEffort::High.into()),
         ..Default::default()
     };
     roles.insert("openai".to_owned(), openai_role.clone());
@@ -1954,11 +1987,16 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
 
     assert_eq!(
         selected_params_for_role(&provider_models, &roles, "openai", &openai).effort,
-        Effort::High,
+        tau_proto::ReasoningSelection::native(NativeReasoningEffort::High),
     );
     assert_eq!(
         selected_params_for_role(&provider_models, &roles, "local", &local).effort,
-        Effort::Off,
+        tau_proto::ReasoningSelection {
+            requested: tau_proto::ReasoningIntent::Intensity(
+                tau_proto::ReasoningIntensity::from_millionths(750_000)
+            ),
+            effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::None),
+        },
     );
 }
 
@@ -1984,7 +2022,7 @@ fn load_roles_ignores_stale_harness_state() {
                 role_groups: {
                 engineer: {
                     roles: {
-                        engineer: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
+                        engineer: { model: "openai/gpt-4.1", effort: 0.75, verbosity: "medium" },
                     },
                 },
             },
@@ -1996,7 +2034,7 @@ fn load_roles_ignores_stale_harness_state() {
         state_dir.join("harness.json"),
         r#"{
             "role_overrides": {
-                "engineer": { "model": "openai/gpt-4.1-mini", "effort": "low", "verbosity": "high" }
+                "engineer": { "model": "openai/gpt-4.1-mini", "effort": 0.25, "verbosity": "high" }
             }
         }"#,
     )
@@ -2019,12 +2057,12 @@ fn load_roles_ignores_stale_harness_state() {
         role.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-4.1")
     );
-    assert_eq!(role.effort, Some(Effort::High));
+    assert_eq!(role.effort, Some(NativeReasoningEffort::High.into()));
     assert_eq!(role.verbosity, Some(Verbosity::Medium));
 }
 
-/// Roles without an explicit effort get the middle provider-published
-/// reasoning level. Providers that publish only `Off` stay at `Off`.
+/// Roles without an explicit effort preserve provider-default intent rather
+/// than inventing a native middle level.
 #[test]
 fn role_without_effort_picks_middle_provider_effort() {
     let openai: ModelId = "openai/gpt-4.1".parse().expect("model id");
@@ -2043,13 +2081,13 @@ fn role_without_effort_picks_middle_provider_effort() {
             context_window: tau_proto::TokenCount::new(128_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![
-                Effort::Off,
-                Effort::Minimal,
-                Effort::Low,
-                Effort::Medium,
-                Effort::High,
-            ],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+                NativeReasoningEffort::Minimal,
+                NativeReasoningEffort::Low,
+                NativeReasoningEffort::Medium,
+                NativeReasoningEffort::High,
+            ]),
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -2077,7 +2115,9 @@ fn role_without_effort_picks_middle_provider_effort() {
             context_window: tau_proto::TokenCount::new(8_192),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -2100,11 +2140,11 @@ fn role_without_effort_picks_middle_provider_effort() {
 
     assert_eq!(
         selected_params_for_role(&provider_models, &roles, "engineer", &openai).effort,
-        Effort::Low,
+        tau_proto::ReasoningSelection::default(),
     );
     assert_eq!(
         selected_params_for_role(&provider_models, &roles, "engineer", &local).effort,
-        Effort::Off,
+        tau_proto::ReasoningSelection::default(),
     );
 }
 
@@ -2207,7 +2247,7 @@ fn role_missing_fields_use_model_defaults() {
                 role_groups: {
                 engineer: {
                     roles: {
-                        engineer: { model: "local/engineer", effort: "high" },
+                        engineer: { model: "local/engineer", effort: 0.75 },
                         plain: {},
                     },
                 },
@@ -2251,7 +2291,11 @@ fn role_missing_fields_use_model_defaults() {
         context_window: tau_proto::TokenCount::new(8_192),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![Effort::Off, Effort::Low, Effort::High],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+            NativeReasoningEffort::None,
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::High,
+        ]),
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],
         supports_compaction: false,
@@ -2267,7 +2311,7 @@ fn role_missing_fields_use_model_defaults() {
         est_cache_storage_cost_1m_token_hour_usd: None,
     }]);
     let params = selected_params_for_role(&provider_models, &roles, "plain", &selected);
-    assert_eq!(params.effort, Effort::Low);
+    assert_eq!(params.effort, tau_proto::ReasoningSelection::default());
 }
 
 /// Roles without an explicit verbosity default to low when the provider
@@ -2291,7 +2335,9 @@ fn role_without_verbosity_picks_low_when_supported() {
             context_window: tau_proto::TokenCount::new(128_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -2319,7 +2365,9 @@ fn role_without_verbosity_picks_low_when_supported() {
             context_window: tau_proto::TokenCount::new(8_192),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -2394,7 +2442,7 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
     let config_path = config_dir.join("harness.yaml");
     std::fs::write(
         &config_path,
-        "agents:\n  effort: low\n  service_tier: flex\n",
+        "agents:\n  effort: 0.25\n  service_tier: flex\n",
     )
     .expect("write valid config");
     let dirs = tau_config::settings::TauDirs {
@@ -2410,7 +2458,7 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
         tau_proto::UiRoleUpdate {
             role: role.clone(),
             action: tau_proto::UiRoleUpdateAction::SetEffort {
-                effort: Some(Effort::High),
+                effort: Some(NativeReasoningEffort::High.into()),
             },
         },
     )
@@ -2423,7 +2471,10 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
         },
     )
     .expect("reset role to accepted startup baseline");
-    assert_eq!(h.config.available_roles[&role].effort, Some(Effort::Low));
+    assert_eq!(
+        h.config.available_roles[&role].effort,
+        Some(NativeReasoningEffort::Low.into())
+    );
 
     h.publish_current_model_state();
     let mut sequence = path_crate_event_log::EventLogSeq::new(0);
@@ -2471,6 +2522,33 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
         .expect("catch-up selected-role publication");
     assert_eq!(replay_baseline, tau_proto::ServiceTier::Flex);
     h.shutdown().expect("shutdown");
+}
+
+/// Authenticated UI clients cannot bypass the nominal absolute effort range;
+/// only the explicit relative action may retain out-of-range requested intent.
+#[test]
+fn runtime_role_update_rejects_out_of_range_absolute_effort() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let role = h.config.selected_role.clone();
+    let before = h.config.available_roles[&role].effort;
+
+    for millionths in [-1, 1_000_001, 2_000_000] {
+        h.handle_ui_role_update(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiRoleUpdate {
+                role: role.clone(),
+                action: tau_proto::UiRoleUpdateAction::SetEffort {
+                    effort: Some(tau_proto::ReasoningIntent::Intensity(
+                        tau_proto::ReasoningIntensity::from_millionths(millionths),
+                    )),
+                },
+            },
+        )
+        .expect("reject invalid absolute effort");
+        assert_eq!(h.config.available_roles[&role].effort, before);
+        assert!(!h.config.role_overrides.contains_key(&role));
+    }
 }
 
 /// Disabling every role is a configuration error: startup must fail clearly
@@ -2759,109 +2837,6 @@ profiles:
 
 /// Provider snapshots are the only source for effort choices. The harness
 /// should expose exactly what the provider published and report no choices for
-/// unknown models rather than reviving config-derived defaults.
-#[test]
-fn efforts_for_model_uses_provider_snapshot_levels() {
-    use tau_proto::Effort as L;
-
-    let custom: ModelId = "openai/gpt-5.4-pro".parse().expect("model id");
-    let local: ModelId = "local/llama".parse().expect("model id");
-    let provider_models = provider_models([
-        ProviderModelInfo {
-            id: custom.clone(),
-            display_name: None,
-            tags: Vec::new(),
-            hosted_tool_capabilities: Vec::new(),
-            supported_tool_types: vec![tau_proto::ToolType::Function],
-            input_modalities: Vec::new(),
-            tool_result_modalities: Vec::new(),
-            supports_parallel_tool_calls: true,
-            default_affinity: 0,
-            context_window: tau_proto::TokenCount::new(128_000),
-            max_input_tokens: None,
-            max_output_tokens: None,
-            efforts: vec![L::Medium, L::High, L::XHigh],
-            verbosities: vec![Verbosity::Medium],
-            thinking_summaries: vec![ThinkingSummary::Off],
-            supports_compaction: false,
-            supports_standalone_compaction: false,
-            standalone_compaction_generation_negative: false,
-            standalone_compaction_threshold: None,
-            standalone_compaction_prefix_budget: None,
-            cache_policy: None,
-            est_uncached_input_cost_1m_usd: Default::default(),
-            est_cached_input_cost_1m_usd: Default::default(),
-            est_cache_write_input_cost_1m_usd: Default::default(),
-            est_output_cost_1m_usd: Default::default(),
-            est_cache_storage_cost_1m_token_hour_usd: None,
-        },
-        ProviderModelInfo {
-            id: local.clone(),
-            display_name: None,
-            tags: Vec::new(),
-            hosted_tool_capabilities: Vec::new(),
-            supported_tool_types: vec![tau_proto::ToolType::Function],
-            input_modalities: Vec::new(),
-            tool_result_modalities: Vec::new(),
-            supports_parallel_tool_calls: true,
-            default_affinity: 0,
-            context_window: tau_proto::TokenCount::new(8_192),
-            max_input_tokens: None,
-            max_output_tokens: None,
-            efforts: vec![L::Off],
-            verbosities: vec![Verbosity::Medium],
-            thinking_summaries: vec![ThinkingSummary::Off],
-            supports_compaction: false,
-            supports_standalone_compaction: false,
-            standalone_compaction_generation_negative: false,
-            standalone_compaction_threshold: None,
-            standalone_compaction_prefix_budget: None,
-            cache_policy: None,
-            est_uncached_input_cost_1m_usd: Default::default(),
-            est_cached_input_cost_1m_usd: Default::default(),
-            est_cache_write_input_cost_1m_usd: Default::default(),
-            est_output_cost_1m_usd: Default::default(),
-            est_cache_storage_cost_1m_token_hour_usd: None,
-        },
-    ]);
-
-    assert_eq!(
-        efforts_for_model(&provider_models, &custom),
-        vec![L::Medium, L::High, L::XHigh],
-    );
-    assert_eq!(efforts_for_model(&provider_models, &local), vec![L::Off],);
-    assert!(
-        efforts_for_model(
-            &provider_models,
-            &"openai/unknown-id".parse().expect("model id"),
-        )
-        .is_empty(),
-        "unknown model yields no provider-published choices",
-    );
-}
-
-/// `clamp_effort` must degrade `Max` through `XHigh` then `High`, and degrade
-/// `XHigh` to `High`, rather than silently dropping supported requests to
-/// `Off`.
-/// `Off` remains the fallback for other unsupported levels so users with a
-/// no-reasoning provider don't get pinned to a level the model can't handle.
-#[test]
-fn clamp_effort_degrades_max_and_xhigh_when_unsupported() {
-    use tau_proto::Effort as L;
-    let without_xhigh = [L::Off, L::Minimal, L::Low, L::Medium, L::High];
-
-    assert_eq!(clamp_effort(L::XHigh, &without_xhigh), L::High);
-    assert_eq!(clamp_effort(L::Max, &[L::Off, L::High, L::XHigh]), L::XHigh);
-    assert_eq!(clamp_effort(L::Max, &without_xhigh), L::High);
-    // Sanity: when xhigh IS allowed, no demotion.
-    let with_xhigh = [L::Off, L::Minimal, L::Low, L::Medium, L::High, L::XHigh];
-    assert_eq!(clamp_effort(L::XHigh, &with_xhigh), L::XHigh);
-    // Other unsupported requests still fall to Off.
-    assert_eq!(clamp_effort(L::Minimal, &[L::Off]), L::Off);
-    // No Off in the allowed set: degrade to the first entry.
-    assert_eq!(clamp_effort(L::High, &[L::Medium, L::Low]), L::Medium);
-}
-
 /// Verbosity choices come from the provider snapshot. Providers that do not
 /// support the knob publish a single fixed level, and unknown models expose no
 /// levels.
@@ -2885,7 +2860,9 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             context_window: tau_proto::TokenCount::new(128_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![V::Low, V::Medium, V::High],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -2913,7 +2890,9 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             context_window: tau_proto::TokenCount::new(128_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![V::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
@@ -2969,7 +2948,9 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             context_window: tau_proto::TokenCount::new(128_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off, T::Auto, T::Concise, T::Detailed],
             supports_compaction: false,
@@ -2997,7 +2978,9 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             context_window: tau_proto::TokenCount::new(8_192),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![Effort::Off],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                NativeReasoningEffort::None,
+            ]),
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off],
             supports_compaction: false,
@@ -3033,7 +3016,7 @@ fn selected_params_use_runtime_role_fields() {
         "engineer".to_owned(),
         tau_config::settings::AgentRole {
             model: Some(model.clone()),
-            effort: Some(Effort::High),
+            effort: Some(NativeReasoningEffort::High.into()),
             verbosity: Some(Verbosity::Low),
             thinking_summary: Some(ThinkingSummary::Concise),
             ..Default::default()
@@ -3054,7 +3037,11 @@ fn selected_params_use_runtime_role_fields() {
         context_window: tau_proto::TokenCount::new(128_000),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![Effort::Off, Effort::Low, Effort::High],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+            NativeReasoningEffort::None,
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::High,
+        ]),
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![
             ThinkingSummary::Off,
@@ -3075,7 +3062,10 @@ fn selected_params_use_runtime_role_fields() {
     }]);
 
     let params = selected_params_for_role(&provider_models, &roles, selected_role, &model);
-    assert_eq!(params.effort, Effort::High);
+    assert_eq!(
+        params.effort,
+        tau_proto::ReasoningSelection::native(NativeReasoningEffort::High)
+    );
     assert_eq!(params.verbosity, Verbosity::Low);
     assert_eq!(params.thinking_summary, ThinkingSummary::Concise);
 }

@@ -2440,7 +2440,7 @@ fn role_completion_labels_hide_tool_policy_without_hiding_tool_settings() {
                 compactions: Vec::new(),
                 model: Some("provider/model".into()),
                 params: tau_proto::ModelParams {
-                    effort: Effort::High,
+                    effort: tau_proto::ReasoningSelection::native(NativeReasoningEffort::High),
                     verbosity: Verbosity::Low,
                     thinking_summary: ThinkingSummary::Concise,
                     service_tier: Some(ServiceTier::Fast),
@@ -2469,7 +2469,7 @@ fn role_completion_labels_hide_tool_policy_without_hiding_tool_settings() {
     assert_eq!(role_candidates[0].label, "engineer");
     assert_eq!(
         role_candidates[0].description,
-        "provider/model e=high v=low ts=concise st=fast — production implementation"
+        "provider/model e=0.75→high v=low ts=concise st=fast — production implementation"
     );
     assert_eq!(role_candidates[0].replacement, ":role engineer");
 
@@ -2482,7 +2482,7 @@ fn role_completion_labels_hide_tool_policy_without_hiding_tool_settings() {
     assert_eq!(new_role_candidates.len(), 1);
     assert_eq!(
         new_role_candidates[0].description,
-        "provider/model e=high v=low ts=concise st=fast tools=read etg=pim dtg=shell et=web_search dt=shell — production implementation"
+        "provider/model e=0.75→high v=low ts=concise st=fast tools=read etg=pim dtg=shell et=web_search dt=shell — production implementation"
     );
 
     let tool_setting_candidates = tau_cli_term::completion::build_candidates(

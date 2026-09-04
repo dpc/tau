@@ -1725,7 +1725,7 @@ where
     use std::io::BufWriter;
 
     use tau_proto::{
-        ContentPart, ContextItem, ContextRole, Effort, EventName, HarnessInputMessage,
+        ContentPart, ContextItem, ContextRole, EventName, HarnessInputMessage,
         HarnessOutputMessage, Hello, MessageItem, PROTOCOL_VERSION, PeerInputReader,
         PeerOutputWriter, ProviderModelInfo, ProviderModelsDeclared, ProviderPromptSubmitted,
         Ready, Subscribe, ThinkingSummary, ToolCallItem, ToolName, Verbosity,
@@ -1772,7 +1772,7 @@ where
                 context_window: tau_proto::TokenCount::new(128_000),
                 max_input_tokens: None,
                 max_output_tokens: None,
-                efforts: vec![Effort::Off],
+                efforts: tau_proto::ReasoningEffortCapability::default(),
                 verbosities: vec![Verbosity::Low],
                 thinking_summaries: vec![ThinkingSummary::Off],
                 supports_compaction: true,

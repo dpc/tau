@@ -199,6 +199,22 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
             )
         })
         .expect("synthetic prompt-start");
+    let started = records
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentPromptStarted(started)
+                if started.agent_prompt_id == owner.agent_prompt_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("synthetic prompt-start");
+    assert_eq!(
+        started.model_params,
+        Some(source.model_params),
+        "local route failure freezes the same requested and effective params the successor dispatch owned"
+    );
     let failure_position = records
         .iter()
         .position(|record| {

@@ -655,12 +655,16 @@ impl Harness {
         else {
             return false;
         };
+        let model_params = self.params_for_role_model(
+            &self.role_name_for_agent_id(cid),
+            &continuation.plan.dispatch.model,
+        );
         let started = tau_proto::AgentPromptStarted {
             agent_prompt_id: continuation.plan.agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
             session_id: self.session_runtime.current_session_id.clone(),
             model: continuation.plan.dispatch.model.clone(),
-            model_params: Some(tau_proto::ModelParams::default()),
+            model_params: Some(model_params),
             outer_turn_id: Some(continuation.plan.owner.outer_turn_id.clone()),
             operation: continuation.plan.dispatch.operation,
             originator: originator.clone(),

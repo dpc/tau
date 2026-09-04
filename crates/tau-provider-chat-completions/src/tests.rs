@@ -1820,7 +1820,8 @@ fn chat_request_exposes_provider_visible_identity_changes() {
     );
 
     let mut changed_effort = created.clone();
-    changed_effort.model_params.effort = tau_proto::Effort::High;
+    changed_effort.model_params.effort =
+        tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High);
     assert_ne!(
         serde_json::to_vec(&build_request(&config, model, &changed_effort)).expect("serialize"),
         stable_bytes
@@ -3795,12 +3796,12 @@ fn qwen_reasoning_efforts_use_literal_wire_spellings() {
     let mut provider = provider();
     provider.compat.reasoning_effort = Some(ReasoningEffortWire::Literal);
     for (effort, expected) in [
-        (tau_proto::Effort::Low, "low"),
-        (tau_proto::Effort::Medium, "medium"),
-        (tau_proto::Effort::XHigh, "xhigh"),
+        (tau_proto::NativeReasoningEffort::Low, "low"),
+        (tau_proto::NativeReasoningEffort::Medium, "medium"),
+        (tau_proto::NativeReasoningEffort::XHigh, "xhigh"),
     ] {
         let mut prompt = prompt();
-        prompt.model_params.effort = effort;
+        prompt.model_params.effort = tau_proto::ReasoningSelection::native(effort);
         let request = build_request(&resolved_provider(&provider), &provider.models[0], &prompt);
         let json = serde_json::to_value(request).expect("request json");
         assert_eq!(json["reasoning_effort"], expected);

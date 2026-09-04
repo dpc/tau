@@ -260,7 +260,8 @@ impl Default for ChatCompletionsCompat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatCompletionsReasoningEffort {
-    /// Effort levels published for model selection in canonical order.
+    /// NativeReasoningEffort levels published for model selection in canonical
+    /// order.
     pub efforts: ChatCompletionsReasoningEfforts,
     /// Wire emission and spelling policy.
     pub wire: ChatCompletionsReasoningEffortWire,
@@ -270,8 +271,8 @@ pub struct ChatCompletionsReasoningEffort {
 /// route.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChatCompletionsReasoningEfforts(
-    /// Bit set indexed by [`tau_proto::Effort`]; constructors and
-    /// deserialization guarantee at least one bit and reject repeated
+    /// Bit set indexed by [`tau_proto::NativeReasoningEffort`]; constructors
+    /// and deserialization guarantee at least one bit and reject repeated
     /// configured values.
     u8,
 );
@@ -303,7 +304,7 @@ impl ChatCompletionsReasoningEfforts {
     ///
     /// Returns an error when the input is empty or repeats a value.
     pub fn new(
-        efforts: impl IntoIterator<Item = tau_proto::Effort>,
+        efforts: impl IntoIterator<Item = tau_proto::NativeReasoningEffort>,
     ) -> Result<Self, ChatCompletionsReasoningEffortsError> {
         let mut mask = 0_u8;
         for effort in efforts {
@@ -319,21 +320,24 @@ impl ChatCompletionsReasoningEfforts {
         Ok(Self(mask))
     }
 
-    /// Construct the historical OpenAI-compatible set through `xhigh`.
+    /// Construct the distinct OpenAI-compatible set through `high`.
+    ///
+    /// The OpenAI wire collapses extended levels to `high`, so publishing them
+    /// as separate choices would overstate the effective route capability.
     const fn open_ai() -> Self {
-        Self((1_u8 << tau_proto::Effort::Max as u8) - 1)
+        Self((1_u8 << tau_proto::NativeReasoningEffort::XHigh as u8) - 1)
     }
 
     /// Return whether this set contains one effort level.
     #[must_use]
-    pub fn contains(self, effort: tau_proto::Effort) -> bool {
+    pub fn contains(self, effort: tau_proto::NativeReasoningEffort) -> bool {
         self.0 & (1 << effort as u8) != 0
     }
 
     /// Return the set in stable model-publication order.
     #[must_use]
-    pub fn canonical(self) -> Vec<tau_proto::Effort> {
-        tau_proto::Effort::ALL
+    pub fn canonical(self) -> Vec<tau_proto::NativeReasoningEffort> {
+        tau_proto::NativeReasoningEffort::ALL
             .into_iter()
             .filter(|effort| self.contains(*effort))
             .collect()
@@ -356,7 +360,7 @@ impl<'de> Deserialize<'de> for ChatCompletionsReasoningEfforts {
     {
         use serde::de::Error as _;
 
-        let configured = Vec::<tau_proto::Effort>::deserialize(deserializer)?;
+        let configured = Vec::<tau_proto::NativeReasoningEffort>::deserialize(deserializer)?;
         Self::new(configured).map_err(D::Error::custom)
     }
 }
@@ -537,6 +541,19 @@ impl ChatCompletionsCompat {
                 && config.efforts.0.count_ones() != 1
         }) {
             return Err("omitted reasoning_effort wire requires exactly one effective effort");
+        }
+        if self.reasoning_effort.is_some_and(|config| {
+            config.wire == ChatCompletionsReasoningEffortWire::OpenAi
+                && (config
+                    .efforts
+                    .contains(tau_proto::NativeReasoningEffort::XHigh)
+                    || config
+                        .efforts
+                        .contains(tau_proto::NativeReasoningEffort::Max))
+        }) {
+            return Err(
+                "OpenAI reasoning_effort wire cannot publish collapsed xhigh or max levels",
+            );
         }
         Ok(())
     }

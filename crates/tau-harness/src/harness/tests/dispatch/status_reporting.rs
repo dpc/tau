@@ -1877,13 +1877,14 @@ fn self_info_production_dispatch_reports_memory_only_current_status() {
     assert_eq!(
         result,
         format!(
-            "agent_id: {}\nsession_id: s1\nsession_dir: (none)\nmodel: {}\neffort: {}\nstatus: working\nstatus_task_name: Inspect runtime identity",
+            "agent_id: {}\nsession_id: s1\nsession_dir: (none)\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: working\nstatus_task_name: Inspect runtime identity",
             prompt.agent_id,
             prompt.model,
-            prompt.model_params.effort.as_str()
+            prompt.model_params.effort.requested,
+            prompt.model_params.effort.effective
         )
     );
-    assert_eq!(result.lines().count(), 7);
+    assert_eq!(result.lines().count(), 8);
     h.shutdown().expect("shutdown");
 }
 

@@ -111,10 +111,10 @@ work, and the same semantic qualification predicate. It emits only bounded
 scalar facts on a dedicated process-local target; the disabled path creates no
 trace state and takes no observation clock.
 
-Every request also lowers the harness-selected effective reasoning effort as
-`reasoning.effort`. The public API spells Tau's `off` as `none`; the remaining
-canonical levels (`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) pass
-through directly.
+Numeric and disabled requests lower the harness-frozen effective native
+reasoning selector as `reasoning.effort`; provider-default, fixed, and
+unsupported selections omit it. The public API accepts the canonical native
+levels `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 An exact configured route may opt into legacy OpenAI automatic-cache retention
 or explicit first-input-text caching. The adapter sends an agent-derived

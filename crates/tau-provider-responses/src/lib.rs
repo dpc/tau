@@ -18,9 +18,9 @@ use serde_json::value::RawValue;
 #[cfg(test)]
 use tau_proto::ToolResultStatus;
 use tau_proto::{
-    ContentPart, ContextItem, ContextRole, Effort, MessageItem, ModelName, ProviderStopReason,
-    ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope,
-    ToolCallItem, ToolChoice, ToolDefinition, ToolType,
+    ContentPart, ContextItem, ContextRole, MessageItem, ModelName, NativeReasoningEffort,
+    ProviderStopReason, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind,
+    ResponsesToolCallEnvelope, ToolCallItem, ToolChoice, ToolDefinition, ToolType,
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision, classify_error_code};
 use tau_provider::{
@@ -2499,7 +2499,8 @@ fn borrowed_context_items(
 #[derive(Serialize)]
 struct Reasoning {
     /// Upstream spelling for the harness-effective reasoning effort.
-    effort: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -2556,7 +2557,12 @@ fn build_request(
         input,
         stream: true,
         reasoning: Reasoning {
-            effort: effort_wire(prompt.model_params.effort),
+            effort: prompt
+                .model_params
+                .effort
+                .effective
+                .selector()
+                .map(effort_wire),
         },
         instructions: (!prompt.system_prompt.trim().is_empty())
             .then(|| prompt.system_prompt.clone()),
@@ -2588,15 +2594,15 @@ pub fn serialized_request_bytes(
         .and_then(|encoded| u64::try_from(encoded.len()).ok())
 }
 
-fn effort_wire(effort: Effort) -> &'static str {
+fn effort_wire(effort: NativeReasoningEffort) -> &'static str {
     match effort {
-        Effort::Off => "none",
-        Effort::Minimal => "minimal",
-        Effort::Low => "low",
-        Effort::Medium => "medium",
-        Effort::High => "high",
-        Effort::XHigh => "xhigh",
-        Effort::Max => "max",
+        NativeReasoningEffort::None => "none",
+        NativeReasoningEffort::Minimal => "minimal",
+        NativeReasoningEffort::Low => "low",
+        NativeReasoningEffort::Medium => "medium",
+        NativeReasoningEffort::High => "high",
+        NativeReasoningEffort::XHigh => "xhigh",
+        NativeReasoningEffort::Max => "max",
     }
 }
 

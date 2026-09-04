@@ -45,9 +45,8 @@ use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::harness::SessionGeneration;
 use crate::model::{
-    InterSessionReceiverRole, clamp_effort, efforts_for_model, load_roles, role_infos,
-    select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
-    verbosities_for_model,
+    InterSessionReceiverRole, load_roles, role_infos, select_model_for_role,
+    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::pending_agent_discovery::PendingAgentDiscovery;
 use crate::tool_turn::ToolTurnCategories;
@@ -1538,7 +1537,9 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
                         context_window: tau_proto::TokenCount::new(1_000),
                         max_input_tokens: None,
                         max_output_tokens: None,
-                        efforts: vec![tau_proto::Effort::Medium],
+                        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                            tau_proto::NativeReasoningEffort::Medium,
+                        ]),
                         verbosities: vec![tau_proto::Verbosity::Medium],
                         thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                         supports_compaction: true,

@@ -11,7 +11,8 @@ configuration. `--profile focused,review` applies only `profiles.focused` then
 `agents`, a role group, and a role can set these provider/model fields:
 
 - `model`: qualified model id, in `provider/model` form
-- `effort`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`
+- `effort`: `provider_default`, `disabled`, or an exact decimal intensity from
+  `0.0` through `1.0`
 - `verbosity`: `low`, `medium`, or `high`
 - `thinking_summary`: `off`, `auto`, `concise`, or `detailed`
 - `service_tier`: `fast` or `flex`
@@ -22,11 +23,12 @@ configuration. `--profile focused,review` applies only `profiles.focused` then
   `threshold` or `reserve` boundary plus an optional lifecycle/status condition
 - `compaction`: legacy shorthand normalized into both domains above
 
-For `effort`, `verbosity`, and `thinking_summary`, use `increase` or
-`decrease` to adjust an inherited value by one level, or `increase:<amount>` /
-`decrease:<amount>` for a saturating multi-level adjustment. Relative settings
-resolve from the built-in bases (`medium`, `medium`, and `auto`) when no broader
-absolute setting exists.
+For `effort`, use `increase:<decimal>` or `decrease:<decimal>` with a positive
+magnitude. Relative effort keeps the exact signed millionth result even outside
+`0.0..=1.0`; the selected model clamps only when mapping a prompt to its native
+level. An otherwise-unset effort adjustment starts from `0.5`.
+For `verbosity` and `thinking_summary`, `increase`/`decrease` and optional
+integer amounts retain their saturating level behavior.
 
 A role can also set:
 
@@ -125,13 +127,13 @@ group setting comes from a later drop-in, selected profile, or
 ```yaml
 agents:
   model: chatgpt/gpt-5.3-codex
-  effort: medium
+  effort: 0.5
   role_groups:
     review:
-      effort: high
+      effort: 0.75
       roles:
         reviewer:
-          effort: xhigh
+          effort: 0.9
 ```
 
 The same global fragment path is available to one-shot harness config overrides,
@@ -206,12 +208,12 @@ accumulated base and earlier profiles as its starting point:
 
 ```yaml
 agents:
-  effort: low
+  effort: 0.25
 
 profiles:
   focused:
     agents:
-      effort: increase
+      effort: "increase:0.25"
       role_groups:
         review:
           roles:
@@ -373,13 +375,13 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
           "engineer-junior": {
             order: 10,
             description: "Lower-reasoning engineer",
-            effort: "low",
+            effort: 0.25,
           },
           "engineer": {
             order: 20,
             description: "Balanced coding engineer",
             model: "chatgpt/gpt-5.3-codex",
-            effort: "medium",
+            effort: 0.5,
             compaction: { reserve: 25000 },
             tools: ["read", "grep"],
             enable_tool_groups: ["calendar", "email"],
@@ -389,7 +391,7 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
           "engineer-senior": {
             order: 30,
             description: "Maximum-reasoning engineer",
-            effort: "xhigh",
+            effort: 1.0,
           },
           "old-role": {
             enable: false,
@@ -459,20 +461,22 @@ Examples:
 
 ```text
 :role engineer model chatgpt/gpt-5.3-codex
-:role engineer-senior effort xhigh
+:role engineer-senior effort 0.9
 :role engineer enable-tool-groups calendar,email
 :role engineer disable-tools email_trash
 :role temporary model anthropic/claude-sonnet-4-20250514
 :role temporary delete
 ```
 
-Use `reset` as the value to clear a field and return to model/provider fallback behavior (`off` is still the explicit off value for `effort` and `thinking-summary`).
+Use `reset` as the value to clear a field and return to its configured baseline.
+Use `disabled` for explicit no-reasoning intent; `off` remains the explicit
+disabled value for `thinking-summary`.
 
-For `effort`, `verbosity`, and `thinking-summary`, `increase`,
-`decrease`, `increase:<amount>`, and `decrease:<amount>` adjust the current
-effective role value and saturate at each setting's endpoints. This differs
-from configuration, where relative values resolve broadly from `agents` through
-the role group to the role before Tau stores the absolute result.
+For `effort`, `increase:<decimal>` and `decrease:<decimal>` adjust the portable
+requested intensity without clamping stored state. For `verbosity` and
+`thinking-summary`, `increase`, `decrease`, and optional integer amounts adjust
+and saturate the current value. Configuration resolves relative values broadly
+from `agents` through the role group to the role before Tau stores the result.
 
 The convenience command `:fast` mutates the currently selected role using the same role-update path.
 
@@ -506,7 +510,8 @@ watching, and messaging are irrelevant to that explicit capability.
 `self_info({})` is enabled by default and returns the calling agent's
 authoritative runtime metadata as deterministic `key: value` lines. It accepts
 no input fields and reports `agent_id`, `session_id`, `session_dir`, the exact
-prompt-owned `model` and `effort`, `status`, and `status_task_name`. Before the
+prompt-owned `model`, `effort_requested`, `effort_effective`, `status`, and
+`status_task_name`. Before the
 first `status` call, it reports `status: unreported` and
 `status_task_name: (none)`. An unavailable session directory is also `(none)`.
 The built-in prompt templates omit agent identity; custom templates retain the

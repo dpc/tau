@@ -6995,7 +6995,8 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     let captured: tau_proto::ModelId = "staged/captured-final".into();
     captured_info.id = captured.clone();
     captured_info.supported_tool_types = vec![tau_proto::ToolType::Function];
-    captured_info.efforts = vec![tau_proto::Effort::High];
+    captured_info.efforts =
+        tau_proto::ReasoningEffortCapability::mapped(vec![tau_proto::NativeReasoningEffort::High]);
     captured_info.verbosities = vec![tau_proto::Verbosity::Low];
     captured_info.thinking_summaries = vec![tau_proto::ThinkingSummary::Detailed];
     let current: tau_proto::ModelId = "other/current-selection".into();
@@ -7012,7 +7013,7 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
         .available_roles
         .get_mut(&h.config.selected_role)
         .expect("selected role");
-    role.effort = Some(tau_proto::Effort::High);
+    role.effort = Some(tau_proto::NativeReasoningEffort::High.into());
     role.verbosity = Some(tau_proto::Verbosity::Low);
     role.thinking_summary = Some(tau_proto::ThinkingSummary::Detailed);
     role.tools = Some(vec![ToolName::new("captured_only_tool")]);
@@ -7102,7 +7103,10 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
         })
         .expect("captured continuation prompt");
     assert_eq!(prompt.model, captured);
-    assert_eq!(prompt.model_params.effort, tau_proto::Effort::High);
+    assert_eq!(
+        prompt.model_params.effort,
+        tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High)
+    );
     assert_eq!(prompt.model_params.verbosity, tau_proto::Verbosity::Low);
     assert_eq!(
         prompt.model_params.thinking_summary,

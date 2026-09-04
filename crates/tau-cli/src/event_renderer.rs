@@ -1046,13 +1046,15 @@ impl RoleCompletionDetails {
 fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::CompletionItem {
     let description = match (setting, value) {
         (_, "reset") => "clear this role setting",
-        ("effort", "off") => "disable reasoning effort",
-        ("effort", "minimal") => "minimum reasoning effort",
-        ("effort", "low") => "light reasoning effort",
-        ("effort", "medium") => "balanced reasoning effort",
-        ("effort", "high") => "strong reasoning effort",
-        ("effort", "xhigh") => "extra-high reasoning effort",
-        ("effort", "max") => "maximum reasoning effort for GPT-5.6",
+        ("effort", "provider_default") => "omit effort and use the provider default",
+        ("effort", "disabled") => "request disabled reasoning",
+        ("effort", "0.0") => "minimum portable reasoning intensity",
+        ("effort", "0.25") => "light portable reasoning intensity",
+        ("effort", "0.5") => "medium-like portable reasoning intensity",
+        ("effort", "0.75") => "strong portable reasoning intensity",
+        ("effort", "1.0") => "maximum portable reasoning intensity",
+        ("effort", "increase:0.25") => "increase portable intensity by 0.25",
+        ("effort", "decrease:0.25") => "decrease portable intensity by 0.25",
         ("verbosity", "low") => "terse responses",
         ("verbosity", "medium") => "normal responses",
         ("verbosity", "high") => "detailed responses",
@@ -1143,7 +1145,16 @@ fn role_setting_value_completions(
         | "enable-tools"
         | "disable-tools" => &["reset"],
         "effort" => &[
-            "reset", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+            "reset",
+            "provider_default",
+            "disabled",
+            "0.0",
+            "0.25",
+            "0.5",
+            "0.75",
+            "1.0",
+            "increase:0.25",
+            "decrease:0.25",
         ],
         "verbosity" => &["reset", "low", "medium", "high"],
         "thinking-summary" => &["reset", "off", "auto", "concise", "detailed"],
@@ -1868,9 +1879,6 @@ impl EventRenderer {
                 role_defaults: HashMap::new(),
                 baseline_params: None,
                 model_params: tau_proto::ModelParams::default(),
-                effort_state: Arc::new(path_std_sync_atomic::AtomicU8::new(
-                    tau_proto::Effort::Off.as_u8(),
-                )),
                 fast_service_tier_state: Arc::new(AtomicBool::new(false)),
                 current_role_state: Arc::new(Mutex::new(None)),
                 roles_available: Arc::new(Mutex::new(Vec::new())),
@@ -4078,10 +4086,10 @@ impl EventRenderer {
         }
         let show_effort = self.role.baseline_params.map_or_else(
             || {
-                self.role_default_effort()
-                    .map_or(!self.role.model_params.effort.is_default(), |default| {
-                        self.role.model_params.effort != default
-                    })
+                self.role_default_effort().map_or(
+                    self.role.model_params.effort != Default::default(),
+                    |default| self.role.model_params.effort != default,
+                )
             },
             |default| self.role.model_params.effort != default.effort,
         );
@@ -4092,7 +4100,7 @@ impl EventRenderer {
                 status_chip(
                     &self.resources.theme,
                     names::STATUS_EFFORT,
-                    format!("^{}", self.role.model_params.effort.as_str()),
+                    format!("^{}", self.role.model_params.effort),
                 ),
             );
         }
@@ -4324,15 +4332,19 @@ impl EventRenderer {
         )
     }
 
-    fn role_default_effort(&self) -> Option<tau_proto::Effort> {
+    fn role_default_effort(&self) -> Option<tau_proto::ReasoningSelection> {
         let role = self.role.current_role.as_deref()?;
         self.role
             .role_defaults
             .get(role)?
             .effort
             .as_deref()?
-            .parse()
+            .parse::<tau_proto::ReasoningIntent>()
             .ok()
+            .map(|requested| tau_proto::ReasoningSelection {
+                requested,
+                effective: tau_proto::EffectiveReasoningEffort::ProviderDefault(None),
+            })
     }
 
     fn role_default_verbosity(&self) -> Option<tau_proto::Verbosity> {
@@ -9592,10 +9604,6 @@ impl EventRenderer {
         self.role.current_role = Some(selected.role.clone());
         self.role.baseline_params = selected.baseline_params;
         self.role.model_params = selected.model_params;
-        self.role.effort_state.store(
-            selected.model_params.effort.as_u8(),
-            path_std_sync_atomic::Ordering::Relaxed,
-        );
         self.role.verbosity_state.store(
             selected.model_params.verbosity.as_u8(),
             path_std_sync_atomic::Ordering::Relaxed,

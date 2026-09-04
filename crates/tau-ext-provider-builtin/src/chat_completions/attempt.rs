@@ -45,8 +45,20 @@ pub fn models_for_provider(
                     .max_output_tokens
                     .map(|tokens| tau_proto::TokenCount::new(u64::from(tokens.get()))),
                 efforts: compat.reasoning_effort.as_ref().map_or_else(
-                    || vec![tau_proto::Effort::Off],
-                    |config| config.efforts.canonical(),
+                    tau_proto::ReasoningEffortCapability::default,
+                    |config| {
+                        let levels = config.efforts.canonical();
+                        if config.wire == super::ChatCompletionsReasoningEffortWire::Omit {
+                            tau_proto::ReasoningEffortCapability {
+                                control: tau_proto::ReasoningEffortControl::Fixed {
+                                    level: levels[0],
+                                },
+                                provider_default: Some(levels[0]),
+                            }
+                        } else {
+                            tau_proto::ReasoningEffortCapability::mapped(levels)
+                        }
+                    },
                 ),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],

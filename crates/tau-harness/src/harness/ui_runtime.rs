@@ -1912,6 +1912,18 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiRoleUpdate,
     ) -> Result<bool, HarnessError> {
+        if matches!(
+            &req.action,
+            tau_proto::UiRoleUpdateAction::SetEffort {
+                effort: Some(intent)
+            } if !intent.is_nominal()
+        ) {
+            self.send_ui_error_response(
+                client_id,
+                ":role: absolute reasoning intensity must be between 0.0 and 1.0",
+            );
+            return Ok(true);
+        }
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::PolicyChanged);
         if let Some(reason) = self.config.disabled_role_reasons.get(&req.role) {
             self.send_ui_error_response(

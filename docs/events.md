@@ -106,9 +106,9 @@ for control of the emit/intercept pipeline.
 - **`harness.provider_quota_changed`** — Harness-validated, transient full
   current-state snapshot of bounded account quota windows and exact model-to-pool
   bindings. Observation timestamps are preserved during late-subscriber catch-up.
-- **`harness.efforts_available`** — Which effort levels are valid for the
-  selected role's resolved model. Empty when the selected role has no
-  resolved model or the provider doesn't support reasoning.
+- **`harness.efforts_available`** — The selected role's resolved model
+  reasoning capability: unsupported, fixed, or an exact portable-to-native
+  lower-bound mapping.
 - **`harness.verbosities_available`** — Which output verbosity levels are valid
   for the selected role's resolved model. Empty means no resolved model;
   `[medium]` means the provider does not expose a verbosity knob.

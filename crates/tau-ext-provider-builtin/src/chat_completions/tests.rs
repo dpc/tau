@@ -96,11 +96,11 @@ fn qwen_reasoning_profile_publishes_exact_efforts() {
     let models = models_for_provider(&tau_proto::ProviderName::new("qwen"), &provider);
     assert_eq!(
         models[0].efforts,
-        vec![
-            tau_proto::Effort::Low,
-            tau_proto::Effort::Medium,
-            tau_proto::Effort::XHigh,
-        ]
+        tau_proto::ReasoningEffortCapability::mapped(vec![
+            tau_proto::NativeReasoningEffort::Low,
+            tau_proto::NativeReasoningEffort::Medium,
+            tau_proto::NativeReasoningEffort::XHigh,
+        ])
     );
     let encoded = serde_json::to_value(&provider).expect("serialize Qwen profile");
     assert_eq!(
@@ -285,6 +285,81 @@ fn omitted_reasoning_effort_wire_requires_one_effective_effort() {
         provider.validate(),
         Err("omitted reasoning_effort wire requires exactly one effective effort")
     );
+}
+
+/// A valid omitted-wire profile publishes fixed behavior and a matching known
+/// provider default rather than a selectable mapping it cannot transmit.
+#[test]
+fn omitted_reasoning_effort_wire_publishes_fixed_capability() {
+    let provider: ChatCompletionsProvider = serde_json::from_value(serde_json::json!({
+        "models": [{
+            "id": "llama-cpp-qwen",
+            "compat": {
+                "reasoning_effort": {
+                    "efforts": ["xhigh"],
+                    "wire": "omit"
+                }
+            }
+        }]
+    }))
+    .expect("profile");
+    provider.validate().expect("valid fixed profile");
+
+    let models = models_for_provider(&tau_proto::ProviderName::new("local"), &provider);
+    assert_eq!(
+        models[0].efforts,
+        tau_proto::ReasoningEffortCapability {
+            control: tau_proto::ReasoningEffortControl::Fixed {
+                level: tau_proto::NativeReasoningEffort::XHigh,
+            },
+            provider_default: Some(tau_proto::NativeReasoningEffort::XHigh),
+        }
+    );
+}
+
+/// OpenAI-compatible publication must expose only distinct native choices
+/// because extended levels collapse to the same `high` wire value.
+#[test]
+fn openai_reasoning_effort_publication_stops_at_high() {
+    let efforts = ChatCompletionsCompat::openai_defaults()
+        .reasoning_effort
+        .expect("OpenAI effort")
+        .efforts
+        .canonical();
+    assert_eq!(
+        efforts,
+        vec![
+            tau_proto::NativeReasoningEffort::None,
+            tau_proto::NativeReasoningEffort::Minimal,
+            tau_proto::NativeReasoningEffort::Low,
+            tau_proto::NativeReasoningEffort::Medium,
+            tau_proto::NativeReasoningEffort::High,
+        ]
+    );
+}
+
+/// Operator profiles must not publish extended OpenAI-wire levels that collapse
+/// to `high` and therefore are not distinct effective choices.
+#[test]
+fn openai_reasoning_effort_rejects_collapsed_extended_levels() {
+    for level in ["xhigh", "max"] {
+        let provider: ChatCompletionsProvider = serde_json::from_value(serde_json::json!({
+            "models": [{
+                "id": "collapsed",
+                "compat": {
+                    "reasoning_effort": {
+                        "efforts": ["high", level],
+                        "wire": "open_ai"
+                    }
+                }
+            }]
+        }))
+        .expect("profile");
+        assert_eq!(
+            provider.validate(),
+            Err("OpenAI reasoning_effort wire cannot publish collapsed xhigh or max levels")
+        );
+    }
 }
 
 /// Cache controls must reject the retired boolean key flag so profiles cannot

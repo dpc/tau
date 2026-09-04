@@ -2060,7 +2060,12 @@ fn representative_events() -> Vec<Event> {
                 context_window: TokenCount::new(128_000),
                 max_input_tokens: None,
                 max_output_tokens: None,
-                efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
+                efforts: crate::ReasoningEffortCapability::mapped(vec![
+                    NativeReasoningEffort::None,
+                    NativeReasoningEffort::Low,
+                    NativeReasoningEffort::Medium,
+                    NativeReasoningEffort::High,
+                ]),
                 verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],
                 supports_compaction: false,
@@ -2229,7 +2234,10 @@ fn representative_events() -> Vec<Event> {
             state: AgentRuntimeState::Running,
         }),
         Event::HarnessEffortsAvailable(HarnessEffortsAvailable {
-            levels: vec![Effort::Off, Effort::Low],
+            capability: crate::ReasoningEffortCapability::mapped([
+                NativeReasoningEffort::None,
+                NativeReasoningEffort::Low,
+            ]),
         }),
         Event::HarnessVerbositiesAvailable(HarnessVerbositiesAvailable {
             levels: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
@@ -4996,7 +5004,7 @@ fn harness_role_info_role_description_is_optional_and_round_trips() {
             compactions: Vec::new(),
             model: Some("openai/gpt-4.1".into()),
             params: ModelParams {
-                effort: Effort::High,
+                effort: crate::ReasoningSelection::native(NativeReasoningEffort::High),
                 verbosity: Verbosity::Medium,
                 thinking_summary: ThinkingSummary::Auto,
                 service_tier: Some(ServiceTier::Fast),
@@ -5011,7 +5019,11 @@ fn harness_role_info_role_description_is_optional_and_round_trips() {
     let json = serde_json::to_value(&with_description).expect("serialize role info");
     assert_eq!(json["role_description"], "Deep investigation mode");
     assert_eq!(json["details"]["model"], "openai/gpt-4.1");
-    assert_eq!(json["details"]["params"]["effort"], "high");
+    assert_eq!(json["details"]["params"]["effort"]["requested"], "0.75");
+    assert_eq!(
+        json["details"]["params"]["effort"]["effective"],
+        serde_json::json!({"kind": "native", "level": "high"})
+    );
     assert_eq!(json["details"]["enable_tools"][0], "web_search");
     let decoded: HarnessRoleInfo = serde_json::from_value(json).expect("decode role info");
     assert_eq!(decoded, with_description);
@@ -5032,7 +5044,6 @@ fn provider_model_info_requires_context_window() {
     // metadata, so context windows must be present instead of defaulted.
     let value = serde_json::json!({
         "id": "openai/gpt-4.1",
-        "efforts": ["off"],
         "verbosities": ["medium"],
         "thinking_summaries": ["off"]
     });
@@ -5866,8 +5877,8 @@ fn delegate_progress_optional_metadata_and_agent_id_wire_contract() {
     .expect_err("invalid agent id should fail to deserialize");
 }
 
-/// `Verbosity::next_in` mirrors `Effort::next_in`. Even though the CLI
-/// doesn't bind a cycle key for verbosity today, the helper is part of
+/// `Verbosity::next_in` mirrors `NativeReasoningEffort::next_in`. Even though
+/// the CLI doesn't bind a cycle key for verbosity today, the helper is part of
 /// the public API and the protocol tests should pin the same wrap /
 /// skip / empty-allowed-set behaviour effort relies on.
 #[test]
@@ -5901,81 +5912,201 @@ fn thinking_summary_round_trips_through_display_and_from_str() {
     assert!("bogus".parse::<ThinkingSummary>().is_err());
 }
 
-/// `ModelParams` serializes its bundled knobs as a flat object that
-/// drops fields at their default value. Lets `harness.yaml`
-/// snapshots stay tiny and avoids surprising callers that introspect
-/// the wire shape.
+/// Reasoning intensity uses canonical exact-millionth decimal strings.
 #[test]
-fn model_params_serializes_skipping_defaults() {
-    let json = serde_json::to_value(ModelParams::default()).expect("serialize");
-    assert_eq!(json, serde_json::json!({}));
+fn reasoning_intensity_round_trips_canonical_decimals() {
+    let value = "1.150001"
+        .parse::<crate::ReasoningIntensity>()
+        .expect("parse");
+    assert_eq!(value.millionths(), 1_150_001);
+    assert_eq!(value.to_string(), "1.150001");
+    assert_eq!(
+        serde_json::to_string(&value).expect("serialize"),
+        r#""1.150001""#
+    );
+    assert!("0.0000001".parse::<crate::ReasoningIntensity>().is_err());
+}
 
+/// Portable arithmetic retains out-of-range state and model selection clamps
+/// once.
+#[test]
+fn reasoning_intent_adjusts_outside_nominal_range_and_maps_at_selection() {
+    let delta = crate::ReasoningIntensityDelta::new(250_000).expect("nonzero");
+    let requested =
+        crate::ReasoningIntent::Intensity(crate::ReasoningIntensity::from_millionths(900_000))
+            .adjust(delta);
+    assert_eq!(requested.to_string(), "1.15");
+    let capability = crate::ReasoningEffortCapability::mapped([
+        NativeReasoningEffort::Low,
+        NativeReasoningEffort::Medium,
+        NativeReasoningEffort::High,
+        NativeReasoningEffort::XHigh,
+        NativeReasoningEffort::Max,
+    ]);
+    assert_eq!(
+        capability.select(requested),
+        crate::EffectiveReasoningEffort::Native(NativeReasoningEffort::Max)
+    );
+    assert_eq!(
+        capability.select(crate::ReasoningIntent::Disabled),
+        crate::EffectiveReasoningEffort::Native(NativeReasoningEffort::Low)
+    );
+    assert_eq!(
+        capability.select(crate::ReasoningIntent::ProviderDefault),
+        crate::EffectiveReasoningEffort::ProviderDefault(None)
+    );
+}
+
+/// Standard mappings keep `0.5` medium-like across common native vocabularies
+/// while preserving explicit sparse lower-bound tiers.
+#[test]
+fn standard_reasoning_mappings_keep_half_intensity_medium_like() {
+    for levels in [
+        vec![
+            NativeReasoningEffort::None,
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::Medium,
+            NativeReasoningEffort::High,
+        ],
+        vec![
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::Medium,
+            NativeReasoningEffort::High,
+            NativeReasoningEffort::XHigh,
+            NativeReasoningEffort::Max,
+        ],
+        vec![
+            NativeReasoningEffort::None,
+            NativeReasoningEffort::Minimal,
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::Medium,
+            NativeReasoningEffort::High,
+            NativeReasoningEffort::XHigh,
+            NativeReasoningEffort::Max,
+        ],
+    ] {
+        let capability = crate::ReasoningEffortCapability::mapped(levels);
+        assert!(capability.is_valid());
+        assert_eq!(
+            capability.select(crate::ReasoningIntent::Intensity(
+                crate::ReasoningIntensity::MEDIUM
+            )),
+            crate::EffectiveReasoningEffort::Native(NativeReasoningEffort::Medium)
+        );
+    }
+}
+
+/// Fixed control proves the omitted-selector result, while structural
+/// validation rejects missing or contradictory redundant default metadata.
+#[test]
+fn fixed_reasoning_control_freezes_its_level_for_provider_default() {
+    let valid = crate::ReasoningEffortCapability {
+        control: crate::ReasoningEffortControl::Fixed {
+            level: NativeReasoningEffort::High,
+        },
+        provider_default: Some(NativeReasoningEffort::High),
+    };
+    assert!(valid.is_valid());
+    assert_eq!(
+        valid.select(crate::ReasoningIntent::ProviderDefault),
+        crate::EffectiveReasoningEffort::ProviderDefault(Some(NativeReasoningEffort::High))
+    );
+    for provider_default in [None, Some(NativeReasoningEffort::Low)] {
+        let invalid = crate::ReasoningEffortCapability {
+            control: crate::ReasoningEffortControl::Fixed {
+                level: NativeReasoningEffort::High,
+            },
+            provider_default,
+        };
+        assert!(!invalid.is_valid());
+        assert_eq!(
+            invalid.select(crate::ReasoningIntent::ProviderDefault),
+            crate::EffectiveReasoningEffort::ProviderDefault(Some(NativeReasoningEffort::High))
+        );
+    }
+}
+
+/// Raw capability serde must preserve malformed mappings for entrywise harness
+/// validation while the structural predicate rejects every forbidden shape.
+#[test]
+fn reasoning_effort_capability_serde_preserves_invalid_raw_mappings() {
+    for mapping in [
+        serde_json::json!([]),
+        serde_json::json!([
+            {"from": "0.1", "level": "low"}
+        ]),
+        serde_json::json!([
+            {"from": "0.0", "level": "low"},
+            {"from": "1.1", "level": "medium"}
+        ]),
+        serde_json::json!([
+            {"from": "0.0", "level": "medium"},
+            {"from": "0.5", "level": "low"}
+        ]),
+        serde_json::json!([
+            {"from": "0.0", "level": "low"},
+            {"from": "0.0", "level": "medium"}
+        ]),
+    ] {
+        let value = serde_json::json!({
+            "control": {
+                "kind": "mapped",
+                "mapping": mapping
+            }
+        });
+        let capability: crate::ReasoningEffortCapability =
+            serde_json::from_value(value.clone()).expect("raw capability remains decodable");
+        assert!(!capability.is_valid(), "{value}");
+        assert_eq!(
+            serde_json::to_value(capability).expect("serialize raw capability"),
+            value
+        );
+    }
+
+    for value in [
+        serde_json::json!({
+            "control": {"kind": "unsupported"},
+            "provider_default": "medium"
+        }),
+        serde_json::json!({
+            "control": {"kind": "fixed", "level": "medium"}
+        }),
+        serde_json::json!({
+            "control": {"kind": "fixed", "level": "medium"},
+            "provider_default": "high"
+        }),
+        serde_json::json!({
+            "control": {
+                "kind": "mapped",
+                "mapping": [{"from": "0.0", "level": "low"}]
+            },
+            "provider_default": "medium"
+        }),
+    ] {
+        let capability: crate::ReasoningEffortCapability =
+            serde_json::from_value(value.clone()).expect("raw capability remains decodable");
+        assert!(!capability.is_valid(), "{value}");
+        assert_eq!(
+            serde_json::to_value(capability).expect("serialize raw capability"),
+            value
+        );
+    }
+}
+
+/// A prompt parameter snapshot serializes both portable request and frozen
+/// native result.
+#[test]
+fn model_params_serializes_frozen_reasoning_selection() {
     let json = serde_json::to_value(ModelParams {
-        effort: Effort::High,
+        effort: crate::ReasoningSelection::native(NativeReasoningEffort::High),
         verbosity: Verbosity::Low,
         thinking_summary: ThinkingSummary::Concise,
         service_tier: Some(ServiceTier::Fast),
     })
     .expect("serialize");
-    assert_eq!(
-        json,
-        serde_json::json!({
-            "effort": "high",
-            "thinking_summary": "concise",
-            "service_tier": "fast",
-        })
-    );
-}
-
-/// `Effort::next_in` must skip levels that aren't in the harness's
-/// allowed set so cycling callers don't trap when (say) `xhigh` is
-/// missing for the current model. Locking the behaviour with explicit
-/// cases so a future refactor of the cycle helper can't silently
-/// regress the UX.
-#[test]
-fn effort_next_in_skips_disallowed_levels_and_wraps() {
-    use Effort::*;
-    let canonical = [Off, Minimal, Low, Medium, High];
-    let with_xhigh = [Off, Minimal, Low, Medium, High, XHigh];
-    let with_max = [Off, Minimal, Low, Medium, High, XHigh, Max];
-
-    // Without xhigh or max, High wraps back to Off.
-    assert_eq!(High.next_in(&canonical), Off);
-    // With xhigh but not max, XHigh wraps to Off.
-    assert_eq!(High.next_in(&with_xhigh), XHigh);
-    assert_eq!(XHigh.next_in(&with_xhigh), Off);
-    // GPT-5.6 can advance through Max before wrapping.
-    assert_eq!(XHigh.next_in(&with_max), Max);
-    assert_eq!(Max.next_in(&with_max), Off);
-
-    // Sparse allowed set (provider with no reasoning effort) — Off
-    // is the only legal level, so any input lands there.
-    let only_off = [Off];
-    assert_eq!(High.next_in(&only_off), Off);
-    assert_eq!(Off.next_in(&only_off), Off);
-
-    // Empty allowed set falls through to plain `next()` so callers
-    // that haven't received `HarnessEffortsAvailable` yet still make
-    // progress.
-    assert_eq!(Medium.next_in(&[]), Medium.next());
-}
-
-/// Ensures the GPT-5.6 maximum effort has stable config, display, and atomic
-/// representations across protocol boundaries.
-#[test]
-fn max_effort_round_trips_all_protocol_representations() {
-    assert_eq!(
-        serde_json::to_string(&Effort::Max).expect("serialize"),
-        r#""max""#
-    );
-    assert_eq!(
-        serde_json::from_str::<Effort>(r#""max""#).expect("deserialize"),
-        Effort::Max
-    );
-    assert_eq!("max".parse::<Effort>().expect("parse"), Effort::Max);
-    assert_eq!(Effort::Max.to_string(), "max");
-    assert_eq!(Effort::Max.as_u8(), 6);
-    assert_eq!(Effort::from_u8(6), Some(Effort::Max));
+    assert_eq!(json["effort"]["requested"], "0.75");
+    assert_eq!(json["effort"]["effective"]["kind"], "native");
+    assert_eq!(json["effort"]["effective"]["level"], "high");
 }
 
 /// Provider-facing tool responses must use the uniform header/body shape so
@@ -6275,7 +6406,6 @@ fn provider_model_supported_tool_types_json_roundtrip() {
     let mut value = serde_json::json!({
         "id": "openai/model",
         "context_window": 1000,
-        "efforts": [],
         "verbosities": [],
         "thinking_summaries": [],
         "supports_compaction": false,
@@ -6322,7 +6452,6 @@ fn provider_model_preserves_zero_standalone_compaction_prefix_budget() {
     let value = serde_json::json!({
         "id": "openai/model",
         "context_window": 1000,
-        "efforts": [],
         "verbosities": [],
         "thinking_summaries": [],
         "standalone_compaction_prefix_budget": 0
@@ -6962,8 +7091,6 @@ fn role_setting_adjustments_are_positive_saturating_and_wire_safe() {
 
     let increase = crate::UiRoleSettingAdjustment::Increase(NonZeroU8::new(99).expect("positive"));
     let decrease = crate::UiRoleSettingAdjustment::Decrease(NonZeroU8::new(99).expect("positive"));
-    assert_eq!(crate::Effort::Off.adjust(decrease), crate::Effort::Off);
-    assert_eq!(crate::Effort::Max.adjust(increase), crate::Effort::Max);
     assert_eq!(
         crate::Verbosity::Low.adjust(decrease),
         crate::Verbosity::Low
@@ -6982,7 +7109,7 @@ fn role_setting_adjustments_are_positive_saturating_and_wire_safe() {
     );
     assert!(serde_json::from_str::<crate::UiRoleSettingAdjustment>(r#"{"Increase":0}"#).is_err());
     let action = crate::UiRoleUpdateAction::AdjustEffort {
-        adjustment: increase,
+        adjustment: crate::ReasoningIntensityDelta::new(250_000).expect("nonzero"),
     };
     assert_eq!(
         serde_json::from_value::<crate::UiRoleUpdateAction>(

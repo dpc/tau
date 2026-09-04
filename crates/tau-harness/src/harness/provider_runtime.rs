@@ -39,6 +39,11 @@ impl Harness {
             if model.max_output_tokens == Some(tau_proto::TokenCount::ZERO) {
                 issues.push(tau_proto::ProviderModelDeclarationIssue::MaxOutputTokensZero);
             }
+            if !model.efforts.is_valid() {
+                issues.push(
+                    tau_proto::ProviderModelDeclarationIssue::InvalidReasoningEffortCapability,
+                );
+            }
             let has_standalone_metadata = model.standalone_compaction_threshold.is_some()
                 || model.standalone_compaction_prefix_budget.is_some();
             if has_standalone_metadata && !model.supports_explicit_standalone_compaction() {
@@ -341,7 +346,12 @@ impl Harness {
                 next_role.effort = effort;
             }
             tau_proto::UiRoleUpdateAction::AdjustEffort { adjustment } => {
-                next_role.effort = Some(effective_params.effort.adjust(adjustment));
+                next_role.effort = Some(
+                    next_role
+                        .effort
+                        .unwrap_or(effective_params.effort.requested)
+                        .adjust(adjustment),
+                );
             }
             tau_proto::UiRoleUpdateAction::SetVerbosity { verbosity } => {
                 next_role.verbosity = verbosity;
@@ -576,7 +586,11 @@ impl Harness {
                     thinking_summaries_for_model(&self.provider_runtime.model_info, model),
                 )
             } else {
-                (Vec::new(), Vec::new(), Vec::new())
+                (
+                    tau_proto::ReasoningEffortCapability::default(),
+                    Vec::new(),
+                    Vec::new(),
+                )
             };
         let context_window = selected_model
             .as_ref()
@@ -636,7 +650,7 @@ impl Harness {
         self.publish_event(
             None,
             Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
-                levels: effort_levels,
+                capability: effort_levels,
             }),
         );
         self.publish_event(

@@ -4,9 +4,9 @@ use std::rc::Rc;
 
 use tau_config::settings::ProviderCacheMaxIdle;
 use tau_proto::{
-    Effort, EstimatedUsdPerMillion, ProviderCacheDeletionAvailability, ProviderCacheKind,
-    ProviderCachePolicy, ProviderCachePrivacy, ProviderCacheQuotaAccounting, ThinkingSummary,
-    Verbosity,
+    EstimatedUsdPerMillion, NativeReasoningEffort, ProviderCacheDeletionAvailability,
+    ProviderCacheKind, ProviderCachePolicy, ProviderCachePrivacy, ProviderCacheQuotaAccounting,
+    ThinkingSummary, Verbosity,
 };
 
 use super::*;
@@ -138,7 +138,7 @@ pub(crate) fn model(provider: &str) -> ProviderModelInfo {
         context_window: tau_proto::TokenCount::new(10_000),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![Effort::Medium],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![NativeReasoningEffort::Medium]),
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],
         supports_compaction: false,

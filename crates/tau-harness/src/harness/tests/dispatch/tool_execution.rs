@@ -2959,7 +2959,7 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
             model: Some("test/role-model".into()),
             prompt_override: Some("explicit-template".to_owned()),
             tools: Some(vec![ToolName::new("agent_watch")]),
-            effort: Some(tau_proto::Effort::High),
+            effort: Some(tau_proto::NativeReasoningEffort::High.into()),
             ..Default::default()
         },
     );
@@ -3018,7 +3018,10 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
         .expect("side prompt");
     let prompt = read_prompt_created(&h, &spid);
     assert_eq!(prompt.model.to_string(), "test/role-model");
-    assert_eq!(prompt.model_params.effort, tau_proto::Effort::High);
+    assert_eq!(
+        prompt.model_params.effort,
+        tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High)
+    );
     assert!(
         prompt
             .system_prompt

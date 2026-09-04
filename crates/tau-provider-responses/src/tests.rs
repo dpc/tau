@@ -2144,7 +2144,7 @@ fn http_sse_attempt_posts_responses_and_completes() {
         );
         let request: serde_json::Value = serde_json::from_slice(&body).expect("request JSON");
         assert_eq!(request["stream"], true);
-        assert_eq!(request["reasoning"]["effort"], "none");
+        assert!(request["reasoning"].get("effort").is_none());
         assert_eq!(request["prompt_cache_key"], "tau:agent-test");
         assert_eq!(request["prompt_cache_options"]["mode"], "explicit");
         assert_eq!(request["prompt_cache_options"]["ttl"], "30m");
@@ -2438,16 +2438,16 @@ fn request_lowers_every_reasoning_effort_to_exact_wire_spelling() {
     };
 
     for (effort, expected) in [
-        (tau_proto::Effort::Off, "none"),
-        (tau_proto::Effort::Minimal, "minimal"),
-        (tau_proto::Effort::Low, "low"),
-        (tau_proto::Effort::Medium, "medium"),
-        (tau_proto::Effort::High, "high"),
-        (tau_proto::Effort::XHigh, "xhigh"),
-        (tau_proto::Effort::Max, "max"),
+        (tau_proto::NativeReasoningEffort::None, "none"),
+        (tau_proto::NativeReasoningEffort::Minimal, "minimal"),
+        (tau_proto::NativeReasoningEffort::Low, "low"),
+        (tau_proto::NativeReasoningEffort::Medium, "medium"),
+        (tau_proto::NativeReasoningEffort::High, "high"),
+        (tau_proto::NativeReasoningEffort::XHigh, "xhigh"),
+        (tau_proto::NativeReasoningEffort::Max, "max"),
     ] {
         let mut prompt = minimal_prompt();
-        prompt.model_params.effort = effort;
+        prompt.model_params.effort = tau_proto::ReasoningSelection::native(effort);
         let request = build_request(&prompt, &config, &model).expect("request");
         let request = serde_json::to_value(request).expect("serialize request");
 
@@ -4558,7 +4558,8 @@ fn responses_request_exposes_provider_visible_identity_changes() {
     );
 
     let mut changed_effort = prompt.clone();
-    changed_effort.model_params.effort = tau_proto::Effort::High;
+    changed_effort.model_params.effort =
+        tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High);
     assert_ne!(
         serde_json::to_vec(
             &build_request(&changed_effort, &config, &model).expect("changed effort request")

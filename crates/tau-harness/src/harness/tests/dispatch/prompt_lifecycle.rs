@@ -327,7 +327,9 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                     context_window: tau_proto::TokenCount::new(200_000),
                     max_input_tokens: None,
                     max_output_tokens: None,
-                    efforts: vec![tau_proto::Effort::Medium],
+                    efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                        tau_proto::NativeReasoningEffort::Medium,
+                    ]),
                     verbosities: vec![tau_proto::Verbosity::Medium],
                     thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                     supports_compaction: false,
@@ -375,7 +377,9 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             context_window: tau_proto::TokenCount::new(200_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![tau_proto::Effort::Medium],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                tau_proto::NativeReasoningEffort::Medium,
+            ]),
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: false,
@@ -631,7 +635,9 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     context_window: tau_proto::TokenCount::new(200_000),
                     max_input_tokens: None,
                     max_output_tokens: None,
-                    efforts: vec![tau_proto::Effort::Medium],
+                    efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                        tau_proto::NativeReasoningEffort::Medium,
+                    ]),
                     verbosities: vec![tau_proto::Verbosity::Medium],
                     thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                     supports_compaction: false,
@@ -665,7 +671,9 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             context_window: tau_proto::TokenCount::new(200_000),
             max_input_tokens: None,
             max_output_tokens: None,
-            efforts: vec![tau_proto::Effort::Medium],
+            efforts: tau_proto::ReasoningEffortCapability::mapped(vec![
+                tau_proto::NativeReasoningEffort::Medium,
+            ]),
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: false,

@@ -2220,10 +2220,14 @@ fn build_request_after_prefix_admission(
             mode: "explicit",
             ttl: "30m",
         }),
-        reasoning_effort: provider
-            .compat
-            .reasoning_effort
-            .map(|wire| effort_wire(prompt.model_params.effort, wire)),
+        reasoning_effort: provider.compat.reasoning_effort.and_then(|wire| {
+            prompt
+                .model_params
+                .effort
+                .effective
+                .selector()
+                .map(|effort| effort_wire(effort, wire))
+        }),
         max_tokens,
         max_completion_tokens,
         extra_body: provider.extra_body.clone(),
@@ -3259,17 +3263,22 @@ fn assistant_text_item(text: impl Into<String>) -> ContextItem {
     })
 }
 
-fn effort_wire(effort: tau_proto::Effort, wire: ReasoningEffortWire) -> &'static str {
+fn effort_wire(
+    effort: tau_proto::NativeReasoningEffort,
+    wire: ReasoningEffortWire,
+) -> &'static str {
     match (effort, wire) {
-        (tau_proto::Effort::XHigh, ReasoningEffortWire::Literal) => "xhigh",
-        (tau_proto::Effort::Max, ReasoningEffortWire::Literal) => "max",
+        (tau_proto::NativeReasoningEffort::XHigh, ReasoningEffortWire::Literal) => "xhigh",
+        (tau_proto::NativeReasoningEffort::Max, ReasoningEffortWire::Literal) => "max",
         (effort, _) => match effort {
-            tau_proto::Effort::Off => "none",
-            tau_proto::Effort::Minimal => "minimal",
-            tau_proto::Effort::Low => "low",
-            tau_proto::Effort::Medium => "medium",
-            tau_proto::Effort::High => "high",
-            tau_proto::Effort::XHigh | tau_proto::Effort::Max => "high",
+            tau_proto::NativeReasoningEffort::None => "none",
+            tau_proto::NativeReasoningEffort::Minimal => "minimal",
+            tau_proto::NativeReasoningEffort::Low => "low",
+            tau_proto::NativeReasoningEffort::Medium => "medium",
+            tau_proto::NativeReasoningEffort::High => "high",
+            tau_proto::NativeReasoningEffort::XHigh | tau_proto::NativeReasoningEffort::Max => {
+                "high"
+            }
         },
     }
 }

@@ -7,8 +7,9 @@ use std::os::unix::net::UnixStream;
 use tau_config::settings::{AgentRole, ShellToolStyle, TauDirs, ToolPolicy};
 use tau_core::ToolRegistration;
 use tau_proto::{
-    BackgroundSupport, Effort, ModelId, ModelName, ModelTag, ProviderModelInfo, ProviderName,
-    ThinkingSummary, ToolGroup, ToolGroupName, ToolName, ToolSpec, ToolTag, ToolType, Verbosity,
+    BackgroundSupport, ModelId, ModelName, ModelTag, NativeReasoningEffort, ProviderModelInfo,
+    ProviderName, ThinkingSummary, ToolGroup, ToolGroupName, ToolName, ToolSpec, ToolTag, ToolType,
+    Verbosity,
 };
 use tempfile::TempDir;
 
@@ -72,7 +73,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         context_window: tau_proto::TokenCount::new(128_000),
         max_input_tokens: None,
         max_output_tokens: None,
-        efforts: vec![Effort::Off],
+        efforts: tau_proto::ReasoningEffortCapability::mapped(vec![NativeReasoningEffort::None]),
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],
         supports_compaction: false,

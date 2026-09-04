@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tau_proto::{
-    CborValue, Effort, Event, ModelId, SessionAgentWorkStatus, SessionId, StartAgentRequest,
-    ToolCallId, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolUseState,
+    CborValue, Event, ModelId, SessionAgentWorkStatus, SessionId, StartAgentRequest, ToolCallId,
+    ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolUseState,
 };
 
 #[cfg(test)]
@@ -221,7 +221,7 @@ pub(crate) struct InternalSelfInfo {
     /// call.
     pub model: ModelId,
     /// Exact reasoning effort captured for the prompt that made the call.
-    pub effort: Effort,
+    pub effort: tau_proto::ReasoningSelection,
     /// Current canonical harness-owned semantic work status.
     pub work_status: SessionAgentWorkStatus,
 }

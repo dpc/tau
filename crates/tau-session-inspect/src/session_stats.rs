@@ -5,7 +5,9 @@ use std::path::Path;
 
 use serde::Serialize;
 use tau_core::{AgentStore, SessionStore};
-use tau_proto::{AgentOuterTurnDisposition, AgentOuterTurnId, Effort, Event, ModelId};
+use tau_proto::{
+    AgentOuterTurnDisposition, AgentOuterTurnId, Event, ModelId, NativeReasoningEffort,
+};
 
 use crate::InspectError;
 
@@ -18,7 +20,7 @@ mod tool_activity_stats;
 pub use activity_counts::ActivityCounts;
 pub use agent_activity_stats::AgentActivityStats;
 pub use missing_accounting_data::{MissingAccountingData, MissingAccountingFact};
-pub use model_effort_stats::ModelEffortStats;
+pub use model_effort_stats::ModelNativeReasoningEffortStats;
 pub use tool_activity_stats::ToolActivityStats;
 
 /// Serialized activity report for one persisted session.
@@ -44,8 +46,10 @@ pub struct SessionStats {
 struct PromptAccounting {
     /// Captured provider-qualified model.
     model: ModelId,
-    /// Captured effort, absent only in legacy records.
-    effort: Option<Effort>,
+    /// Captured native effort when the effective result is known and native.
+    /// Modern provider-default or unsupported selections remain absent without
+    /// implying missing prompt parameters.
+    effort: Option<NativeReasoningEffort>,
 }
 
 /// Traverse one session membership journal and only its members' agent
@@ -112,7 +116,7 @@ pub fn read_session_stats(
         agents.push(agent);
     }
     Ok(Some(SessionStats {
-        schema_version: 2,
+        schema_version: 3,
         session_id: session_id
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -131,7 +135,7 @@ fn aggregate_agent(
 ) -> AgentActivityStats {
     let mut result = empty_agent(agent_id.clone());
     let mut prompts = HashMap::new();
-    let mut models: BTreeMap<(ModelId, Effort), ActivityCounts> = BTreeMap::new();
+    let mut models: BTreeMap<(ModelId, NativeReasoningEffort), ActivityCounts> = BTreeMap::new();
     let mut tools: HashMap<tau_proto::ToolName, ToolActivityStats> = HashMap::new();
     let mut open_turns = HashSet::<AgentOuterTurnId>::new();
     let mut selected_calls = HashMap::new();
@@ -168,10 +172,13 @@ fn aggregate_agent(
                 if prompt.operation.is_inference() && prompt.outer_turn_id.is_none() {
                     note_missing(missing, agent_id, MissingAccountingFact::PromptOuterTurnId);
                 }
-                let effort = prompt.model_params.map(|params| params.effort);
-                if effort.is_none() {
-                    note_missing(missing, agent_id, MissingAccountingFact::PromptModelParams);
-                }
+                let effort = prompt.model_params.map_or_else(
+                    || {
+                        note_missing(missing, agent_id, MissingAccountingFact::PromptModelParams);
+                        None
+                    },
+                    |params| params.effort.effective.native(),
+                );
                 prompts.insert(
                     prompt.agent_prompt_id.clone(),
                     PromptAccounting {
@@ -251,11 +258,13 @@ fn aggregate_agent(
     result.totals.outer_turns_unterminated = u64::try_from(open_turns.len()).unwrap_or(u64::MAX);
     result.models = models
         .into_iter()
-        .map(|((model, effort), totals)| ModelEffortStats {
-            model,
-            effort,
-            totals,
-        })
+        .map(
+            |((model, effort), totals)| ModelNativeReasoningEffortStats {
+                model,
+                effort,
+                totals,
+            },
+        )
         .collect();
     result.tools = tools.into_values().collect();
     result

@@ -1682,14 +1682,14 @@ fn opaque_item_from_value(item: &serde_json::Value, raw_json: String) -> OpaqueP
         .expect("parsed provider item must match its retained raw JSON")
 }
 
-/// Maps `Effort` to the wire string the OpenAI Responses /
+/// Maps `NativeReasoningEffort` to the wire string the OpenAI Responses /
 /// Chat Completions APIs accept. `Off` maps to OpenAI's explicit
 /// `none` so provider defaults (for example GPT-5.5's `medium`) do
 /// not silently apply.
-pub fn effort_wire(level: tau_proto::Effort) -> Option<&'static str> {
-    use tau_proto::Effort::*;
+pub fn effort_wire(level: tau_proto::NativeReasoningEffort) -> Option<&'static str> {
+    use tau_proto::NativeReasoningEffort::*;
     match level {
-        Off => Some("none"),
+        None => Some("none"),
         Minimal => Some("minimal"),
         Low => Some("low"),
         Medium => Some("medium"),

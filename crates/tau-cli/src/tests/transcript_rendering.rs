@@ -2221,7 +2221,7 @@ fn renderer_output_length_diagnostics_match_disposition_and_visible_output() {
 #[test]
 fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
     let source = concat!(
-        "| Scope | Effort |\n",
+        "| Scope | NativeReasoningEffort |\n",
         "| --- | ---: |\n",
         "| Formed 7-guardian federation, connected gateway, configured/advertising FLIP, log paths, working `fman-cli` | **4–7 engineer-days** |\n",
         "| Complete FI-requested/funded liquidity and register the gateway in federation consensus | **8–15 days total** |\n",
@@ -2250,7 +2250,7 @@ fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
     ));
     sync(&handle);
     assert!(vt.screen_contains(160, "◇ | Scope"));
-    assert!(vt.screen_contains(160, "                    Effort |"));
+    assert!(vt.screen_contains(160, "     NativeReasoningEffort |"));
 
     renderer.handle(&Event::ProviderResponseFinished(finished.clone()));
     sync(&handle);
@@ -2283,7 +2283,7 @@ fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
     let cold_frame = cold_vt.wait_for_frame_containing_after(cold_generation, "◆ | Scope");
     let cold_frames = cold_vt.frames.0.lock().expect("frames");
     let settled = cold_frames[cold_frame - 1].join("\n");
-    assert!(settled.contains("                    Effort |"));
+    assert!(settled.contains("     NativeReasoningEffort |"));
     assert!(settled.contains("\n> "), "{settled}");
     for frame in &cold_frames[cold_generation..cold_frame] {
         let text = frame.join("\n");
@@ -2308,7 +2308,7 @@ fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
         "live and cold-replayed editor finals must perform equivalent projection work"
     );
     assert!(cold_vt.screen_contains(160, "◆ | Scope"));
-    assert!(cold_vt.screen_contains(160, "                    Effort |"));
+    assert!(cold_vt.screen_contains(160, "     NativeReasoningEffort |"));
 }
 
 /// Ensures streaming Markdown styles are applied as each line completes, so a

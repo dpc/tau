@@ -16,12 +16,12 @@ use tau_proto::{
     AgentPromptFailed, AgentPromptQueued, AgentPromptRejected, AgentPromptSteered,
     AgentPromptSubmitted, AgentPromptTerminated, AgentPromptTerminationReason,
     AgentStandaloneCompactionFailed, AgentStandaloneCompactionStarted, CborValue, ContentPart,
-    ContextItem, ContextRole, Effort, Event, ExtensionReady, HarnessContextUsageChanged,
-    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, HarnessSessionDir, MessageItem,
-    OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
-    ServiceTier, SessionDirStatus, SessionStartReason, SessionStarted, ThinkingSummary,
-    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
-    UiRoleUpdateAction, Verbosity,
+    ContextItem, ContextRole, Event, ExtensionReady, HarnessContextUsageChanged, HarnessRoleInfo,
+    HarnessRoleSelected, HarnessRolesAvailable, HarnessSessionDir, MessageItem,
+    NativeReasoningEffort, OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated,
+    ProviderStopReason, ServiceTier, SessionDirStatus, SessionStartReason, SessionStarted,
+    ThinkingSummary, ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult,
+    UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
 use super::agent_navigation::AgentNavigationState;

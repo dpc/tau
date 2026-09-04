@@ -2827,7 +2827,12 @@ fn build_request(
     };
 
     let effort = if config.supports_reasoning_effort {
-        effort_wire(request.params.effort)
+        request
+            .params
+            .effort
+            .effective
+            .selector()
+            .and_then(effort_wire)
     } else {
         None
     };

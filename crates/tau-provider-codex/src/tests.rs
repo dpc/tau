@@ -1305,13 +1305,13 @@ fn publishes_chatgpt_model_metadata() {
         models
             .iter()
             .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
-            .all(|model| model.efforts.contains(&Effort::Max))
+            .all(|model| model.efforts.contains(NativeReasoningEffort::Max))
     );
     assert!(
         models
             .iter()
             .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
-            .all(|model| !model.efforts.contains(&Effort::Max))
+            .all(|model| !model.efforts.contains(NativeReasoningEffort::Max))
     );
     assert!(
         models
