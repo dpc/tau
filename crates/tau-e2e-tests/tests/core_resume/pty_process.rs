@@ -496,6 +496,34 @@ impl PtyProcess {
             .clone())
     }
 
+    /// Returns the number of terminal bells retained in the bounded raw suffix.
+    pub(super) fn retained_bell_count(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(self.raw()?.iter().filter(|byte| **byte == b'\x07').count())
+    }
+
+    /// Waits until a live terminal bell arrives after the caller's baseline.
+    pub(super) fn wait_for_bell_after(
+        &self,
+        baseline: usize,
+        deadline: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (lock, wake) = &*self.capture;
+        let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+        loop {
+            if capture.raw.iter().filter(|byte| **byte == b'\x07').count() > baseline {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || capture.closed {
+                return Err("timed out waiting for terminal bell fence".into());
+            }
+            let (next, _) = wake
+                .wait_timeout(capture, remaining.min(Duration::from_millis(100)))
+                .map_err(|_| "PTY capture poisoned")?;
+            capture = next;
+        }
+    }
+
     /// Requests explicit session shutdown, then waits for the owned process
     /// tree's natural exit.
     pub(super) fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {

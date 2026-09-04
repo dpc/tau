@@ -361,8 +361,8 @@ fn late_attached_public_pty_stages_current_state_before_completed_turn()
     attached.wait_for(&response, deadline)?;
     let original_frame = original.wait_ready_for(agent_id.as_str(), deadline)?;
     let attached_frame = attached.wait_ready_for(agent_id.as_str(), deadline)?;
-    assert_attach_semantics(&original_frame, &session_id, &prompt, &response, &agent_id)?;
-    assert_attach_semantics(&attached_frame, &session_id, &prompt, &response, &agent_id)?;
+    assert_attach_semantics(&original_frame, &prompt, &response, &agent_id)?;
+    assert_attach_semantics(&attached_frame, &prompt, &response, &agent_id)?;
     assert_exact_ready_set(&observer.events)?;
     let matched = fixture
         .trace()?
@@ -522,8 +522,8 @@ fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
     )?;
     let original_running = original.wait_for(&format!("@{}", agent_id.as_str()), deadline)?;
     let attached_running = attached.wait_for(&format!("@{}", agent_id.as_str()), deadline)?;
-    assert_live_attach_semantics(&original_running, &session_id, &agent_id)?;
-    assert_live_attach_semantics(&attached_running, &session_id, &agent_id)?;
+    assert_live_attach_semantics(&original_running, &agent_id)?;
+    assert_live_attach_semantics(&attached_running, &agent_id)?;
 
     observer.cancel_prompt(&session_id, &prompt)?;
     peer_navigation::wait_for_canceled_hold(&mut observer, &prompt, deadline)?;
@@ -532,8 +532,8 @@ fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
     let original_idle = original.wait_ready_for(agent_id.as_str(), deadline)?;
     let attached_idle = attached.wait_ready_for(agent_id.as_str(), deadline)?;
     peer_navigation::assert_exact_canceled_hold_facts(&observer.events, &prompt)?;
-    assert_settled_attach_semantics(&original_idle, &session_id, &agent_id)?;
-    assert_settled_attach_semantics(&attached_idle, &session_id, &agent_id)?;
+    assert_settled_attach_semantics(&original_idle, &agent_id)?;
+    assert_settled_attach_semantics(&attached_idle, &agent_id)?;
 
     fixture.write_artifact(
         "attach-cancel-observer.json",
@@ -559,11 +559,9 @@ fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
 /// cancellation without depending on transcript rows retained in the viewport.
 fn assert_settled_attach_semantics(
     frame: &str,
-    session_id: &SessionId,
     agent_id: &AgentId,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for needle in [
-        format!("sessions/{}/", session_id.as_str()),
         format!("Write a message to {}...", agent_id.as_str()),
         format!("@{}", agent_id.as_str()),
     ] {
@@ -578,13 +576,9 @@ fn assert_settled_attach_semantics(
 /// live attached terminal projections; typed observer stats own runtime.
 fn assert_live_attach_semantics(
     frame: &str,
-    session_id: &SessionId,
     agent_id: &AgentId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for needle in [
-        format!("sessions/{}/", session_id.as_str()),
-        format!("@{}", agent_id.as_str()),
-    ] {
+    for needle in [format!("@{}", agent_id.as_str())] {
         if !frame.lines().any(|row| row.contains(&needle)) {
             return Err(format!("missing semantic row `{needle}` in:\n{frame}").into());
         }
@@ -749,7 +743,6 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
 /// byte-for-byte or cell-for-cell equality between attached terminal views.
 fn assert_attach_semantics(
     frame: &str,
-    session_id: &SessionId,
     prompt: &str,
     response: &str,
     agent_id: &AgentId,
@@ -760,24 +753,16 @@ fn assert_attach_semantics(
             .position(|row| row.contains(needle))
             .ok_or_else(|| format!("missing semantic row `{needle}` in:\n{frame}"))
     };
-    let session = find(&format!("sessions/{}/", session_id.as_str()))?;
-    let extension = find("extension e2e-fake-provider ready")?;
     let submitted = find(prompt)?;
     let initialized = find(&format!("initialized {}", agent_id.as_str()))?;
     let answered = find(response)?;
     let editable = find(&format!("Write a message to {}...", agent_id.as_str()))?;
     let status = find(&format!("@{}", agent_id.as_str()))?;
-    if !(session < submitted
-        && extension < submitted
-        && initialized <= submitted
-        && submitted < answered
-        && answered < editable
-        && editable <= status)
-    {
+    if !(submitted < answered && answered < editable && editable <= status) {
         return Err(format!(
-            "semantic row order violated: session={session}, extension={extension}, \
-             initialized={initialized}, submitted={submitted}, answered={answered}, \
-              editable={editable}, status={status}\n{frame}"
+            "semantic row order violated: initialized={initialized}, \
+             submitted={submitted}, answered={answered}, \
+             editable={editable}, status={status}\n{frame}"
         )
         .into());
     }

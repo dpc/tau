@@ -261,7 +261,11 @@ fn run_live_trace(
 }
 
 /// Proves two attached public UIs share ID-keyed semantic transcripts while
-/// keeping drafts, selection, themes, redraws, and terminal dimensions local.
+/// keeping drafts, explicit selection, themes, redraws, and dimensions local.
+///
+/// Runtime-agent stats can race each attachment's replay boundary, so this
+/// end-to-end fixture does not own initial-selection cardinality. Fixed-map
+/// renderer tests cover unique, zero, and multiple attach candidates.
 #[test]
 fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -329,7 +333,18 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     )?;
     wait_resume_boundaries(&mut observer, &session_id, &identities, deadline)?;
     observer.wait_for_extension("e2e-fake-provider", deadline)?;
-    first.wait_for("worker completion observed", deadline)?;
+    fence_terminal_after_replay(&mut observer, &first, deadline)?;
+    let first_worker_switch = first.read_generation()?;
+    first.send_line(&format!(":agent switch {}", identities.worker))?;
+    wait_for_worker_frame(
+        &first,
+        first_worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
+    first.send_line(&format!(":agent switch {}", identities.main))?;
+    first.wait_ready_for(identities.main.as_str(), deadline)?;
     let mut second = PtyProcess::spawn(
         fixture.attach_command(session_id.as_str()),
         false,
@@ -338,7 +353,18 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
             fixture.artifact_path("presentation-second.normalized.txt"),
         )),
     )?;
-    second.wait_for("worker completion observed", deadline)?;
+    fence_terminal_after_replay(&mut observer, &second, deadline)?;
+    let second_worker_switch = second.read_generation()?;
+    second.send_line(&format!(":agent switch {}", identities.worker))?;
+    wait_for_worker_frame(
+        &second,
+        second_worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
+    second.send_line(&format!(":agent switch {}", identities.main))?;
+    second.wait_ready_for(identities.main.as_str(), deadline)?;
     let trace_before_presentation = fixture.trace()?;
     let observer_before_presentation = observer.events.len();
 
@@ -671,6 +697,30 @@ fn wait_draft(
         )
     })?;
     Ok(())
+}
+
+/// Retries a live bell until this exact PTY acknowledges one after subscribing.
+///
+/// Per-client catch-up publishes `SessionReplayComplete` before live delivery,
+/// so observing the later bell fences both its socket stream and renderer
+/// queue.
+fn fence_terminal_after_replay(
+    observer: &mut SideObserver,
+    terminal: &PtyProcess,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while Instant::now() < deadline {
+        let baseline = terminal.retained_bell_count()?;
+        observer.ring_terminals()?;
+        let attempt_deadline = deadline.min(Instant::now() + Duration::from_millis(250));
+        if terminal
+            .wait_for_bell_after(baseline, attempt_deadline)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err("terminal never acknowledged a post-replay live bell".into())
 }
 
 /// Temporarily appends and removes one ASCII canary to prove an exact repaint.

@@ -256,6 +256,14 @@ impl SideObserver {
         Ok(())
     }
 
+    /// Broadcasts one terminal bell as a live post-replay ordering fence.
+    pub(super) fn ring_terminals(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.peer.send(&HarnessInputMessage::emit(Event::TermBell(
+            tau_proto::TermBell {},
+        )))?;
+        Ok(())
+    }
+
     /// Queries one authoritative requester-directed roster after replay.
     pub(super) fn roster(
         &mut self,
