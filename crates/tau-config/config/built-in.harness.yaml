@@ -1,7 +1,8 @@
 # Built-in HarnessSettings defaults. Harness-owned roles and prompt fragments
 # are provided as ordinary config so user partial overrides keep built-in fields.
-session_retention_days: 60
-diagnostic_retention_days: 14
+session_retention: null
+agent_retention: null
+diagnostic_retention: 30d
 # Show a one-line Tau onboarding prompt to the initial interactive UI.
 show_introduction_notice: true
 wait_timeout_minimum_minutes: 1

@@ -101,6 +101,12 @@ This atomically replaced manifest owns the canonical creation timestamp;
 journals remain authoritative for membership and fallback-message facts, and
 agent journals remain authoritative for identity and transcript facts. Journal
 recovery never reconstructs a missing or invalid canonical session manifest.
+Retention treats each surviving canonical session's complete durable
+`session.agent_loaded` history as ownership authority for agent journals,
+including agents later unloaded. Exact agent deletion evidence comes only from
+a checkpoint bound to the current journal EOF plus the journal mtime freshness
+fence. Retired agent IDs have permanent sibling tombstones that every durable
+mint and creation path treats as reserved.
 
 Memory-only streams use the same semantic fold as journal-backed streams and
 support same-daemon replay, but create no durable artifact. Agent journals remain

@@ -45,6 +45,74 @@ const BUILT_IN_HARNESS_YAML: &str = include_str!("../config/built-in.harness.yam
 const DEFAULT_CONTEXT_SIZE_ALERT_MESSAGE: &str =
     "Use the `compact` tool after finishing your current task.";
 
+/// One positive retention duration written as an ASCII decimal plus one unit.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RetentionDuration(Duration);
+
+impl RetentionDuration {
+    /// Returns the validated standard-library duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+}
+
+impl FromStr for RetentionDuration {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let Some((&unit, digits)) = value.as_bytes().split_last() else {
+            return Err(retention_duration_error());
+        };
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return Err(retention_duration_error());
+        }
+        let multiplier = match unit {
+            b's' => 1,
+            b'm' => 60,
+            b'h' => 60 * 60,
+            b'd' => 24 * 60 * 60,
+            b'w' => 7 * 24 * 60 * 60,
+            _ => return Err(retention_duration_error()),
+        };
+        let amount = value[..value.len() - 1]
+            .parse::<u64>()
+            .map_err(|_| "retention duration decimal overflows u64".to_owned())?;
+        let seconds = amount
+            .checked_mul(multiplier)
+            .filter(|seconds| *seconds != 0)
+            .ok_or_else(|| {
+                "retention duration must be positive and fit in u64 seconds".to_owned()
+            })?;
+        Ok(Self(Duration::from_secs(seconds)))
+    }
+}
+
+impl Serialize for RetentionDuration {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{}s", self.0.as_secs()))
+    }
+}
+
+impl<'de> Deserialize<'de> for RetentionDuration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}
+
+fn retention_duration_error() -> String {
+    "retention duration must be a positive ASCII decimal followed by exactly one of s, m, h, d, or w"
+        .to_owned()
+}
+
 /// One positive whole-minute activating-input wait timeout.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct WaitTimeoutMinutes(NonZeroU16);
@@ -1033,13 +1101,12 @@ pub struct NotificationDeliveryPolicies {
 /// test or fallback.
 #[derive(Clone, Debug)]
 pub struct HarnessSettings {
-    /// Number of days to keep inactive session state directories.
-    /// Set to `0` to disable session cleanup.
-    pub session_retention_days: u64,
-
-    /// Number of days to keep non-authoritative session diagnostic files.
-    /// Set to `0` to disable diagnostic cleanup.
-    pub diagnostic_retention_days: u64,
+    /// Optional lifetime of inactive session state directories.
+    pub session_retention: Option<RetentionDuration>,
+    /// Optional lifetime of unreferenced durable agent transcripts.
+    pub agent_retention: Option<RetentionDuration>,
+    /// Optional lifetime of non-authoritative session diagnostic files.
+    pub diagnostic_retention: Option<RetentionDuration>,
     /// Whether a newly spawned interactive harness greets its initial UI with
     /// the Tau onboarding notice.
     pub show_introduction_notice: bool,
@@ -1120,10 +1187,15 @@ pub struct HarnessSettings {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HarnessSettingsWire {
-    /// Whole-session directory retention in days.
-    session_retention_days: u64,
-    /// Non-authoritative session diagnostic retention in days.
-    diagnostic_retention_days: u64,
+    /// Optional whole-session directory retention.
+    #[serde(alias = "sessionRetention")]
+    session_retention: Option<RetentionDuration>,
+    /// Optional unreferenced durable-agent retention.
+    #[serde(alias = "agentRetention")]
+    agent_retention: Option<RetentionDuration>,
+    /// Optional non-authoritative session diagnostic retention.
+    #[serde(alias = "diagnosticRetention")]
+    diagnostic_retention: Option<RetentionDuration>,
     /// Whether to show Tau's onboarding notice to the initial UI.
     #[serde(alias = "showIntroductionNotice")]
     show_introduction_notice: bool,
@@ -1249,8 +1321,9 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         )
         .map_err(D::Error::custom)?;
         let mut settings = Self {
-            session_retention_days: wire.session_retention_days,
-            diagnostic_retention_days: wire.diagnostic_retention_days,
+            session_retention: wire.session_retention,
+            agent_retention: wire.agent_retention,
+            diagnostic_retention: wire.diagnostic_retention,
             show_introduction_notice: wire.show_introduction_notice,
             wait_timeout_bounds,
             agent_watch_retry_notification_threshold: AgentWatchRetryNotificationPolicy::from_raw(
@@ -2496,31 +2569,21 @@ impl HarnessSettings {
     }
 
     /// Returns the configured session retention duration.
-    ///
-    /// A value of `0` disables time-based cleanup and returns `None`; otherwise
-    /// the configured day count is converted to a saturating [`Duration`].
     #[must_use]
     pub fn session_retention(&self) -> Option<Duration> {
-        if self.session_retention_days == 0 {
-            return None;
-        }
-        Some(Duration::from_secs(
-            self.session_retention_days.saturating_mul(24 * 60 * 60),
-        ))
+        self.session_retention.map(RetentionDuration::duration)
+    }
+
+    /// Returns the configured unreferenced-agent retention duration.
+    #[must_use]
+    pub fn agent_retention(&self) -> Option<Duration> {
+        self.agent_retention.map(RetentionDuration::duration)
     }
 
     /// Returns the configured non-authoritative diagnostic retention duration.
-    ///
-    /// A value of `0` disables time-based cleanup and returns `None`; otherwise
-    /// the configured day count is converted to a saturating [`Duration`].
     #[must_use]
     pub fn diagnostic_retention(&self) -> Option<Duration> {
-        if self.diagnostic_retention_days == 0 {
-            return None;
-        }
-        Some(Duration::from_secs(
-            self.diagnostic_retention_days.saturating_mul(24 * 60 * 60),
-        ))
+        self.diagnostic_retention.map(RetentionDuration::duration)
     }
 }
 
@@ -4681,6 +4744,16 @@ fn normalize_harness_config_value(
     let serde_json::Value::Object(map) = value else {
         return Ok(());
     };
+    normalize_alias_key(map, "sessionRetention", "session_retention", source, "root")?;
+    normalize_alias_key(map, "agentRetention", "agent_retention", source, "root")?;
+    normalize_alias_key(
+        map,
+        "diagnosticRetention",
+        "diagnostic_retention",
+        source,
+        "root",
+    )?;
+    validate_retention_config_values(map, source)?;
     normalize_alias_key(map, "customPrompts", "custom_prompts", source, "root")?;
     normalize_alias_key(map, "toolPolicy", "tool_policy", source, "root")?;
     normalize_alias_key(
@@ -4836,6 +4909,37 @@ fn normalize_harness_config_value(
                         &format!("{group_path}.roles.{role_name}"),
                     )?;
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_retention_config_values(
+    map: &serde_json::Map<String, serde_json::Value>,
+    source: &str,
+) -> Result<(), SettingsError> {
+    for key in [
+        "session_retention",
+        "agent_retention",
+        "diagnostic_retention",
+    ] {
+        let Some(value) = map.get(key) else {
+            continue;
+        };
+        match value {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(value) => {
+                value.parse::<RetentionDuration>().map_err(|error| {
+                    SettingsError::Config(config::ConfigError::Message(format!(
+                        "{source}: invalid `{key}`: {error}"
+                    )))
+                })?;
+            }
+            _ => {
+                return Err(SettingsError::Config(config::ConfigError::Message(
+                    format!("{source}: invalid `{key}`: expected a duration string or null"),
+                )));
             }
         }
     }
@@ -5168,6 +5272,9 @@ fn canonical_top_level_key(key: &str) -> &str {
         "waitTimeoutMaximumMinutes" => "wait_timeout_maximum_minutes",
         "agentWatchRetryNotificationThreshold" => "agent_watch_retry_notification_threshold",
         "notificationDelivery" => "notification_delivery",
+        "sessionRetention" => "session_retention",
+        "agentRetention" => "agent_retention",
+        "diagnosticRetention" => "diagnostic_retention",
         _ => key,
     }
 }

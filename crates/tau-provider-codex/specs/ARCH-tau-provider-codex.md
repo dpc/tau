@@ -298,7 +298,7 @@ provider prose, close reasons, raw values, headers, endpoints, proxy/account
 data, request/model output, credentials, or raw library errors. This projection
 is bounded and redacted but remains a private, potentially credential-bearing
 artifact. Submission and configurable diagnostic retention reuse the shared
-best-effort writer; cleanup defaults to fourteen days and may be disabled.
+best-effort writer; cleanup defaults to thirty days and may be disabled.
 Omission never changes provider execution.
 That historical compact HTTP failure record is the deliberate exception to the
 prose/header/raw-value exclusions above: it is operator-enabled private forensic

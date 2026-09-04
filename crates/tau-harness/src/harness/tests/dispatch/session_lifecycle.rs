@@ -1,5 +1,7 @@
 //! Tests for session lifecycle behavior.
 
+use fs2::FileExt as _;
+
 use super::*;
 
 /// Runtime construction carries configured input-wait bounds through the
@@ -804,6 +806,70 @@ fn existing_agent_loaded_into_different_session_gets_session_state_notice() {
         "changed-session notice must be one-shot"
     );
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A cleanup-held durable agent lock prevents the existing-agent load path from
+/// mutating or publishing session membership.
+#[test]
+fn locked_existing_agent_cannot_publish_durable_session_membership() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let agent_id = tau_proto::AgentId::parse("cleanup-locked-agent").expect("agent id");
+    h.append_direct_agent_semantic_event(
+        agent_id.as_str(),
+        tau_core::AgentEventParent::InheritHead,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+            parent_agent: None,
+            agent_id: agent_id.clone(),
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    )
+    .expect("seed durable agent");
+    h.session_runtime
+        .agent_store
+        .release_managed_agents(Duration::from_secs(1))
+        .expect("release seeded writer");
+    let cleanup_lock = path_std_fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(td.path().join("agents/cleanup-locked-agent/lock"))
+        .expect("cleanup lock");
+    cleanup_lock
+        .try_lock_exclusive()
+        .expect("hold cleanup lock");
+    let cid = crate::parse_agent_id(agent_id.as_str());
+    let mut agent = Agent::new(
+        cid.clone(),
+        1,
+        h.session_runtime.current_session_id.clone(),
+        tau_proto::PromptOriginator::User,
+        None,
+        None,
+    );
+    agent.identity.role = Some("engineer".to_owned());
+    agent.identity.agent_id = Some(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .insert(cid.clone(), agent);
+
+    h.ensure_loaded_agent_for_agent(&cid, &agent_id);
+
+    assert!(
+        !h.agent_runtime
+            .agent_registry
+            .session_loaded
+            .contains(&agent_id)
+    );
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::SessionAgentLoaded(loaded) if loaded.agent_id == agent_id
+    )));
     h.shutdown().expect("shutdown");
 }
 

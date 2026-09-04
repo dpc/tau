@@ -393,20 +393,22 @@ impl Harness {
                 storage_mode,
             )?;
         }
-        if storage_mode.is_durable() {
-            crate::session_cleanup::spawn_session_cleanup(
-                sessions_dir.clone(),
-                harness_settings.session_retention(),
-                vec![
-                    SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid"),
-                ],
-            );
-        }
-        crate::diagnostic_cleanup::spawn_diagnostic_cleanup(
-            sessions_dir.clone(),
-            harness_settings.diagnostic_retention(),
-            storage_mode.session_persistence(),
-            vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
+        crate::retention_cleanup::spawn_retention_cleanup(
+            crate::retention_cleanup::RetentionCleanup {
+                state_dir: state_dir.clone(),
+                sessions_dir: sessions_dir.clone(),
+                session_persistence: storage_mode.session_persistence(),
+                agent_persistence: if storage_mode.is_memory_only() {
+                    tau_core::AgentPersistenceMode::Ephemeral
+                } else {
+                    tau_core::AgentPersistenceMode::Durable
+                },
+                current_session: SessionId::parse(eager_session_id)
+                    .expect("known-safe SessionId must be valid"),
+                session_retention: harness_settings.session_retention(),
+                agent_retention: harness_settings.agent_retention(),
+                diagnostic_retention: harness_settings.diagnostic_retention(),
+            },
         );
         let mut harness = Self::from_base_parts(HarnessBaseParts {
             runtime_io: RuntimeIoState {
@@ -809,8 +811,10 @@ impl Harness {
         let roles = Self::load_startup_roles(&harness_settings)?;
         let missing_default_role = roles.missing_default_role.clone();
         let session_retention = harness_settings.session_retention();
+        let agent_retention = harness_settings.agent_retention();
         let diagnostic_retention = harness_settings.diagnostic_retention();
         let storage_mode = launch.storage_mode;
+        let retention_state_dir = state_dir.clone();
         tracing::debug!(target: "tau_harness::startup", selected_model = ?roles.selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
         let mut harness = Self::assemble_startup_harness(StartupHarnessParts {
             state_dir,
@@ -841,20 +845,22 @@ impl Harness {
             eager_session_id,
             startup_started_at,
         )?;
-        if launch.storage_mode.is_durable() {
-            crate::session_cleanup::spawn_session_cleanup(
-                sessions_dir.clone(),
+        crate::retention_cleanup::spawn_retention_cleanup(
+            crate::retention_cleanup::RetentionCleanup {
+                state_dir: retention_state_dir,
+                sessions_dir: sessions_dir.clone(),
+                session_persistence: storage_mode.session_persistence(),
+                agent_persistence: if storage_mode.is_memory_only() || memory_only_agent_store {
+                    tau_core::AgentPersistenceMode::Ephemeral
+                } else {
+                    tau_core::AgentPersistenceMode::Durable
+                },
+                current_session: SessionId::parse(eager_session_id)
+                    .expect("known-safe SessionId must be valid"),
                 session_retention,
-                vec![
-                    SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid"),
-                ],
-            );
-        }
-        crate::diagnostic_cleanup::spawn_diagnostic_cleanup(
-            sessions_dir.clone(),
-            diagnostic_retention,
-            storage_mode.session_persistence(),
-            vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
+                agent_retention,
+                diagnostic_retention,
+            },
         );
         Ok((harness, missing_default_role, extension_secrets))
     }

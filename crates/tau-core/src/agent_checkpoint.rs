@@ -4,13 +4,129 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, Event, UnixMicros};
 
 use crate::{AgentMeta, AgentTree, PersistedAgentEvent, PersistedAgentEventSeq};
+
+/// Exact no-repair age evidence for one durable agent transcript.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentRetentionEvidence {
+    /// Semantic timestamp from the journal-bound checkpoint.
+    pub last_touched: SystemTime,
+    /// Filesystem modification timestamp of the exact bound journal.
+    pub journal_modified: SystemTime,
+}
+
+/// Inspect one durable agent without repairing or accepting stale projections.
+pub fn inspect_agent_retention_evidence(
+    agent_dir: &Path,
+    agent_id: &tau_proto::AgentId,
+) -> io::Result<AgentRetentionEvidence> {
+    let mut journal = open_regular_nofollow(&agent_dir.join("events.cbor"))?;
+    let checkpoint = read_checkpoint_nofollow(&agent_dir.join("meta.json"))?;
+    if checkpoint.agent_id != *agent_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "checkpoint agent id does not match directory",
+        ));
+    }
+    let metadata = journal.metadata()?;
+    let (device, inode) = file_identity(&journal)?;
+    if checkpoint.journal.device != device
+        || checkpoint.journal.inode != inode
+        || checkpoint.journal.covered_bytes != metadata.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "checkpoint does not cover the exact current journal",
+        ));
+    }
+    verify_boundary(&mut journal, &checkpoint.journal)?;
+    verify_creation_record(&mut journal, agent_id)?;
+    let micros = checkpoint
+        .summary
+        .last_touched_at_micros
+        .filter(|timestamp| timestamp.get() != 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown agent timestamp"))?;
+    let last_touched = UNIX_EPOCH
+        .checked_add(Duration::from_micros(micros.get()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "agent timestamp overflow"))?;
+    Ok(AgentRetentionEvidence {
+        last_touched,
+        journal_modified: metadata.modified()?,
+    })
+}
+
+fn verify_creation_record(journal: &mut File, agent_id: &tau_proto::AgentId) -> io::Result<()> {
+    journal.seek(SeekFrom::Start(0))?;
+    let length = crate::record_log::read_record_length(journal)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty agent journal"))?;
+    if MAX_RECORD_BYTES < length {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "agent creation record exceeds maximum",
+        ));
+    }
+    let mut bytes = vec![0; length as usize];
+    journal.read_exact(&mut bytes)?;
+    let record: PersistedAgentEvent = ciborium::from_reader(bytes.as_slice())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    match record.event {
+        Event::AgentStarted(started) if record.seq.get() == 0 && started.agent_id == *agent_id => {
+            Ok(())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "journal does not begin with matching agent.started",
+        )),
+    }
+}
+
+fn read_checkpoint_nofollow(path: &Path) -> io::Result<AgentCheckpoint> {
+    let mut file = open_regular_nofollow(path)?;
+    let length = file.metadata()?.len();
+    if MAX_CHECKPOINT_BYTES < length {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "agent checkpoint exceeds maximum",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(length as usize);
+    file.read_to_end(&mut bytes)?;
+    let checkpoint: AgentCheckpoint = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if checkpoint.schema_version != AGENT_CHECKPOINT_SCHEMA_VERSION
+        || !checkpoint_is_structurally_valid(&checkpoint)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported agent checkpoint schema",
+        ));
+    }
+    Ok(checkpoint)
+}
+
+fn open_regular_nofollow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "retention artifact is not a regular file",
+        ));
+    }
+    Ok(file)
+}
 
 /// Current on-disk summary checkpoint schema.
 pub const AGENT_CHECKPOINT_SCHEMA_VERSION: u32 = 2;

@@ -240,7 +240,7 @@ fn resolved_config_retains_one_coherent_settings_snapshot() {
     let config_path = tempdir.path().join("harness.yaml");
     std::fs::write(
         &config_path,
-        "session_retention_days: 37\nextensions:\n  core-shell:\n    enable: false\n",
+        "session_retention: 37d\nextensions:\n  core-shell:\n    enable: false\n",
     )
     .expect("write valid harness config");
     let dirs = tau_config::settings::TauDirs {
@@ -253,7 +253,10 @@ fn resolved_config_retains_one_coherent_settings_snapshot() {
     std::fs::write(&config_path, "extensions: [malformed\n")
         .expect("replace source after acceptance");
 
-    assert_eq!(accepted.harness_settings.session_retention_days, 37);
+    assert_eq!(
+        accepted.harness_settings.session_retention(),
+        Some(std::time::Duration::from_secs(37 * 24 * 60 * 60))
+    );
     assert!(!accepted.extensions.contains_key("core-shell"));
     assert!(
         resolve_config_in_without_environment(&dirs).is_err(),
@@ -877,16 +880,14 @@ fn harness_config_cli_override_rejects_invalid_value_without_user_configuration(
         config_dir: Some(tempdir.path().to_path_buf()),
         state_dir: None,
     };
-    let overrides = [
-        HarnessConfigCliOverride::from_str("session_retention_days=abc").expect("override syntax"),
-    ];
+    let overrides =
+        [HarnessConfigCliOverride::from_str("session_retention=abc").expect("override syntax")];
 
     let err = load_settings_for_cli_overrides_in(&dirs, None, &[], &overrides)
         .expect_err("wrong type fails");
 
     let err = err.to_string();
-    assert!(err.contains("invalid type"));
-    assert!(err.contains("expected u64"));
+    assert!(err.contains("retention duration"));
 }
 
 #[test]

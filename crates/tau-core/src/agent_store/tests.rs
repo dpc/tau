@@ -1,5 +1,7 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
 use std::time::Instant;
 use std::{sync as path_std_sync, time as path_std_time};
 
@@ -256,6 +258,56 @@ fn memory_only_store_never_touches_durable_root() {
     );
     assert!(!seeded_agent_dir.join("lock").exists());
     assert!(!agents_dir.join(agent_id.as_str()).exists());
+}
+
+/// Permanent retired-ID tombstones reserve the namespace in discovery and at
+/// the durable reservation boundary.
+#[test]
+fn retired_agent_id_cannot_be_reserved_again() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("agents");
+    let agent_id = AgentId::parse("retired-agent").expect("agent id");
+    let tombstone = super::retired_agent_tombstone(&agents_dir, &agent_id);
+    fs::create_dir_all(tombstone.parent().expect("retired root")).expect("retired root");
+    fs::write(&tombstone, []).expect("tombstone");
+    let owner = path_std_sync::Arc::new(
+        crate::SemanticPersistenceOwner::new(Default::default()).expect("persistence owner"),
+    );
+    let mut store = AgentStore::open_managed(&agents_dir, owner).expect("managed store");
+
+    assert!(store.agent_id_is_reserved(agent_id.as_str()));
+    assert!(matches!(
+        store.reserve_new_agent(agent_id.as_str()),
+        Err(AgentStoreError::PersistenceConflict { .. })
+    ));
+    assert!(!agents_dir.join(agent_id.as_str()).exists());
+}
+
+/// A dangling tombstone symlink still reserves the stable ID for both durable
+/// and ephemeral creation paths.
+#[cfg(unix)]
+#[test]
+fn dangling_retired_tombstone_symlink_reserves_agent_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("agents");
+    let agent_id = AgentId::parse("dangling-retired").expect("agent id");
+    let tombstone = super::retired_agent_tombstone(&agents_dir, &agent_id);
+    fs::create_dir_all(tombstone.parent().expect("retired root")).expect("retired root");
+    unix_fs::symlink(temp.path().join("missing-target"), &tombstone).expect("dangling tombstone");
+    let owner = path_std_sync::Arc::new(
+        crate::SemanticPersistenceOwner::new(Default::default()).expect("persistence owner"),
+    );
+    let mut store = AgentStore::open_managed(&agents_dir, owner).expect("managed store");
+
+    assert!(store.agent_id_is_reserved(agent_id.as_str()));
+    assert!(matches!(
+        store.reserve_new_agent(agent_id.as_str()),
+        Err(AgentStoreError::PersistenceConflict { .. })
+    ));
+    assert!(matches!(
+        store.mark_agent_ephemeral(agent_id.as_str()),
+        Err(AgentStoreError::PersistenceConflict { .. })
+    ));
 }
 
 /// Prompt previews retain the legacy normalized text for empty, boundary, and

@@ -574,14 +574,12 @@ no-drain/no-join behavior is a structural review invariant: the singleton drops
 the production join handle immediately, exposes no shutdown/drain API, and no
 lifecycle code may wait for it.
 
-Startup diagnostic-retention tests live beside `diagnostic_cleanup`. Use the injected
-clock/removal seam for exact age, scope, symlink, and per-file failure behavior
-across `events.jsonl` and compressed provider captures. Captures live under
+Startup retention tests live beside `retention_cleanup`, `session_cleanup`,
+`agent_cleanup`, and `diagnostic_cleanup`. Use injected clocks and filesystem
+fault seams for exact inclusive age, scope, symlink, lock, detach/recreate,
+tombstone, reference, and per-candidate failure behavior. The production worker
+runs the phases once in that order and never blocks startup. Captures live under
 `debug/provider-requests/<provider-instance>/`.
-Use the returned test join handle only to verify startup gating: durable configured
-cleanup launches and protects the current session, while disabled retention and
-ephemeral sessions do not launch. Production drops that handle and never blocks
-startup on cleanup.
 
 Provider-capture filename grammar tests live in
 `tau-config::provider_debug_capture`, the dependency-neutral contract used by

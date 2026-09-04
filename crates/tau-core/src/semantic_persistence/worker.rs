@@ -1208,6 +1208,17 @@ fn advance_creation(
             .ok_or(CreationError::Collision)?
     };
     let directory = path.parent().ok_or(CreationError::Collision)?;
+    let agent_id = match job.stream() {
+        StreamIdentity::Agent(agent_id) => agent_id,
+        _ => return Err(CreationError::Collision),
+    };
+    let agents_dir = directory.parent().ok_or(CreationError::Collision)?;
+    let tombstone = crate::retired_agent_tombstone(agents_dir, agent_id);
+    match shared.backend.existing_path_kind(&tombstone) {
+        Ok(_) => return Err(CreationError::Collision),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
+    }
     let creation = creations.entry(job.stream().clone()).or_default();
     if !creation.directory_owned {
         match shared.backend.create_owner_directory(directory) {

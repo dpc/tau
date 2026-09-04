@@ -61,5 +61,5 @@ Raw extension stderr is unredacted at the sink boundary. It can contain
 identifiers, queries, filesystem paths, or custom-extension text even when a
 first-party extension intentionally redacts sensitive values from its own
 records. Do not share it without review. It is unrotated within the session and
-follows whole-session retention (60 days by default), rather than the shorter
+follows whole-session retention (disabled by default), rather than the shorter
 diagnostic cleanup period.

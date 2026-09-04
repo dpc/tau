@@ -180,13 +180,27 @@ I/O failures may omit individual lines; uncertain rollback poisons the
 process-wide writer. This non-authoritative diagnostic mirror does not promise
 crash or power-loss durability: termination can lose queued lines or leave a
 missing or torn final line, and restart neither repairs nor salvages that line.
-At durable Tau startup, a detached best-effort cleanup pass removes expired
-`events.jsonl` regular files and compressed `.json.zst` request/response files
-below
-`debug/provider-requests`, according to
-`diagnostic_retention_days` (fourteen days by default). It skips the current
-and locked sessions, does not follow symlinks, and never removes canonical CBOR
-journals, session directories, unrelated JSONL, or other debug files.
+At Tau startup, one detached best-effort retention pass uses a single wall-clock
+snapshot and an inclusive cutoff. It first finalizes committed detached trees,
+then removes expired sessions, derives every durable agent ever loaded by each
+surviving canonical session, removes only exact old unreferenced agent
+transcripts, and finally removes expired `events.jsonl` regular files and
+recognized compressed `.json.zst` provider captures below
+`debug/provider-requests`. Session and agent deletion are nullable and disabled
+by default; diagnostic deletion defaults to thirty days. A canonical session
+with an uncertain journal aborts agent deletion for that pass, and unload does
+not remove historical protection needed for cold accounting restore.
+
+Agent deletion requires an exclusive existing lock, a fresh checkpoint bound to
+the exact journal EOF, a nonzero expired semantic timestamp, and an independently
+expired journal mtime. Before atomic detach it durably publishes a permanent
+content-free retired-ID tombstone. Successful rename commits logical deletion;
+later startups finish recursive removal independent of the current policy.
+Locked, future, stale, corrupt, missing, replaced, symlinked, or otherwise
+uncertain state is retained. Per-file diagnostic cleanup skips the current and
+locked sessions, does not follow symlinks, and never removes canonical CBOR
+journals, whole session directories, unrelated JSONL, stderr logs, or other
+debug files.
 
 `tau_harness::debug_log_timing` separately traces producer
 serialization/admission and worker I/O. Worker records include exact monotonic

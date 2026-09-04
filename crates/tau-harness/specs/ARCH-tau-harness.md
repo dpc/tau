@@ -312,11 +312,14 @@ No harness lifecycle owns, drains, joins, or fsyncs this worker. Authoritative
 CBOR journals use a separate bounded, non-droppable ordered persistence queue
 and worker under
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
-Startup separately runs one best-effort, time-based cleanup of expired session
-`events.jsonl` files and exact compressed provider request/response or
-failed-attempt diagnostic
-captures, defaulting to fourteen days while excluding current or locked
-sessions, symlinks, unrelated diagnostics, and all canonical journals.
+Startup runs one ordered detached retention worker. It finalizes previously
+committed session and agent detaches, removes expired whole sessions, derives
+surviving canonical session references, removes expired unreferenced agents,
+then removes expired `events.jsonl` files and exact compressed provider
+request/response or failed-attempt captures. Session and agent deletion are
+disabled by default; diagnostics default to thirty days. The worker excludes
+current or locked resources, symlinks, unrelated diagnostics, stderr logs, and
+canonical journals from per-file diagnostic deletion.
 
 Opaque Provider debug captures arrive through a dedicated non-event protocol
 message with Provider-supplied session/prompt attribution. The harness accepts

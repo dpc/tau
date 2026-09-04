@@ -31,7 +31,7 @@ Tau follows the XDG directory layout on Linux:
 
 - Config: `~/.config/tau/`
   - `cli.yaml`, `cli.d/*.yaml` — CLI display preferences, key bindings, and prompt completions. See `tau-self-knowledge-cli-ui` for UI-specific behavior.
-  - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, custom prompts, whole-session retention, and `diagnostic_retention_days` (14 by default; `0` disables startup cleanup of expired session `events.jsonl` and provider request/response diagnostics).
+  - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, custom prompts, and nullable `session_retention`, `agent_retention`, and `diagnostic_retention` durations. Session and agent cleanup default to disabled; diagnostics default to `30d`. Values use one positive decimal plus `s`, `m`, `h`, `d`, or `w`; `null` disables one policy.
   - `testing.yaml` — explicit provider-profile allowlist for `tau dev tmux` E2E testing; see `tau-self-knowledge-e2e-testing`.
 - State: `~/.local/state/tau/` or the platform/user state directory.
   - `sessions/<session_id>/` — durable session membership, metadata, logs, and debug captures.
@@ -46,7 +46,7 @@ Tau follows the XDG directory layout on Linux:
     daemon's current active `session_id` (updated after successful `:session new`).
 
 Extension stderr under `sessions/<session_id>/logs/` follows whole-session
-retention (60 days by default). The 14-day diagnostic cleanup applies to
+retention (disabled by default). The default 30-day diagnostic cleanup applies to
 session `events.jsonl` and provider request/response diagnostics, not those
 extension log files.
 

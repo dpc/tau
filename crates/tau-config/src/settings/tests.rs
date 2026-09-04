@@ -995,33 +995,145 @@ fn testing_settings_rejects_unknown_fields() {
     assert!(error.to_string().contains("unknown field"));
 }
 
-/// Ensures `session_retention_days: 0` disables cleanup by returning `None`.
+/// Ensures nullable retention policies are disabled independently by default.
 #[test]
-fn zero_session_retention_disables_cleanup() {
-    let settings = HarnessSettings {
-        session_retention_days: 0,
-        ..HarnessSettings::built_in()
-    };
-
+fn session_and_agent_retention_default_to_disabled() {
+    let settings = HarnessSettings::built_in();
     assert_eq!(settings.session_retention(), None);
+    assert_eq!(settings.agent_retention(), None);
 }
 
-/// Ensures non-authoritative diagnostic cleanup defaults to fourteen days and
+/// Ensures non-authoritative diagnostic cleanup defaults to thirty days and
 /// can be disabled independently from whole-session retention.
 #[test]
 fn diagnostic_retention_has_independent_default_and_disable() {
     let built_in = HarnessSettings::built_in();
-    assert_eq!(built_in.diagnostic_retention_days, 14);
     assert_eq!(
         built_in.diagnostic_retention(),
-        Some(std::time::Duration::from_secs(14 * 24 * 60 * 60))
+        Some(std::time::Duration::from_secs(30 * 24 * 60 * 60))
     );
 
     let disabled = HarnessSettings {
-        diagnostic_retention_days: 0,
+        diagnostic_retention: None,
         ..built_in
     };
     assert_eq!(disabled.diagnostic_retention(), None);
+}
+
+/// Every supported unit maps to its exact checked number of seconds.
+#[test]
+fn retention_duration_accepts_exact_single_unit_grammar() {
+    for (text, seconds) in [
+        ("1s", 1),
+        ("2m", 120),
+        ("3h", 10_800),
+        ("4d", 345_600),
+        ("5w", 3_024_000),
+    ] {
+        let duration: RetentionDuration = text.parse().expect("valid retention duration");
+        assert_eq!(duration.duration(), std::time::Duration::from_secs(seconds));
+    }
+}
+
+/// Ambiguous, zero, signed, fractional, compound, whitespace, and overflowing
+/// retention values fail instead of changing deletion policy.
+#[test]
+fn retention_duration_rejects_every_noncanonical_form() {
+    for text in [
+        "",
+        "0s",
+        "0d",
+        "-1d",
+        "+1d",
+        "1.5d",
+        "1d2h",
+        " 1d",
+        "1d ",
+        "1",
+        "1D",
+        "18446744073709551616s",
+        "18446744073709551615w",
+    ] {
+        assert!(
+            text.parse::<RetentionDuration>().is_err(),
+            "{text:?} must fail"
+        );
+    }
+}
+
+/// Retired day-count keys remain ordinary unknown fields and are never silently
+/// translated into the new duration schema.
+#[test]
+fn retired_retention_keys_fail_as_unknown_fields() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "session_retention_days: 7\n",
+    )
+    .expect("write retired config");
+    let error =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("retired key must fail");
+    let rendered = error.to_string();
+    assert!(rendered.contains("session_retention_days"), "{rendered}");
+    assert!(rendered.contains("unknown field"), "{rendered}");
+}
+
+/// Explicit null disables one leaf while omitted leaves continue inheriting
+/// their built-in defaults.
+#[test]
+fn null_disables_one_retention_policy_and_omission_inherits() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "diagnostic_retention: null\n",
+    )
+    .expect("write null override");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load settings");
+    assert_eq!(settings.session_retention(), None);
+    assert_eq!(settings.agent_retention(), None);
+    assert_eq!(settings.diagnostic_retention(), None);
+}
+
+/// File, drop-in, and CLI validation errors retain both their authored source
+/// and exact retention key.
+#[test]
+fn invalid_retention_values_report_source_and_key_per_layer() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(td.path().join("harness.yaml"), "agent_retention: 0d\n").expect("base config");
+    let base = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("base retention must fail")
+        .to_string();
+    assert!(
+        base.contains("harness.yaml") && base.contains("agent_retention"),
+        "{base}"
+    );
+
+    std::fs::write(td.path().join("harness.yaml"), "").expect("clear base");
+    std::fs::create_dir(td.path().join("harness.d")).expect("drop-in dir");
+    std::fs::write(
+        td.path().join("harness.d/20-retention.yaml"),
+        "diagnostic_retention: 1.5d\n",
+    )
+    .expect("drop-in config");
+    let drop_in = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("drop-in retention must fail")
+        .to_string();
+    assert!(
+        drop_in.contains("20-retention.yaml") && drop_in.contains("diagnostic_retention"),
+        "{drop_in}"
+    );
+
+    std::fs::remove_file(td.path().join("harness.d/20-retention.yaml")).expect("remove drop-in");
+    let overrides =
+        [HarnessConfigCliOverride::from_str("session_retention=-1d").expect("override syntax")];
+    let cli =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
+            .expect_err("CLI retention must fail")
+            .to_string();
+    assert!(
+        cli.contains("CLI override `session_retention`") && cli.contains("session_retention"),
+        "{cli}"
+    );
 }
 
 /// Ensures activating-input waits honor a one-minute default floor and retain
@@ -1789,6 +1901,27 @@ fn harness_rejects_same_layer_nested_alias_conflict() {
     );
 }
 
+/// Every retention camelCase alias conflicts with its canonical spelling in the
+/// same source layer instead of silently selecting one value.
+#[test]
+fn harness_rejects_same_layer_retention_alias_conflicts() {
+    for (legacy, canonical) in [
+        ("sessionRetention", "session_retention"),
+        ("agentRetention", "agent_retention"),
+        ("diagnosticRetention", "diagnostic_retention"),
+    ] {
+        let mut map = serde_json::Map::new();
+        map.insert(legacy.to_owned(), serde_json::json!("1d"));
+        map.insert(canonical.to_owned(), serde_json::json!("2d"));
+        let mut value = serde_json::Value::Object(map);
+        let error =
+            normalize_harness_config_value(&mut value, "test").expect_err("conflict must fail");
+        let rendered = error.to_string();
+        assert!(rendered.contains(legacy), "{rendered}");
+        assert!(rendered.contains(canonical), "{rendered}");
+    }
+}
+
 /// Ensures every maintained file-layer legacy alias normalizes to its canonical
 /// key.
 #[test]
@@ -1847,6 +1980,18 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     });
     let root = value.as_object_mut().expect("root map");
     root.insert(
+        "sessionRetention".to_owned(),
+        serde_json::Value::String("1d".to_owned()),
+    );
+    root.insert(
+        "agentRetention".to_owned(),
+        serde_json::Value::String("2d".to_owned()),
+    );
+    root.insert(
+        "diagnosticRetention".to_owned(),
+        serde_json::Value::String("3d".to_owned()),
+    );
+    root.insert(
         "waitTimeoutMinimumMinutes".to_owned(),
         serde_json::Value::from(5),
     );
@@ -1892,6 +2037,9 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     normalize_harness_config_value(&mut value, "test").expect("normalize");
 
     assert!(value.get("custom_prompts").is_some());
+    assert_eq!(value["session_retention"], serde_json::json!("1d"));
+    assert_eq!(value["agent_retention"], serde_json::json!("2d"));
+    assert_eq!(value["diagnostic_retention"], serde_json::json!("3d"));
     assert_eq!(value["wait_timeout_minimum_minutes"], serde_json::json!(5));
     assert_eq!(
         value["wait_timeout_maximum_minutes"],
@@ -1950,6 +2098,9 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
 fn harness_cli_alias_table_normalizes_all_legacy_keys() {
     let cases = [
         ("customPrompts", "custom_prompts"),
+        ("sessionRetention", "session_retention"),
+        ("agentRetention", "agent_retention"),
+        ("diagnosticRetention", "diagnostic_retention"),
         ("toolPolicy", "tool_policy"),
         ("waitTimeoutMinimumMinutes", "wait_timeout_minimum_minutes"),
         ("waitTimeoutMaximumMinutes", "wait_timeout_maximum_minutes"),
@@ -2295,13 +2446,12 @@ fn harness_settings_user_override_wins_over_built_in() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-                session_retention_days: 7,
+                session_retention: "7d",
             }"#,
     )
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.session_retention_days, 7);
     assert_eq!(
         s.session_retention(),
         Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
@@ -2403,8 +2553,8 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            session_retention_days: 7,
-            diagnostic_retention_days: 9,
+            session_retention: "7d",
+            diagnostic_retention: "9d",
             extensions: {
                 "core-shell": { config: { working_directory: "/from-file" } },
                 "std-websearch": { enable: true },
@@ -2414,12 +2564,18 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     .expect("write");
 
     let file_settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load file layer");
-    assert_eq!(file_settings.session_retention_days, 7);
-    assert_eq!(file_settings.diagnostic_retention_days, 9);
+    assert_eq!(
+        file_settings.session_retention(),
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    );
+    assert_eq!(
+        file_settings.diagnostic_retention(),
+        Some(std::time::Duration::from_secs(9 * 24 * 60 * 60))
+    );
 
     let overrides = [
-        HarnessConfigCliOverride::from_str("session_retention_days=3").expect("override"),
-        HarnessConfigCliOverride::from_str("diagnostic_retention_days=0")
+        HarnessConfigCliOverride::from_str("session_retention=3d").expect("override"),
+        HarnessConfigCliOverride::from_str("diagnostic_retention=null")
             .expect("diagnostic override"),
         HarnessConfigCliOverride::from_str(
             "extensions.core-shell.config.working_directory=/from-cli",
@@ -2436,8 +2592,10 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     let s = load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
         .expect("load");
 
-    assert_eq!(s.session_retention_days, 3);
-    assert_eq!(s.diagnostic_retention_days, 0);
+    assert_eq!(
+        s.session_retention(),
+        Some(std::time::Duration::from_secs(3 * 24 * 60 * 60))
+    );
     assert_eq!(s.diagnostic_retention(), None);
     let core_shell = &s.extensions["core-shell"];
     assert_eq!(
@@ -3668,7 +3826,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            session_retention_days: 7,
+            session_retention: "7d",
             extensions: {
                 mything: { command: ["mything"] },
             },
@@ -3691,7 +3849,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     std::fs::write(
         dir.join("harness.d").join("01-extra.yaml"),
         r#"{
-            session_retention_days: 14,
+            session_retention: "14d",
             extensions: {
                 mything: { suffix: ["--flag"] },
             },
@@ -3712,7 +3870,10 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     .expect("write drop-in");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.session_retention_days, 14);
+    assert_eq!(
+        s.session_retention(),
+        Some(std::time::Duration::from_secs(14 * 24 * 60 * 60))
+    );
     assert_eq!(
         s.extensions["mything"].command.as_ref().expect("command"),
         &vec!["mything".to_owned()]
@@ -4703,7 +4864,7 @@ fn selected_profile_rejects_unsupported_settings_and_extensions() {
         r#"
 profiles:
   invalid:
-    session_retention_days: 1
+    session_retention: 1d
 "#,
     )
     .expect("write profiles");

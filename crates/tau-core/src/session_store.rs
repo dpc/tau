@@ -1712,7 +1712,7 @@ pub fn list_session_metas(sessions_dir: &Path) -> io::Result<Vec<(SessionId, Ses
     for entry in fs::read_dir(sessions_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_dir() {
+        if !entry.file_type()?.is_dir() {
             continue;
         }
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -1740,6 +1740,63 @@ pub fn list_session_metas(sessions_dir: &Path) -> io::Result<Vec<(SessionId, Ses
         out.push((session_id, meta));
     }
     Ok(out)
+}
+
+/// Strictly reads every durable agent ever loaded by one canonical session.
+pub fn read_session_ever_loaded_agents(
+    session_dir: &Path,
+    session_id: &SessionId,
+) -> Result<std::collections::HashSet<tau_proto::AgentId>, SessionStoreError> {
+    let path = session_dir.join("events.cbor");
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|source| SessionStoreError::Open {
+            path: path.clone(),
+            source,
+        })?;
+    let metadata = file.metadata().map_err(|source| SessionStoreError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Err(SessionStoreError::Open {
+            path: path.clone(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session journal is not a real regular file",
+            ),
+        });
+    }
+    let events = load_session_events_from_file(&path, &mut file)?;
+    if !path_still_names_file(&path, &metadata).map_err(|source| SessionStoreError::Read {
+        path: path.clone(),
+        source,
+    })? {
+        return Err(SessionStoreError::Read {
+            path,
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session journal was replaced during retention inspection",
+            ),
+        });
+    }
+    let mut loaded = HashSet::new();
+    for record in events {
+        validate_session_event(session_id.as_str(), &record.event)?;
+        if let Event::SessionAgentLoaded(event) = record.event
+            && !event.ephemeral
+        {
+            loaded.insert(event.agent_id);
+        }
+    }
+    Ok(loaded)
 }
 
 /// Best-effort check whether a session lock is currently held.
@@ -1902,8 +1959,21 @@ fn load_session_events(path: &Path) -> Result<Vec<PersistedSessionEvent>, Sessio
     if !path.exists() {
         return Ok(Vec::new());
     }
+    let mut file = File::open(path).map_err(|source| SessionStoreError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    load_session_events_from_file(path, &mut file)
+}
+
+fn load_session_events_from_file(
+    path: &Path,
+    file: &mut File,
+) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
     let mut events = Vec::new();
-    read_cbor_records(path, |record: PersistedSessionEvent| events.push(record))?;
+    read_cbor_records_from_file(file, path, |record: PersistedSessionEvent| {
+        events.push(record);
+    })?;
     for (idx, record) in events.iter().enumerate() {
         let expected = PersistedSessionEventSeq::new(idx as u64);
         if record.seq != expected {
@@ -1967,18 +2037,18 @@ fn managed_session_projection_charge(
         .saturating_add(std::mem::size_of::<ManagedSessionProjection>())
 }
 
-fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), SessionStoreError>
+fn read_cbor_records_from_file<T, F>(
+    file: &mut File,
+    path: &Path,
+    mut handle: F,
+) -> Result<(), SessionStoreError>
 where
     T: for<'de> Deserialize<'de>,
     F: FnMut(T),
 {
-    let mut file = File::open(path).map_err(|source| SessionStoreError::Open {
-        path: path.to_path_buf(),
-        source,
-    })?;
     loop {
         let Some(record_length) =
-            crate::record_log::read_record_length(&mut file).map_err(|source| {
+            crate::record_log::read_record_length(file).map_err(|source| {
                 SessionStoreError::Read {
                     path: path.to_path_buf(),
                     source,
@@ -2020,5 +2090,21 @@ where
             });
         }
         handle(record);
+    }
+}
+
+fn path_still_names_file(path: &Path, opened: &fs::Metadata) -> io::Result<bool> {
+    let current = fs::symlink_metadata(path)?;
+    if current.file_type().is_symlink() || !current.is_file() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(opened.dev() == current.dev() && opened.ino() == current.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(opened.len() == current.len() && opened.modified()? == current.modified()?)
     }
 }

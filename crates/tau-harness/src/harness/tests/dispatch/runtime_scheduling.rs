@@ -1361,8 +1361,9 @@ fn cold_restart_restores_checkpointed_start_without_coordinator() {
     assert_eq!(coordinator.retained_bytes, 0);
 }
 
-/// A physical post-accept creation failure terminalizes accepted requests
-/// without exposing the failed identity while later FIFO work continues.
+/// A physical path collision after request acceptance but before durable
+/// reservation terminalizes without publishing agent identity, while later FIFO
+/// work continues.
 #[test]
 fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
     let td = TempDir::new().expect("tempdir");
@@ -1429,7 +1430,7 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         event,
         Event::AgentPromptSubmitted(prompt) if prompt.agent_id.as_str() == first_agent_id
     )));
-    assert!(events.iter().any(|event| matches!(
+    assert!(events.iter().all(|event| !matches!(
         event,
         Event::AgentStarted(started) if started.agent_id.as_str() == first_agent_id
     )));

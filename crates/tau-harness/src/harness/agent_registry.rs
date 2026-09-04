@@ -2330,14 +2330,14 @@ impl Harness {
             .session_runtime
             .agent_store
             .agent_has_committed_identity(agent_id);
+        let persistence = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .map(|agent| agent.identity.persistence)
+            .unwrap_or_default();
         if !has_creation {
-            let persistence = self
-                .agent_runtime
-                .agent_registry
-                .agents
-                .get(cid)
-                .map(|agent| agent.identity.persistence)
-                .unwrap_or_default();
             let started =
                 Event::AgentStarted(tau_proto::AgentStarted {
                     creator: Some(tau_proto::AgentCreator::default()),
@@ -2388,6 +2388,18 @@ impl Harness {
                 }),
             );
         } else {
+            if persistence.is_durable()
+                && !self.session_runtime.storage_mode.is_memory_only()
+                && let Err(error) = self
+                    .session_runtime
+                    .agent_store
+                    .prepare_existing_agent(agent_id.as_str())
+            {
+                self.emit_harness_failure(&format!(
+                    "failed to acquire durable agent `{agent_id}` before session membership: {error}"
+                ));
+                return;
+            }
             // Existing identities can become loaded after cold rehydration. Fold
             // their already-validated immutable creation fact now, rather than
             // losing creator cost propagation until another daemon resume.
@@ -2417,13 +2429,6 @@ impl Harness {
             .agents
             .get(cid)
             .map(|conv| self.role_name_for_agent(conv));
-        let persistence = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(cid)
-            .map(|conv| conv.identity.persistence)
-            .unwrap_or_default();
         let prompt_index_initialized = self
             .agent_runtime
             .agent_registry

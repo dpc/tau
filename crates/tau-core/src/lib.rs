@@ -26,13 +26,13 @@ pub use action_registry::{
 };
 pub use agent_checkpoint::{
     AgentCheckpoint, AgentJournalCheckpoint, AgentListEntry, AgentListIdentity, AgentListStatus,
-    AgentSummary, list_agent_entries,
+    AgentRetentionEvidence, AgentSummary, inspect_agent_retention_evidence, list_agent_entries,
 };
 pub use agent_store::{
     AgentAppendOutcome, AgentCreationFacts, AgentCreationFactsBudget,
     AgentCreationFactsBudgetExceeded, AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot,
     AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked, list_agent_metas,
-    read_agent_creation_record,
+    read_agent_creation_record, retired_agent_tombstone, retired_agents_dir,
 };
 pub use bus::{DeliveryOutcomeCount, EventBus};
 pub use compaction_chain_view::{
@@ -65,7 +65,8 @@ pub use session::{
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,
-    SessionPersistenceMode, SessionStore, SessionStoreError, list_session_metas, session_is_locked,
+    SessionPersistenceMode, SessionStore, SessionStoreError, list_session_metas,
+    read_session_ever_loaded_agents, session_is_locked,
 };
 pub use tool_registry::{
     RegisterToolReport, ToolArgumentRepair, ToolArgumentValidationError, ToolProvider,

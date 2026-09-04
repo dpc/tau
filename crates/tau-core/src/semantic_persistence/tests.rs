@@ -790,8 +790,8 @@ fn display_name_event(agent_id: &tau_proto::AgentId, display_name: &str) -> tau_
     })
 }
 
-/// A new-agent disk collision diagnoses the accepted generation without
-/// truncating or deleting pre-existing canonical bytes.
+/// A new-agent reservation rejects an existing live path before any accepted
+/// creation work can truncate or delete canonical bytes.
 #[test]
 fn new_agent_collision_preserves_existing_bytes() {
     let root = tempfile::tempdir().expect("temporary root");
@@ -802,24 +802,20 @@ fn new_agent_collision_preserves_existing_bytes() {
     std::fs::write(&journal, old_bytes).expect("seed canonical bytes");
     let owner =
         Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
-    let mut store = AgentStore::open_managed(&agents, owner.clone()).expect("store");
+    let mut store = AgentStore::open_managed(&agents, owner).expect("store");
     let agent_id = tau_proto::AgentId::parse("collision-agent").expect("agent id");
-    store
+    let error = store
         .reserve_new_agent(agent_id.as_str())
-        .expect("in-memory reservation ignores disk");
-    store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            crate::AgentEventParent::InheritHead,
-            started_event(&agent_id),
-            tau_proto::UnixMicros::new(7),
-        )
-        .expect("creation fact accepted before asynchronous collision");
-    assert!(
-        owner.wait_for_failure_for_test(PersistenceFailureKind::Collision, Duration::from_secs(2),)
+        .expect_err("live disk path reserves the id");
+    assert!(matches!(
+        error,
+        crate::AgentStoreError::PersistenceConflict { .. }
+    ));
+    assert_eq!(
+        std::fs::read(journal).expect("old journal"),
+        old_bytes,
+        "reservation rejection must preserve existing canonical bytes"
     );
-    assert_eq!(std::fs::read(journal).expect("old journal"), old_bytes);
 }
 
 /// Every fallible new-agent creation phase resumes its own artifacts without

@@ -103,11 +103,15 @@ When adding or renaming a harness config field, update all alias handling paths
 needed for direct patch parsing) and add regression coverage for both file and
 CLI override forms.
 
-`session_retention_days` controls whole inactive session-directory cleanup.
-`diagnostic_retention_days` independently controls best-effort startup
-cleanup of non-authoritative session JSONL and provider request/response
-captures and defaults to fourteen days; zero disables only that shared
-diagnostic cleanup.
+`session_retention`, `agent_retention`, and `diagnostic_retention` are
+independent nullable startup-cleanup policies. Values use a positive ASCII
+decimal followed by exactly one `s`, `m`, `h`, `d`, or `w`; `null` disables one
+policy and omission inherits a lower layer. Session and agent cleanup default
+to disabled, while diagnostics default to `30d`. The retired
+`session_retention_days` and `diagnostic_retention_days` fail as ordinary
+unknown keys rather than translating their old zero/day semantics; migration
+documentation names `session_retention` and `diagnostic_retention` as their
+replacements.
 
 `wait_timeout_minimum_minutes` and `wait_timeout_maximum_minutes` bound the
 effective activating-input `wait({"timeout_minutes": N})` deadline. They are
@@ -147,7 +151,7 @@ transport/direction class, and exact compressed `.json.zst` extension.
 The recognized current classes include
 `responses-attempt-failure.json.zst`. It uses the same eligibility, path
 validation, compression, best-effort failure behavior, and
-`diagnostic_retention_days` cleanup as request/response captures; it has no
+`diagnostic_retention` cleanup as request/response captures; it has no
 separate retention knob.
 
 `tool_policy.rules` is a keyed layered map. Rule names may contain dots (for

@@ -21,6 +21,7 @@ pub mod runtime_dir;
 pub const EXTENSION_DATA_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 mod agent;
+mod agent_cleanup;
 mod agent_cost_ledger;
 mod agent_creator_topology;
 mod client_writer_lifecycle;
@@ -49,6 +50,7 @@ mod pending_agent_discovery;
 mod prompt;
 mod provider_cache_residency;
 mod provider_capture_writer;
+mod retention_cleanup;
 mod secrets;
 mod self_info_tool;
 mod session_cleanup;

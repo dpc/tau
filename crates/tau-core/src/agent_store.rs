@@ -13,6 +13,7 @@ mod snapshot;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -825,6 +826,15 @@ impl AgentStore {
         agent_id: &str,
     ) -> Result<PersistenceLease, AgentStoreError> {
         let agent_id = parse_agent_id_for_store(agent_id)?;
+        let live_path = self.agent_dir(agent_id.as_str());
+        if path_reserves_id(&live_path)
+            || path_reserves_id(&retired_agent_tombstone(&self.agents_dir, &agent_id))
+        {
+            return Err(AgentStoreError::PersistenceConflict {
+                agent_id,
+                path: live_path,
+            });
+        }
         let owner = self
             .persistence_owner
             .as_ref()
@@ -832,10 +842,7 @@ impl AgentStore {
                 PersistenceAdmissionError::Unavailable,
             ))?;
         let lease = owner
-            .reserve_new_agent(
-                agent_id.clone(),
-                self.agent_dir(agent_id.as_str()).join("events.cbor"),
-            )
+            .reserve_new_agent(agent_id.clone(), live_path.join("events.cbor"))
             .map_err(AgentStoreError::Persistence)?;
         self.persistence_leases
             .insert(agent_id.clone(), lease.clone());
@@ -989,10 +996,8 @@ impl AgentStore {
         if self.default_persistence.is_ephemeral() {
             return false;
         }
-        if self.persistence_owner.is_some() {
-            return false;
-        }
-        self.agent_dir(agent_id).exists()
+        path_reserves_id(&self.agent_dir(agent_id))
+            || path_reserves_id(&retired_agent_tombstone(&self.agents_dir, &aid))
     }
 
     /// Returns whether an agent has a loaded or journal-backed semantic
@@ -1050,8 +1055,8 @@ impl AgentStore {
         let aid = parse_agent_id_for_store(agent_id)?;
         let agent_dir = self.agent_dir(agent_id);
         if self.default_persistence.is_durable()
-            && self.persistence_owner.is_none()
-            && agent_dir.exists()
+            && (path_reserves_id(&agent_dir)
+                || path_reserves_id(&retired_agent_tombstone(&self.agents_dir, &aid)))
         {
             return Err(AgentStoreError::PersistenceConflict {
                 agent_id: aid,
@@ -2140,6 +2145,33 @@ impl AgentStore {
         } else {
             self.legacy_io_mut().dirty_checkpoints.remove(agent_id);
         }
+    }
+}
+
+/// Returns the permanent retired-ID tombstone path for one agent.
+#[must_use]
+pub fn retired_agent_tombstone(agents_dir: &Path, agent_id: &AgentId) -> PathBuf {
+    retired_agents_dir(agents_dir).join(agent_id.as_str())
+}
+
+/// Returns the private directory that permanently reserves retired agent IDs.
+#[must_use]
+pub fn retired_agents_dir(agents_dir: &Path) -> PathBuf {
+    let mut name = OsString::from(".");
+    name.push(
+        agents_dir
+            .file_name()
+            .unwrap_or_else(|| OsStr::new("agents")),
+    );
+    name.push(".retired");
+    agents_dir.with_file_name(name)
+}
+
+fn path_reserves_id(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
     }
 }
 

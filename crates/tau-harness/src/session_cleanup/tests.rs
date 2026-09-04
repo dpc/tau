@@ -1,4 +1,6 @@
 use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
 use std::time::Duration;
 
 use fs2::FileExt as _;
@@ -24,6 +26,7 @@ fn write_session_meta(root: &std::path::Path, session_id: &str, last_touched: u6
         .expect("meta json"),
     )
     .expect("write meta");
+    std::fs::write(dir.join("lock"), []).expect("write lock");
 }
 
 /// Ensures cleanup does not remove the active session even when its
@@ -239,4 +242,80 @@ fn cleanup_preserves_sessions_with_invalid_manifests() {
 
     assert!(missing.exists());
     assert!(malformed.exists());
+}
+
+/// Session discovery never follows a namespace symlink or creates a lock
+/// through it while deciding retention eligibility.
+#[cfg(unix)]
+#[test]
+fn cleanup_ignores_symlinked_session_entry_without_touching_target() {
+    let temp = TempDir::new().expect("temp sessions");
+    let sessions_dir = sessions_dir(&temp);
+    let external = temp.path().join("external");
+    write_session_meta(&external, "target", 0);
+    std::fs::remove_file(external.join("target/lock")).expect("remove seeded target lock");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions root");
+    unix_fs::symlink(external.join("target"), sessions_dir.join("linked"))
+        .expect("session symlink");
+
+    cleanup_old_sessions_with(
+        sessions_dir.clone(),
+        Duration::from_secs(1),
+        Vec::new(),
+        100,
+        |path| std::fs::remove_dir_all(path),
+    );
+
+    assert!(sessions_dir.join("linked").is_symlink());
+    assert!(external.join("target/meta.json").exists());
+    assert!(!external.join("target/lock").exists());
+}
+
+/// A direct-child replacement after enumeration cannot inherit the old
+/// candidate's eligibility or be detached under the old identity.
+#[test]
+fn cleanup_revalidates_session_directory_identity_after_entry_swap() {
+    let temp = TempDir::new().expect("temp sessions");
+    let sessions_dir = sessions_dir(&temp);
+    write_session_meta(&sessions_dir, "swapped", 0);
+    let displaced = temp.path().join("displaced");
+    let mut swapped = false;
+
+    super::cleanup_old_sessions_with_hooks(
+        sessions_dir.clone(),
+        Duration::from_secs(1),
+        Vec::new(),
+        100,
+        |path| std::fs::remove_dir_all(path),
+        |path| {
+            if !swapped {
+                swapped = true;
+                std::fs::rename(path, &displaced).expect("displace enumerated tree");
+                write_session_meta(&sessions_dir, "swapped", 0);
+            }
+        },
+    );
+
+    assert!(sessions_dir.join("swapped/meta.json").exists());
+    assert!(displaced.join("meta.json").exists());
+}
+
+/// A non-regular lock object cannot authorize session deletion.
+#[test]
+fn cleanup_preserves_session_with_nonregular_lock() {
+    let temp = TempDir::new().expect("temp sessions");
+    let sessions_dir = sessions_dir(&temp);
+    write_session_meta(&sessions_dir, "bad-lock", 0);
+    std::fs::remove_file(sessions_dir.join("bad-lock/lock")).expect("remove lock file");
+    std::fs::create_dir(sessions_dir.join("bad-lock/lock")).expect("directory lock artifact");
+
+    cleanup_old_sessions_with(
+        sessions_dir.clone(),
+        Duration::from_secs(1),
+        Vec::new(),
+        100,
+        |path| std::fs::remove_dir_all(path),
+    );
+
+    assert!(sessions_dir.join("bad-lock/meta.json").exists());
 }

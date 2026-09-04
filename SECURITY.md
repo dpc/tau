@@ -201,7 +201,7 @@ hash exactly the decoded bytes delivered and distinguish complete decoded-body
 from partial coverage. Treat these owner-only local artifacts as
 sensitive: provider error bodies can reflect prompt, account, or service-internal
 data even after configured credentials are removed. Configurable diagnostic
-retention defaults to fourteen days; disabling cleanup can retain them
+retention defaults to thirty days; disabling cleanup can retain them
 indefinitely.
 Disabled-by-default cache refreshes resend an exact previously successful
 Provider-visible prefix. The harness keeps that content in process memory and
@@ -488,11 +488,18 @@ can lose queued/OS-cached rows or tear the final line, and restart neither
 repairs nor salvages it. Re-check bounds under held locks, path switching,
 per-line lock reacquisition, overflow recovery, I/O retry, global poison,
 warning coalescing, and nonjoining exit whenever debug-log I/O changes.
-Startup cleanup applies the configured time window only to unlocked session
-`events.jsonl` regular files and exact compressed `.json.zst` provider
-request/response captures. It does not follow symlinks or remove
-canonical agent/session journals, unrelated debug files, or extension-owned
-JSONL.
+Startup retention uses one ordered detached worker and one wall-clock snapshot.
+It finalizes committed detached session and agent trees, removes expired
+unlocked sessions, strictly derives every durable agent ever loaded by each
+surviving canonical session, removes only exact old unreferenced agents after a
+durable permanent ID tombstone, then removes expired session `events.jsonl`
+regular files and exact compressed `.json.zst` provider request/response
+captures. Session and agent deletion are disabled by default; diagnostics
+default to thirty days. Canonical-session journal uncertainty aborts agent
+deletion, and locked, stale, future, corrupt, replaced, or symlinked artifacts
+remain untouched. Focused filesystem, reference, tombstone, and ordering oracles
+live beside `session_cleanup`, `agent_cleanup`, `retention_cleanup`, and
+`diagnostic_cleanup`.
 
 Summary files intentionally omit prompt previews. Legacy preview-bearing
 sidecars are unverified hints and are scrubbed when strict journal migration can
