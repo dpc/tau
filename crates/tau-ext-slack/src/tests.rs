@@ -3,6 +3,7 @@
 //! `SPEC-tau-ext-slack-conversation-routing`.
 
 use std::collections::hash_map as path_std_collections_hash_map;
+use std::os::unix::net as path_std_os_unix_net;
 use std::{io as path_std_io, net as path_std_net};
 
 use tokio::{net as path_tokio_net, sync as path_tokio_sync, time as path_tokio_time};
@@ -49,6 +50,8 @@ impl Extension {
 struct SharedWriter {
     /// Shared byte buffer written by the runner's writer thread.
     bytes: Arc<Mutex<Vec<u8>>>,
+    /// Notification for tests waiting on causally later protocol output.
+    changed: Arc<Condvar>,
 }
 
 impl SharedWriter {
@@ -56,17 +59,49 @@ impl SharedWriter {
     fn bytes(&self) -> Vec<u8> {
         self.bytes.lock().expect("lock shared writer").clone()
     }
+
+    /// Wait until the encoded protocol output contains one test-only marker.
+    fn wait_for_bytes(&self, marker: &[u8], timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut bytes = self.bytes.lock().expect("lock shared writer");
+        while !bytes.windows(marker.len()).any(|window| window == marker) {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("protocol output marker deadline");
+            let (next, result) = self
+                .changed
+                .wait_timeout(bytes, remaining)
+                .expect("wait for protocol output marker");
+            bytes = next;
+            assert!(
+                !result.timed_out(),
+                "protocol output did not contain marker `{}`",
+                String::from_utf8_lossy(marker)
+            );
+        }
+    }
 }
 
 impl Write for SharedWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.bytes.lock().expect("lock shared writer").extend(buf);
+        self.changed.notify_all();
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// Decode every complete protocol frame captured by one shared test writer.
+fn protocol_frames(writer: &SharedWriter) -> Vec<HarnessInputMessage> {
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(writer.bytes()));
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.read_message().expect("read protocol output") {
+        frames.push(frame);
+    }
+    frames
 }
 
 /// One complete fake Slack post recorded atomically for assertions.
@@ -253,6 +288,55 @@ impl ReactionClient for FakeClient {
             signal.send(()).expect("signal reaction completion");
         }
         result
+    }
+}
+
+/// Fake Slack API that directs every Socket Mode reconnect to one loopback
+/// listener while retaining deterministic installation and human identity.
+struct RestartCatchUpClient {
+    /// Loopback Socket Mode URL returned for every worker connection attempt.
+    socket_url: String,
+}
+
+impl SlackClient for RestartCatchUpClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
+        Ok(self.socket_url.clone())
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
+    }
+
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
+        Ok(test_verified_human(user_id, true))
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
+        panic!("restart catch-up fixture must not post messages")
+    }
+}
+
+impl ReactionClient for RestartCatchUpClient {
+    fn react(
+        &self,
+        _cfg: &RuntimeConfig,
+        _action: ReactionActionKind,
+        _channel_id: &str,
+        _message_ts: &str,
+        _emoji: &str,
+    ) -> Result<(), ReactionApiError> {
+        panic!("restart catch-up fixture must not react")
     }
 }
 
@@ -722,6 +806,207 @@ fn run_protocol_messages(
         frames.push(frame);
     }
     frames
+}
+
+/// A restarted worker must leave an eligible envelope un-ACKed until the
+/// canonical current-session catch-up arrives, then ACK the redelivery and
+/// continue serving the same Socket Mode connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restarted_worker_restores_session_admission_from_catch_up() {
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let envelope = serde_json::json!({
+        "type": "events_api",
+        "envelope_id": "env-restart-redelivery",
+        "payload": {
+            "type": "event_callback",
+            "context_team_id": "T123",
+            "event_id": "Ev-restart-redelivery",
+            "event": {
+                "type": "app_mention",
+                "channel": "C123",
+                "channel_type": "channel",
+                "user": "U123",
+                "text": "<@UBOT123> restart redelivery",
+                "ts": "1.0"
+            }
+        }
+    })
+    .to_string();
+    let (pre_session_tx, pre_session_rx) = path_tokio_sync::oneshot::channel();
+    let (acked_tx, acked_rx) = path_tokio_sync::oneshot::channel();
+    let (duplicate_tx, duplicate_rx) = path_tokio_sync::oneshot::channel();
+    let (restored_tx, restored_rx) = path_tokio_sync::oneshot::channel();
+    let server_envelope = envelope.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept first connection");
+        let mut first = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete first websocket handshake");
+        first
+            .send(Message::Text(r#"{"type":"hello"}"#.to_owned().into()))
+            .await
+            .expect("send first hello");
+        first
+            .send(Message::Text(server_envelope.clone().into()))
+            .await
+            .expect("send pre-session envelope");
+        let response = path_tokio_time::timeout(Duration::from_secs(1), first.next())
+            .await
+            .expect("pre-session rejection must reconnect");
+        assert!(
+            !matches!(response, Some(Ok(Message::Text(_)))),
+            "pre-session envelope must remain un-ACKed"
+        );
+        pre_session_tx
+            .send(())
+            .expect("announce pre-session rejection");
+
+        let (stream, _) = listener.accept().await.expect("accept restored connection");
+        let mut restored = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete restored websocket handshake");
+        restored
+            .send(Message::Text(r#"{"type":"hello"}"#.to_owned().into()))
+            .await
+            .expect("send restored hello");
+        restored
+            .send(Message::Text(server_envelope.into()))
+            .await
+            .expect("redeliver eligible envelope");
+        let ack = path_tokio_time::timeout(Duration::from_secs(2), restored.next())
+            .await
+            .expect("restored envelope ACK deadline")
+            .expect("restored worker response")
+            .expect("restored ACK frame");
+        assert!(matches!(ack, Message::Text(_)), "redelivery must be ACKed");
+        acked_tx.send(()).expect("announce restored ACK");
+        duplicate_rx
+            .await
+            .expect("wait for duplicate live session start");
+
+        restored
+            .send(Message::Ping(vec![7].into()))
+            .await
+            .expect("probe restored worker");
+        let pong = path_tokio_time::timeout(Duration::from_secs(1), restored.next())
+            .await
+            .expect("restored worker liveness deadline")
+            .expect("restored worker liveness response")
+            .expect("restored Pong frame");
+        assert!(
+            matches!(pong, Message::Pong(payload) if payload.as_ref() == [7]),
+            "restored worker must remain live after ACK"
+        );
+        restored_tx.send(()).expect("announce restored worker");
+        std::future::pending::<()>().await;
+    });
+
+    let (extension_input, harness_input) =
+        path_std_os_unix_net::UnixStream::pair().expect("protocol input pair");
+    let output = SharedWriter::default();
+    let written = output.clone();
+    let client = Arc::new(RestartCatchUpClient { socket_url });
+    let (result_tx, result_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result =
+            run_with_client(extension_input, output, client).map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
+    input
+        .write_message(&valid_config_message())
+        .expect("write restart config");
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-a",
+            bool_args(true),
+        ))))
+        .expect("start restarted worker");
+    input.flush().expect("flush restarted worker startup");
+    pre_session_rx
+        .await
+        .expect("observe pre-session rejection without ACK");
+
+    let started = Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "session-restored"
+            .parse()
+            .expect("known-safe SessionId must be valid"),
+        reason: tau_proto::SessionStartReason::Resume,
+    });
+    input
+        .write_message(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1_700_000_000_000_000),
+            started.clone(),
+        ))
+        .expect("write canonical session catch-up");
+    input.flush().expect("flush restored session authority");
+    acked_rx
+        .await
+        .expect("redelivery ACKed after session catch-up");
+
+    input
+        .write_message(&HarnessOutputMessage::deliver(started))
+        .expect("write duplicate live session start");
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
+            tool_call(
+                CONVERSATIONS_TOOL_NAME,
+                "agent-a",
+                "duplicate-session-barrier",
+                CborValue::Map(Vec::new()),
+            ),
+        )))
+        .expect("write post-duplicate ordering barrier");
+    input.flush().expect("flush duplicate live session start");
+    let barrier_output = written.clone();
+    tokio::task::spawn_blocking(move || {
+        barrier_output.wait_for_bytes(b"duplicate-session-barrier", Duration::from_secs(1));
+    })
+    .await
+    .expect("join post-duplicate ordering barrier");
+    duplicate_tx
+        .send(())
+        .expect("release post-duplicate liveness probe");
+    restored_rx
+        .await
+        .expect("worker remains live after duplicate session start");
+
+    input
+        .write_message(&HarnessOutputMessage::Disconnect(Default::default()))
+        .expect("write disconnect");
+    input.flush().expect("flush disconnect");
+    drop(input);
+    result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("protocol runner exits after disconnect")
+        .expect("protocol runner succeeds");
+    server.abort();
+
+    let frames = protocol_frames(&written);
+    let subscribe = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::Subscribe(subscribe) => Some(subscribe),
+            _ => None,
+        })
+        .expect("Slack startup subscription");
+    let session_started = tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED);
+    assert_eq!(
+        subscribe.historical_selectors.as_slice(),
+        std::slice::from_ref(&session_started)
+    );
+    assert!(
+        subscribe.live_selectors.contains(&session_started),
+        "live session rollover handling must remain subscribed"
+    );
 }
 
 fn extension() -> (

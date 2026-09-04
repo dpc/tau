@@ -5641,6 +5641,10 @@ impl TauExtension for SlackExtension {
                 tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
                 handle_live_event,
             )
+            .on_raw_restore(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
+                handle_live_event,
+            )
             .on_raw_live(
                 tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
                 handle_live_event,
@@ -5730,8 +5734,11 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
 }
 
 impl Extension {
-    /// Apply one event delivered through the registered production live-event
-    /// path.
+    /// Apply one event delivered through a registered production event path.
+    ///
+    /// Only `session.started` uses both restore and live delivery. Every other
+    /// caller is live-only so historical canonical facts cannot recreate
+    /// process-local Slack authority.
     fn apply_live_event(&self, event: &Event) {
         if let Some((kind, publisher, agent_id, message_id, extension_data)) =
             canonical_ingress_ack_fields(event)

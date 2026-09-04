@@ -9,6 +9,7 @@ create/edit/reaction/delete report submission, report-before-result ordering, re
 without repost, ingress report replay before canonical confirmation,
 post-confirmation duplicate suppression, immediate delete revocation, retained
 admission capacity, new/replayed report serialization against disconnect,
+restart admission before and after canonical `session.started` catch-up,
 shutdown, unload, and fatal writer retirement, retry/cancellation/writer failure,
 strict reaction and mention
 arguments, ownership/ambiguity/deletion/capacity, and native-ID nonexposure.

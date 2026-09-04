@@ -156,8 +156,13 @@ the first authorized post or reaction API attempt.
 Runtime links, selections, registrations, reply/edit routes, posted-message
 ownership, received IDs, and send workers clear on restart. Disconnect, session
 rollover, agent unload, route replacement, and tool loss retire the applicable
-authority. Already-started synchronous HTTP may outlive `run` only through its
-bounded request timeout; retired workers cannot retry or restore local state.
+authority. A restarted extension admits no Socket Mode occurrence until the
+harness supplies session lifecycle authority. After session initialization, a
+restart receives the canonical current `session.started` catch-up snapshot;
+during initialization, the existing live subscription receives the start
+instead. The live subscription also remains in place for later lifecycle changes.
+Already-started synchronous HTTP may outlive `run` only through its bounded
+request timeout; retired workers cannot retry or restore local state.
 
 Strict mode admits allowlisted verified humans. Lax mode additionally admits
 verified humans on static receive routes, but never grants control or dynamic DM

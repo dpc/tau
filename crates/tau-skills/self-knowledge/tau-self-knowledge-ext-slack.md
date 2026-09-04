@@ -119,6 +119,14 @@ Runtime
 links/routes/selections and edit ownership clear on restart. Logs and notices
 omit payloads, ids, websocket URLs, and tokens.
 
+Socket Mode admission starts fail-closed in every extension process. An
+extension restarted after session initialization becomes active only after the
+harness supplies its replay-marked current `session.started` snapshot; an
+extension present during initialization receives the start live instead.
+Catch-up restores only current-session admission. It does not reconstruct
+process-local message, reply, edit, reaction, registration, selection, or
+deduplication authority.
+
 `slack_send` reserves each accepted `ToolCallId` in a non-evicting 1,024-entry
 process/session ledger and moves initial HTTP plus retry waiting off the
 serialized protocol reader. It makes one initial attempt and at most one
