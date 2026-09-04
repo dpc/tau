@@ -2094,10 +2094,11 @@ fn try_build_request(
     let summary_config = (prompt.operation == tau_proto::PromptOperation::StandaloneCompaction)
         .then(|| {
             provider.local_summary_compaction.ok_or_else(|| {
-                LlmError::InvalidCompaction(
-                    "standalone compaction is not enabled for this Chat Completions model"
-                        .to_owned(),
-                )
+                LlmError::InvalidCompaction(format!(
+                    "standalone compaction is not configured for Chat Completions model `{}`; \
+                     configure `local_summary_compaction` for this model",
+                    model.id
+                ))
             })
         })
         .transpose()?;

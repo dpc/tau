@@ -2453,7 +2453,8 @@ fn standalone_compaction_requires_enabled_local_summary_config() {
     };
     assert_eq!(
         error,
-        "standalone compaction is not enabled for this Chat Completions model"
+        "standalone compaction is not configured for Chat Completions model `test-model`; \
+         configure `local_summary_compaction` for this model"
     );
 }
 
@@ -2923,6 +2924,34 @@ fn compact_stream_requires_one_final_stop_terminal() {
         }
         assert!(rejected, "invalid compact terminal shape must reject");
     }
+}
+
+/// An unterminated provider stream must retain the malformed-output diagnostic
+/// rather than being mislabeled as missing local-summary configuration.
+#[test]
+fn compact_stream_missing_stop_is_not_a_configuration_error() {
+    let mut state =
+        StreamState::new_for_attempt(CacheUsageCompat::None, Some(tau_proto::ByteCount::new(64)));
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "unterminated"}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("unterminated semantic output remains provisionally valid");
+
+    let error = match state.validate_compaction() {
+        Err(error) => error,
+        Ok(_) => panic!("unterminated compact response must reject"),
+    };
+    let LlmError::InvalidCompaction(message) = error else {
+        panic!("expected compact-shape rejection, got {error:?}");
+    };
+    assert_eq!(
+        message,
+        "summary compactor did not produce the required stop terminal"
+    );
 }
 
 /// Narrative and reasoning consume separate compact byte budgets, and either
