@@ -83,6 +83,10 @@ are durable typed, isolated notifications. Prompt presentation escapes the title
 as untrusted visible metadata and uses the generic shape
 `<tau_internal>Watched agent <agent-id> status: <state> on <title></tau_internal>` without
 inferring start/update sequencing.
+Watch-status protocol and journal decoding applies this phase/title grammar
+through `SessionAgentWorkStatus`. A malformed live or historical notification
+fails closed with one bounded diagnostic and never reaches a consumer through a
+compatibility representation.
 
 The default `status` tool remains subject to each effective prompt's ordinary
 tool policy. When the harness admits a model-originated substantive tool request

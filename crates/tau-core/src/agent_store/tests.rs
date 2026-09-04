@@ -1241,6 +1241,84 @@ fn strict_replay_rejects_framed_record_with_malformed_agent_message_id() {
     );
 }
 
+/// A complete journal frame with a malformed watched-agent status fails strict
+/// replay and reports the fixed validation diagnostic without retaining a
+/// permissive historical representation.
+#[test]
+fn strict_replay_rejects_framed_record_with_malformed_watch_work_status() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    let journal_path;
+    {
+        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::InheritHead,
+                started_event(&agent_id),
+                UnixMicros::new(41),
+            )
+            .expect("baseline appends");
+        journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
+    }
+    let valid = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([1_u8; 16]),
+        seq: PersistedAgentEventSeq::new(1),
+        source: None,
+        event: Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("message-1").expect("message id"),
+            sender_id: AgentId::parse("watched-agent").expect("sender id"),
+            sender_session_id: None,
+            recipient_id: agent_id.clone(),
+            kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+            watch_provider_status: None,
+            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+                session_id: tau_proto::SessionId::parse("session-1").expect("session id"),
+                subscription_id: "watch-1".to_owned(),
+                status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
+                phase: tau_proto::AgentWorkStatusPhase::Working,
+                title: Some("inspect replay".to_owned()),
+                initial: false,
+            }),
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            message: String::new(),
+        }),
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        recorded_at: UnixMicros::new(42),
+    };
+    let mut malformed = serde_json::to_value(valid).expect("serialize record value");
+    *malformed
+        .pointer_mut("/event/payload/watch_work_status/title")
+        .expect("watch-status title field") = serde_json::Value::Null;
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&malformed, &mut encoded).expect("encode malformed framed record");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&journal_path)
+        .expect("open journal");
+    file.write_all(&(encoded.len() as u64).to_le_bytes())
+        .expect("write frame length");
+    file.write_all(&encoded).expect("write complete frame");
+    drop(file);
+
+    let error =
+        AgentStore::open(temp.path()).expect_err("malformed watch status must fail strict replay");
+
+    assert!(matches!(error, AgentStoreError::Decode { .. }));
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("invalid watch work status: work-status title must be absent"),
+        "replay diagnostic must identify the rejected watch-status shape: {diagnostic}"
+    );
+    assert!(
+        diagnostic.len() < 512,
+        "replay diagnostic must remain bounded: {diagnostic}"
+    );
+}
+
 /// Builds the immutable first event used by durable append tests.
 fn started_event(agent_id: &AgentId) -> Event {
     Event::AgentStarted(tau_proto::AgentStarted {

@@ -2462,6 +2462,10 @@ impl AgentWorkStatusEpoch {
 
 /// Harness-authored current self-reported work-status snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    try_from = "AgentWatchWorkStatusNotificationWire",
+    into = "AgentWatchWorkStatusNotificationWire"
+)]
 pub struct AgentWatchWorkStatusNotification {
     /// Session containing the watch relation.
     pub session_id: SessionId,
@@ -2471,13 +2475,62 @@ pub struct AgentWatchWorkStatusNotification {
     pub status_epoch: AgentWorkStatusEpoch,
     /// Closed self-reported task phase.
     pub phase: AgentWorkStatusPhase,
-    /// Canonical model-authored title: absent for `Unreported`; otherwise
-    /// present, nonempty, already trimmed, one line, free of control
-    /// characters, and at most 160 UTF-8 bytes.
-    /// for `Unreported`.
+    /// Canonical model-authored title: absent for `Unreported`; required for
+    /// `Working`, `Done`, `Blocked`, and `Waiting`; optionally retained for
+    /// `Unknown`. Every present title is nonempty, already trimmed, one line,
+    /// free of control characters, and at most 160 UTF-8 bytes.
     pub title: Option<String>,
     /// Whether this is a non-activating snapshot returned at watch enable.
     pub initial: bool,
+}
+
+/// Wire form that validates the semantic work status before exposing a watch
+/// notification.
+#[derive(Serialize, Deserialize)]
+struct AgentWatchWorkStatusNotificationWire {
+    /// Session containing the watch relation.
+    session_id: SessionId,
+    /// Fresh identity for the directed watch relation.
+    subscription_id: String,
+    /// Runtime-local generation of the watched agent's work report.
+    status_epoch: AgentWorkStatusEpoch,
+    /// Potential closed self-reported task phase.
+    phase: AgentWorkStatusPhase,
+    /// Potential canonical model-authored title.
+    title: Option<String>,
+    /// Whether this is a non-activating snapshot returned at watch enable.
+    initial: bool,
+}
+
+impl From<AgentWatchWorkStatusNotification> for AgentWatchWorkStatusNotificationWire {
+    fn from(notification: AgentWatchWorkStatusNotification) -> Self {
+        Self {
+            session_id: notification.session_id,
+            subscription_id: notification.subscription_id,
+            status_epoch: notification.status_epoch,
+            phase: notification.phase,
+            title: notification.title,
+            initial: notification.initial,
+        }
+    }
+}
+
+impl TryFrom<AgentWatchWorkStatusNotificationWire> for AgentWatchWorkStatusNotification {
+    type Error = String;
+
+    fn try_from(notification: AgentWatchWorkStatusNotificationWire) -> Result<Self, Self::Error> {
+        let work_status =
+            crate::SessionAgentWorkStatus::new(notification.phase, notification.title)
+                .map_err(|error| format!("invalid watch work status: {error}"))?;
+        Ok(Self {
+            session_id: notification.session_id,
+            subscription_id: notification.subscription_id,
+            status_epoch: notification.status_epoch,
+            phase: work_status.phase(),
+            title: work_status.title().map(ToOwned::to_owned),
+            initial: notification.initial,
+        })
+    }
 }
 
 /// Harness-authored notification that an agent crossed a waiting threshold.

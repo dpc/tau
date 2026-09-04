@@ -3377,6 +3377,11 @@ fn semantic_watch_notifications_round_trip_with_closed_phases() {
     };
     let value = serde_json::to_value(&status).expect("serialize work status");
     assert_eq!(value["phase"], "working");
+    assert_eq!(
+        serde_json::from_value::<AgentWatchWorkStatusNotification>(value.clone())
+            .expect("decode canonical work status"),
+        status
+    );
     assert!(
         serde_json::from_value::<AgentWatchWorkStatusNotification>(serde_json::json!({
             "session_id": "session-1",
@@ -3399,6 +3404,37 @@ fn semantic_watch_notifications_round_trip_with_closed_phases() {
         serde_json::from_value(serde_json::to_value(&wait).expect("serialize long wait"))
             .expect("decode long wait");
     assert_eq!(decoded, wait);
+}
+
+/// Watch-status decoding rejects malformed phase/title combinations with one
+/// bounded diagnostic instead of exposing invalid live payloads to consumers.
+#[test]
+fn watch_work_status_wire_rejects_malformed_phase_title_with_bounded_diagnostic() {
+    let malformed_title = "x".repeat(1_024);
+    let wire = serde_json::json!({
+        "session_id": "session-1",
+        "subscription_id": "watch-1",
+        "status_epoch": 4,
+        "phase": "unreported",
+        "title": malformed_title,
+        "initial": false,
+    });
+
+    let error = serde_json::from_value::<AgentWatchWorkStatusNotification>(wire)
+        .expect_err("malformed live work-status notification must fail decoding");
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("invalid watch work status: work-status title must be absent"),
+        "diagnostic must identify the rejected watch-status shape: {diagnostic}"
+    );
+    assert!(
+        !diagnostic.contains(&malformed_title),
+        "diagnostic must not echo unbounded malformed metadata"
+    );
+    assert!(
+        diagnostic.len() < 256,
+        "diagnostic must remain bounded: {diagnostic}"
+    );
 }
 
 /// Ensures semantic generation wrappers retain their previous scalar CBOR

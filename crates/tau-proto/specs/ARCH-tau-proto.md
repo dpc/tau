@@ -5,6 +5,10 @@ Both accept 1 through 128 bytes containing only ASCII letters, digits, `_`, and
 `-`. Construction and deserialization validate that grammar; invalid protocol
 or historical journal values fail closed rather than receiving a compatibility
 or sanitization path.
+`AgentWatchWorkStatusNotification` similarly validates its phase/title pair
+through `SessionAgentWorkStatus` during protocol and journal decoding. Invalid
+watch-status payloads fail closed with a fixed bounded diagnostic and no
+compatibility representation; valid wire payloads retain their existing shape.
 
 The protocol now separates transient `message.*_reported` inputs from
 harness-authored canonical `message.*` facts, carries declared
