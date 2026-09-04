@@ -16,6 +16,38 @@ authorizes it to receive a secret. See `SECURITY.md` and
 
 ## Declared startup secrets
 
+### Why the value, declaration, and config reference all appear
+
+These three parts have different jobs:
+
+`<state_dir>/secrets/foo_api_key.yaml` holds the actual value:
+
+```text
+the-api-key-value
+```
+
+`harness.yaml` declares who receives it and how that extension uses its name:
+
+```yaml
+extensions:
+  example:
+    secrets:
+      foo_api_key: {}
+    config:
+      foo_api_key_secret: foo_api_key
+```
+
+- The backing file (or `TAU_SECRET_FOO_API_KEY`) owns the value.
+- `extensions.example.secrets.foo_api_key` authorizes Tau to deliver that named
+  value to `example` in `Configure.secrets` during its startup handshake.
+- `config.foo_api_key_secret` is defined by `example`; it tells that extension
+  which delivered name it should use.
+
+Config references do not grant delivery, declarations do not prescribe how an
+extension uses a secret, and undeclared names are not delivered. This apparent
+redundancy prevents Tau from delivering every available secret to every
+extension.
+
 An extension can declare named startup secrets in `harness.yaml`:
 
 ```yaml

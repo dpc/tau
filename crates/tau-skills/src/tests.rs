@@ -915,6 +915,33 @@ fn zulip_self_knowledge_retains_activity_summary_contract_tokens() {
     }
 }
 
+/// Ensures the secrets skill keeps the practical distinction between a source
+/// value, harness delivery authority, and extension-local secret selection.
+#[test]
+fn secrets_self_knowledge_retains_three_layer_delivery_contract() {
+    let source = BUILT_IN_SKILL_SOURCES
+        .iter()
+        .find(|source| source.diagnostic_path == "tau-self-knowledge-secrets.md")
+        .expect("embedded secrets self-knowledge");
+    for token in [
+        "<state_dir>/secrets/foo_api_key.yaml",
+        "foo_api_key_secret: foo_api_key",
+        "`Configure.secrets`",
+        "owns the value",
+        "authorizes Tau to deliver",
+        "is defined by",
+        "Config references do not grant delivery",
+        "declarations do not prescribe",
+        "undeclared names are not delivered",
+        "prevents Tau from delivering every available secret",
+    ] {
+        assert!(
+            source.content.contains(token),
+            "secrets self-knowledge lost `{token}`"
+        );
+    }
+}
+
 /// Pins the built-in loader's stable source order and complete name inventory.
 #[test]
 fn built_in_skills_have_expected_name_order_and_set() {
