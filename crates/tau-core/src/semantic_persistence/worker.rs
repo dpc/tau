@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 
-use super::backend::PersistenceBackend;
+use super::backend::{ExistingPathKind, PersistenceBackend};
 use super::identity::{PersistenceGeneration, StreamIdentity};
 #[cfg(test)]
 use super::owner::DerivedWorkPauseState;
@@ -25,7 +25,9 @@ use super::owner::{
     FrameAdmissionToken, PersistenceAdmissionError, PersistenceFailureKind, RetentionCharge,
     Shared, StagedFrame, invalidate_worker, report_failure, report_rollback_failure_and_poison,
 };
-use super::preparation::{PreparationResult, SessionPreparationMode, WorkerCommand};
+use super::preparation::{
+    PreparationResult, SessionPreparationMode, SessionPreparationStatus, WorkerCommand,
+};
 
 #[cfg(not(test))]
 const RETRY_DELAY: Duration = Duration::from_millis(25);
@@ -593,10 +595,11 @@ fn process_command(
         } => {
             let result = prepare_session(shared, streams, &session, &restore, mode)
                 .map(
-                    |(events, restore_events, meta)| PreparationResult::Session {
+                    |(events, restore_events, meta, status)| PreparationResult::Session {
                         events,
                         restore_events,
                         meta,
+                        status,
                     },
                 )
                 .map_err(preparation_error);
@@ -693,7 +696,8 @@ fn prepare_agent(
     let lock = shared.backend.open_existing_file(&directory.join("lock"))?;
     shared.backend.try_lock(&lock)?;
     let mut journal = shared.backend.open_existing_file(&journal_path)?;
-    let events = recover_records::<crate::PersistedAgentEvent>(shared, &journal_path, &journal)?;
+    let events =
+        recover_records::<crate::PersistedAgentEvent>(shared, &journal, TornTailPolicy::Repair)?;
     crate::AgentTree::try_from_events(agent_id.clone(), &events)
         .map_err(|error| io::Error::other(error.to_string()))?;
     let offset = shared.backend.seek_end(&mut journal)?;
@@ -720,6 +724,7 @@ fn prepare_session(
     Vec<crate::PersistedSessionEvent>,
     Vec<crate::PersistedSessionEvent>,
     crate::SessionMeta,
+    super::preparation::SessionPreparationStatus,
 )> {
     let StreamIdentity::Session(session_id) = &session_identity.stream else {
         return Err(io::Error::other("ordinary preparation used wrong stream"));
@@ -731,30 +736,51 @@ fn prepare_session(
         .ok_or_else(|| io::Error::other("session journal has no parent"))?;
     let meta_path = directory.join("meta.json");
     let lock_path = directory.join("lock");
-    let exclusive_created = if matches!(mode, SessionPreparationMode::Create) {
-        shared
-            .backend
-            .create_owner_directory(directory)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!("session directory already exists: {}", directory.display()),
-                    )
-                } else {
-                    error
+    let exclusive_created = if matches!(
+        mode,
+        SessionPreparationMode::Create | SessionPreparationMode::CreateOrResume
+    ) {
+        match shared.backend.create_owner_directory(directory) {
+            Ok(()) => Some(initialize_owned_session(shared, directory, &lock_path)?),
+            Err(error)
+                if matches!(mode, SessionPreparationMode::CreateOrResume)
+                    && error.kind() == io::ErrorKind::AlreadyExists =>
+            {
+                if shared.backend.existing_path_kind(directory)? != ExistingPathKind::Directory {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "existing session path is not a real directory: {}",
+                            directory.display()
+                        ),
+                    ));
                 }
-            })?;
-        Some(initialize_owned_session(shared, directory, &lock_path)?)
+                None
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("session directory already exists: {}", directory.display()),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         None
     };
     let (lock, meta, creating) = match exclusive_created {
         Some(created) => created,
-        None => match shared.backend.open_existing_file(&lock_path) {
+        None => match open_existing_session_artifact(shared, &lock_path, mode) {
             Ok(lock) => {
                 shared.backend.try_lock(&lock)?;
-                let bytes = shared.backend.read_file(&meta_path)?;
+                let bytes = if matches!(mode, SessionPreparationMode::CreateOrResume) {
+                    let meta_file = shared
+                        .backend
+                        .open_existing_regular_file_read_no_follow(&meta_path)?;
+                    shared.backend.read_open_file(&meta_file)?
+                } else {
+                    shared.backend.read_file(&meta_path)?
+                };
                 let meta = serde_json::from_slice::<crate::SessionMeta>(&bytes)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 (lock, meta, false)
@@ -796,21 +822,26 @@ fn prepare_session(
     };
     let mut ordinary = match creating {
         true => shared.backend.create_new_file(&ordinary_path)?,
-        false => shared.backend.open_existing_file(&ordinary_path)?,
+        false => open_existing_session_artifact(shared, &ordinary_path, mode)?,
     };
     let mut restore = match creating {
         true => shared.backend.create_new_file(&restore_path)?,
-        false => shared.backend.open_existing_file(&restore_path)?,
+        false => open_existing_session_artifact(shared, &restore_path, mode)?,
     };
     if creating {
         write_manifest(shared, &meta_path, &meta)?;
     }
+    let torn_tail_policy = if !creating && matches!(mode, SessionPreparationMode::CreateOrResume) {
+        TornTailPolicy::Reject
+    } else {
+        TornTailPolicy::Repair
+    };
     let events =
-        recover_records::<crate::PersistedSessionEvent>(shared, &ordinary_path, &ordinary)?;
+        recover_records::<crate::PersistedSessionEvent>(shared, &ordinary, torn_tail_policy)?;
     crate::SessionMembership::try_from_events(session_id.clone(), &events)
         .map_err(|error| io::Error::other(error.to_string()))?;
     let restore_events =
-        recover_records::<crate::PersistedSessionEvent>(shared, &restore_path, &restore)?;
+        recover_records::<crate::PersistedSessionEvent>(shared, &restore, torn_tail_policy)?;
     validate_restore_records(&restore_events)?;
     let ordinary_offset = shared.backend.seek_end(&mut ordinary)?;
     let restore_offset = shared.backend.seek_end(&mut restore)?;
@@ -826,7 +857,7 @@ fn prepare_session(
     );
     // The ordinary prepared stream owns the exclusive session lock. The restore
     // stream needs no second mutable lock handle because both release together.
-    let restore_lock = shared.backend.open_existing_file(&lock_path)?;
+    let restore_lock = open_existing_session_artifact(shared, &lock_path, mode)?;
     streams.insert(
         restore_identity.stream.clone(),
         PreparedStream {
@@ -837,7 +868,12 @@ fn prepare_session(
             session_meta: None,
         },
     );
-    Ok((events, restore_events, meta))
+    let status = if creating {
+        SessionPreparationStatus::Created
+    } else {
+        SessionPreparationStatus::Resumed
+    };
+    Ok((events, restore_events, meta, status))
 }
 
 /// Initializes canonical lock and manifest authority after claiming a
@@ -852,8 +888,28 @@ fn initialize_owned_session(
         .backend
         .set_permissions(directory, Permissions::from_mode(0o700))?;
     let now = unix_seconds();
-    let lock = shared.backend.create_new_file(lock_path)?;
+    let pending_lock_path = lock_path.with_extension("pending");
+    let lock = shared.backend.create_new_file(&pending_lock_path)?;
     shared.backend.try_lock(&lock)?;
+    if let Err(publication_error) = shared
+        .backend
+        .publish_no_replace(&pending_lock_path, lock_path)
+    {
+        return match shared.backend.remove_file(&pending_lock_path) {
+            Ok(()) => Err(publication_error),
+            Err(cleanup_error) => Err(io::Error::new(
+                publication_error.kind(),
+                format!(
+                    "{publication_error}; also failed to remove unpublished pending lock {}: \
+                     {cleanup_error}",
+                    pending_lock_path.display()
+                ),
+            )),
+        };
+    }
+    // The canonical hard link now owns lock authority. Cleanup failure may leave
+    // an inert alias, but it must not report that committed publication failed.
+    let _ = shared.backend.remove_file(&pending_lock_path);
     Ok((
         lock,
         crate::SessionMeta {
@@ -864,20 +920,39 @@ fn initialize_owned_session(
     ))
 }
 
+/// Policy for an incomplete final length prefix or payload.
+#[derive(Clone, Copy)]
+enum TornTailPolicy {
+    /// Preserve existing recovery semantics by removing the incomplete suffix.
+    Repair,
+    /// Reject the journal without changing any durable byte.
+    Reject,
+}
+
 fn recover_records<T: DeserializeOwned>(
     shared: &Shared,
-    path: &std::path::Path,
     file: &File,
+    torn_tail_policy: TornTailPolicy,
 ) -> io::Result<Vec<T>> {
-    let bytes = shared.backend.read_file(path)?;
+    let bytes = shared.backend.read_open_file(file)?;
     let mut cursor = 0usize;
     let mut records = Vec::new();
     while cursor < bytes.len() {
         let frame_start = cursor;
         if bytes.len() - cursor < 8 {
-            shared.backend.truncate(file, frame_start as u64)?;
-            shared.backend.sync_data(file)?;
-            break;
+            match torn_tail_policy {
+                TornTailPolicy::Repair => {
+                    shared.backend.truncate(file, frame_start as u64)?;
+                    shared.backend.sync_data(file)?;
+                    break;
+                }
+                TornTailPolicy::Reject => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "semantic journal ends with an incomplete frame header",
+                    ));
+                }
+            }
         }
         let length = u64::from_le_bytes(
             bytes[cursor..cursor + 8]
@@ -894,9 +969,19 @@ fn recover_records<T: DeserializeOwned>(
         let length = usize::try_from(length)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame length overflow"))?;
         if bytes.len() - cursor < length {
-            shared.backend.truncate(file, frame_start as u64)?;
-            shared.backend.sync_data(file)?;
-            break;
+            match torn_tail_policy {
+                TornTailPolicy::Repair => {
+                    shared.backend.truncate(file, frame_start as u64)?;
+                    shared.backend.sync_data(file)?;
+                    break;
+                }
+                TornTailPolicy::Reject => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "semantic journal ends with an incomplete frame payload",
+                    ));
+                }
+            }
         }
         let record = ciborium::from_reader(&bytes[cursor..cursor + length])
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -904,6 +989,20 @@ fn recover_records<T: DeserializeOwned>(
         cursor += length;
     }
     Ok(records)
+}
+
+fn open_existing_session_artifact(
+    shared: &Shared,
+    path: &Path,
+    mode: SessionPreparationMode,
+) -> io::Result<File> {
+    if matches!(mode, SessionPreparationMode::CreateOrResume) {
+        shared
+            .backend
+            .open_existing_regular_file_write_no_follow(path)
+    } else {
+        shared.backend.open_existing_file(path)
+    }
 }
 
 fn validate_restore_records(records: &[crate::PersistedSessionEvent]) -> io::Result<()> {

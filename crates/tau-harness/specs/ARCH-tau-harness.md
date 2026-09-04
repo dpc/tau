@@ -79,11 +79,15 @@ without blocking shutdown on final Rust teardown; process-backed extensions
 retain their separate supervised signal-and-reap cleanup. See
 [SPEC-tau-harness-extension-lifecycle](SPEC-tau-harness-extension-lifecycle.md#overall-harness-shutdown).
 
-Pinned foreground startup selects either exclusive exact-ID creation or strict
-existing-state resume. Exclusive creation atomically claims only an absent
+Pinned foreground startup selects exclusive exact-ID creation, strict
+existing-state resume, or explicit create-or-existing service startup. Exclusive
+creation atomically claims only an absent
 session directory and never reuses or repairs any existing directory shape;
 strict resume retains the canonical manifest, journal, and lock validation.
-Both modes install process-level SIGINT and SIGTERM handling
+Create-or-existing uses that same atomic directory claim when absent and the
+same strict validation when present; malformed, partial (including a torn
+journal tail), symlinked, or locked state fails unchanged.
+All modes install process-level SIGINT and SIGTERM handling
 that wakes the central event loop. Coordinated shutdown retires listener
 admission first, then shuts down harness connections and extensions, removes the
 runtime socket and metadata, and returns normally to the supervisor. A second

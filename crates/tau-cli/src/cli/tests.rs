@@ -99,6 +99,28 @@ fn serve_requires_exactly_one_explicit_session_mode() {
         Cli::try_parse_from(["tau", "serve", "--session", "s1", "--create", "--existing",])
             .is_err()
     );
+    assert!(
+        Cli::try_parse_from([
+            "tau",
+            "serve",
+            "--session",
+            "s1",
+            "--create",
+            "--create-or-existing",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "tau",
+            "serve",
+            "--session",
+            "s1",
+            "--existing",
+            "--create-or-existing",
+        ])
+        .is_err()
+    );
     let parsed = Cli::parse_from(["tau", "serve", "--session", "s1", "--existing"]);
     assert!(matches!(
         parsed.command,
@@ -106,6 +128,7 @@ fn serve_requires_exactly_one_explicit_session_mode() {
             session,
             create: false,
             existing: true,
+            create_or_existing: false,
             bootstrap_prompt_file: None,
             bootstrap_id: None,
             mirror_extension_stderr: false,
@@ -118,10 +141,24 @@ fn serve_requires_exactly_one_explicit_session_mode() {
             session,
             create: true,
             existing: false,
+            create_or_existing: false,
             bootstrap_prompt_file: None,
             bootstrap_id: None,
             mirror_extension_stderr: false,
         }) if session.as_str() == "s2"
+    ));
+    let parsed = Cli::parse_from(["tau", "serve", "--session", "s3", "--create-or-existing"]);
+    assert!(matches!(
+        parsed.command,
+        Some(super::Command::Serve {
+            session,
+            create: false,
+            existing: false,
+            create_or_existing: true,
+            bootstrap_prompt_file: None,
+            bootstrap_id: None,
+            mirror_extension_stderr: false,
+        }) if session.as_str() == "s3"
     ));
 }
 

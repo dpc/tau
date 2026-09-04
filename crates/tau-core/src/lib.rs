@@ -51,7 +51,8 @@ pub use semantic_persistence::{
     PersistenceAdmissionError, PersistenceCapacity, PersistenceCapacityLimit,
     PersistenceCapacityPressure, PersistenceFailure, PersistenceFailureKind, PersistenceGeneration,
     PersistenceLease, PersistenceOperationalStatus, PersistenceUsage, PreparedAgentStream,
-    PreparedSessionStreams, SemanticPersistenceOwner, SessionPreparationMode, StreamIdentity,
+    PreparedSessionStreams, SemanticPersistenceOwner, SessionPreparationMode,
+    SessionPreparationStatus, StreamIdentity,
 };
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics,

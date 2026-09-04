@@ -28,6 +28,10 @@ serde_json.workspace = true
 tau-actions.workspace = true
 tau-proto.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rustix-v1 = { workspace = true, features = ["fs"] }
+
 [target.'cfg(windows)'.dependencies]
 winapi-util.workspace = true
 

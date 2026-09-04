@@ -2375,9 +2375,9 @@ fn assert_created_session_server_handles_stock_attach_signal_and_strict_resume(s
     environment.assert_runtime_discovery_empty();
 }
 
-/// The public serve CLI admits one bootstrap generation, remains attachable,
-/// skips the same id before touching a missing source, and creates a new agent
-/// only when the operator supplies a different id.
+/// Managed create-or-existing serve admits one bootstrap generation on first
+/// creation, resumes it without touching a missing source, and creates a new
+/// agent only when the operator supplies a different bootstrap id.
 #[test]
 fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
     fn wait_for_agents(environment: &TestEnvironment, session_id: &str, count: usize) -> String {
@@ -2432,7 +2432,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
             "serve",
             "--session",
             session_id,
-            "--create",
+            "--create-or-existing",
             "--bootstrap-prompt-file",
             &source_arg,
             "--bootstrap-id",
@@ -2483,7 +2483,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
             "serve",
             "--session",
             session_id,
-            "--existing",
+            "--create-or-existing",
             "--bootstrap-prompt-file",
             &source_arg,
             "--bootstrap-id",
@@ -2512,7 +2512,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
             "serve",
             "--session",
             session_id,
-            "--existing",
+            "--create-or-existing",
             "--bootstrap-prompt-file",
             &source_arg,
             "--bootstrap-id",
@@ -2694,6 +2694,13 @@ fn existing_session_server_rejects_invalid_modes_and_strict_state_failures() {
         .expect("reject create over locked session");
     assert!(!output.status.success());
     locked.assert_runtime_discovery_empty();
+    let output = locked
+        .command()
+        .args(["serve", "--session", "locked", "--create-or-existing"])
+        .output()
+        .expect("reject create-or-existing over locked session");
+    assert!(!output.status.success());
+    locked.assert_runtime_discovery_empty();
     for (name, before) in canonical_before {
         assert_eq!(
             std::fs::read(locked_session.join(name)).expect("read locked canonical state"),
@@ -2716,6 +2723,13 @@ fn existing_session_server_rejects_invalid_modes_and_strict_state_failures() {
         .args(["serve", "--session", "malformed", "--existing"])
         .output()
         .expect("run malformed server");
+    assert!(!output.status.success());
+    malformed.assert_runtime_discovery_empty();
+    let output = malformed
+        .command()
+        .args(["serve", "--session", "malformed", "--create-or-existing"])
+        .output()
+        .expect("reject create-or-existing malformed server");
     assert!(!output.status.success());
     malformed.assert_runtime_discovery_empty();
 }
@@ -2802,6 +2816,21 @@ fn assert_create_session_server_preserves_partial_state(
         std::fs::read(&artifact).expect("preserved partial artifact"),
         bytes,
         "{session_id} mutated its existing artifact"
+    );
+    environment.assert_runtime_discovery_empty();
+    let output = environment
+        .command()
+        .args(["serve", "--session", session_id, "--create-or-existing"])
+        .output()
+        .expect("reject create-or-existing partial session");
+    assert!(
+        !output.status.success(),
+        "{session_id} unexpectedly resumed partial state"
+    );
+    assert_eq!(
+        std::fs::read(&artifact).expect("preserved partial artifact"),
+        bytes,
+        "{session_id} mutated partial state while resuming"
     );
     environment.assert_runtime_discovery_empty();
 }

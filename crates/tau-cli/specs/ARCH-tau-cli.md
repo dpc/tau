@@ -1,11 +1,17 @@
 # ARCH-tau-cli: tau-cli architecture
 
-`tau serve --session ID --create|--existing` is the supported foreground owner
-for one fixed session. Exactly one mode is mandatory. `--create` atomically
+`tau serve --session ID --create|--existing|--create-or-existing` is the
+supported foreground owner for one fixed session. Exactly one mode is mandatory.
+`--create` atomically
 requires complete session-directory absence; valid state and every partial,
 malformed, locked, or diagnostic-only directory fail unchanged.
 `--existing` retains strict resume: missing, locked, or malformed state fails
-without creation or repair. Both modes start no UI, keep the ordinary runtime
+without creation or repair. `--create-or-existing` atomically claims a completely
+absent canonical path or strictly resumes valid exact-ID state; malformed,
+partial (including torn journal tails), symlinked, or locked state fails
+unchanged without deletion, repair, truncation, replacement, or overwrite.
+`--create` likewise leaves every rejected pre-existing directory unchanged.
+All modes start no UI, keep the ordinary runtime
 discovery socket and metadata available for `tau session list` and
 `tau attach ID`, remain alive across UI disconnects, pin the selected session,
 and reject every in-process session switch.

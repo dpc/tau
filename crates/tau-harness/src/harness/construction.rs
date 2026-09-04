@@ -377,8 +377,10 @@ impl Harness {
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         let mut store = store;
+        let mut launch = launch;
         if storage_mode.is_durable() {
-            store.prepare_session(eager_session_id, launch.mode.preparation())?;
+            let status = store.prepare_session(eager_session_id, launch.mode.preparation())?;
+            launch.mode = launch.mode.resolve(status);
         } else if launch.mode.is_resume() {
             let _ = store.lock_and_load_existing_session(eager_session_id)?;
         } else {
@@ -474,7 +476,9 @@ impl Harness {
         }
 
         harness.install_internal_tool_handlers(internal_tool_handlers);
-        if launch.mode.is_resume() {
+        let session_start_reason = harness.session_runtime.current_session_start_reason;
+        let resumed = session_start_reason == tau_proto::SessionStartReason::Resume;
+        if resumed {
             harness.rehydrate_agents_from_session();
         } else {
             harness.restore_existing_session_accounting_without_runtime_rehydration();
@@ -518,12 +522,12 @@ impl Harness {
             eager_session_id
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
-            launch.mode.reason(),
+            session_start_reason,
         );
         harness.wait_for_session_init()?;
         harness.activate_replayed_prompt_occurrences();
         harness.ensure_selected_role_available_after_required_skill_validation()?;
-        if launch.mode.is_resume() {
+        if resumed {
             harness.finalize_restored_standalone_costs();
         }
         Ok(harness)
@@ -645,7 +649,9 @@ impl Harness {
         harness.extensions.stderr_mirror = extension_stderr_mirror;
         harness.install_internal_tool_handlers(internal_tool_handlers);
 
-        if launch.mode.is_resume() {
+        let session_start_reason = harness.session_runtime.current_session_start_reason;
+        let resumed = session_start_reason == tau_proto::SessionStartReason::Resume;
+        if resumed {
             harness.rehydrate_agents_from_session();
         } else {
             harness.restore_existing_session_accounting_without_runtime_rehydration();
@@ -684,7 +690,7 @@ impl Harness {
             eager_session_id
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
-            launch.mode.reason(),
+            session_start_reason,
         );
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init started");
         if let Err(error) = harness.wait_for_session_init() {
@@ -697,7 +703,7 @@ impl Harness {
             return Err(error);
         }
         harness.activate_replayed_prompt_occurrences();
-        if launch.mode.is_resume() {
+        if resumed {
             harness.finalize_restored_standalone_costs();
         }
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init complete");
@@ -928,9 +934,10 @@ impl Harness {
     }
     fn assemble_startup_harness(mut parts: StartupHarnessParts) -> Result<Self, HarnessError> {
         if parts.launch.storage_mode.is_durable() {
-            parts
+            let status = parts
                 .store
                 .prepare_session(&parts.eager_session_id, parts.launch.mode.preparation())?;
+            parts.launch.mode = parts.launch.mode.resolve(status);
         } else if parts.launch.mode.is_resume() {
             let _ = parts
                 .store

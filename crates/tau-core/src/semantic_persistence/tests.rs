@@ -4,17 +4,17 @@ use std::fs::{File, Permissions};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::backend::{FilesystemBackend, PersistenceBackend};
+use super::backend::{ExistingPathKind, FilesystemBackend, PersistenceBackend};
 use super::worker::StreamLifecycle;
 use super::{
     DurabilityBarrierOutcome, PersistenceCapacity, PersistenceFailureKind, RetentionCharge,
     SemanticPersistenceOwner, StagedFrame,
 };
-use crate::{AgentStore, SessionPreparationMode, SessionStore};
+use crate::{AgentStore, SessionPreparationMode, SessionPreparationStatus, SessionStore};
 
 /// One-shot exact-prefix write fault over the production filesystem backend.
 struct WriteFaultBackend {
@@ -31,6 +31,7 @@ struct WriteFaultBackend {
     fail_next_sync_data: AtomicBool,
     fail_next_sync_all: AtomicBool,
     fail_next_rename: AtomicBool,
+    lock_publication: LockPublicationFaults,
     fail_next_lock: AtomicBool,
     journal_writes: Mutex<Vec<String>>,
     renames: Mutex<usize>,
@@ -43,6 +44,17 @@ struct WriteFaultBackend {
     create_file_call: AtomicUsize,
     fail_create_file_call: AtomicUsize,
     failed_sync_path: Mutex<Option<String>>,
+}
+
+/// Fault controls for the pending-to-canonical lock publication protocol.
+struct LockPublicationFaults {
+    fail_next_remove_file: AtomicBool,
+    hold_lock_publication: AtomicBool,
+    lock_publication_held: Mutex<bool>,
+    lock_publication_wake: Condvar,
+    hold_before_pending_lock_create: AtomicBool,
+    pending_lock_create_held: Mutex<bool>,
+    pending_lock_create_wake: Condvar,
 }
 
 /// Projection whose selected retirement blocks until the test releases it.
@@ -86,6 +98,15 @@ impl WriteFaultBackend {
             fail_next_sync_data: AtomicBool::new(false),
             fail_next_sync_all: AtomicBool::new(false),
             fail_next_rename: AtomicBool::new(false),
+            lock_publication: LockPublicationFaults {
+                fail_next_remove_file: AtomicBool::new(false),
+                hold_lock_publication: AtomicBool::new(false),
+                lock_publication_held: Mutex::new(false),
+                lock_publication_wake: Condvar::new(),
+                hold_before_pending_lock_create: AtomicBool::new(false),
+                pending_lock_create_held: Mutex::new(false),
+                pending_lock_create_wake: Condvar::new(),
+            },
             fail_next_lock: AtomicBool::new(false),
             journal_writes: Mutex::new(Vec::new()),
             renames: Mutex::new(0),
@@ -112,6 +133,48 @@ impl WriteFaultBackend {
             .wait_timeout_while(renames, Duration::from_secs(2), |count| *count <= previous)
             .expect("rename wait");
         assert!(*renames > previous, "expected rename transition");
+    }
+
+    fn wait_until_lock_publication_held(&self) {
+        let held = self
+            .lock_publication
+            .lock_publication_held
+            .lock()
+            .expect("publication held");
+        let (held, _) = self
+            .lock_publication
+            .lock_publication_wake
+            .wait_timeout_while(held, Duration::from_secs(2), |held| !*held)
+            .expect("publication wait");
+        assert!(*held, "worker did not reach held lock publication");
+    }
+
+    fn release_lock_publication(&self) {
+        self.lock_publication
+            .hold_lock_publication
+            .store(false, Ordering::SeqCst);
+        self.lock_publication.lock_publication_wake.notify_all();
+    }
+
+    fn wait_until_pending_lock_create_held(&self) {
+        let held = self
+            .lock_publication
+            .pending_lock_create_held
+            .lock()
+            .expect("pending create held");
+        let (held, _) = self
+            .lock_publication
+            .pending_lock_create_wake
+            .wait_timeout_while(held, Duration::from_secs(2), |held| !*held)
+            .expect("pending create wait");
+        assert!(*held, "worker did not reach pending lock creation cut");
+    }
+
+    fn release_pending_lock_create(&self) {
+        self.lock_publication
+            .hold_before_pending_lock_create
+            .store(false, Ordering::SeqCst);
+        self.lock_publication.pending_lock_create_wake.notify_all();
     }
 
     fn inject_short_write(&self, call: usize, offset: usize) {
@@ -155,10 +218,39 @@ impl PersistenceBackend for WriteFaultBackend {
         }
         FilesystemBackend.create_owner_directory(path)
     }
+    fn existing_path_kind(&self, path: &Path) -> io::Result<ExistingPathKind> {
+        FilesystemBackend.existing_path_kind(path)
+    }
     fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
         FilesystemBackend.set_permissions(path, permissions)
     }
     fn create_new_file(&self, path: &Path) -> io::Result<File> {
+        if path.file_name().is_some_and(|name| name == "lock.pending")
+            && self
+                .lock_publication
+                .hold_before_pending_lock_create
+                .load(Ordering::SeqCst)
+        {
+            let mut held = self
+                .lock_publication
+                .pending_lock_create_held
+                .lock()
+                .expect("pending create held");
+            *held = true;
+            self.lock_publication.pending_lock_create_wake.notify_all();
+            while self
+                .lock_publication
+                .hold_before_pending_lock_create
+                .load(Ordering::SeqCst)
+            {
+                held = self
+                    .lock_publication
+                    .pending_lock_create_wake
+                    .wait(held)
+                    .expect("pending create wait");
+            }
+            *held = false;
+        }
         let call = self.create_file_call.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_create_file_call.load(Ordering::SeqCst) == call {
             self.fail_create_file_call.store(0, Ordering::SeqCst);
@@ -168,6 +260,12 @@ impl PersistenceBackend for WriteFaultBackend {
     }
     fn open_existing_file(&self, path: &Path) -> io::Result<File> {
         FilesystemBackend.open_existing_file(path)
+    }
+    fn open_existing_regular_file_read_no_follow(&self, path: &Path) -> io::Result<File> {
+        FilesystemBackend.open_existing_regular_file_read_no_follow(path)
+    }
+    fn open_existing_regular_file_write_no_follow(&self, path: &Path) -> io::Result<File> {
+        FilesystemBackend.open_existing_regular_file_write_no_follow(path)
     }
     fn create_temporary_file(&self, path: &Path) -> io::Result<File> {
         FilesystemBackend.create_temporary_file(path)
@@ -296,7 +394,45 @@ impl PersistenceBackend for WriteFaultBackend {
         self.rename_wake.notify_all();
         Ok(())
     }
+    fn publish_no_replace(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        if source
+            .file_name()
+            .is_some_and(|name| name == "lock.pending")
+            && self
+                .lock_publication
+                .hold_lock_publication
+                .load(Ordering::SeqCst)
+        {
+            let mut held = self
+                .lock_publication
+                .lock_publication_held
+                .lock()
+                .expect("publication held");
+            *held = true;
+            self.lock_publication.lock_publication_wake.notify_all();
+            while self
+                .lock_publication
+                .hold_lock_publication
+                .load(Ordering::SeqCst)
+            {
+                held = self
+                    .lock_publication
+                    .lock_publication_wake
+                    .wait(held)
+                    .expect("publication wait");
+            }
+            *held = false;
+        }
+        FilesystemBackend.publish_no_replace(source, destination)
+    }
     fn remove_file(&self, path: &Path) -> io::Result<()> {
+        if self
+            .lock_publication
+            .fail_next_remove_file
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected pending lock cleanup failure"));
+        }
         FilesystemBackend.remove_file(path)
     }
     fn open_directory(&self, path: &Path) -> io::Result<File> {
@@ -304,6 +440,9 @@ impl PersistenceBackend for WriteFaultBackend {
     }
     fn read_file(&self, path: &Path) -> io::Result<Vec<u8>> {
         FilesystemBackend.read_file(path)
+    }
+    fn read_open_file(&self, file: &File) -> io::Result<Vec<u8>> {
+        FilesystemBackend.read_open_file(file)
     }
 }
 
@@ -854,6 +993,483 @@ fn exclusive_session_creation_requires_complete_directory_absence() {
     assert!(!session.join("meta.json").exists());
     assert!(!session.join("events.cbor").exists());
     assert!(!session.join("restore-events.cbor").exists());
+}
+
+/// Create-or-resume atomically creates an absent session and strictly resumes
+/// the exact canonical state after the first owner releases it.
+#[test]
+fn create_or_resume_selects_created_then_resumed_lifecycle() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let first_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut first =
+        SessionStore::open_managed(&sessions, first_owner.clone()).expect("first store");
+    assert_eq!(
+        first
+            .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+            .expect("create absent session"),
+        SessionPreparationStatus::Created
+    );
+    first_owner
+        .release(
+            &first.managed_persistence_leases("managed-session"),
+            Duration::from_secs(2),
+        )
+        .expect("release first owner");
+
+    let second_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut second = SessionStore::open_managed(&sessions, second_owner).expect("second store");
+    assert_eq!(
+        second
+            .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+            .expect("resume valid session"),
+        SessionPreparationStatus::Resumed
+    );
+}
+
+/// Competing create-or-resume owners share the atomic directory boundary: one
+/// creates the session while the other fails rather than replacing or repairing
+/// the winner's locked state.
+#[test]
+fn create_or_resume_race_has_one_owner_and_one_failure() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions root");
+    let start = Arc::new(Barrier::new(3));
+    let finish = Arc::new(Barrier::new(3));
+    let (tx, rx) = mpsc::channel();
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let sessions = sessions.clone();
+        let start = start.clone();
+        let finish = finish.clone();
+        let tx = tx.clone();
+        threads.push(thread::spawn(move || {
+            let owner = Arc::new(
+                SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"),
+            );
+            let mut store = SessionStore::open_managed(&sessions, owner).expect("store");
+            start.wait();
+            let result =
+                store.prepare_session("managed-session", SessionPreparationMode::CreateOrResume);
+            tx.send(result.map_err(|error| error.to_string()))
+                .expect("send preparation result");
+            finish.wait();
+        }));
+    }
+    drop(tx);
+    start.wait();
+    let results = [
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("first result"),
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("second result"),
+    ];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| **result == Ok(SessionPreparationStatus::Created))
+            .count(),
+        1
+    );
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    finish.wait();
+    for thread in threads {
+        thread.join().expect("join preparation owner");
+    }
+}
+
+/// The mkdir winner locks a private pending inode before publishing the
+/// canonical lock path, so a concurrent resume cannot steal the creator's lock
+/// during first-session initialization.
+#[test]
+fn create_or_resume_creator_cannot_lose_lock_publication_race() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let backend = Arc::new(WriteFaultBackend::new());
+    backend
+        .lock_publication
+        .hold_lock_publication
+        .store(true, Ordering::SeqCst);
+    let creator_owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("creator owner"),
+    );
+    let mut creator = SessionStore::open_managed(&sessions, creator_owner).expect("creator store");
+    let (creator_tx, creator_rx) = mpsc::channel();
+    let creator_thread = thread::spawn(move || {
+        creator_tx
+            .send(
+                creator
+                    .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+                    .map_err(|error| error.to_string()),
+            )
+            .expect("send creator result");
+    });
+    backend.wait_until_lock_publication_held();
+
+    let session = sessions.join("managed-session");
+    assert!(session.join("lock.pending").is_file());
+    assert!(!session.join("lock").exists());
+    let loser_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut loser = SessionStore::open_managed(&sessions, loser_owner).expect("loser store");
+    loser
+        .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+        .expect_err("concurrent resume must not claim the unpublished lock");
+
+    backend.release_lock_publication();
+    assert_eq!(
+        creator_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("creator result"),
+        Ok(SessionPreparationStatus::Created)
+    );
+    creator_thread.join().expect("join creator");
+    assert!(session.join("lock").is_file());
+    assert!(!session.join("lock.pending").exists());
+}
+
+/// No-replace publication prevents a delayed create-or-resume winner from
+/// overwriting the live canonical lock installed by an ordinary New
+/// initializer.
+#[test]
+fn create_or_resume_cannot_replace_concurrent_new_mode_lock() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let backend = Arc::new(WriteFaultBackend::new());
+    backend
+        .lock_publication
+        .hold_before_pending_lock_create
+        .store(true, Ordering::SeqCst);
+    let delayed_owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("delayed owner"),
+    );
+    let mut delayed = SessionStore::open_managed(&sessions, delayed_owner).expect("delayed store");
+    let (delayed_tx, delayed_rx) = mpsc::channel();
+    let delayed_thread = thread::spawn(move || {
+        delayed_tx
+            .send(
+                delayed
+                    .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+                    .map_err(|error| error.to_string()),
+            )
+            .expect("send delayed result");
+    });
+    backend.wait_until_pending_lock_create_held();
+
+    let current_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut current = SessionStore::open_managed(&sessions, current_owner).expect("current store");
+    current
+        .prepare_session("managed-session", SessionPreparationMode::New)
+        .expect("concurrent New preparation");
+
+    backend.release_pending_lock_create();
+    delayed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("delayed result")
+        .expect_err("delayed publisher must not replace canonical lock");
+    delayed_thread.join().expect("join delayed owner");
+    assert!(
+        !sessions.join("managed-session/lock.pending").exists(),
+        "failed no-replace publication must clean its private pending alias"
+    );
+
+    let third_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut third = SessionStore::open_managed(&sessions, third_owner).expect("third store");
+    third
+        .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+        .expect_err("current owner's canonical lock must remain authoritative");
+}
+
+/// Failure to remove the private alias after canonical hard-link publication
+/// cannot turn committed lock authority into a reported creation failure.
+#[test]
+fn create_or_resume_committed_lock_survives_pending_cleanup_failure() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let backend = Arc::new(WriteFaultBackend::new());
+    backend
+        .lock_publication
+        .fail_next_remove_file
+        .store(true, Ordering::SeqCst);
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(PersistenceCapacity::default(), backend)
+            .expect("owner"),
+    );
+    let mut store = SessionStore::open_managed(&sessions, owner).expect("store");
+    assert_eq!(
+        store
+            .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+            .expect("committed canonical lock remains successful"),
+        SessionPreparationStatus::Created
+    );
+    let session = sessions.join("managed-session");
+    assert!(session.join("lock").is_file());
+    assert!(session.join("lock.pending").is_file());
+
+    let contender_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut contender =
+        SessionStore::open_managed(&sessions, contender_owner).expect("contender store");
+    contender
+        .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+        .expect_err("canonical committed lock must exclude another owner");
+}
+
+/// Create-or-resume treats partial state as occupied authority and preserves it
+/// byte-for-byte instead of filling in missing canonical siblings.
+#[test]
+fn create_or_resume_rejects_partial_state_without_mutation() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let session = sessions.join("managed-session");
+    std::fs::create_dir_all(&session).expect("partial session");
+    let artifact = session.join("events.cbor");
+    std::fs::write(&artifact, b"partial").expect("partial journal");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(&sessions, owner).expect("store");
+    store
+        .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+        .expect_err("partial state must fail");
+    assert_eq!(
+        std::fs::read(&artifact).expect("partial journal"),
+        b"partial"
+    );
+    assert!(!session.join("lock").exists());
+    assert!(!session.join("meta.json").exists());
+    assert!(!session.join("restore-events.cbor").exists());
+}
+
+/// Create-or-resume classifies a torn final frame header as partial state and
+/// leaves the ordinary journal byte-for-byte unchanged.
+#[test]
+fn create_or_resume_rejects_torn_header_without_truncation() {
+    assert_create_or_resume_preserves_torn_tail("events.cbor", &[1, 2, 3]);
+}
+
+/// Create-or-resume classifies a torn final frame payload as partial state and
+/// leaves the restore journal byte-for-byte unchanged.
+#[test]
+fn create_or_resume_rejects_torn_payload_without_truncation() {
+    let mut tail = 10_u64.to_le_bytes().to_vec();
+    tail.extend_from_slice(&[0xa1, 0x61]);
+    assert_create_or_resume_preserves_torn_tail("restore-events.cbor", &tail);
+}
+
+/// Seeds one valid session, appends an incomplete frame, and verifies strict
+/// create-or-resume admission cannot invoke ordinary recovery truncation.
+fn assert_create_or_resume_preserves_torn_tail(journal_name: &str, tail: &[u8]) {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let first_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut first = SessionStore::open_managed(&sessions, first_owner.clone()).expect("store");
+    first
+        .prepare_session("managed-session", SessionPreparationMode::Create)
+        .expect("seed session");
+    first_owner
+        .release(
+            &first.managed_persistence_leases("managed-session"),
+            Duration::from_secs(2),
+        )
+        .expect("release seed");
+    let journal = sessions.join("managed-session").join(journal_name);
+    let mut before = std::fs::read(&journal).expect("seed journal");
+    before.extend_from_slice(tail);
+    std::fs::write(&journal, &before).expect("write torn journal");
+
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(&sessions, owner).expect("store");
+    store
+        .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+        .expect_err("torn journal must fail");
+    assert_eq!(
+        std::fs::read(journal).expect("preserved torn journal"),
+        before
+    );
+}
+
+/// Create-or-resume never follows a symlink occupying the exact session path,
+/// even when its target contains otherwise valid canonical state.
+#[cfg(unix)]
+#[test]
+fn create_or_resume_rejects_symlinked_session_path() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let target_sessions = root.path().join("target-sessions");
+    let target_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut target =
+        SessionStore::open_managed(&target_sessions, target_owner.clone()).expect("target store");
+    target
+        .prepare_session("managed-session", SessionPreparationMode::Create)
+        .expect("create target session");
+    target_owner
+        .release(
+            &target.managed_persistence_leases("managed-session"),
+            Duration::from_secs(2),
+        )
+        .expect("release target");
+    std::fs::create_dir_all(&sessions).expect("sessions root");
+    symlink(
+        target_sessions.join("managed-session"),
+        sessions.join("managed-session"),
+    )
+    .expect("session symlink");
+
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(&sessions, owner).expect("store");
+    let error = store
+        .prepare_session("managed-session", SessionPreparationMode::CreateOrResume)
+        .expect_err("symlinked state must fail");
+    assert!(
+        error.to_string().contains("not a real directory"),
+        "{error}"
+    );
+}
+
+/// Create-or-resume opens every canonical child as an exact regular file, so no
+/// child symlink can borrow another session's lock, manifest, or journals.
+#[cfg(unix)]
+#[test]
+fn create_or_resume_rejects_every_symlinked_canonical_child() {
+    for artifact in ["lock", "meta.json", "events.cbor", "restore-events.cbor"] {
+        assert_create_or_resume_rejects_symlinked_canonical_child(artifact);
+    }
+}
+
+/// Read-only manifests remain valid because both ordinary resume and strict
+/// create-or-resume require only descriptor read access to `meta.json`.
+#[cfg(unix)]
+#[test]
+fn resume_modes_accept_read_only_regular_manifest() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    for (session_id, mode) in [
+        ("ordinary-resume", SessionPreparationMode::Resume),
+        ("create-or-resume", SessionPreparationMode::CreateOrResume),
+    ] {
+        let seed_owner = Arc::new(
+            SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("seed owner"),
+        );
+        let mut seed =
+            SessionStore::open_managed(&sessions, seed_owner.clone()).expect("seed store");
+        seed.prepare_session(session_id, SessionPreparationMode::Create)
+            .expect("seed session");
+        seed_owner
+            .release(
+                &seed.managed_persistence_leases(session_id),
+                Duration::from_secs(2),
+            )
+            .expect("release seed");
+        let manifest = sessions.join(session_id).join("meta.json");
+        std::fs::set_permissions(&manifest, Permissions::from_mode(0o400))
+            .expect("read-only manifest");
+
+        let owner = Arc::new(
+            SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("resume owner"),
+        );
+        let mut store = SessionStore::open_managed(&sessions, owner).expect("resume store");
+        assert_eq!(
+            store
+                .prepare_session(session_id, mode)
+                .expect("read-only manifest remains valid"),
+            SessionPreparationStatus::Resumed
+        );
+    }
+}
+
+/// Unix no-follow admission uses nonblocking open only to classify special
+/// files, then clears that flag before retaining regular descriptors.
+#[cfg(unix)]
+#[test]
+fn no_follow_regular_open_clears_nonblocking_status() {
+    use rustix_v1::fs::{OFlags, fcntl_getfl};
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let path = root.path().join("canonical");
+    std::fs::write(&path, b"canonical").expect("canonical file");
+    for file in [
+        FilesystemBackend
+            .open_existing_regular_file_read_no_follow(&path)
+            .expect("read-only no-follow open"),
+        FilesystemBackend
+            .open_existing_regular_file_write_no_follow(&path)
+            .expect("read/write no-follow open"),
+    ] {
+        let flags = fcntl_getfl(file).expect("read descriptor status flags");
+        assert!(!flags.contains(OFlags::NONBLOCK));
+    }
+}
+
+/// Seeds two valid sessions and replaces one canonical child with a symlink to
+/// prove strict admission rejects the exact child without changing either side.
+#[cfg(unix)]
+fn assert_create_or_resume_rejects_symlinked_canonical_child(artifact: &str) {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(&sessions, owner.clone()).expect("store");
+    for session_id in ["source", "target"] {
+        store
+            .prepare_session(session_id, SessionPreparationMode::Create)
+            .expect("seed session");
+    }
+    owner
+        .release(
+            &[
+                store.managed_persistence_leases("source"),
+                store.managed_persistence_leases("target"),
+            ]
+            .concat(),
+            Duration::from_secs(2),
+        )
+        .expect("release seed sessions");
+
+    let source = sessions.join("source").join(artifact);
+    let target = sessions.join("target").join(artifact);
+    let target_before = std::fs::read(&target).expect("target canonical bytes");
+    std::fs::remove_file(&source).expect("remove source canonical child");
+    symlink(&target, &source).expect("install canonical child symlink");
+
+    let resume_owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut resume = SessionStore::open_managed(&sessions, resume_owner).expect("resume store");
+    resume
+        .prepare_session("source", SessionPreparationMode::CreateOrResume)
+        .expect_err("symlinked canonical child must fail");
+    assert!(
+        std::fs::symlink_metadata(&source)
+            .expect("source symlink")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(target).expect("preserved target canonical bytes"),
+        target_before
+    );
 }
 
 /// New preparation rejects partial canonical state before creating any sibling

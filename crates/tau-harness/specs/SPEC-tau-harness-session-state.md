@@ -21,6 +21,15 @@ partial canonical artifacts, and noncanonical diagnostic scaffolding. Failure
 does not inspect, delete, repair, or claim the existing directory. Once created,
 the session uses the ordinary new-session runtime and durable stores.
 
+Explicit create-or-existing foreground provisioning performs the same atomic
+directory claim. A successful claim starts the ordinary new-session runtime; an
+already occupied real directory enters strict resume and must contain a valid
+manifest, lock, and both journals. Malformed, partial (including a torn journal
+tail), symlinked, or locked state fails without deletion, repair, truncation,
+replacement, or overwrite. The lock, manifest, ordinary journal, and restore
+journal must each be an exact regular file; admission never follows a
+final-component symlink for any of them.
+
 ## Session and agent stores
 
 The session store owns first-transition durable membership facts such as

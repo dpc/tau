@@ -1572,6 +1572,8 @@ pub(crate) enum HarnessSessionLaunchMode {
     New,
     /// Exclusive exact-ID creation requiring complete directory absence.
     Create,
+    /// Resume valid exact-ID state or atomically create absent state.
+    CreateOrResume,
     /// Strict existing-state resume.
     Resume,
 }
@@ -1600,6 +1602,9 @@ impl HarnessSessionLaunchMode {
     pub(crate) const fn reason(self) -> tau_proto::SessionStartReason {
         match self {
             Self::New | Self::Create => tau_proto::SessionStartReason::Initial,
+            Self::CreateOrResume => {
+                panic!("create-or-resume must resolve before session initialization")
+            }
             Self::Resume => tau_proto::SessionStartReason::Resume,
         }
     }
@@ -1609,7 +1614,17 @@ impl HarnessSessionLaunchMode {
         match self {
             Self::New => tau_core::SessionPreparationMode::New,
             Self::Create => tau_core::SessionPreparationMode::Create,
+            Self::CreateOrResume => tau_core::SessionPreparationMode::CreateOrResume,
             Self::Resume => tau_core::SessionPreparationMode::Resume,
+        }
+    }
+
+    /// Resolves a dynamic preparation mode to one ordinary runtime mode.
+    pub(crate) const fn resolve(self, status: tau_core::SessionPreparationStatus) -> Self {
+        match (self, status) {
+            (Self::CreateOrResume, tau_core::SessionPreparationStatus::Created) => Self::Create,
+            (Self::CreateOrResume, tau_core::SessionPreparationStatus::Resumed) => Self::Resume,
+            _ => self,
         }
     }
 
@@ -1622,7 +1637,8 @@ impl HarnessSessionLaunchMode {
 /// Session launch policy used while constructing the harness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HarnessSessionLaunch {
-    /// Typed new, exclusive-create, or resume selection.
+    /// Typed new, exclusive-create, dynamic create-or-resume, or strict resume
+    /// selection.
     pub(crate) mode: HarnessSessionLaunchMode,
     /// Harness-wide storage policy selected for this process.
     pub(crate) storage_mode: crate::HarnessStorageMode,
@@ -1637,7 +1653,11 @@ impl HarnessSessionLaunch {
                 "ephemeral sessions cannot resume persisted session state".to_owned(),
             ));
         }
-        if self.storage_mode.is_ephemeral() && matches!(self.mode, HarnessSessionLaunchMode::Create)
+        if self.storage_mode.is_ephemeral()
+            && matches!(
+                self.mode,
+                HarnessSessionLaunchMode::Create | HarnessSessionLaunchMode::CreateOrResume
+            )
         {
             return Err(HarnessError::Participant(
                 "exclusive session creation requires durable new-session startup".to_owned(),

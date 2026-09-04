@@ -624,7 +624,7 @@ impl SessionStore {
         &mut self,
         session_id: &str,
         mode: SessionPreparationMode,
-    ) -> Result<(), SessionStoreError> {
+    ) -> Result<crate::SessionPreparationStatus, SessionStoreError> {
         let session_id = validate_session_id(session_id)?;
         let owner =
             self.persistence_owner.as_ref().cloned().ok_or({
@@ -648,7 +648,8 @@ impl SessionStore {
         let fresh_runtime = matches!(
             mode,
             SessionPreparationMode::New | SessionPreparationMode::Create
-        );
+        ) || prepared.status == crate::SessionPreparationStatus::Created;
+        let status = prepared.status;
         let membership = if fresh_runtime {
             SessionMembership {
                 session_id: session_id.clone(),
@@ -692,7 +693,7 @@ impl SessionStore {
                 meta: prepared.meta,
             },
         );
-        Ok(())
+        Ok(status)
     }
 
     /// Releases both managed streams before session switch or maintenance.

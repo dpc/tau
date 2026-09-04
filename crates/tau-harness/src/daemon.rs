@@ -1869,6 +1869,8 @@ pub struct FixedSessionServeOptions<'a> {
 pub type ExistingSessionServeOptions<'a> = FixedSessionServeOptions<'a>;
 /// Complete inputs for one supported foreground exact-ID creation.
 pub type CreateSessionServeOptions<'a> = FixedSessionServeOptions<'a>;
+/// Complete inputs for one supported foreground idempotent launch.
+pub type CreateOrExistingSessionServeOptions<'a> = FixedSessionServeOptions<'a>;
 
 /// Serves one strict existing session in the foreground without an initial UI.
 ///
@@ -1896,6 +1898,21 @@ pub fn run_create_session_component_with_internal_tools(
         options,
         SessionLaunchStatus::New,
         HarnessSessionLaunchMode::Create,
+    )
+}
+
+/// Serves valid existing state or atomically creates an absent exact-ID
+/// session.
+///
+/// Existing malformed, partial, symlinked, or locked state fails without
+/// deletion, repair, truncation, replacement, or overwrite.
+pub fn run_create_or_existing_session_component_with_internal_tools(
+    options: CreateOrExistingSessionServeOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_fixed_session_component_with_internal_tools(
+        options,
+        SessionLaunchStatus::New,
+        HarnessSessionLaunchMode::CreateOrResume,
     )
 }
 

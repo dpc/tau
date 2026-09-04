@@ -1259,7 +1259,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             DispatchCommand::Other(cli::Command::Serve {
                 session,
                 create,
-                existing: _,
+                existing,
+                create_or_existing: _,
                 bootstrap_prompt_file,
                 bootstrap_id,
                 mirror_extension_stderr,
@@ -1285,8 +1286,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 };
                 if create {
                     tau_harness::run_create_session_component_with_internal_tools(options)
-                } else {
+                } else if existing {
                     tau_harness::run_existing_session_component_with_internal_tools(options)
+                } else {
+                    tau_harness::run_create_or_existing_session_component_with_internal_tools(
+                        options,
+                    )
                 }
                 .map_err(|error| CliError::Participant(error.to_string()))
             }

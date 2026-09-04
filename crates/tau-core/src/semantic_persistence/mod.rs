@@ -21,7 +21,9 @@ pub use owner::{
     SemanticPersistenceOwner,
 };
 pub(crate) use owner::{RetentionCharge, StagedFrame};
-pub use preparation::{PreparedAgentStream, PreparedSessionStreams, SessionPreparationMode};
+pub use preparation::{
+    PreparedAgentStream, PreparedSessionStreams, SessionPreparationMode, SessionPreparationStatus,
+};
 pub(crate) use worker::AgentCheckpointCandidate;
 
 #[cfg(test)]

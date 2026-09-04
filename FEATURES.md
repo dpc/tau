@@ -37,10 +37,11 @@ should exist only for the lifetime of the daemon.
 
 Use `tau attach [SESSION]` for a running target, `tau resume [SESSION]` for
 persisted state with an initial UI, and
-`tau serve --session SESSION --create|--existing` for a pinned foreground
-headless owner supervised by another process. Attach and resume omission opens
-target selection; serve always requires an exact ID and one explicit
-create-versus-existing mode. See the
+`tau serve --session SESSION --create|--existing|--create-or-existing` for a
+pinned foreground headless owner supervised by another process. The third mode
+atomically creates absent state or strictly resumes valid state without repairing
+an occupied path. Attach and resume omission opens target selection; serve always
+requires an exact ID and one explicit lifecycle mode. See the
 [session startup guide](docs/session-startup.md) for identity, locking, and
 root-option semantics.
 

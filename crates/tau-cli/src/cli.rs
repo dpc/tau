@@ -169,14 +169,26 @@ pub enum Command {
         /// it.
         #[arg(
             long,
-            required_unless_present = "existing",
-            conflicts_with = "existing"
+            required_unless_present_any = ["existing", "create_or_existing"],
+            conflicts_with_all = ["existing", "create_or_existing"]
         )]
         create: bool,
 
         /// Require and strictly resume valid existing session state.
-        #[arg(long, required_unless_present = "create", conflicts_with = "create")]
+        #[arg(
+            long,
+            required_unless_present_any = ["create", "create_or_existing"],
+            conflicts_with_all = ["create", "create_or_existing"]
+        )]
         existing: bool,
+
+        /// Resume valid existing state or atomically create an absent session.
+        #[arg(
+            long,
+            required_unless_present_any = ["create", "existing"],
+            conflicts_with_all = ["create", "existing"]
+        )]
+        create_or_existing: bool,
 
         /// Read one literal bootstrap prompt from this UTF-8 file after
         /// startup.

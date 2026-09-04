@@ -1100,12 +1100,14 @@ impl SemanticPersistenceOwner {
                 events,
                 restore_events,
                 meta,
+                status,
             })) => Ok(PreparedSessionStreams {
                 session_lease,
                 restore_lease,
                 events,
                 restore_events,
                 meta,
+                status,
             }),
             Ok(Ok(PreparationResult::Agent(_))) => {
                 unreachable!("session preparation returns session records")

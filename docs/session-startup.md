@@ -8,6 +8,7 @@ tau attach [SESSION]
 tau resume [SESSION]
 tau serve --session SESSION --create
 tau serve --session SESSION --existing
+tau serve --session SESSION --create-or-existing
 ```
 
 `attach` connects to the live daemon that currently advertises `SESSION` and
@@ -23,20 +24,26 @@ session list` and `tau attach SESSION` work unchanged. It pins the session and
 rejects `:session new`. Exactly one lifecycle guard is mandatory. `--create`
 requires the session directory to be completely absent and never resumes,
 repairs, or deletes valid or partial state. `--existing` strictly resumes valid
-state; missing, locked, or malformed state fails without creation. SIGINT and SIGTERM
+state; missing, locked, or malformed state fails without creation.
+`--create-or-existing` is the idempotent supervisor mode: it atomically claims a
+completely absent exact-ID path or strictly resumes valid state. An occupied
+partial, malformed, symlinked, or locked path fails unchanged, including torn
+journal tails; this mode never deletes, repairs, truncates, replaces, or
+overwrites state. SIGINT and SIGTERM
 stop listener admission, shut down the harness and extensions, remove runtime
 socket/metadata, and exit normally. A second SIGINT or SIGTERM forces the
 signal's default termination and can interrupt that cleanup.
 
-After a graceful `--create` stop, use the same command with `--existing` for
-normal service restarts.
+Use `--create-or-existing` when one service command must handle both first
+provisioning and normal restarts. Keep `--create` and `--existing` for
+deployments that require one exact lifecycle assertion.
 
 Supervisors that need extension output in process logs can opt in with
 `--mirror-extension-stderr`. The option exists only on `tau serve` and is off by
 default:
 
 ```text
-tau serve --session SESSION --existing --mirror-extension-stderr
+tau serve --session SESSION --create-or-existing --mirror-extension-stderr
 ```
 
 Tau keeps each private extension log authoritative and unchanged, then sends
@@ -58,7 +65,7 @@ drop notices, and within-generation ordering contract are documented under
 `serve` can admit one literal prompt after complete readiness:
 
 ```text
-tau serve --session SESSION --existing \
+tau serve --session SESSION --create-or-existing \
   --bootstrap-prompt-file /run/credentials/tau-bootstrap \
   --bootstrap-id telegram-v1
 ```

@@ -13,8 +13,19 @@ pub enum SessionPreparationMode {
     New,
     /// Establish a new canonical session only when its directory is absent.
     Create,
+    /// Resume valid existing state or atomically establish an absent session.
+    CreateOrResume,
     /// Require and validate the existing canonical manifest and streams.
     Resume,
+}
+
+/// Durable lifecycle selected while preparing one session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionPreparationStatus {
+    /// The preparation atomically established new canonical state.
+    Created,
+    /// The preparation validated and resumed existing canonical state.
+    Resumed,
 }
 
 /// Strictly recovered existing durable agent stream.
@@ -37,6 +48,8 @@ pub struct PreparedSessionStreams {
     pub restore_events: Vec<crate::PersistedSessionEvent>,
     /// Canonical manifest loaded or created during preparation.
     pub meta: crate::SessionMeta,
+    /// Durable lifecycle selected at the atomic directory boundary.
+    pub status: SessionPreparationStatus,
 }
 
 /// Result returned across the worker preparation handoff.
@@ -51,6 +64,8 @@ pub(crate) enum PreparationResult {
         restore_events: Vec<crate::PersistedSessionEvent>,
         /// Canonical manifest authority.
         meta: crate::SessionMeta,
+        /// Durable lifecycle selected by preparation.
+        status: SessionPreparationStatus,
     },
 }
 
