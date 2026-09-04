@@ -78,7 +78,7 @@ pub(crate) fn cli_test_theme() -> tau_themes::Theme {
 
 /// Build a renderer with the built-in lifecycle markers rather than the terse
 /// legacy test markers used by [`EventRenderer::new`].
-fn marker_test_renderer(handle: TermHandle) -> EventRenderer {
+pub(crate) fn marker_test_renderer(handle: TermHandle) -> EventRenderer {
     EventRenderer::new_with_state(
         handle,
         tau_cli_term::CompletionData::new(),
@@ -135,7 +135,7 @@ use super::tool_render::{
 /// Writer that feeds bytes directly into a VT parser and records a screen
 /// snapshot at each redraw-thread flush boundary.
 #[derive(Clone)]
-struct VtWriter {
+pub(crate) struct VtWriter {
     /// Parser containing the latest virtual-terminal screen.
     parser: Arc<Mutex<vt100::Parser>>,
     /// Completed flush-delimited frames and their wait notification.
@@ -251,7 +251,7 @@ impl std::io::Write for VtWriter {
     }
 }
 
-fn setup(w: u16, h: u16) -> (Term, TermHandle, VtWriter) {
+pub(crate) fn setup(w: u16, h: u16) -> (Term, TermHandle, VtWriter) {
     let vt = VtWriter::new(vt100::Parser::new(h, w, 100));
     let (term, handle, _input) = Term::new_virtual(
         w as usize,

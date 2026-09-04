@@ -13,15 +13,65 @@ use super::{
 
 /// Builds one plain replayable transcript prompt.
 fn historical_prompt(text: &str) -> Event {
+    historical_prompt_for("agent-1", text)
+}
+
+/// Builds one plain replayable transcript prompt for a specific owner.
+fn historical_prompt_for(agent_id: &str, text: &str) -> Event {
     Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
         literal: false,
         session_id: "session-1".parse().expect("valid session id"),
         text: text.to_owned(),
-        agent_id: "agent-1".parse().expect("valid agent id"),
+        agent_id: agent_id.parse().expect("valid agent id"),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     })
+}
+
+/// Applies one staged delivery through the same presentation-specific renderer
+/// entry point as the production renderer loop.
+fn render_delivery(
+    renderer: &mut crate::event_renderer::EventRenderer,
+    delivery: RendererDelivery,
+) {
+    match delivery.presentation {
+        RendererPresentation::Ordinary => renderer.handle_socket_delivery(
+            &delivery.event,
+            delivery.recorded_at,
+            delivery.delivery_id,
+        ),
+        RendererPresentation::Replay => renderer.handle_replay_socket_delivery(
+            &delivery.event,
+            delivery.recorded_at,
+            delivery.delivery_id,
+        ),
+        RendererPresentation::ColdAttachReplay => {
+            renderer.handle_cold_attach_replay_socket_delivery(
+                &delivery.event,
+                delivery.recorded_at,
+                delivery.delivery_id,
+            );
+        }
+        RendererPresentation::ReconstructedToolStart { .. } => {
+            renderer.handle_cold_attach_replay_socket_delivery(
+                &delivery.event,
+                delivery.recorded_at,
+                delivery.delivery_id,
+            );
+        }
+        RendererPresentation::SelectAttachAgent { agent_id } => {
+            renderer.handle_attach_agent_selection_socket_delivery(
+                &delivery.event,
+                &agent_id,
+                delivery.recorded_at,
+                delivery.delivery_id,
+            );
+        }
+        RendererPresentation::StandaloneShellTerminal => {
+            unreachable!("selection regression does not stage shell terminals")
+        }
+    }
 }
 
 /// Wraps a replay event with deterministic queue metadata.
@@ -126,6 +176,231 @@ fn replay_complete() -> Event {
         session_id: "session-1".parse().expect("valid session id"),
         error: None,
     })
+}
+
+/// Builds one per-agent replay terminal with an optional incompatibility error.
+fn agent_replay_complete(agent_id: &str, error: Option<&str>) -> Event {
+    Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
+        agent_id: agent_id.parse().expect("valid agent id"),
+        session_id: Some("session-1".parse().expect("valid session id")),
+        error: error.map(str::to_owned),
+    })
+}
+
+/// Builds one current resumed-runtime snapshot for attach selection.
+fn agent_stats(agent_id: &str) -> Event {
+    Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "session-1".parse().expect("valid session id"),
+        agent_id: agent_id.parse().expect("valid agent id"),
+        work_status: Default::default(),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+    })
+}
+
+/// Builds one replayed tool terminal that ends plain transcript staging before
+/// the later attach-selection facts arrive.
+fn historical_tool_error() -> Event {
+    Event::ToolError(tau_proto::ToolError {
+        presentation: Default::default(),
+        call_id: "historical-call".into(),
+        tool_name: tau_proto::ToolName::new("fixture"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "historical failure".to_owned(),
+        details: None,
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    })
+}
+
+/// Attach must select the only agent whose journal replay succeeded and whose
+/// current runtime snapshot proves it is actually restored, even after
+/// tool-bearing history ends plain transcript staging.
+#[test]
+fn selects_unique_successful_runtime_agent_at_replay_boundary() {
+    let mut stager = ColdAttachStager::staging();
+    assert_eq!(stager.admit(replay(historical_tool_error(), 1, 1)).len(), 1);
+    assert_eq!(
+        stager
+            .admit(live(
+                agent_replay_complete("legacy-agent", Some("incompatible journal")),
+                2,
+            ))
+            .len(),
+        1
+    );
+    assert_eq!(
+        stager
+            .admit(live(agent_replay_complete("restored-agent", None), 3))
+            .len(),
+        1
+    );
+    assert_eq!(
+        stager.admit(live(agent_stats("restored-agent"), 4)).len(),
+        1
+    );
+
+    let ready = stager.admit(live(replay_complete(), 5));
+
+    assert!(matches!(
+        ready.last().map(|delivery| &delivery.presentation),
+        Some(RendererPresentation::SelectAttachAgent { agent_id })
+            if agent_id.as_str() == "restored-agent"
+    ));
+}
+
+/// Attach-selection metadata shares the cold-attach item/byte budget, fails
+/// closed on overflow, and releases retained entries on disconnect.
+#[test]
+fn bounds_and_releases_attach_selection_metadata() {
+    let mut overflowing = ColdAttachStager::staging();
+    assert_eq!(
+        overflowing
+            .admit(replay(
+                agent_replay_complete("agent-a", None),
+                RENDERER_QUEUE_MAX_BYTES,
+                1,
+            ))
+            .len(),
+        1
+    );
+    assert_eq!(
+        overflowing.retained_usage(),
+        RetainedUsage {
+            items: 1,
+            bytes: RENDERER_QUEUE_MAX_BYTES,
+        }
+    );
+    assert_eq!(
+        overflowing
+            .admit(replay(agent_stats("agent-a"), 1, 2))
+            .len(),
+        1
+    );
+    assert_eq!(overflowing.retained_usage(), RetainedUsage::default());
+    let boundary = overflowing.admit(live(replay_complete(), 3));
+    assert!(matches!(
+        boundary.last().map(|delivery| &delivery.presentation),
+        Some(RendererPresentation::Ordinary)
+    ));
+
+    let mut disconnected = ColdAttachStager::staging();
+    assert_eq!(
+        disconnected
+            .admit(replay(agent_replay_complete("agent-a", None), 7, 4))
+            .len(),
+        1
+    );
+    assert_eq!(disconnected.retained_usage().items, 1);
+    assert!(disconnected.finish_before_disconnect().is_empty());
+    assert_eq!(disconnected.retained_usage(), RetainedUsage::default());
+}
+
+/// Attach must keep the no-agent state honest when multiple successfully
+/// replayed agents have current runtimes instead of choosing arbitrarily.
+#[test]
+fn leaves_ambiguous_runtime_agents_unselected() {
+    let mut stager = ColdAttachStager::staging();
+    for (delivery_id, agent_id) in [(1, "agent-a"), (2, "agent-b")] {
+        assert_eq!(
+            stager
+                .admit(live(agent_replay_complete(agent_id, None), delivery_id))
+                .len(),
+            1
+        );
+        assert_eq!(
+            stager
+                .admit(live(agent_stats(agent_id), delivery_id + 2))
+                .len(),
+            1
+        );
+    }
+
+    let ready = stager.admit(live(replay_complete(), 5));
+
+    assert!(matches!(
+        ready.last().map(|delivery| &delivery.presentation),
+        Some(RendererPresentation::Ordinary)
+    ));
+}
+
+/// Transcript rows for multiple valid restored agents must remain display-only
+/// until the boundary rejects the ambiguous automatic selection.
+#[test]
+fn ambiguous_attach_transcript_rows_remain_unselected_in_renderer() {
+    let (_term, handle, _vt) = crate::tests::setup(100, 24);
+    let mut renderer = crate::tests::marker_test_renderer(handle);
+    let selected = renderer.current_agent_state();
+    let mut stager = ColdAttachStager::staging();
+    for (delivery_id, agent_id) in [(1, "agent-a"), (2, "agent-b")] {
+        assert!(
+            stager
+                .admit(replay(
+                    historical_prompt_for(agent_id, agent_id),
+                    1,
+                    delivery_id,
+                ))
+                .is_empty()
+        );
+        for delivery in stager.admit(live(agent_replay_complete(agent_id, None), delivery_id + 2)) {
+            render_delivery(&mut renderer, delivery);
+        }
+        for delivery in stager.admit(live(agent_stats(agent_id), delivery_id + 4)) {
+            render_delivery(&mut renderer, delivery);
+        }
+    }
+    for delivery in stager.admit(live(replay_complete(), 7)) {
+        render_delivery(&mut renderer, delivery);
+    }
+
+    assert!(
+        selected
+            .lock()
+            .expect("selection intent")
+            .as_ref()
+            .is_none()
+    );
+}
+
+/// An early historical row absent from the current runtime cannot preempt the
+/// different agent selected by the successful-replay/runtime intersection.
+#[test]
+fn non_runtime_replay_row_cannot_preempt_unique_boundary_candidate() {
+    let (_term, handle, _vt) = crate::tests::setup(100, 24);
+    let mut renderer = crate::tests::marker_test_renderer(handle);
+    let selected = renderer.current_agent_state();
+    let mut stager = ColdAttachStager::staging();
+    assert!(
+        stager
+            .admit(replay(
+                historical_prompt_for("historical-agent", "old"),
+                1,
+                1,
+            ))
+            .is_empty()
+    );
+    for (delivery_id, event) in [
+        (2, agent_replay_complete("historical-agent", None)),
+        (3, agent_replay_complete("restored-agent", None)),
+        (4, agent_stats("restored-agent")),
+    ] {
+        for delivery in stager.admit(live(event, delivery_id)) {
+            render_delivery(&mut renderer, delivery);
+        }
+    }
+    for delivery in stager.admit(live(replay_complete(), 5)) {
+        render_delivery(&mut renderer, delivery);
+    }
+
+    assert_eq!(
+        selected.lock().expect("selection intent").as_deref(),
+        Some("restored-agent")
+    );
 }
 
 /// Builds one correlated user-shell start.

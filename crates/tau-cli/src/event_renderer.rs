@@ -1845,6 +1845,7 @@ impl EventRenderer {
                 agents_ui_state: HashMap::new(),
                 overview_message_ids: HashSet::new(),
                 current_agent_state: Arc::new(Mutex::new(None)),
+                selection_intent: Arc::new(Mutex::new(renderer_state::SelectionIntent::default())),
                 draft_retargeter: None,
             },
             event_owners: renderer_state::EventOwnershipState::default(),
@@ -2027,10 +2028,17 @@ impl EventRenderer {
         self.discovery.agent_navigation.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn current_agent_state(
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<Option<tau_proto::AgentId>>> {
         self.selection.current_agent_state.clone()
+    }
+
+    pub(crate) fn selection_intent(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<renderer_state::SelectionIntent>> {
+        self.selection.selection_intent.clone()
     }
 
     #[cfg(test)]
@@ -2044,8 +2052,17 @@ impl EventRenderer {
         self.agent_id_for_event(event)
     }
 
+    #[cfg(test)]
     pub(crate) fn switch_agent(&mut self, agent_id: tau_proto::AgentId) {
-        self.switch_agent_after_display_update(agent_id, || {});
+        self.switch_agent_after_display_update_inner(agent_id, || {}, true);
+    }
+
+    /// Applies a display command whose input target was already claimed.
+    pub(crate) fn apply_claimed_agent(&mut self, agent_id: tau_proto::AgentId, intent_epoch: u64) {
+        if !self.selection_intent_matches(intent_epoch, Some(&agent_id)) {
+            return;
+        }
+        self.switch_agent_after_display_update_inner(agent_id, || {}, false);
     }
 
     #[cfg(test)]
@@ -2057,13 +2074,14 @@ impl EventRenderer {
         agent_id: tau_proto::AgentId,
         after_display_update: impl FnOnce(),
     ) {
-        self.switch_agent_after_display_update(agent_id, after_display_update);
+        self.switch_agent_after_display_update_inner(agent_id, after_display_update, true);
     }
 
-    fn switch_agent_after_display_update(
+    fn switch_agent_after_display_update_inner(
         &mut self,
         agent_id: tau_proto::AgentId,
         after_display_update: impl FnOnce(),
+        update_intent: bool,
     ) {
         let handle = self.resources.handle.terminal_handle();
         // A selection transition publishes one coherent transcript, target,
@@ -2083,7 +2101,7 @@ impl EventRenderer {
             self.selection.awaiting_new_agent_selection = false;
 
             if target_changed {
-                self.set_current_agent_id(Some(agent_id), false);
+                self.set_current_agent_id(Some(agent_id), false, update_intent);
                 self.render_model_status();
                 self.refresh_prompt_placeholder();
                 handle.redraw();
@@ -2093,7 +2111,25 @@ impl EventRenderer {
     }
 
     pub(crate) fn clear_selected_agent(&mut self) {
-        self.clear_selected_agent_after_display_update(|| {});
+        self.clear_selected_agent_after_display_update_inner(|| {}, true);
+    }
+
+    /// Applies a clear command whose input target was already claimed.
+    pub(crate) fn apply_claimed_clear(&mut self, intent_epoch: u64) {
+        if !self.selection_intent_matches(intent_epoch, None) {
+            return;
+        }
+        self.clear_selected_agent_after_display_update_inner(|| {}, false);
+    }
+
+    fn selection_intent_matches(
+        &self,
+        intent_epoch: u64,
+        agent_id: Option<&tau_proto::AgentId>,
+    ) -> bool {
+        self.selection.selection_intent.lock().is_ok_and(|intent| {
+            intent.epoch == intent_epoch && intent.selected_agent_id.as_ref() == agent_id
+        })
     }
 
     #[cfg(test)]
@@ -2103,10 +2139,14 @@ impl EventRenderer {
         &mut self,
         after_display_update: impl FnOnce(),
     ) {
-        self.clear_selected_agent_after_display_update(after_display_update);
+        self.clear_selected_agent_after_display_update_inner(after_display_update, true);
     }
 
-    fn clear_selected_agent_after_display_update(&mut self, after_display_update: impl FnOnce()) {
+    fn clear_selected_agent_after_display_update_inner(
+        &mut self,
+        after_display_update: impl FnOnce(),
+        update_intent: bool,
+    ) {
         let handle = self.resources.handle.terminal_handle();
         handle.with_redraw_suppressed(|| {
             handle.with_output_transaction(|| {
@@ -2131,7 +2171,7 @@ impl EventRenderer {
                 after_display_update();
 
                 if target_changed {
-                    self.set_current_agent_id(None, false);
+                    self.set_current_agent_id(None, false, update_intent);
                     self.render_model_status();
                     self.refresh_prompt_placeholder();
                     handle.redraw();
@@ -2276,10 +2316,19 @@ impl EventRenderer {
                 .any(|state| matches!(state.owner, UiSnapshotOwner::NoAgent))
     }
 
-    fn set_current_agent_id(&mut self, agent_id: Option<tau_proto::AgentId>, retarget_draft: bool) {
+    fn set_current_agent_id(
+        &mut self,
+        agent_id: Option<tau_proto::AgentId>,
+        retarget_draft: bool,
+        update_intent: bool,
+    ) {
         self.selection.current_agent_id = agent_id.clone();
         if let Ok(mut current) = self.selection.current_agent_state.lock() {
-            *current = agent_id;
+            *current = agent_id.clone();
+        }
+        if update_intent && let Ok(mut intent) = self.selection.selection_intent.lock() {
+            intent.epoch = intent.epoch.saturating_add(1);
+            intent.selected_agent_id = agent_id;
         }
         if retarget_draft {
             self.retarget_prompt_draft();
@@ -4904,7 +4953,7 @@ impl EventRenderer {
 
     #[cfg(test)]
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
-        self.handle_recorded_delivery(event, recorded_at, None);
+        self.handle_recorded_delivery(event, recorded_at, None, false, false);
     }
 
     /// Handles one socket delivery with its content-free frontend correlation.
@@ -4914,11 +4963,34 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         delivery_id: RendererDeliveryId,
     ) {
-        self.handle_recorded_delivery(event, recorded_at, Some(delivery_id));
+        self.handle_recorded_delivery(event, recorded_at, Some(delivery_id), false, false);
+    }
+
+    /// Handles one replay delivery without letting replay-derived selection
+    /// replace newer explicit input intent.
+    pub(crate) fn handle_replay_socket_delivery(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        delivery_id: RendererDeliveryId,
+    ) {
+        self.handle_recorded_delivery(event, recorded_at, Some(delivery_id), true, false);
+    }
+
+    /// Handles replay retained by an explicit cold attach. These rows can
+    /// populate agent snapshots, but only the replay boundary may select one.
+    pub(crate) fn handle_cold_attach_replay_socket_delivery(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        delivery_id: RendererDeliveryId,
+    ) {
+        self.handle_recorded_delivery(event, recorded_at, Some(delivery_id), false, true);
     }
 
     /// Selects the validated owner of a reconstructed pending start, then
     /// processes the start through the ordinary visible-agent path.
+    #[cfg(test)]
     pub(crate) fn handle_reconstructed_tool_start_socket_delivery(
         &mut self,
         event: &Event,
@@ -4928,20 +5000,49 @@ impl EventRenderer {
     ) {
         let user_originated =
             matches!(event, Event::ToolStarted(started) if started.originator.is_user());
-        if user_originated
+        let can_claim = user_originated
             && self.selection.current_agent_id.is_none()
             && self.selection.displayed_agent_id.is_none()
             && !self.selection.awaiting_new_agent_selection
-            && self.can_select_target_from_empty(target_agent_id)
+            && self.can_select_target_from_empty(target_agent_id);
+        if can_claim
+            && let Some(intent_epoch) = self.claim_initial_selection_intent(target_agent_id)
         {
-            self.show_agent_transcript(target_agent_id.clone());
-            self.selection.awaiting_new_agent_selection = false;
-            self.set_current_agent_id(Some(target_agent_id.clone()), true);
-            self.refresh_prompt_placeholder();
-            self.render_model_status();
-            self.flush_pending_initial_discovery();
+            self.apply_claimed_agent(target_agent_id.clone(), intent_epoch);
+        }
+        self.handle_replay_socket_delivery(event, recorded_at, delivery_id);
+    }
+
+    /// Selects an attach-time replay target only while the UI still has no
+    /// explicit agent choice, then processes the replay boundary normally.
+    pub(crate) fn handle_attach_agent_selection_socket_delivery(
+        &mut self,
+        event: &Event,
+        target_agent_id: &tau_proto::AgentId,
+        recorded_at: UnixMicros,
+        delivery_id: RendererDeliveryId,
+    ) {
+        let claimed_epoch = self.claim_initial_selection_intent(target_agent_id);
+        if let Some(intent_epoch) = claimed_epoch {
+            self.apply_claimed_agent(target_agent_id.clone(), intent_epoch);
         }
         self.handle_socket_delivery(event, recorded_at, delivery_id);
+    }
+
+    fn claim_initial_selection_intent(&self, target_agent_id: &tau_proto::AgentId) -> Option<u64> {
+        self.selection
+            .selection_intent
+            .lock()
+            .ok()
+            .and_then(|mut intent| {
+                if intent.epoch == 0 && intent.selected_agent_id.is_none() {
+                    intent.epoch = 1;
+                    intent.selected_agent_id = Some(target_agent_id.clone());
+                    Some(intent.epoch)
+                } else {
+                    None
+                }
+            })
     }
 
     fn handle_recorded_delivery(
@@ -4949,6 +5050,8 @@ impl EventRenderer {
         event: &Event,
         recorded_at: UnixMicros,
         delivery_id: Option<RendererDeliveryId>,
+        replay_selection_guard: bool,
+        suppress_auto_selection: bool,
     ) {
         let prepared = PreparedRendererEvent::new(event);
         if let Some((_, calls)) = prepared.finished() {
@@ -4987,7 +5090,13 @@ impl EventRenderer {
                 let handle = self.resources.handle.terminal_handle();
                 self.final_publication_in_progress = true;
                 handle.with_redraw_suppressed(|| {
-                    self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
+                    self.handle_recorded_delivery_inner(
+                        prepared,
+                        recorded_at,
+                        observation,
+                        replay_selection_guard,
+                        suppress_auto_selection,
+                    );
                 });
                 self.final_publication_in_progress = false;
                 // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -4998,7 +5107,13 @@ impl EventRenderer {
             }
             self.final_publication_in_progress = true;
             self.hidden_finalization_in_progress = true;
-            self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
+            self.handle_recorded_delivery_inner(
+                prepared,
+                recorded_at,
+                observation,
+                replay_selection_guard,
+                suppress_auto_selection,
+            );
             self.hidden_finalization_in_progress = false;
             self.final_publication_in_progress = false;
             return;
@@ -5007,10 +5122,22 @@ impl EventRenderer {
         if invalidates_pending {
             let handle = self.resources.handle.terminal_handle();
             handle.with_redraw_suppressed(|| {
-                self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
+                self.handle_recorded_delivery_inner(
+                    prepared,
+                    recorded_at,
+                    observation,
+                    replay_selection_guard,
+                    suppress_auto_selection,
+                );
             });
         } else {
-            self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
+            self.handle_recorded_delivery_inner(
+                prepared,
+                recorded_at,
+                observation,
+                replay_selection_guard,
+                suppress_auto_selection,
+            );
         }
     }
 
@@ -5021,6 +5148,8 @@ impl EventRenderer {
         prepared: PreparedRendererEvent<'_>,
         recorded_at: UnixMicros,
         observation: Option<(RendererDeliveryId, PresentationFactClass)>,
+        replay_selection_guard: bool,
+        suppress_auto_selection: bool,
     ) {
         self.resources
             .handle
@@ -5029,6 +5158,8 @@ impl EventRenderer {
             prepared,
             recorded_at,
             observation.map(|(delivery_id, _)| delivery_id),
+            replay_selection_guard,
+            suppress_auto_selection,
         );
         let Some((delivery_id, class)) = observation else {
             return;
@@ -5046,6 +5177,8 @@ impl EventRenderer {
         prepared: PreparedRendererEvent<'_>,
         recorded_at: UnixMicros,
         delivery_id: Option<RendererDeliveryId>,
+        replay_selection_guard: bool,
+        suppress_auto_selection: bool,
     ) {
         let event = prepared.event();
         let event_name = event.name();
@@ -5139,11 +5272,36 @@ impl EventRenderer {
         }
         if self.selection.current_agent_id.is_none() {
             if self.event_selects_agent_from_empty(event, &target_agent_id) {
+                if suppress_auto_selection {
+                    self.handle_recorded_at_for_hidden_agent(
+                        &prepared,
+                        recorded_at,
+                        target_agent_id,
+                    );
+                    self.update_agent_in_progress();
+                    return;
+                }
+                let claimed_epoch = replay_selection_guard
+                    .then(|| self.claim_initial_selection_intent(&target_agent_id))
+                    .flatten();
+                if replay_selection_guard && claimed_epoch.is_none() {
+                    self.handle_recorded_at_for_hidden_agent(
+                        &prepared,
+                        recorded_at,
+                        target_agent_id,
+                    );
+                    self.update_agent_in_progress();
+                    return;
+                }
                 if self.selection.displayed_agent_id.as_ref() != Some(&target_agent_id) {
                     self.show_agent_transcript(target_agent_id.clone());
                 }
                 self.selection.awaiting_new_agent_selection = false;
-                self.set_current_agent_id(Some(target_agent_id.clone()), true);
+                self.set_current_agent_id(
+                    Some(target_agent_id.clone()),
+                    true,
+                    !replay_selection_guard,
+                );
                 self.refresh_prompt_placeholder();
                 self.render_model_status();
                 self.flush_pending_initial_discovery();
@@ -9699,7 +9857,7 @@ impl EventRenderer {
 
 mod finished_response_projection;
 mod prepared_renderer_event;
-mod renderer_state;
+pub(crate) mod renderer_state;
 mod terminal_tool_calls;
 #[cfg(test)]
 mod terminal_tool_calls_tests;

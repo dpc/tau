@@ -279,6 +279,26 @@ bound retained presentation state. Long-running or high-volume UIs can
 therefore consume increasing memory and make selection, resize, and
 retroactive display toggles expensive.
 
+Attach-time automatic selection is presentation-only until it atomically claims
+the shared `SelectionIntent { epoch, selected_agent_id }` from exact empty epoch
+zero. Every explicit input-loop selection, including clearing the target,
+increments that epoch synchronously before enqueueing its renderer command.
+Renderer commands carry the claimed epoch and update display state only when the
+shared intent still matches both epoch and target; stale admitted remote work can
+therefore update neither prompt routing nor the visible transcript. Ordinary
+pass-through replay-derived auto-selection uses the same exact epoch-zero claim,
+so replay drained before a queued local display command cannot overwrite the
+input intent that the local command already published. During explicit cold
+attach, pre-boundary transcript rows and reconstructed starts never auto-select;
+only the validated unique-intersection candidate at `SessionReplayComplete` may
+claim epoch zero.
+
+Cold staging derives an automatic attach candidate from the exhaustive
+intersection of two bounded maps: agents with successful replay completion and
+agents present in the current runtime snapshot. It selects only a unique
+intersection member and releases both maps at the replay boundary; overflow or
+ambiguity fails closed without selecting an agent.
+
 The socket reader admits decoded deliveries to one FIFO bounded at 1,024 items
 and 64 MiB of encoded frames. Full admission backpressures socket reading and
 never drops a decoded delivery. Socket disconnect is the final item in that
@@ -317,8 +337,9 @@ continue directly to the renderer, so session, extension, context, and agent
 initialization state appears before historical conversation without changing
 wire delivery or shared catch-up semantics. Staging uses the same 1,024-item /
 64-MiB aggregate limits as renderer admission across retained transcript,
-pending tool starts, buffered live tool frames, and session/membership/ownership
-indexes. Replayed provider-declared
+pending tool starts, buffered live tool frames, session/membership/ownership
+indexes, successful per-agent replay terminals, and current runtime-agent
+snapshots. Replayed provider-declared
 tool calls authorize only matching durable starts owned by agents currently
 loaded in this session; canonical terminals close those starts, including
 provider-projected errors. A buffered pre-terminal progress frame retains its

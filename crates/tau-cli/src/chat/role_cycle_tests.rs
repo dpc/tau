@@ -26,7 +26,7 @@ fn routing_state(
         );
     }
     InputRoutingState::new(
-        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None.into())),
         known,
         Arc::new(Mutex::new(navigation)),
         Arc::new(Mutex::new(path_std_collections::HashSet::new())),
@@ -188,7 +188,7 @@ fn active_auto_completion_follows_runtime_state() {
     );
     let navigation = Arc::new(Mutex::new(navigation));
     let routing = InputRoutingState::new(
-        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None.into())),
         Arc::new(Mutex::new(vec!["helper".to_owned()])),
         navigation.clone(),
         Arc::new(Mutex::new(Default::default())),
@@ -367,7 +367,7 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
     assert_eq!(routing.selected_agent_id(), None);
     assert!(matches!(
         renderer_rx.try_recv().expect("overview renderer command"),
-        RendererCmd::ClearSelectedAgent
+        RendererCmd::ClearSelectedAgent { .. }
     ));
 
     assert_eq!(
@@ -377,7 +377,7 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
     assert_eq!(routing.selected_agent_id().as_deref(), Some("alpha"));
     assert!(matches!(
         renderer_rx.try_recv().expect("agent renderer command"),
-        RendererCmd::SwitchAgent { agent_id } if agent_id.as_str() == "alpha"
+        RendererCmd::SwitchAgent { agent_id, .. } if agent_id.as_str() == "alpha"
     ));
 
     routing.set_selected_agent(None);
@@ -387,7 +387,7 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
     );
     assert!(matches!(
         renderer_rx.try_recv().expect("reverse renderer command"),
-        RendererCmd::SwitchAgent { agent_id } if agent_id.as_str() == "bravo"
+        RendererCmd::SwitchAgent { agent_id, .. } if agent_id.as_str() == "bravo"
     ));
 }
 

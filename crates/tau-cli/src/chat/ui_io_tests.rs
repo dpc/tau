@@ -252,6 +252,7 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     local_tx
         .send(RendererCmd::SwitchAgent {
             agent_id: agent_id("worker"),
+            intent_epoch: 1,
         })
         .expect("local selection");
     local_tx
@@ -282,7 +283,7 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
-        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id.as_str() == "worker"
+        Ok(RendererCmd::SwitchAgent { agent_id, .. }) if agent_id.as_str() == "worker"
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
@@ -516,6 +517,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
     local_tx
         .send(RendererCmd::SwitchAgent {
             agent_id: agent_id("worker"),
+            intent_epoch: 1,
         })
         .expect("local selection");
     remote_tx
@@ -542,7 +544,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
     ));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id.as_str() == "worker"
+        Ok(RendererCmd::SwitchAgent { agent_id, .. }) if agent_id.as_str() == "worker"
     ));
 }
 
@@ -576,6 +578,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
         local_tx
             .send(RendererCmd::SwitchAgent {
                 agent_id: agent_id("worker"),
+                intent_epoch: 1,
             })
             .expect("local enqueue");
         done_tx.send(()).expect("local enqueue done");
@@ -604,7 +607,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
         .expect("local enqueue completes after remote dequeue");
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_secs(1)),
-        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id.as_str() == "worker"
+        Ok(RendererCmd::SwitchAgent { agent_id, .. }) if agent_id.as_str() == "worker"
     ));
     sender.join().expect("local sender");
 }
@@ -627,7 +630,7 @@ fn renderer_scheduler_wakes_for_remote_arriving_after_empty_scan() {
         Ok(result) => result,
         Err(error) => {
             local_tx
-                .send(RendererCmd::ClearSelectedAgent)
+                .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
                 .expect("cleanup local wake");
             worker.join().expect("scheduler worker");
             panic!("remote arrival did not wake scheduler: {error}");
@@ -654,7 +657,7 @@ fn renderer_scheduler_wakes_for_local_arriving_after_empty_scan() {
     let worker = std::thread::spawn(move || {
         let mut after_empty_scan = || {
             local_tx
-                .send(RendererCmd::ClearSelectedAgent)
+                .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
                 .expect("local arrival");
         };
         let result =
@@ -669,7 +672,10 @@ fn renderer_scheduler_wakes_for_local_arriving_after_empty_scan() {
             panic!("local arrival did not wake scheduler: {error}");
         }
     };
-    assert!(matches!(result, Ok(RendererCmd::ClearSelectedAgent)));
+    assert!(matches!(
+        result,
+        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+    ));
     worker.join().expect("scheduler worker");
 }
 
@@ -685,7 +691,7 @@ fn renderer_scheduler_coalesced_wake_preserves_remote_reservation() {
         admitted.fetch_add(1, Ordering::AcqRel);
         remote_tx.send(remote_bell(1)).expect("reserved remote");
         local_tx
-            .send(RendererCmd::ClearSelectedAgent)
+            .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
             .expect("watermarked local");
     };
 
@@ -698,7 +704,7 @@ fn renderer_scheduler_coalesced_wake_preserves_remote_reservation() {
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::ZERO),
-        Ok(RendererCmd::ClearSelectedAgent)
+        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
     ));
 }
 
@@ -716,11 +722,11 @@ fn renderer_scheduler_remote_close_waits_for_local_or_deadline() {
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
     local_tx
-        .send(RendererCmd::ClearSelectedAgent)
+        .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
         .expect("local after remote close");
     assert!(matches!(
         scheduler.recv_timeout(Duration::ZERO),
-        Ok(RendererCmd::ClearSelectedAgent)
+        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
     ));
 }
 
@@ -909,7 +915,7 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
     let (remote_tx, local_tx, mut scheduler) =
         renderer_scheduler_channels(8, admitted.clone(), arbiter);
     local_tx
-        .send(RendererCmd::ClearSelectedAgent)
+        .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
         .expect("local selection");
     for delivery_id in 1..=4 {
         admitted.store(delivery_id, Ordering::Release);
@@ -944,7 +950,10 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
             ..
         })
     ));
-    assert!(matches!(next(), Ok(RendererCmd::ClearSelectedAgent)));
+    assert!(matches!(
+        next(),
+        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+    ));
     assert!(matches!(
         next(),
         Ok(RendererCmd::Remote {
@@ -1008,6 +1017,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
     local_tx
         .send(RendererCmd::SwitchAgent {
             agent_id: agent_id("worker"),
+            intent_epoch: 1,
         })
         .expect("local selection");
 
@@ -1036,7 +1046,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     );
-    let RendererCmd::SwitchAgent { agent_id } = selection else {
+    let RendererCmd::SwitchAgent { agent_id, .. } = selection else {
         panic!("expected selection command");
     };
     renderer.switch_agent(agent_id);

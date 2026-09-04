@@ -1,6 +1,9 @@
 //! Tests for agent navigation behavior.
 
 use super::*;
+use crate::agent_navigation::AgentNavigation;
+use crate::chat::InputRoutingState;
+use crate::event_renderer::renderer_state::SelectionIntent;
 
 /// Agent-trace help must advertise the compact-overview semantics and both
 /// default values so generated help cannot drift from parser behavior.
@@ -25,14 +28,206 @@ fn agent_trace_help_shows_compact_toon_lite_defaults() {
 fn role_cycling_only_enabled_without_selected_agent() {
     // Regression: role cycling changes the role used for the next new agent,
     // so once an agent is selected it must stop mutating the live agent's role.
-    let current_agent_state = Arc::new(Mutex::new(None));
+    let current_agent_state = Arc::new(Mutex::new(SelectionIntent::default()));
     assert!(role_cycling_enabled(&current_agent_state));
 
-    *current_agent_state.lock().expect("current agent") = Some(agent_id("engineer_abc12345"));
+    current_agent_state
+        .lock()
+        .expect("current agent")
+        .selected_agent_id = Some(agent_id("engineer_abc12345"));
     assert!(!role_cycling_enabled(&current_agent_state));
 
-    *current_agent_state.lock().expect("current agent") = None;
+    current_agent_state
+        .lock()
+        .expect("current agent")
+        .selected_agent_id = None;
     assert!(role_cycling_enabled(&current_agent_state));
+}
+
+/// A cold attach boundary must select its unique restored runtime target from
+/// the empty composer, but must not overwrite a choice made before replay ends.
+#[test]
+fn attach_boundary_selects_only_from_unclaimed_empty_state() {
+    let (_term, handle, _vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle);
+    let selected = renderer.current_agent_state();
+    let boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        session_id: test_session_id("s1"),
+        error: Some("legacy agent journal is incompatible".to_owned()),
+    });
+
+    renderer.handle_attach_agent_selection_socket_delivery(
+        &boundary,
+        &agent_id("restored-agent"),
+        tau_proto::UnixMicros::new(1),
+        tau_cli_term::RendererDeliveryId::new(1),
+    );
+    assert_eq!(
+        selected.lock().expect("selected agent").as_ref(),
+        Some(&agent_id("restored-agent"))
+    );
+
+    renderer.handle_attach_agent_selection_socket_delivery(
+        &boundary,
+        &agent_id("other-agent"),
+        tau_proto::UnixMicros::new(2),
+        tau_cli_term::RendererDeliveryId::new(2),
+    );
+    assert_eq!(
+        selected.lock().expect("selected agent").as_ref(),
+        Some(&agent_id("restored-agent"))
+    );
+}
+
+/// A local input claim made before the delayed replay boundary wins its
+/// selection-intent epoch and cannot be overwritten by stale renderer work.
+#[test]
+fn attach_boundary_cas_preserves_newer_local_intent() {
+    let (_term, handle, _vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle);
+    let selected = renderer.selection_intent();
+    let routing = InputRoutingState::new(
+        selected.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(AgentNavigation::default())),
+        Arc::new(Mutex::new(HashSet::new())),
+    );
+    let boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        session_id: test_session_id("s1"),
+        error: None,
+    });
+
+    let stale_epoch = routing.set_selected_agent(Some(agent_id("local-agent")));
+    renderer.handle_attach_agent_selection_socket_delivery(
+        &boundary,
+        &agent_id("restored-agent"),
+        tau_proto::UnixMicros::new(1),
+        tau_cli_term::RendererDeliveryId::new(1),
+    );
+    assert_eq!(
+        routing.selected_agent_id().as_deref(),
+        Some("local-agent"),
+        "already-admitted replay must not retarget immediate prompt routing"
+    );
+
+    renderer.apply_claimed_agent(agent_id("stale-renderer-agent"), stale_epoch);
+    assert_eq!(
+        routing.selected_agent_id().as_deref(),
+        Some("local-agent"),
+        "display-only renderer commands must not write into input authority"
+    );
+}
+
+/// A replay target admitted before local input but rendered afterward cannot
+/// move the display away from the newer input target.
+#[test]
+fn admitted_attach_selection_cannot_render_after_newer_local_intent() {
+    let (_term, handle, _vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle);
+    let selected = renderer.selection_intent();
+    let routing = InputRoutingState::new(
+        selected.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(AgentNavigation::default())),
+        Arc::new(Mutex::new(HashSet::new())),
+    );
+    let restored = agent_id("restored-agent");
+    let admitted_epoch = {
+        let mut intent = selected.lock().expect("selection intent");
+        intent.epoch = 1;
+        intent.selected_agent_id = Some(restored.clone());
+        intent.epoch
+    };
+
+    routing.set_selected_agent(Some(agent_id("local-agent")));
+    renderer.apply_claimed_agent(restored, admitted_epoch);
+
+    assert_eq!(routing.selected_agent_id().as_deref(), Some("local-agent"));
+    assert_eq!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("renderer selection")
+            .as_deref(),
+        None,
+        "stale admitted display command must be discarded"
+    );
+}
+
+/// Retained replay rows drained before a queued local display command cannot
+/// replace the local input claim that was published synchronously.
+#[test]
+fn admitted_replay_before_local_display_preserves_input_intent() {
+    let (_term, handle, _vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle);
+    let selected = renderer.selection_intent();
+    let routing = InputRoutingState::new(
+        selected,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(AgentNavigation::default())),
+        Arc::new(Mutex::new(HashSet::new())),
+    );
+    let local = agent_id("local-agent");
+    let replay = Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+        literal: false,
+        session_id: test_session_id("s1"),
+        text: "retained replay".into(),
+        agent_id: agent_id("replay-agent"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    });
+
+    let local_epoch = routing.set_selected_agent(Some(local.clone()));
+    renderer.handle_replay_socket_delivery(
+        &replay,
+        tau_proto::UnixMicros::new(1),
+        tau_cli_term::RendererDeliveryId::new(1),
+    );
+
+    assert_eq!(routing.selected_agent_id().as_ref(), Some(&local));
+    assert!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("renderer selection")
+            .is_none(),
+        "replay must wait for the queued local display command"
+    );
+    renderer.apply_claimed_agent(local.clone(), local_epoch);
+    assert_eq!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("renderer selection")
+            .as_ref(),
+        Some(&local)
+    );
+
+    let (_term, handle, _vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle);
+    let selected = renderer.selection_intent();
+    let routing = InputRoutingState::new(
+        selected,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(AgentNavigation::default())),
+        Arc::new(Mutex::new(HashSet::new())),
+    );
+    routing.set_selected_agent(None);
+    renderer.handle_replay_socket_delivery(
+        &replay,
+        tau_proto::UnixMicros::new(2),
+        tau_cli_term::RendererDeliveryId::new(2),
+    );
+    assert!(
+        routing.selected_agent_id().is_none()
+            && renderer
+                .current_agent_state()
+                .lock()
+                .expect("renderer selection")
+                .is_none(),
+        "explicit clearing must also prevent replay-derived selection"
+    );
 }
 
 /// Ctrl-K/Ctrl-J cycle through active agents and the overview while skipping

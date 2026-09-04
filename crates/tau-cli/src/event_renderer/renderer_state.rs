@@ -88,6 +88,24 @@ pub(super) struct AgentDiscoveryState {
     pub(super) ephemeral_agents: Arc<Mutex<HashSet<tau_proto::AgentId>>>,
 }
 
+/// Input-routing authority shared with the renderer.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SelectionIntent {
+    /// Monotonic local-selection claim epoch.
+    pub(crate) epoch: u64,
+    /// Agent currently targeted by prompt input.
+    pub(crate) selected_agent_id: Option<tau_proto::AgentId>,
+}
+
+impl From<Option<tau_proto::AgentId>> for SelectionIntent {
+    fn from(selected_agent_id: Option<tau_proto::AgentId>) -> Self {
+        Self {
+            epoch: 0,
+            selected_agent_id,
+        }
+    }
+}
+
 /// Current input target, visible transcript, and detached transcript snapshots.
 pub(super) struct AgentSelectionState {
     /// Agent targeted by prompt input.
@@ -105,6 +123,8 @@ pub(super) struct AgentSelectionState {
         HashSet<(Option<tau_proto::SessionId>, tau_proto::AgentMessageId)>,
     /// Input-thread mirror of the selected agent.
     pub(super) current_agent_state: Arc<Mutex<Option<tau_proto::AgentId>>>,
+    /// Input-thread selection authority and local-intent epoch.
+    pub(super) selection_intent: Arc<Mutex<SelectionIntent>>,
     /// Mailbox used to retarget pending drafts.
     pub(super) draft_retargeter: Option<DraftRetargeter>,
 }

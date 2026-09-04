@@ -48,6 +48,7 @@ use crate::daemon::{
     DaemonCliOverrides, DaemonHandle, daemon_output_for_chat_session, resolve_daemon,
     storage_mode_from_ephemeral,
 };
+use crate::event_renderer::renderer_state::SelectionIntent;
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
 use crate::prompt_history::{PromptHistoryAdmission, PromptHistoryStore};
 use crate::tool_render::ui_dir_block;
@@ -1411,7 +1412,7 @@ fn run_chat_session(
     let agent_in_progress = renderer.agent_in_progress_state();
     let fast_service_tier_state = renderer.fast_service_tier_state();
     let current_role_state = renderer.current_role_state();
-    let current_agent_state = renderer.current_agent_state();
+    let current_agent_state = renderer.selection_intent();
     let known_agents = renderer.known_agents();
     let agent_display_names = renderer.agent_display_names();
     let agent_navigation = renderer.agent_navigation();
@@ -1633,6 +1634,20 @@ fn spawn_renderer_thread(
                                         delivery_id,
                                     );
                                 }
+                                cold_attach_stager::RendererPresentation::Replay => {
+                                    renderer.handle_replay_socket_delivery(
+                                        &event,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
+                                cold_attach_stager::RendererPresentation::ColdAttachReplay => {
+                                    renderer.handle_cold_attach_replay_socket_delivery(
+                                        &event,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
                                 cold_attach_stager::RendererPresentation::StandaloneShellTerminal => {
                                     let Event::ShellCommandFinished(finished) = &*event else {
                                         unreachable!(
@@ -1652,9 +1667,18 @@ fn spawn_renderer_thread(
                                         matches!(&*event, Event::ToolStarted(started) if started.agent_id == owner),
                                         "reconstructed start presentation requires its validated owner"
                                     );
-                                    renderer.handle_reconstructed_tool_start_socket_delivery(
+                                    renderer.handle_cold_attach_replay_socket_delivery(
                                         &event,
-                                        &owner,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
+                                cold_attach_stager::RendererPresentation::SelectAttachAgent {
+                                    agent_id,
+                                } => {
+                                    renderer.handle_attach_agent_selection_socket_delivery(
+                                        &event,
+                                        &agent_id,
                                         recorded_at,
                                         delivery_id,
                                     );
@@ -1689,8 +1713,15 @@ fn spawn_renderer_thread(
                         }
                         RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
                         RendererCmd::ToggleVerboseMode => renderer.toggle_verbose_mode(),
-                        RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
-                        RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
+                        RendererCmd::SwitchAgent {
+                            agent_id,
+                            intent_epoch,
+                        } => {
+                            renderer.apply_claimed_agent(agent_id, intent_epoch);
+                        }
+                        RendererCmd::ClearSelectedAgent { intent_epoch } => {
+                            renderer.apply_claimed_clear(intent_epoch);
+                        }
                         RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
                         RendererCmd::ShowSessionStats => renderer.show_session_token_stats(),
                         RendererCmd::ActionInvoked {
@@ -2176,9 +2207,14 @@ enum RendererCmd {
     SwitchAgent {
         /// Stable local agent identity to display.
         agent_id: tau_proto::AgentId,
+        /// Exact input-intent epoch authorizing this display command.
+        intent_epoch: u64,
     },
     /// Return to the start-new-agent prompt state.
-    ClearSelectedAgent,
+    ClearSelectedAgent {
+        /// Exact input-intent epoch authorizing this display command.
+        intent_epoch: u64,
+    },
     /// `:theme <name>` — apply a theme to this UI process only.
     SetTheme {
         /// Fully resolved process-local theme.
@@ -2266,16 +2302,16 @@ struct TerminalInputLoopCtx {
 }
 
 #[derive(Clone)]
-struct InputRoutingState {
-    current_agent_state: Arc<Mutex<Option<tau_proto::AgentId>>>,
+pub(crate) struct InputRoutingState {
+    current_agent_state: Arc<Mutex<SelectionIntent>>,
     known_agents: Arc<Mutex<Vec<String>>>,
     agent_navigation: Arc<Mutex<AgentNavigation>>,
     ephemeral_agents: Arc<Mutex<std::collections::HashSet<tau_proto::AgentId>>>,
 }
 
 impl InputRoutingState {
-    fn new(
-        current_agent_state: Arc<Mutex<Option<tau_proto::AgentId>>>,
+    pub(crate) fn new(
+        current_agent_state: Arc<Mutex<SelectionIntent>>,
         known_agents: Arc<Mutex<Vec<String>>>,
         agent_navigation: Arc<Mutex<AgentNavigation>>,
         ephemeral_agents: Arc<Mutex<std::collections::HashSet<tau_proto::AgentId>>>,
@@ -2288,21 +2324,24 @@ impl InputRoutingState {
         }
     }
 
-    fn selected_agent_id(&self) -> Option<tau_proto::AgentId> {
+    pub(crate) fn selected_agent_id(&self) -> Option<tau_proto::AgentId> {
         self.current_agent_state
             .lock()
             .ok()
-            .and_then(|agent| agent.clone())
+            .and_then(|intent| intent.selected_agent_id.clone())
     }
 
     fn selected_side_agent_id(&self) -> Option<tau_proto::AgentId> {
         self.selected_agent_id()
     }
 
-    fn set_selected_agent(&self, agent_id: Option<tau_proto::AgentId>) {
-        if let Ok(mut current) = self.current_agent_state.lock() {
-            *current = agent_id;
+    pub(crate) fn set_selected_agent(&self, agent_id: Option<tau_proto::AgentId>) -> u64 {
+        if let Ok(mut intent) = self.current_agent_state.lock() {
+            intent.epoch = intent.epoch.saturating_add(1);
+            intent.selected_agent_id = agent_id;
+            return intent.epoch;
         }
+        0
     }
 
     fn known_agents(&self) -> Vec<String> {
@@ -3508,26 +3547,32 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn clear_selected_agent(&mut self) {
-        self.ctx.routing.set_selected_agent(None);
+        let intent_epoch = self.ctx.routing.set_selected_agent(None);
         self.dismiss_completion_menu();
         self.retarget_current_draft();
-        let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
+        let _ = self
+            .ctx
+            .renderer_tx
+            .send(RendererCmd::ClearSelectedAgent { intent_epoch });
     }
 
     fn apply_agent_switch(&mut self, target: Option<tau_proto::AgentId>) {
         match target {
             None => {
-                self.ctx.routing.set_selected_agent(None);
-                let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
+                let intent_epoch = self.ctx.routing.set_selected_agent(None);
+                let _ = self
+                    .ctx
+                    .renderer_tx
+                    .send(RendererCmd::ClearSelectedAgent { intent_epoch });
                 self.dismiss_completion_menu();
                 self.retarget_current_draft();
             }
             Some(agent_id) => {
-                self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
-                let _ = self
-                    .ctx
-                    .renderer_tx
-                    .send(RendererCmd::SwitchAgent { agent_id });
+                let intent_epoch = self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
+                let _ = self.ctx.renderer_tx.send(RendererCmd::SwitchAgent {
+                    agent_id,
+                    intent_epoch,
+                });
                 self.pending_new_agent_options.clear();
                 self.dismiss_completion_menu();
                 self.retarget_current_draft();
@@ -3905,13 +3950,13 @@ impl<'a> TerminalInputSession<'a> {
 
     fn switch_to_agent(&mut self, agent_id: tau_proto::AgentId) {
         self.pending_new_agent_options.clear();
-        self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
+        let intent_epoch = self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
         self.dismiss_completion_menu();
         self.retarget_current_draft();
-        let _ = self
-            .ctx
-            .renderer_tx
-            .send(RendererCmd::SwitchAgent { agent_id });
+        let _ = self.ctx.renderer_tx.send(RendererCmd::SwitchAgent {
+            agent_id,
+            intent_epoch,
+        });
     }
 
     fn dismiss_completion_menu(&mut self) {
@@ -4189,13 +4234,11 @@ impl SubmittedLineHandlers for TerminalInputSession<'_> {
     }
 }
 
-pub(crate) fn role_cycling_enabled(
-    current_agent_state: &Arc<Mutex<Option<tau_proto::AgentId>>>,
-) -> bool {
+pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<SelectionIntent>>) -> bool {
     current_agent_state
         .lock()
         .ok()
-        .and_then(|agent| agent.clone())
+        .and_then(|intent| intent.selected_agent_id.clone())
         .is_none()
 }
 
@@ -4263,14 +4306,15 @@ fn dispatch_agent_cycle(
     match &action {
         AgentCycleAction::KeepSelection => {}
         AgentCycleAction::Select(agent_id) => {
-            routing.set_selected_agent(Some(agent_id.clone()));
+            let intent_epoch = routing.set_selected_agent(Some(agent_id.clone()));
             let _ = renderer_tx.send(RendererCmd::SwitchAgent {
                 agent_id: agent_id.clone(),
+                intent_epoch,
             });
         }
         AgentCycleAction::ClearSelection => {
-            routing.set_selected_agent(None);
-            let _ = renderer_tx.send(RendererCmd::ClearSelectedAgent);
+            let intent_epoch = routing.set_selected_agent(None);
+            let _ = renderer_tx.send(RendererCmd::ClearSelectedAgent { intent_epoch });
         }
     }
     action
