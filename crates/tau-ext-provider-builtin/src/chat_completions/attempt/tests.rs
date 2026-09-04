@@ -33,9 +33,7 @@ fn tool_choice_capability_lowers_explicitly() {
     assert!(!lower_compat(compat).tool_choice);
     assert!(lower_compat(Default::default()).tool_choice);
 }
-use crate::chat_completions::{
-    LocalSummaryCompactionConfig, LocalSummaryCompactionSerializationProfile,
-};
+use crate::chat_completions::LocalSummaryCompactionConfig;
 
 /// Ensures a bounded free-form narrative becomes one private harness envelope
 /// while empty and oversized messages fail.
@@ -59,7 +57,7 @@ fn narrative_output_is_bounded_and_lowered_to_private_envelope() {
     assert_eq!(envelope.narrative, expected_narrative);
 
     let mut tiny = config;
-    tiny.max_output_bytes = NonZeroU64::new(1).expect("positive");
+    tiny.max_output_bytes = NonZeroU64::new(1);
     assert!(validate_narrative_output(vec![item], tiny).is_err());
 
     let empty = tau_proto::ContextItem::Message(tau_proto::MessageItem {
@@ -179,11 +177,9 @@ fn narrative_output_rejects_text_mixed_with_attempted_tool_call() {
 
 fn narrative_config(max_output_bytes: u64) -> LocalSummaryCompactionConfig {
     LocalSummaryCompactionConfig {
-        serialization_profile: LocalSummaryCompactionSerializationProfile::LocalTranscriptV1,
-        context_window_tokens: NonZeroU64::new(8192).expect("positive"),
-        max_input_bytes: NonZeroU64::new(4096).expect("positive"),
-        max_output_tokens: NonZeroU32::new(512).expect("positive"),
-        max_output_bytes: NonZeroU64::new(max_output_bytes).expect("positive"),
+        max_input_bytes: NonZeroU64::new(4096),
+        max_output_tokens: NonZeroU32::new(512),
+        max_output_bytes: NonZeroU64::new(max_output_bytes),
     }
 }
 

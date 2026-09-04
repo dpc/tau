@@ -369,10 +369,9 @@ fn validate_narrative_output(
     validate_resolved_narrative_output(
         items,
         config
-            .validated_for(tau_proto::TokenCount::new(
-                config.context_window_tokens.get(),
-            ))
-            .expect("test compaction config is valid"),
+            .validated_for(tau_proto::TokenCount::new(8_192))
+            .expect("test compaction config limits are valid")
+            .expect("test compaction context is positive"),
     )
 }
 

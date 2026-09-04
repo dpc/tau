@@ -1501,6 +1501,171 @@ fn provider_settings_snapshot_validation_is_atomic() {
     );
 }
 
+/// Removed summary fields must produce exact migration guidance for both
+/// compatible wire families instead of serde's generic unknown-field error.
+#[test]
+fn local_summary_compaction_obsolete_fields_have_actionable_migration_errors() {
+    let cases = [
+        (
+            "chat",
+            serde_json::json!({
+                "kind": "chat_completions",
+                "models": [{
+                    "id": "local",
+                    "local_summary_compaction": {
+                        "serialization_profile": "local_transcript_v1"
+                    }
+                }],
+                "credential": {"kind": "none"}
+            }),
+            ProviderSettingsValidationReason::ObsoleteLocalSummarySerializationProfile,
+        ),
+        (
+            "responses",
+            serde_json::json!({
+                "kind": "responses",
+                "models": [{
+                    "id": "local",
+                    "local_summary_compaction": {
+                        "context_window_tokens": 128000
+                    }
+                }],
+                "credential": {"kind": "none"}
+            }),
+            ProviderSettingsValidationReason::ObsoleteLocalSummaryContextWindow,
+        ),
+        (
+            "openrouter",
+            serde_json::json!({
+                "kind": "openrouter",
+                "models": [{
+                    "id": "remote",
+                    "local_summary_compaction": {
+                        "context_window_tokens": 128000
+                    }
+                }],
+                "credential": {
+                    "kind": "api_key",
+                    "identity": "0123456789abcdef0123456789abcdef"
+                }
+            }),
+            ProviderSettingsValidationReason::ObsoleteLocalSummaryContextWindow,
+        ),
+    ];
+
+    for (name, settings, expected) in cases {
+        let error = try_load_settings_profiles(vec![(
+            ProviderName::new(name),
+            serde_json::to_vec(&settings).expect("settings JSON"),
+        )])
+        .expect_err("obsolete field must reject the profile");
+        assert_eq!(error.reason, expected);
+    }
+}
+
+/// Omission and an empty override object must publish the same generic fallback
+/// for each compatible provider profile kind.
+#[test]
+fn local_summary_compaction_omission_and_empty_object_match_for_all_provider_kinds() {
+    for kind in ["chat_completions", "openrouter", "responses"] {
+        let credential = if kind == "openrouter" {
+            serde_json::json!({
+                "kind": "api_key",
+                "identity": "0123456789abcdef0123456789abcdef"
+            })
+        } else {
+            serde_json::json!({"kind": "none"})
+        };
+        let settings = serde_json::json!({
+            "kind": kind,
+            "models": [
+                {"id": "omitted", "context_window": 8192},
+                {
+                    "id": "empty",
+                    "context_window": 8192,
+                    "local_summary_compaction": {}
+                }
+            ],
+            "credential": credential
+        });
+        let provider_name = ProviderName::new(kind);
+        let (profile, _) = parse_settings_profile(
+            &provider_name,
+            &serde_json::to_vec(&settings).expect("settings JSON"),
+        )
+        .expect("compatible profile");
+        let models = match profile {
+            BuiltinProviderProfile::ChatCompletions(provider) => {
+                chat_models_for_provider(&provider_name, &provider)
+            }
+            BuiltinProviderProfile::OpenRouter(profile) => {
+                chat_models_for_provider(&provider_name, &profile.to_chat_completions())
+            }
+            BuiltinProviderProfile::Responses(provider) => {
+                responses::models_for_provider(&provider_name, &provider)
+            }
+            BuiltinProviderProfile::Chatgpt(_) => panic!("unexpected profile kind"),
+        };
+
+        assert_eq!(models.len(), 2);
+        assert!(
+            models
+                .iter()
+                .all(|model| model.supports_standalone_compaction)
+        );
+        assert_eq!(
+            models[0].standalone_compaction_threshold,
+            models[1].standalone_compaction_threshold
+        );
+        assert_eq!(
+            models[0].standalone_compaction_prefix_budget,
+            models[1].standalone_compaction_prefix_budget
+        );
+    }
+}
+
+/// Cross-field summary mistakes must reject the complete startup snapshot with
+/// one closed field-specific reason for both compatible wire families.
+#[test]
+fn local_summary_compaction_invalid_bounds_reject_profile_snapshot() {
+    let cases = [
+        (
+            "chat",
+            serde_json::json!({
+                "kind": "chat_completions",
+                "models": [{
+                    "id": "local",
+                    "context_window": 8,
+                    "local_summary_compaction": {"max_output_tokens": 9}
+                }],
+                "credential": {"kind": "none"}
+            }),
+            ProviderSettingsValidationReason::LocalSummaryOutputTokensExceedContextWindow,
+        ),
+        (
+            "responses",
+            serde_json::json!({
+                "kind": "responses",
+                "models": [{
+                    "id": "local",
+                    "local_summary_compaction": {"max_output_bytes": 262145}
+                }],
+                "credential": {"kind": "none"}
+            }),
+            ProviderSettingsValidationReason::LocalSummaryOutputBytesExceedNarrativeLimit,
+        ),
+    ];
+
+    for (name, settings, expected) in cases {
+        let error = try_load_settings_profiles(vec![(
+            ProviderName::new(name),
+            serde_json::to_vec(&settings).expect("settings JSON"),
+        )])
+        .expect_err("invalid summary bound must reject the profile");
+        assert_eq!(error.reason, expected);
+    }
+}
+
 /// Proves a portable explicit keyless profile crosses Configure and publishes
 /// its model without issuing a Secret request or requiring a dummy record.
 #[test]
@@ -1536,7 +1701,14 @@ fn invalid_provider_configure_emits_config_error_without_models_or_ready() {
     let valid = configured_chat_completions_settings("alpha", serde_json::json!({}));
     let invalid = configured_chat_completions_settings(
         "deepseek",
-        serde_json::json!({"api_key_secret": "legacy-secret-name"}),
+        serde_json::json!({
+            "models": [{
+                "id": "deepseek-chat",
+                "local_summary_compaction": {
+                    "context_window_tokens": 128000
+                }
+            }]
+        }),
     );
     let (result, frames) = run_provider_configure(BTreeMap::from([
         ("alpha.json".to_owned(), valid),
@@ -1557,7 +1729,7 @@ fn invalid_provider_configure_emits_config_error_without_models_or_ready() {
     assert_eq!(
         errors,
         vec![
-            "provider profile 'deepseek' has invalid credential-free settings: credential fields are forbidden"
+            "provider profile 'deepseek' has invalid credential-free settings: remove obsolete local_summary_compaction.context_window_tokens; model context_window is used"
         ]
     );
     assert!(

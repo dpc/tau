@@ -33,9 +33,14 @@ The Tau-owned summary fallback for Chat Completions, OpenRouter, and public
 Responses models uses cache-aligned ordinary-prefix compaction. Its generic
 profile publishes no prefix byte cap or proactive threshold; its output-token
 cap is derived only within the token domain and its narrative byte cap is an
-independent resource bound. An explicit `local_summary_compaction` profile may
-publish native-domain overrides. Provider-native ChatGPT/Codex compaction
-remains preferred and unchanged.
+independent resource bound. `local_summary_compaction` contains only independent
+optional prefix-byte, output-token, and output-byte overrides layered over those
+defaults; the selected provider-qualified model's `context_window` is the sole
+context source. Removed duplicate-context and serialization-selector fields are
+configuration errors with migration diagnostics. Override validation occurs
+before any model publication or Ready signal. These bounds publish no proactive
+threshold. Provider-native ChatGPT/Codex compaction remains preferred and
+unchanged.
 
 The compaction request lowers the selected immutable cut exactly as ordinary
 inference does: the same system prompt, tool definitions, ordered typed history,

@@ -31,9 +31,12 @@ Tau-owned cache-aligned local summary fallback when they lack provider-native
 compaction. It preserves the ordinary provider request prefix and appends the
 harness summary instruction last. Its generic profile publishes no prefix byte
 cap or proactive threshold; its output-token cap and narrative byte bound remain
-independent resource limits. `local_summary_compaction` may provide native-domain
-overrides. ChatGPT/Codex continues to prefer unchanged native inline or
-standalone compaction.
+independent resource limits. `local_summary_compaction` contains only optional,
+independent prefix-byte, output-token, and output-byte overrides. Resolution uses
+the selected model's `context_window`; startup rejects obsolete duplicate-context
+and serialization-selector keys, or limits that exceed their owning boundary,
+before publishing any model. ChatGPT/Codex continues to prefer unchanged native
+inline or standalone compaction.
 
 Chat Completions routes select cache-usage parsing only through their serialized
 compatibility capability. A selected cache schema requires streamed usage, so the

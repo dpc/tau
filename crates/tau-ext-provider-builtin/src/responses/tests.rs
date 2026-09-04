@@ -423,12 +423,57 @@ fn dispatch_reanchors_semantic_timing_without_changing_update_schema() {
 fn summary_config() -> SummaryCompactionConfig {
     SummaryCompactionConfig::new(
         NonZeroU64::new(128_000).expect("positive"),
-        128_000,
         NonZeroU64::new(16_384).expect("positive"),
         NonZeroU32::new(4_096).expect("positive"),
         NonZeroU64::new(8_192).expect("positive"),
     )
     .expect("valid explicit summary profile")
+}
+
+/// Public Responses must share the generic fallback and fieldwise override
+/// semantics without publishing a proactive threshold.
+#[test]
+fn local_summary_compaction_uses_generic_defaults_and_partial_overrides() {
+    let provider: ResponsesProvider = serde_json::from_value(serde_json::json!({
+        "models": [
+            {"id": "default", "context_window": 8192},
+            {
+                "id": "partial",
+                "context_window": 8192,
+                "local_summary_compaction": {"max_output_tokens": 2048}
+            }
+        ]
+    }))
+    .expect("Responses models");
+    provider
+        .validate_local_summary_compaction()
+        .expect("valid partial override");
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("responses"), &provider);
+    assert!(
+        published
+            .iter()
+            .all(|model| model.supports_standalone_compaction)
+    );
+    assert!(
+        published
+            .iter()
+            .all(|model| model.standalone_compaction_threshold.is_none())
+    );
+    assert!(
+        published
+            .iter()
+            .all(|model| model.standalone_compaction_prefix_budget.is_none())
+    );
+
+    let defaults = resolved_summary_config(&provider.models[0]).expect("generic fallback");
+    assert_eq!(defaults.max_output_tokens(), 1024);
+    let partial = resolved_summary_config(&provider.models[1]).expect("partial override");
+    assert_eq!(partial.max_output_tokens(), 2048);
+    assert_eq!(
+        partial.max_output_bytes(),
+        tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
+    );
 }
 
 /// Public Responses accepts legacy retention and its one opt-in typed

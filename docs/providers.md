@@ -885,27 +885,41 @@ Keyless setup writes only the explicit portable profile. It does not create an
 empty or dummy API-key record.
 
 Tau enables its summary compaction fallback for Chat Completions, OpenRouter,
-and public Responses models. The generic fallback publishes no prefix byte cap
-or proactive threshold; it derives only a same-domain output-token cap and uses
-an independent narrative byte bound. An explicit `local_summary_compaction`
-object supplies native-domain overrides:
+and public Responses models whose configured context window is nonzero. Omit
+`local_summary_compaction` to use the generic fallback: no historical-prefix
+byte cap, an output-token cap of `clamp(context_window / 8, 1, 4096)`, and a
+256 KiB output-byte bound. The fallback publishes no proactive threshold.
+
+An explicit object supplies independent optional overrides. An empty object is
+equivalent to omission:
 
 ```json
 {
   "id": "local-model",
   "context_window": 32768,
   "local_summary_compaction": {
-    "serialization_profile": "local_transcript_v1",
-    "context_window_tokens": 32768,
     "max_input_bytes": 16384,
-    "max_output_tokens": 1024,
-    "max_output_bytes": 8192
+    "max_output_tokens": 1024
   }
 }
 ```
 
-`local_transcript_v1` remains the serialized compatibility discriminator for
-this profile; it no longer means Tau materializes a canonical transcript.
+`max_input_bytes` bounds the canonical JSON-serialized historical prompt prefix.
+`max_output_tokens` controls the summary request. `max_output_bytes` independently
+bounds accepted narrative and reasoning output and defaults to 256 KiB. Explicit
+values must be positive; output tokens cannot exceed the model `context_window`,
+and output bytes cannot exceed 256 KiB.
+
+The old duplicate context and serialization-selector fields are rejected with
+migration guidance:
+
+```text
+remove obsolete local_summary_compaction.context_window_tokens; model context_window is used
+remove obsolete local_summary_compaction.serialization_profile
+```
+
+Remove those keys and keep any of the three limit keys that differ from the
+generic fallback. Provider settings changes still require a Tau restart.
 
 Tau lowers the selected immutable cut exactly like ordinary inference: the
 same system prompt, tools, ordered history, images, raw tool-call arguments,
@@ -921,11 +935,9 @@ harness stores the exact final text once as one synthetic user-role checkpoint,
 without a wrapper or deterministic supplement. Events after the immutable cut
 remain suffix history, and live/cold replay reuse the committed checkpoint
 without another model call. Ordinary opted-in provider debug capture applies.
-For an override, the context window must match the model field. Explicit byte
-input/output limits and the output-token limit must be positive in their native
-domains. Tau does not infer token fit from byte limits. The profile controls only
-its declared resource/output bounds; without an exact token threshold it does
-not proactively schedule. Compaction does not rewrite the ordinary input prefix.
+Tau does not infer token fit from byte limits. The object controls only its
+declared resource/output bounds; without an exact token threshold it does not
+proactively schedule. Compaction does not rewrite the ordinary input prefix.
 Empty, unsupported,
 truncated, or over-limit summaries fail the durable transaction without fallback
 or resend.

@@ -6,7 +6,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{ModelName, TokenCount};
-use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
+use tau_provider::local_summary_compaction::{
+    Config as SummaryCompactionConfig, ConfigError as SummaryCompactionConfigError,
+};
 
 /// Default context window advertised by configured compatible models.
 const DEFAULT_CONTEXT_WINDOW: TokenCount = TokenCount::new(128_000);
@@ -78,7 +80,7 @@ pub struct ChatCompletionsModel {
     /// Whether this model may produce multiple Function calls in one turn.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
-    /// Optional full override for Tau-owned summary compaction limits.
+    /// Optional independent overrides for Tau-owned summary compaction limits.
     ///
     /// Absence derives conservative defaults from the model context window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,43 +106,49 @@ pub struct ChatCompletionsModel {
         Option<tau_proto::EstimatedUsdPerMillionTokenHours>,
 }
 
-/// Explicit limits and compatibility profile for Tau summary compaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Independent optional limits for Tau-owned summary compaction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalSummaryCompactionConfig {
-    /// Versioned profile identifier for local summary compaction.
-    pub serialization_profile: LocalSummaryCompactionSerializationProfile,
-    /// Explicit context window for this local compactor; must match the model.
-    pub context_window_tokens: NonZeroU64,
-    /// Input-size budget used to derive the proactive compaction threshold.
-    pub max_input_bytes: NonZeroU64,
-    /// Maximum requested summary output tokens.
-    pub max_output_tokens: NonZeroU32,
-    /// Maximum accepted summary output size in bytes.
-    pub max_output_bytes: NonZeroU64,
-}
-
-/// Canonical transcript serialization supported by Tau's summary compactor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalSummaryCompactionSerializationProfile {
-    /// Tau's canonical JSON transcript serialization version 1.
-    LocalTranscriptV1,
+    /// Optional canonical historical-prefix JSON byte budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_bytes: Option<NonZeroU64>,
+    /// Optional maximum requested summary output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<NonZeroU32>,
+    /// Optional maximum accepted summary output size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<NonZeroU64>,
 }
 
 impl LocalSummaryCompactionConfig {
-    /// Convert this serialized profile into validated provider request limits.
+    /// Layer these serialized overrides over the generic model-derived limits.
     pub(crate) fn validated_for(
         self,
         model_context_window: TokenCount,
-    ) -> Option<tau_provider_chat_completions::LocalSummaryCompactionConfig> {
-        tau_provider_chat_completions::LocalSummaryCompactionConfig::new(
-            self.context_window_tokens,
+    ) -> Result<
+        Option<tau_provider_chat_completions::LocalSummaryCompactionConfig>,
+        SummaryCompactionConfigError,
+    > {
+        tau_provider_chat_completions::LocalSummaryCompactionConfig::with_overrides(
             model_context_window.get(),
             self.max_input_bytes,
             self.max_output_tokens,
             self.max_output_bytes,
         )
+    }
+}
+
+impl ChatCompletionsModel {
+    /// Validate this model's optional summary limits against its sole context
+    /// window.
+    pub(crate) fn validate_local_summary_compaction(
+        &self,
+    ) -> Result<(), SummaryCompactionConfigError> {
+        if let Some(config) = self.local_summary_compaction {
+            config.validated_for(self.context_window)?;
+        }
+        Ok(())
     }
 }
 
@@ -150,7 +158,9 @@ fn resolved_local_summary_compaction(
     context_window: TokenCount,
 ) -> Option<SummaryCompactionConfig> {
     match override_config {
-        Some(config) => config.validated_for(context_window),
+        Some(config) => config
+            .validated_for(context_window)
+            .expect("validated provider profile must retain valid summary limits"),
         None => SummaryCompactionConfig::default_for(context_window.get()),
     }
 }
@@ -404,6 +414,9 @@ impl ChatCompletionsProvider {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         self.compat.validate()?;
         for (index, model) in self.models.iter().enumerate() {
+            model
+                .validate_local_summary_compaction()
+                .map_err(|_| "invalid local summary compaction limits")?;
             if self.models[..index]
                 .iter()
                 .any(|candidate| candidate.id == model.id)

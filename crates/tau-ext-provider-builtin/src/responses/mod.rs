@@ -16,7 +16,9 @@ pub use prompt_cache::{
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName, TokenCount};
-use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
+use tau_provider::local_summary_compaction::{
+    Config as SummaryCompactionConfig, ConfigError as SummaryCompactionConfigError,
+};
 
 use self::sampling::ResponsesResponseSampler;
 use crate::OpenAiPromptCacheKey;
@@ -57,6 +59,21 @@ pub struct ResponsesProvider {
     pub compat: ResponsesCompat,
 }
 
+impl ResponsesProvider {
+    /// Validate every model's optional summary limits against its own context
+    /// window.
+    pub(crate) fn validate_local_summary_compaction(
+        &self,
+    ) -> Result<(), SummaryCompactionConfigError> {
+        self.models
+            .iter()
+            .try_for_each(|model| match model.local_summary_compaction {
+                Some(config) => config.validated_for(model.context_window).map(|_| ()),
+                None => Ok(()),
+            })
+    }
+}
+
 /// One generic public Responses model configured by the user.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,7 +99,7 @@ pub struct ResponsesModel {
     /// Whether the model may issue several Function calls in one response.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
-    /// Optional full override for Tau-owned summary compaction limits.
+    /// Optional independent overrides for Tau-owned summary compaction limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_summary_compaction: Option<super::chat_completions::LocalSummaryCompactionConfig>,
     /// Optional operator-declared runtime cache contract for this exact model.
@@ -485,7 +502,9 @@ fn materialize_summary_prompt(
 
 fn resolved_summary_config(model: &ResponsesModel) -> Option<SummaryCompactionConfig> {
     match model.local_summary_compaction {
-        Some(config) => config.validated_for(model.context_window),
+        Some(config) => config
+            .validated_for(model.context_window)
+            .expect("validated provider profile must retain valid summary limits"),
         None => SummaryCompactionConfig::default_for(model.context_window.get()),
     }
 }

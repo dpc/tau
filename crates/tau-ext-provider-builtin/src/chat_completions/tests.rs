@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
-use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io as path_std_io, time as path_std_time};
@@ -441,55 +440,66 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
     );
 }
 
-/// Generic compatible models receive a no-byte-cap summary fallback while a
-/// fully declared per-model profile supplies explicit native-domain limits.
+/// Generic compatible models receive the fallback while one partial object
+/// overrides only its declared native-domain limits.
 #[test]
 fn local_summary_compaction_defaults_without_model_profile() {
     let disabled: ChatCompletionsModel =
-        serde_json::from_value(serde_json::json!({"id": "disabled"})).expect("disabled model");
+        serde_json::from_value(serde_json::json!({"id": "disabled", "context_window": 8192}))
+            .expect("generic model");
+    let explicit_defaults: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "explicit-defaults",
+        "context_window": 8192,
+        "local_summary_compaction": {}
+    }))
+    .expect("empty override object");
     let enabled: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
         "id": "enabled",
         "context_window": 8192,
         "local_summary_compaction": {
-            "serialization_profile": "local_transcript_v1",
-            "context_window_tokens": 8192,
             "max_input_bytes": 4096,
-            "max_output_tokens": 512,
-            "max_output_bytes": 4096
+            "max_output_tokens": 512
         }
     }))
     .expect("enabled model");
     let provider = ChatCompletionsProvider {
-        models: vec![disabled, enabled],
+        models: vec![disabled, explicit_defaults, enabled],
         ..ChatCompletionsProvider::default()
     };
 
     let published = models_for_provider(&tau_proto::ProviderName::new("local"), &provider);
     assert!(published[0].supports_standalone_compaction);
     assert!(published[1].supports_standalone_compaction);
+    assert!(published[2].supports_standalone_compaction);
     assert!(
         published
             .iter()
             .all(|model| model.standalone_compaction_threshold.is_none())
     );
     assert!(published.iter().all(|model| !model.supports_compaction));
-
-    let mut incompatible = provider.models[1].clone();
-    incompatible
-        .local_summary_compaction
-        .as_mut()
-        .expect("local profile")
-        .context_window_tokens = NonZeroU64::new(4096).expect("positive");
-    let incompatible_provider = ChatCompletionsProvider {
-        models: vec![incompatible],
-        ..ChatCompletionsProvider::default()
-    };
-    assert!(
-        !models_for_provider(
-            &tau_proto::ProviderName::new("local"),
-            &incompatible_provider
-        )[0]
-        .supports_standalone_compaction
+    assert_eq!(
+        published[2].standalone_compaction_prefix_budget,
+        Some(tau_proto::ByteCount::new(4096))
+    );
+    assert_eq!(
+        resolved_local_summary_compaction(
+            provider.models[0].local_summary_compaction,
+            provider.models[0].context_window,
+        ),
+        resolved_local_summary_compaction(
+            provider.models[1].local_summary_compaction,
+            provider.models[1].context_window,
+        )
+    );
+    let resolved = resolved_local_summary_compaction(
+        provider.models[2].local_summary_compaction,
+        provider.models[2].context_window,
+    )
+    .expect("partial override remains enabled");
+    assert_eq!(resolved.max_output_tokens(), 512);
+    assert_eq!(
+        resolved.max_output_bytes(),
+        tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
     );
 }
 
@@ -500,8 +510,6 @@ fn local_summary_compaction_profile_rejects_unknown_fields() {
     let error = serde_json::from_value::<ChatCompletionsModel>(serde_json::json!({
         "id": "invalid",
         "local_summary_compaction": {
-            "serialization_profile": "local_transcript_v1",
-            "context_window_tokens": 128000,
             "max_input_bytes": 1,
             "max_output_tokens": 1,
             "max_output_bytes": 1,
@@ -514,8 +522,6 @@ fn local_summary_compaction_profile_rejects_unknown_fields() {
     let zero = serde_json::from_value::<ChatCompletionsModel>(serde_json::json!({
         "id": "zero",
         "local_summary_compaction": {
-            "serialization_profile": "local_transcript_v1",
-            "context_window_tokens": 128000,
             "max_input_bytes": 1,
             "max_output_tokens": 0,
             "max_output_bytes": 1
@@ -532,8 +538,6 @@ fn openrouter_enables_local_summary_compaction() {
         "id": "remote",
         "context_window": 8192,
         "local_summary_compaction": {
-            "serialization_profile": "local_transcript_v1",
-            "context_window_tokens": 8192,
             "max_input_bytes": 4096,
             "max_output_tokens": 512,
             "max_output_bytes": 4096
@@ -769,8 +773,6 @@ fn run_scripted_local_summary_attempt_with_updates(
         "id": "local",
         "context_window": 8192,
         "local_summary_compaction": {
-            "serialization_profile": "local_transcript_v1",
-            "context_window_tokens": 8192,
             "max_input_bytes": 4096,
             "max_output_tokens": 512,
             "max_output_bytes": 4096

@@ -472,10 +472,16 @@ quota display updates do not clear inference cooldowns.
 ## Tau-owned summary compaction fallback
 
 Chat Completions, OpenRouter, and public Responses models advertise standalone
-summary compaction by default. Its generic profile publishes no prefix byte cap
-or proactive threshold; its output-token cap and narrative byte bound remain
-independent resource limits. `local_summary_compaction` may provide native-domain
-overrides. Tau sends the ordinary provider request prefix for the immutable cut,
+summary compaction by default when their configured context window is nonzero.
+Omitting `local_summary_compaction` uses no prefix byte cap, derives the
+output-token cap by clamping `context_window / 8` to `1..=4096`, uses a 256 KiB output-byte
+bound, and publishes no proactive threshold. The object accepts independent
+optional `max_input_bytes`, `max_output_tokens`, and `max_output_bytes`
+overrides; `{}` keeps all defaults. The selected model's `context_window` is the
+sole context source. Tau rejects the retired `serialization_profile` and
+`context_window_tokens` keys with migration guidance and rejects output limits
+that exceed the model token window or Tau's byte ceiling before model
+publication. Tau sends the ordinary provider request prefix for the immutable cut,
 including the normal system prompt, tools, history, images, raw tool arguments,
 and cache controls, then appends one harness-authored `<tau_internal>` user
 message. Any tool call fails without execution. Tau accepts one nonempty bounded

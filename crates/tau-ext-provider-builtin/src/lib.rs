@@ -17,6 +17,7 @@ mod oauth_refresh_rejection;
 mod openai_prompt_cache;
 mod output_cost_observation;
 mod prewarm;
+mod provider_settings_validation;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
 mod receipt_observation;
@@ -50,8 +51,7 @@ pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
     ChatCompletionsReasoningEffort, ChatCompletionsReasoningEffortWire,
     ChatCompletionsReasoningEfforts, ChatCompletionsReasoningEffortsError,
-    ChatCompletionsReasoningReplay, LocalSummaryCompactionConfig,
-    LocalSummaryCompactionSerializationProfile, OpenAiExplicitPromptCacheMode,
+    ChatCompletionsReasoningReplay, LocalSummaryCompactionConfig, OpenAiExplicitPromptCacheMode,
     OpenAiPromptCache as ChatCompletionsOpenAiPromptCache, OpenAiPromptCacheBoundary,
     OpenAiPromptCacheOptions, OpenAiPromptCachePolicy as ChatCompletionsOpenAiPromptCachePolicy,
     OpenAiPromptCacheTtl, OpenRouterDiscoveryError, OpenRouterProfile,
@@ -67,6 +67,10 @@ use output_cost_observation::{
     SamplerObservation, WorkerDrainObservation, WorkerOutputObservation, WorkerQueueState,
 };
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
+use provider_settings_validation::{
+    ProviderSettingsValidationError, ProviderSettingsValidationReason,
+    reject_obsolete_local_summary_fields,
+};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
 use receipt_observation::{ReceiptObservation, ReceiptOutcome};
@@ -105,6 +109,7 @@ use tau_proto::{
     ProviderResponseStats, ProviderResponseStatusUpdate, ProviderResponseUpdated,
     ProviderStopReason, SecretValue, ServerOffsetMillis, UnixMillis,
 };
+use tau_provider::local_summary_compaction::ConfigError as SummaryCompactionConfigError;
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
     AttemptOutcome as CodexAttemptOutcome, ChatGptRetryIdentity, CodexError, CodexMode,
@@ -159,6 +164,23 @@ impl BuiltinProviderProfile {
             Self::ChatCompletions(provider) => provider.validate(),
             Self::OpenRouter(profile) => profile.validate(),
             Self::Chatgpt(_) | Self::Responses(_) => Ok(()),
+        }
+    }
+
+    /// Validate model-local summary limits consistently across compatible
+    /// provider families.
+    fn validate_local_summary_compaction(&self) -> Result<(), SummaryCompactionConfigError> {
+        match self {
+            Self::ChatCompletions(provider) => provider
+                .models
+                .iter()
+                .try_for_each(ChatCompletionsModel::validate_local_summary_compaction),
+            Self::OpenRouter(profile) => profile
+                .models
+                .iter()
+                .try_for_each(ChatCompletionsModel::validate_local_summary_compaction),
+            Self::Responses(provider) => provider.validate_local_summary_compaction(),
+            Self::Chatgpt(_) => Ok(()),
         }
     }
 }
@@ -2178,61 +2200,6 @@ fn api_key_record(
     }
 }
 
-/// Closed, redacted reason that one credential-free provider profile is
-/// invalid.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProviderSettingsValidationReason {
-    /// The settings bytes are not JSON.
-    InvalidJson,
-    /// The JSON root is not an object.
-    NotObject,
-    /// The object retains a legacy or inline credential field.
-    CredentialFieldsPresent,
-    /// The credential reference violates the shared closed schema.
-    InvalidCredentialReference,
-    /// The remaining provider-specific fields do not match a built-in profile.
-    InvalidProfile,
-    /// The credential slot does not match the provider profile kind.
-    CredentialKindMismatch,
-}
-
-impl std::fmt::Display for ProviderSettingsValidationReason {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidJson => "settings are not valid JSON",
-            Self::NotObject => "settings must be an object",
-            Self::CredentialFieldsPresent => "credential fields are forbidden",
-            Self::InvalidCredentialReference => "credential reference is invalid",
-            Self::InvalidProfile => "provider-specific settings are invalid",
-            Self::CredentialKindMismatch => {
-                "credential kind does not match the provider profile kind"
-            }
-        })
-    }
-}
-
-/// Bounded startup diagnostic carrying only a validated provider name and a
-/// closed validation reason.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ProviderSettingsValidationError {
-    /// Logical provider profile name from the validated settings filename.
-    provider: ProviderName,
-    /// Closed reason that cannot retain raw settings, paths, or values.
-    reason: ProviderSettingsValidationReason,
-}
-
-impl std::fmt::Display for ProviderSettingsValidationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "provider profile '{}' has invalid credential-free settings: {}",
-            self.provider, self.reason
-        )
-    }
-}
-
-impl std::error::Error for ProviderSettingsValidationError {}
-
 fn try_load_settings_profiles(
     files: Vec<(ProviderName, Vec<u8>)>,
 ) -> Result<BuiltinProviderProfiles, ProviderSettingsValidationError> {
@@ -2292,6 +2259,7 @@ fn parse_settings_profile(
     {
         return Err(ProviderSettingsValidationReason::CredentialFieldsPresent);
     }
+    reject_obsolete_local_summary_fields(object)?;
     let credential = parse_provider_credential(name, object)
         .map_err(|_| ProviderSettingsValidationReason::InvalidCredentialReference)?;
     object
@@ -2309,6 +2277,16 @@ fn parse_settings_profile(
     }
     let profile: BuiltinProviderProfile = serde_json::from_value(value)
         .map_err(|_| ProviderSettingsValidationReason::InvalidProfile)?;
+    profile
+        .validate_local_summary_compaction()
+        .map_err(|error| match error {
+            SummaryCompactionConfigError::MaxOutputTokensExceedContextWindow => {
+                ProviderSettingsValidationReason::LocalSummaryOutputTokensExceedContextWindow
+            }
+            SummaryCompactionConfigError::MaxOutputBytesExceedNarrativeLimit => {
+                ProviderSettingsValidationReason::LocalSummaryOutputBytesExceedNarrativeLimit
+            }
+        })?;
     profile
         .validate()
         .map_err(|_| ProviderSettingsValidationReason::InvalidProfile)?;

@@ -7,7 +7,17 @@ fn defaults_publish_no_cross_unit_limits() {
     let config = Config::default_for(128_000).expect("ordinary model context");
     assert_eq!(config.max_output_tokens(), 4096);
     assert_eq!(config.max_input_bytes(), None);
+    assert_eq!(
+        config.max_output_bytes(),
+        tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
+    );
     assert!(Config::default_for(0).is_none());
+    assert_eq!(
+        Config::default_for(1)
+            .expect("small positive context")
+            .max_output_tokens(),
+        1
+    );
 }
 
 /// The shared instruction must identify harness authority and forbid tools
@@ -21,7 +31,6 @@ fn request_is_the_cache_aligned_trailing_user_instruction() {
 
     let independent_byte_cap = Config::new(
         NonZeroU64::new(2048).expect("positive"),
-        2048,
         NonZeroU64::new(255).expect("positive"),
         NonZeroU32::new(1).expect("positive"),
         NonZeroU64::new(1).expect("positive"),
@@ -31,6 +40,54 @@ fn request_is_the_cache_aligned_trailing_user_instruction() {
             .expect("byte work cap is independent of token capacity")
             .max_input_bytes(),
         Some(tau_proto::ByteCount::new(255))
+    );
+}
+
+/// Each serialized override must replace only its own native-domain fallback.
+#[test]
+fn partial_overrides_preserve_independent_generic_defaults() {
+    let token_override = Config::with_overrides(32_768, None, NonZeroU32::new(8_192), None)
+        .expect("valid token override")
+        .expect("positive context");
+    assert_eq!(token_override.max_input_bytes(), None);
+    assert_eq!(token_override.max_output_tokens(), 8_192);
+    assert_eq!(
+        token_override.max_output_bytes(),
+        tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
+    );
+
+    let byte_override = Config::with_overrides(
+        32_768,
+        NonZeroU64::new(12_345),
+        None,
+        NonZeroU64::new(6_789),
+    )
+    .expect("valid byte overrides")
+    .expect("positive context");
+    assert_eq!(
+        byte_override.max_input_bytes(),
+        Some(tau_proto::ByteCount::new(12_345))
+    );
+    assert_eq!(byte_override.max_output_tokens(), 4_096);
+    assert_eq!(byte_override.max_output_bytes(), 6_789);
+}
+
+/// Override validation must name the owning output domain without restoring a
+/// duplicate context-window assertion.
+#[test]
+fn overrides_reject_output_limits_above_model_and_tau_boundaries() {
+    assert_eq!(
+        Config::with_overrides(8, None, NonZeroU32::new(9), None),
+        Err(ConfigError::MaxOutputTokensExceedContextWindow)
+    );
+    assert_eq!(
+        Config::with_overrides(
+            0,
+            None,
+            None,
+            NonZeroU64::new(tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64 + 1),
+        ),
+        Err(ConfigError::MaxOutputBytesExceedNarrativeLimit)
     );
 }
 

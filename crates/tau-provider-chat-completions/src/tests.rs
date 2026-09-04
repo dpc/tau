@@ -2093,12 +2093,14 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
         ));
     let mut config = resolved_provider(&provider());
     config.compat.prompt_cache = Some(PromptCache::ExplicitSystemPrompt);
-    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
-        NonZeroU64::new(8192).expect("positive"),
-        8192,
-        NonZeroU64::new(4096).expect("positive"),
-        NonZeroU32::new(321).expect("positive"),
-        NonZeroU64::new(2048).expect("positive"),
+    config.local_summary_compaction = Some(
+        LocalSummaryCompactionConfig::new(
+            NonZeroU64::new(8192).expect("positive"),
+            NonZeroU64::new(4096).expect("positive"),
+            NonZeroU32::new(321).expect("positive"),
+            NonZeroU64::new(2048).expect("positive"),
+        )
+        .expect("valid test summary config"),
     );
 
     let mut model = provider().models[0].clone();
@@ -2167,12 +2169,14 @@ fn local_summary_prefix_byte_cap_accepts_equality_and_rejects_plus_one() {
             .expect("standalone prompt has a measurable historical prefix");
     let config_with_cap = |cap| {
         let mut config = resolved_provider(&provider());
-        config.local_summary_compaction = LocalSummaryCompactionConfig::new(
-            NonZeroU64::new(8_192).expect("positive token context"),
-            8_192,
-            NonZeroU64::new(cap).expect("positive byte cap"),
-            NonZeroU32::new(321).expect("positive token output cap"),
-            NonZeroU64::new(2_048).expect("positive byte output cap"),
+        config.local_summary_compaction = Some(
+            LocalSummaryCompactionConfig::new(
+                NonZeroU64::new(8_192).expect("positive token context"),
+                NonZeroU64::new(cap).expect("positive byte cap"),
+                NonZeroU32::new(321).expect("positive token output cap"),
+                NonZeroU64::new(2_048).expect("positive byte output cap"),
+            )
+            .expect("valid test summary config"),
         );
         config
     };
@@ -2233,12 +2237,14 @@ fn local_summary_prefix_cap_precedes_request_lowering() {
             },
         ));
     let mut config = resolved_provider(&provider());
-    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
-        NonZeroU64::new(8_192).expect("positive token context"),
-        8_192,
-        NonZeroU64::new(1).expect("positive byte cap"),
-        NonZeroU32::new(321).expect("positive token output cap"),
-        NonZeroU64::new(2_048).expect("positive byte output cap"),
+    config.local_summary_compaction = Some(
+        LocalSummaryCompactionConfig::new(
+            NonZeroU64::new(8_192).expect("positive token context"),
+            NonZeroU64::new(1).expect("positive byte cap"),
+            NonZeroU32::new(321).expect("positive token output cap"),
+            NonZeroU64::new(2_048).expect("positive byte output cap"),
+        )
+        .expect("valid test summary config"),
     );
     let error = match with_admitted_historical_prefix(
         config.local_summary_compaction,
@@ -3256,15 +3262,9 @@ fn local_summary_compaction_rejects_output_bytes_above_harness_narrative_cap() {
     let output_tokens = NonZeroU32::new(1).expect("positive");
     let exact =
         NonZeroU64::new(tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64).expect("positive");
-    assert!(
-        LocalSummaryCompactionConfig::new(context, context.get(), input, output_tokens, exact)
-            .is_some()
-    );
+    assert!(LocalSummaryCompactionConfig::new(context, input, output_tokens, exact).is_ok());
     let over = NonZeroU64::new(exact.get() + 1).expect("positive");
-    assert!(
-        LocalSummaryCompactionConfig::new(context, context.get(), input, output_tokens, over)
-            .is_none()
-    );
+    assert!(LocalSummaryCompactionConfig::new(context, input, output_tokens, over).is_err());
 }
 
 /// Ensures request emission depends only on wire compatibility and tool

@@ -8,6 +8,15 @@ use serde::Serialize;
 /// Default maximum summary generation.
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 
+/// Invalid Tau-owned summary compaction limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigError {
+    /// The requested output-token bound exceeds the model context window.
+    MaxOutputTokensExceedContextWindow,
+    /// The requested output-byte bound exceeds Tau's fixed narrative ceiling.
+    MaxOutputBytesExceedNarrativeLimit,
+}
+
 /// Validated limits for Tau-owned summary compaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -20,27 +29,29 @@ pub struct Config {
 }
 
 impl Config {
-    /// Validate explicit limits.
+    /// Validate explicit limits against one provider-qualified context window.
     ///
-    /// Returns `None` unless the declared and advertised windows match, output
-    /// bytes fit the harness cap, and the output-token cap does not exceed the
-    /// token window.
-    #[must_use]
+    /// # Errors
+    ///
+    /// Returns an error when an output limit exceeds its owning model or Tau
+    /// boundary.
     pub fn new(
-        declared_context_window_tokens: NonZeroU64,
-        advertised_context_window_tokens: u64,
+        context_window_tokens: NonZeroU64,
         max_input_bytes: NonZeroU64,
         max_output_tokens: NonZeroU32,
         max_output_bytes: NonZeroU64,
-    ) -> Option<Self> {
-        (declared_context_window_tokens.get() == advertised_context_window_tokens
-            && max_output_bytes.get() <= tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
-            && u64::from(max_output_tokens.get()) <= advertised_context_window_tokens)
-            .then_some(Self {
-                max_input_bytes: Some(tau_proto::ByteCount::new(max_input_bytes.get())),
-                max_output_tokens,
-                max_output_bytes,
-            })
+    ) -> Result<Self, ConfigError> {
+        if u64::from(max_output_tokens.get()) > context_window_tokens.get() {
+            return Err(ConfigError::MaxOutputTokensExceedContextWindow);
+        }
+        if max_output_bytes.get() > tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64 {
+            return Err(ConfigError::MaxOutputBytesExceedNarrativeLimit);
+        }
+        Ok(Self {
+            max_input_bytes: Some(tau_proto::ByteCount::new(max_input_bytes.get())),
+            max_output_tokens,
+            max_output_bytes,
+        })
     }
 
     /// Build the generic no-prefix-cap fallback using only same-domain token
@@ -60,7 +71,49 @@ impl Config {
         })
     }
 
-    /// Return the configured prefix budget used for proactive scheduling.
+    /// Resolve independent optional overrides over the generic fallback.
+    ///
+    /// A zero context window retains the generic unsupported result. An
+    /// explicit output-token limit remains invalid when it exceeds that
+    /// zero window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an explicit output limit exceeds its owning model
+    /// or Tau boundary.
+    pub fn with_overrides(
+        context_window_tokens: u64,
+        max_input_bytes: Option<NonZeroU64>,
+        max_output_tokens: Option<NonZeroU32>,
+        max_output_bytes: Option<NonZeroU64>,
+    ) -> Result<Option<Self>, ConfigError> {
+        if max_output_bytes.is_some_and(|limit| {
+            limit.get() > tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
+        }) {
+            return Err(ConfigError::MaxOutputBytesExceedNarrativeLimit);
+        }
+        let Some(context_window_tokens) = NonZeroU64::new(context_window_tokens) else {
+            return if max_output_tokens.is_some() {
+                Err(ConfigError::MaxOutputTokensExceedContextWindow)
+            } else {
+                Ok(None)
+            };
+        };
+        let defaults = Self::default_for(context_window_tokens.get())
+            .expect("nonzero context window must produce generic summary limits");
+        let max_output_tokens = max_output_tokens.unwrap_or(defaults.max_output_tokens);
+        let max_output_bytes = max_output_bytes.unwrap_or(defaults.max_output_bytes);
+        if u64::from(max_output_tokens.get()) > context_window_tokens.get() {
+            return Err(ConfigError::MaxOutputTokensExceedContextWindow);
+        }
+        Ok(Some(Self {
+            max_input_bytes: max_input_bytes.map(|limit| tau_proto::ByteCount::new(limit.get())),
+            max_output_tokens,
+            max_output_bytes,
+        }))
+    }
+
+    /// Return the configured historical-prefix byte budget.
     #[must_use]
     pub const fn max_input_bytes(self) -> Option<tau_proto::ByteCount> {
         self.max_input_bytes
