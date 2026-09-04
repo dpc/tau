@@ -1371,6 +1371,110 @@ fn strict_replay_rejects_framed_record_with_malformed_watch_work_status() {
     );
 }
 
+/// Builds a canonical uncertainty report without a retained task title.
+fn unknown_work_status_event(agent_id: &AgentId) -> Event {
+    Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("unknown-work-status").expect("message id"),
+        sender_id: AgentId::parse("watched-agent").expect("sender id"),
+        sender_session_id: None,
+        recipient_id: agent_id.clone(),
+        kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+        watch_provider_status: None,
+        watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+            session_id: tau_proto::SessionId::parse("session-1").expect("session id"),
+            subscription_id: "watch-1".to_owned(),
+            status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
+            phase: tau_proto::AgentWorkStatusPhase::Unknown,
+            title: None,
+            initial: false,
+        }),
+        watch_long_wait: None,
+        watch_lifecycle: None,
+        message: String::new(),
+    })
+}
+
+/// Durable append accepts the canonical unknown-without-title work status.
+#[test]
+fn durable_append_accepts_unknown_watch_work_status_without_title() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    let event = unknown_work_status_event(&agent_id);
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            UnixMicros::new(41),
+        )
+        .expect("baseline appends");
+
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            event.clone(),
+            UnixMicros::new(42),
+        )
+        .expect("unknown status without title appends");
+
+    assert_eq!(
+        store
+            .agent_events(agent_id.as_str())
+            .expect("durable events")
+            .last()
+            .expect("watch status event")
+            .event,
+        event
+    );
+}
+
+/// Cold replay accepts and restores the canonical unknown-without-title status.
+#[test]
+fn cold_replay_restores_unknown_watch_work_status_without_title() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    let event = unknown_work_status_event(&agent_id);
+    {
+        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::InheritHead,
+                started_event(&agent_id),
+                UnixMicros::new(41),
+            )
+            .expect("baseline appends");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::InheritHead,
+                event.clone(),
+                UnixMicros::new(42),
+            )
+            .expect("unknown status without title appends");
+    }
+
+    let mut reopened = AgentStore::open_lazy(temp.path()).expect("cold store opens");
+    reopened
+        .lock_and_recover_agent(agent_id.as_str())
+        .expect("cold replay accepts unknown status without title");
+    assert_eq!(
+        reopened
+            .agent_events(agent_id.as_str())
+            .expect("replayed events")
+            .last()
+            .expect("watch status event")
+            .event,
+        event
+    );
+}
+
 /// Builds the immutable first event used by durable append tests.
 fn started_event(agent_id: &AgentId) -> Event {
     Event::AgentStarted(tau_proto::AgentStarted {

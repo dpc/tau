@@ -4093,10 +4093,9 @@ fn validate_event_enforces_watch_payload_discriminator() {
     }
 }
 
-/// Ensures canonical work-status phase/title violations fail with a diagnostic
-/// distinct from the message-kind payload discriminator.
+/// Ensures durable watch status uses the shared canonical phase/title grammar.
 #[test]
-fn validate_event_rejects_noncanonical_work_status_title_shape() {
+fn validate_event_reuses_canonical_work_status_grammar() {
     let id = agent_id();
     let tree = AgentTree::from_events(id.clone(), &[]);
     let event_for = |phase, title: Option<String>| {
@@ -4121,8 +4120,8 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
             message: String::new(),
         })
     };
-    let shape_diagnostic =
-        "work-status title must be absent for unreported and present for every reported phase";
+    let shape_diagnostic = "invalid watch work status: work-status title must be absent for \
+        unreported and present for working, done, blocked, and waiting";
     for (phase, title) in [
         (
             tau_proto::AgentWorkStatusPhase::Unreported,
@@ -4135,7 +4134,8 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
             shape_diagnostic
         );
     }
-    let canonical_diagnostic = "work-status title must be nonempty, trimmed, one line, control-free, and at most 160 UTF-8 bytes";
+    let canonical_diagnostic = "invalid watch work status: work-status title must be nonempty, \
+        trimmed, one line, control-free, and at most 160 UTF-8 bytes";
     for title in [
         String::new(),
         " ".to_owned(),
@@ -4160,6 +4160,8 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
         Some("x".repeat(160)),
     ))
     .expect("the exact 160-byte boundary must remain valid");
+    tree.validate_event(&event_for(tau_proto::AgentWorkStatusPhase::Unknown, None))
+        .expect("unknown status may omit a title");
 }
 
 /// Ensures semantic watch kinds require exactly their matching typed payload

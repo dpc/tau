@@ -3825,23 +3825,13 @@ impl AgentTree {
                         == message.watch_long_wait.is_some())
                     && ((message.kind == AgentMessageKind::WatchLifecycle)
                         == message.watch_lifecycle.is_some());
-                let work_status_shape_valid =
-                    message.watch_work_status.as_ref().is_none_or(|status| {
-                        (status.phase == tau_proto::AgentWorkStatusPhase::Unreported)
-                            == status.title.is_none()
-                    });
-                let work_status_title_valid =
-                    message.watch_work_status.as_ref().is_none_or(|status| {
-                        status.title.as_ref().is_none_or(|title| {
-                            !title.is_empty()
-                                && title.len() <= 160
-                                && !title.chars().any(|character| {
-                                    character.is_control()
-                                        || matches!(character, '\u{2028}' | '\u{2029}')
-                                })
-                                && title.trim() == title
-                        })
-                    });
+                let work_status_validation = message
+                    .watch_work_status
+                    .as_ref()
+                    .map(|status| {
+                        tau_proto::SessionAgentWorkStatus::new(status.phase, status.title.clone())
+                    })
+                    .transpose();
                 let lifecycle_body_valid =
                     message.kind != AgentMessageKind::WatchLifecycle || message.message.is_empty();
                 Some(if !payload_matches_kind {
@@ -3852,14 +3842,10 @@ impl AgentTree {
                     Err(AgentEventValidationError::new(
                         "watch lifecycle messages must be content-free",
                     ))
-                } else if !work_status_shape_valid {
-                    Err(AgentEventValidationError::new(
-                        "work-status title must be absent for unreported and present for every reported phase",
-                    ))
-                } else if !work_status_title_valid {
-                    Err(AgentEventValidationError::new(
-                        "work-status title must be nonempty, trimmed, one line, control-free, and at most 160 UTF-8 bytes",
-                    ))
+                } else if let Err(error) = work_status_validation {
+                    Err(AgentEventValidationError::new(format!(
+                        "invalid watch work status: {error}"
+                    )))
                 } else {
                     Ok(())
                 })
