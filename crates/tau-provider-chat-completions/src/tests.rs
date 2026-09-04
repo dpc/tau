@@ -2566,6 +2566,146 @@ fn compact_stream_accepts_only_final_narrative_and_reasoning() {
     );
 }
 
+/// llama.cpp sends its final timing metadata after the singleton `stop` event
+/// as an empty-choices usage event. The compact validator must preserve that
+/// ordering while retaining the extracted usage and accepted summary.
+#[test]
+fn compact_stream_accepts_llama_cpp_final_usage_timings_metadata() {
+    let mut state = StreamState::new_for_attempt(
+        CacheUsageCompat::OpenAi,
+        Some(tau_proto::ByteCount::new(64)),
+    );
+    for event in [
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": "summary"},
+                "finish_reason": null,
+            }],
+            "created": 1_757_141_666_u64,
+            "id": "chatcmpl-local",
+            "model": "local-qwen",
+            "object": "chat.completion.chunk",
+            "system_fingerprint": "b-local",
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+            "created": 1_757_141_666_u64,
+            "id": "chatcmpl-local",
+            "model": "local-qwen",
+            "object": "chat.completion.chunk",
+            "system_fingerprint": "b-local",
+        }),
+        serde_json::json!({
+            "choices": [],
+            "created": 1_757_141_666_u64,
+            "id": "chatcmpl-local",
+            "model": "local-qwen",
+            "object": "chat.completion.chunk",
+            "system_fingerprint": "b-local",
+            "usage": {
+                "completion_tokens": 7,
+                "prompt_tokens": 11,
+                "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 3},
+            },
+            "timings": {
+                "cache_n": 3,
+                "prompt_n": 8,
+                "prompt_ms": 30.958,
+                "predicted_n": 7,
+                "predicted_ms": 661.064,
+            },
+        }),
+    ] {
+        apply_event(&mut state, &event, &mut |_| {}).expect("llama.cpp compact event");
+    }
+    let state = state
+        .validate_compaction()
+        .expect("complete llama.cpp compact response");
+
+    assert_eq!(state.text, "summary");
+    let usage = state.usage().expect("llama.cpp usage");
+    assert_eq!(usage.prompt_sent_tokens, 11);
+    assert_eq!(usage.prompt_cached_tokens, 3);
+    assert_eq!(usage.response_received_tokens, 7);
+}
+
+/// Timings remain strict compact-only metadata: they must be the one
+/// post-`stop`, empty-choices usage event, while unrelated fields continue to
+/// reject with the established provider-output diagnostic.
+#[test]
+fn compact_stream_rejects_timings_outside_llama_cpp_final_usage_shape() {
+    let mut before_stop =
+        StreamState::new_for_attempt(CacheUsageCompat::None, Some(tau_proto::ByteCount::new(64)));
+    let error = apply_event(
+        &mut before_stop,
+        &serde_json::json!({
+            "choices": [],
+            "usage": {},
+            "timings": {},
+        }),
+        &mut |_| {},
+    )
+    .expect_err("pre-stop timings event must reject");
+    assert!(matches!(
+        error,
+        LlmError::InvalidCompaction(message)
+            if message == "summary compactor returned unsupported provider output"
+    ));
+
+    for event in [
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+            "timings": {},
+        }),
+        serde_json::json!({
+            "choices": [],
+            "usage": {},
+            "timings": "not metadata",
+        }),
+        serde_json::json!({
+            "choices": [],
+            "usage": {},
+            "timings": {},
+            "unrelated": true,
+        }),
+    ] {
+        let mut state = StreamState::new_for_attempt(
+            CacheUsageCompat::None,
+            Some(tau_proto::ByteCount::new(64)),
+        );
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "summary"},
+                    "finish_reason": "stop",
+                }],
+            }),
+            &mut |_| {},
+        )
+        .expect("required compact stop");
+        let error = apply_event(&mut state, &event, &mut |_| {})
+            .expect_err("invalid timings shape must reject");
+        assert!(matches!(
+            error,
+            LlmError::InvalidCompaction(message)
+                if message == "summary compactor returned unsupported provider output"
+        ));
+    }
+}
+
 /// One Chat Completions event may carry every reasoning alias for the same
 /// bytes, so ordinary streaming retains the first alias only.
 #[test]

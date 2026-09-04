@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{LlmError, OutputItemAccumulator, StreamState};
 
@@ -14,6 +14,9 @@ pub(super) struct CompactStreamValidator {
     max_output_bytes: tau_proto::ByteCount,
     /// Whether the one required `stop` terminal has been observed.
     completed: bool,
+    /// Whether the one allowed llama.cpp final usage metadata event was
+    /// observed.
+    llama_cpp_final_usage_timings_seen: bool,
 }
 
 impl CompactStreamValidator {
@@ -22,6 +25,7 @@ impl CompactStreamValidator {
         Self {
             max_output_bytes,
             completed: false,
+            llama_cpp_final_usage_timings_seen: false,
         }
     }
 
@@ -59,13 +63,17 @@ impl CompactStreamValidator {
             "system_fingerprint",
             "usage",
         ];
-        if object
-            .keys()
-            .any(|key| !TOP_LEVEL_FIELDS.contains(&key.as_str()))
-        {
+        let llama_cpp_final_usage_timings = self.is_llama_cpp_final_usage_timings_event(object);
+        if object.keys().any(|key| {
+            !TOP_LEVEL_FIELDS.contains(&key.as_str())
+                && !(key == "timings" && llama_cpp_final_usage_timings)
+        }) {
             return Err(invalid(
                 "summary compactor returned unsupported provider output",
             ));
+        }
+        if llama_cpp_final_usage_timings {
+            self.llama_cpp_final_usage_timings_seen = true;
         }
         if object.get("error").is_some_and(|error| !error.is_null()) {
             if !error_choices_are_content_free(object.get("choices")) {
@@ -170,6 +178,18 @@ impl CompactStreamValidator {
             }
         }
         Ok(())
+    }
+
+    /// Identifies llama.cpp's one content-free final usage event with timings.
+    fn is_llama_cpp_final_usage_timings_event(&self, event: &Map<String, Value>) -> bool {
+        self.completed
+            && !self.llama_cpp_final_usage_timings_seen
+            && event.get("error").is_none_or(Value::is_null)
+            && event.get("choices").is_some_and(
+                |choices| matches!(choices.as_array(), Some(choices) if choices.is_empty()),
+            )
+            && event.get("usage").is_some_and(Value::is_object)
+            && event.get("timings").is_some_and(Value::is_object)
     }
 
     /// Validate the complete parsed projection and release it to the attempt
