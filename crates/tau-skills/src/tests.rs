@@ -894,6 +894,27 @@ fn built_in_skill_sources_load_with_matching_frontmatter_names() {
     }
 }
 
+/// Keep the concise Zulip operational skill synchronized with the bounded
+/// activity-summary capability and its process-local deadline boundary.
+#[test]
+fn zulip_self_knowledge_retains_activity_summary_contract_tokens() {
+    let source = BUILT_IN_SKILL_SOURCES
+        .iter()
+        .find(|source| source.diagnostic_path == "tau-self-knowledge-ext-zulip.md")
+        .expect("embedded Zulip self-knowledge");
+    for token in [
+        "non_allowlisted_activity",
+        "message bodies",
+        "process state",
+        "deadline",
+    ] {
+        assert!(
+            source.content.contains(token),
+            "Zulip self-knowledge lost `{token}`"
+        );
+    }
+}
+
 /// Pins the built-in loader's stable source order and complete name inventory.
 #[test]
 fn built_in_skills_have_expected_name_order_and_set() {

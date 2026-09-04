@@ -9,6 +9,18 @@ description: Use for Tau std-zulip setup, event queues, stream/topic and DM rout
 
 Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_secret`, a nonempty numeric `allowed_user_ids`, optional sender aliases, optional `direct_messages: { receive: all_messages }`, optional `proactive_direct_messages` aliases with one fixed recipient each, and name-based stream/topic routes. Keep the identity key stable across API-key rotation; changing it deliberately starts a new opaque sender/conversation/message namespace. `allowed_user_ids` admits inbound senders only; it does not authorize proactive DMs. Routes independently select `receive: mentions_only|all_messages` and `proactive_send`; every configured channel name resolves to a private native ID before queue registration, and `all_messages` subscribes the bot idempotently before that registration without later unsubscribing. Exact proactive stream names remain the default, while `agent_chosen_topic: true` on a proactive name without `topic` explicitly grants agent topic choice within that configured channel. Production requires HTTPS.
 
+Set `non_allowlisted_activity: {}` to collect bounded stream activity that
+passes every receive predicate except the numeric sender allowlist.
+Unauthorized message bodies are discarded. The next allowlisted message in
+the same exact stream/topic may prepend one bridge-authored note with sanitized
+untrusted display hints, route-scoped opaque pseudonyms, and post counts; its
+own Markdown remains the exact suffix, and the pair uses one fact and wake.
+This is best effort, not a reliable queue: bounded process state can expire or
+disappear after 24 hours, authority changes, or restart. Capacity can omit new
+activity, duplicate-cache eviction can permit duplicate observations, and
+nothing is delivered without a later eligible message. Direct messages and
+autonomous deadline delivery are not supported.
+
 For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all inbound fields, and configure exactly one `proactive_direct_messages` alias. This mode declares only scoped `zulip_send` without a tool group; sending uses `message` plus that sole alias and needs no registration. It never registers or polls a queue, publishes Zulip-originated events, installs reply/reaction authority, or activates an agent. Mode changes require extension restart.
 
 In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the group. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
