@@ -420,6 +420,26 @@ a transport prefix. Zulip preserves its inbound Markdown exactly, including a
 leading addressed bot mention. These mappings create no transport-specific wire
 fields.
 
+The user approved one bounded Zulip-only exception to the original-body-only
+rule on September 4, 2026. With opt-in non-allowlisted stream activity
+collection, one `message.delivered` text may contain a clearly delimited
+bridge-authored, non-authoritative activity note followed by the current
+allowlisted sender's exact unchanged Markdown. The note contains only bounded
+sanitized untrusted display hints, route-scoped opaque pseudonyms, and
+saturating counts; rejected bodies and raw topics are discarded. This
+deliberately mixes bridge and sender provenance in one external-content fact
+so the summary and admitted message share one report, durable fact, transcript
+item, and wake. `verified_allowlisted` continues to describe only the current
+native sender and grants no trust to the note, its labels, or the body.
+
+The Zulip accumulator is best-effort process-local context, not an audit log or
+reliable queue. Capacity, age expiry, queue or authority changes, shutdown,
+crash, restart, or absence of a later eligible same-topic admitted message can
+discard it. If a complete note cannot fit the generic text bound, Zulip
+publishes the admitted body unchanged and does not block delivery. No other
+bridge gains transport-prefix or mixed-provenance authority from this
+exception.
+
 ## Security and visibility
 
 The stable publisher stamp is connection provenance only. A publisher can

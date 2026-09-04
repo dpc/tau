@@ -41,3 +41,17 @@ checkpoint-write retry, report-submission barriers, unregister lifecycle,
 corruption rejection, namespace secrecy, and exclusive identity ownership.
 The fake history API and loopback request-shape test keep page sizes and Zulip
 anchor parameters deterministic.
+## Non-allowlisted activity summaries
+
+Focused activity tests prove that only otherwise-admissible stream creates are
+counted, rejected bodies never survive into model-visible output, hostile
+labels remain bounded visible data, and route/sender capacities do not evict
+existing buckets. Piggyback tests require one report with the authorized
+Markdown preserved as an exact suffix. They also cover the full-size-body
+fallback, where the authorized message remains unchanged and the summary stays
+queued.
+
+Treat this feature as process-local best effort when testing lifecycle cuts:
+queue replacement, configuration or registration changes, shutdown, and a new
+extension instance may discard pending counts. No test should expect a
+standalone deadline report; v1 has no autonomous summary delivery.

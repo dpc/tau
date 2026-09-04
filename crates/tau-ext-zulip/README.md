@@ -38,6 +38,7 @@ extensions:
       identity_key_secret: zulip_identity_key
       offline_message_catch_up: false
       allowed_user_ids: [42, 77]
+      non_allowlisted_activity: {}
       sender_aliases:
         - { user_id: 42, alias: dpc }
       direct_messages: { receive: all_messages }
@@ -59,6 +60,31 @@ extensions:
 ```
 
 The sender allowlist is mandatory and uses stable numeric Zulip user IDs. It authorizes only inbound senders; it never grants outbound authority. `sender_aliases` are presentation-only. A configured stream `name` forms the model-callable destination namespace and resolves to its private native ID before each queue registration; a route covers one exact channel and either one exact topic or all topics. `mentions_only` checks Zulip's `mentioned` flag; `all_messages` is explicit operator authority and automatically subscribes the bot before queue registration. Reconnection repeats the idempotent subscription, while route removal never unsubscribes. Proactive stream sends require an exact configured topic unless the operator explicitly sets `agent_chosen_topic: true` and omits `topic`. A topicless agent-chosen route may also receive all topics in that channel, but cannot overlap another receive route; a send-only agent-chosen route may coexist with an exact-topic receive route. `proactive_direct_messages` separately grants one fixed recipient to a destination alias; the recipient ID is configuration-only and never enters tool arguments or discovery output. Every non-bot inbound group-DM participant must be allowlisted. The queue does not request all-public-stream access.
+
+`non_allowlisted_activity: {}` opt-in records only bounded sender activity for
+created stream messages that pass every ordinary size, route, topic, mention,
+queue, generation, single-agent, self-message, and duplicate predicate but fail
+the numeric sender allowlist. Its summary accumulator never retains rejected
+message bodies, raw topics, emails, URLs, or native message/event IDs. The
+pre-existing bounded duplicate cache still retains recent native message IDs,
+and catch-up persists its ordinary highest completed native message position;
+neither reaches reports, facts, or model-visible output. The next admitted
+message in the exact same native stream/topic may carry one clearly delimited
+bridge-authored note listing sanitized untrusted display hints, route-scoped
+opaque sender pseudonyms, and saturating post counts. The admitted sender's
+exact Markdown is an unchanged suffix of the same `message.delivered` fact, so
+the note adds no independent report or wake. If the complete note cannot fit,
+the allowed message is delivered unchanged and the bucket remains for a later
+smaller message.
+
+These summaries are best effort, not an audit log or reliable queue. State is
+bounded to 64 conversations and 32 retained senders per conversation, expires
+24 hours after the first retained post, and disappears on queue replacement,
+configuration or registration changes, shutdown, crash, or restart. New
+activity may be omitted at capacity, counts saturate at `9999+`, and activity
+is never delivered if no later eligible same-topic allowed message arrives.
+Direct-message summaries and autonomous deadline delivery are not implemented;
+unknown fields such as `deadline_seconds` fail closed.
 Keep `zulip_identity_key` stable across API-key rotation and restart. It keys
 non-reversible publisher-domain sender, conversation, and message identifiers.
 Rotating it deliberately starts a new opaque identity namespace; existing facts

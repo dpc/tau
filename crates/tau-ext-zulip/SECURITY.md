@@ -19,6 +19,27 @@ The configured same-user extension process is trusted local IPC, while every Zul
 
 Exact numeric sender allowlists and configured direct-message/stream/topic receive policy gate prompt-producing ingress. Direct/private ingress accepts at most 33 unique recipient objects with nonzero numeric IDs, requires the authenticated queue bot and parsed sender, removes the bot, then requires 1–32 allowlisted non-bot users. It rejects malformed evidence before it emits a report or creates owner/reply authority; `direct_participant_admission_requires_complete_allowlisted_membership` and `malformed_direct_participants_create_no_report_or_reply_owner` retain those regressions. `allowed_user_ids` is inbound-only and never grants proactive direct-message authority. Proactive DMs require a separate configured alias with one fixed nonzero recipient; its recipient ID never enters discovery or tool arguments. Sender aliases and descriptions never grant authority. Configured stream names and direct-message aliases grant only their fixed extension-private routes. Source-bound reply and reaction selectors resolve only bounded local ownership under the same agent and current generations. Proactive stream send uses only configured names: exact-topic names and replies retain fixed topics, while an explicit `agent_chosen_topic:true` proactive name grants topic choice only within its resolved private stream. Generic message facts contain descriptive opaque identity and conversation provenance, not actionable native authority.
 
+Opt-in `non_allowlisted_activity` is a narrow exception to silent sender
+rejection for otherwise-admissible created stream messages. It retains only a
+private numeric aggregation key, a fixed opaque conversation key, a bounded
+escaped display hint, a route-scoped keyed pseudonym, saturating counts, and
+monotonic age. Rejected bodies and raw topics cannot enter this accumulator,
+reports, facts, logs, notices, or model-visible output. The pre-existing
+bounded duplicate cache necessarily retains recent native message IDs, and
+catch-up persists its ordinary highest completed native message position,
+including filtered unauthorized creates. A later same-topic allowlisted
+message may carry the complete bridge-authored activity note and its own exact
+body in one external-content fact. Labels remain attacker controlled after
+sanitization; the note explicitly marks them as untrusted and grants no
+authority.
+
+The accumulator is deliberately best effort and process-local. Fixed route,
+sender, label, count, rendering, and 24-hour lifetime bounds limit hostile
+memory use. Authority-epoch changes clear it, and restart or capacity pressure
+may lose observations. It never generates a standalone activation, summarizes
+direct messages, or delays an admitted message when a complete note does not
+fit.
+
 Zulip organization administrators and conversation members may read transported content. This bridge does not provide end-to-end encryption. `all_messages` broadens prompt-injection and model-spend exposure. Catch-up is opt-in because it extends this exposure to newly created messages sent while Tau was offline. Recovery fetches at most 100 messages per page and waits for outstanding canonical echoes before fetching another page, bounding retained checkpoint correlations independently of the reply-authority cache. Process restart loses reply authority and can duplicate a delivery, but the checkpoint never advances until the canonical fact returns on the post-commit downpath.
 
 Review changes that affect authentication, API-base validation, allowlists, route overlap, DM participant derivation, mention admission, queue gaps, response/event/message bounds, report-before-result ordering, native-ID leakage, mutation ownership, stale-generation checks, or secret redaction. Shared event/journal or harness-extension interface changes require the root persistence/interface gate and are outside this component.

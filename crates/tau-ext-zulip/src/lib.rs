@@ -5,6 +5,7 @@
 //! emits only canonical external-message reports through
 //! `PeerCapability::MessageBridge`.
 
+mod activity;
 mod api;
 mod checkpoint;
 mod config;
@@ -18,8 +19,9 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use activity::{ActivityAccumulator, MAX_ACTIVITY_NOTE_BYTES};
 use api::{ApiError, EventQueue, HttpZulipClient, NativeRoute, ZulipClient};
 use checkpoint::CheckpointRuntime;
 #[cfg(test)]
@@ -200,6 +202,8 @@ struct State {
     owner_order: VecDeque<MessageFactId>,
     /// Durable catch-up state, opened only while the opt-in feature is active.
     checkpoint: Option<CheckpointRuntime>,
+    /// Bounded process-local summaries of relevant rejected stream messages.
+    activity: ActivityAccumulator,
 }
 
 impl State {
@@ -239,9 +243,11 @@ impl State {
         self.recent_set.clear();
         self.registration_generation = self.registration_generation.wrapping_next();
         self.checkpoint = None;
+        self.activity.clear();
     }
 
     fn unregister_agent(&mut self, agent_id: &AgentId) {
+        self.activity.clear();
         self.registered_agents.remove(agent_id);
         self.owners.retain(|_, owner| &owner.agent_id != agent_id);
         if self.registered_agents.is_empty() {
@@ -962,14 +968,16 @@ impl Extension {
         registration_generation: ZulipRegistrationGeneration,
         bot_user_id: u64,
     ) {
-        if self
-            .state
-            .lock()
-            .config
-            .as_ref()
-            .is_none_or(|cfg| cfg.mode.is_send_only())
         {
-            return;
+            let mut state = self.state.lock();
+            if state
+                .config
+                .as_ref()
+                .is_none_or(|cfg| cfg.mode.is_send_only())
+            {
+                return;
+            }
+            state.activity.prune_expired(Instant::now());
         }
         let event_id = match event.get("id").and_then(serde_json::Value::as_i64) {
             Some(value) => value,
@@ -1036,7 +1044,7 @@ impl Extension {
         if sender_id == bot_user_id {
             return;
         }
-        let (agent_id, conversation, sender_alias) = {
+        let (agent_id, conversation, sender_alias, mut activity_snapshot) = {
             let mut state = self.state.lock();
             if state.config_generation != generation
                 || state.registration_generation != registration_generation
@@ -1049,7 +1057,7 @@ impl Extension {
                 return;
             }
             let cfg = state.config.clone().expect("active queue config");
-            if !cfg.allowed_user_ids.contains(&sender_id) || cfg.max_message_bytes < text.len() {
+            if cfg.max_message_bytes < text.len() {
                 return;
             }
             let Some(conversation) =
@@ -1063,8 +1071,29 @@ impl Extension {
                 .next()
                 .cloned()
                 .expect("one agent");
+            if !cfg.allowed_user_ids.contains(&sender_id) {
+                if cfg.non_allowlisted_activity
+                    && matches!(conversation.route, NativeRoute::Stream { .. })
+                {
+                    state.activity.observe(
+                        &conversation.stable_id,
+                        sender_id,
+                        message
+                            .get("sender_full_name")
+                            .and_then(serde_json::Value::as_str),
+                        &cfg.id_key,
+                        Instant::now(),
+                    );
+                }
+                return;
+            }
             let sender_alias = cfg.sender_aliases.get(&sender_id).cloned();
-            (agent_id, conversation, sender_alias)
+            let activity_snapshot = if cfg.non_allowlisted_activity {
+                state.activity.take(&conversation.stable_id, Instant::now())
+            } else {
+                None
+            };
+            (agent_id, conversation, sender_alias, activity_snapshot)
         };
         let mut state = self.state.lock();
         if state.config_generation != generation
@@ -1074,16 +1103,35 @@ impl Extension {
         {
             return;
         }
-        let cfg = state.config.as_ref().expect("active queue config");
-        let fact_id = message_fact_id(cfg, native_id);
+        let cfg = state.config.clone().expect("active queue config");
+        let fact_id = message_fact_id(&cfg, native_id);
         let publisher = state.publisher_name.clone().expect("configured publisher");
+        let activity_note = (!text.is_empty())
+            .then(|| {
+                activity_snapshot.as_ref().and_then(|snapshot| {
+                    snapshot.render(
+                        MAX_MESSAGE_BYTES
+                            .saturating_sub(text.len())
+                            .min(MAX_ACTIVITY_NOTE_BYTES),
+                    )
+                })
+            })
+            .flatten();
+        if activity_note.is_none()
+            && let Some(snapshot) = activity_snapshot.take()
+        {
+            state.activity.restore(snapshot);
+        }
+        let delivered_text = activity_note
+            .as_ref()
+            .map_or_else(|| text.to_owned(), |note| format!("{note}{text}"));
         let report = Event::MessageDeliveredReported(MessageDelivered::new(
             RawMessagePublisherId::new(publisher.as_str()),
             MessageAgentTarget::new(agent_id.as_ref()),
             fact_id.clone(),
-            sender_party(cfg, sender_id, sender_alias),
+            sender_party(&cfg, sender_id, sender_alias),
             Some(conversation.fact()),
-            text,
+            delivered_text,
         ));
         if let Some(checkpoint) = state.checkpoint.as_mut() {
             checkpoint.submitted(native_id, fact_id.clone());
@@ -1111,6 +1159,9 @@ impl Extension {
                 || !state.registered_agents.contains(&agent_id)
             {
                 return;
+            }
+            if let Some(snapshot) = activity_snapshot {
+                state.activity.restore(snapshot);
             }
             if let Some(checkpoint) = state.checkpoint.as_mut() {
                 checkpoint.retry(native_id);
@@ -1767,6 +1818,7 @@ fn handle_queue_expiry(
             return;
         }
         state.queue = None;
+        state.activity.clear();
     }
     if cfg.offline_message_catch_up {
         ext.output

@@ -37,7 +37,15 @@ pub(crate) struct ExtConfig {
     pub(crate) max_message_bytes: Option<usize>,
     /// Recover newly created messages missed while the extension was offline.
     pub(crate) offline_message_catch_up: bool,
+    /// Optional bounded summaries of otherwise-admissible non-allowlisted
+    /// stream activity.
+    pub(crate) non_allowlisted_activity: Option<NonAllowlistedActivityConfig>,
 }
+
+/// Opt-in process-local non-allowlisted activity collection.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct NonAllowlistedActivityConfig {}
 
 /// Configured presentation alias for one Zulip user.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -190,6 +198,8 @@ pub(crate) struct RuntimeConfig {
     pub(crate) offline_message_catch_up: bool,
     /// Harness-assigned extension state directory.
     pub(crate) state_dir: Option<PathBuf>,
+    /// Whether bounded non-allowlisted stream activity summaries are enabled.
+    pub(crate) non_allowlisted_activity: bool,
 }
 
 /// Validated bridge authority selected by operator configuration.
@@ -232,6 +242,9 @@ impl ExtConfig {
             }
             if self.offline_message_catch_up {
                 return Err("zulip send-only config forbids `offline_message_catch_up`".to_owned());
+            }
+            if self.non_allowlisted_activity.is_some() {
+                return Err("zulip send-only config forbids `non_allowlisted_activity`".to_owned());
             }
             if self.proactive_direct_messages.len() != 1 {
                 return Err(
@@ -351,6 +364,7 @@ impl ExtConfig {
             id_key,
             offline_message_catch_up: self.offline_message_catch_up,
             state_dir: None,
+            non_allowlisted_activity: self.non_allowlisted_activity.is_some(),
         })
     }
 }

@@ -6,6 +6,18 @@ The routing contract spans configuration validation, queue admission, runtime ow
 
 Ingress requires an allowlisted numeric sender and exactly one current registered Tau agent. Direct messages require explicit DM policy and complete `private`/`direct` participant evidence: at most 33 unique recipient objects with nonzero numeric IDs, including the authenticated queue bot and parsed sender. Admission removes that bot, requires 1–32 allowlisted non-bot IDs, then freezes their sorted set; malformed or incomplete evidence creates neither a report nor reply authority. Each configured stream name resolves to one native ID before queue registration; inbound stream traffic matches that ID, and an optional configured topic narrows the route. `all_messages` also subscribes the bot to its configured channel before every queue registration, never on route removal. A topicless agent-chosen proactive route may also receive every topic, but that receive grant cannot overlap another receive route in the stream; a send-only such route may coexist with an exact-topic receive route. `mentions_only` additionally requires Zulip's structured `mentioned` flag. Admission does not remove or otherwise interpret inbound Markdown, including a leading bot address. More than one matching agent fails closed.
 
+When `non_allowlisted_activity: {}` is configured, a created stream message
+that passes every preceding syntax, size, queue, generation, duplicate, self,
+route, topic, mention, and single-agent predicate but fails only sender
+allowlisting increments a bounded same-conversation count and emits no report.
+Direct messages never contribute. The conversation scope is the keyed stable
+identity of exact native `(stream_id, topic)`; retained sender identity is the
+private numeric ID, never the display name. A later fully admitted message
+flushes only its same-scope bucket when a complete note fits beside the exact
+body. Otherwise it delivers unchanged and retains the bucket. Queue
+replacement and every configuration or registration authority change clear
+all buckets.
+
 Catch-up applies this same current sender and receive policy to newly created
 history messages. Skipped history may advance the position; an allowed and
 routed message may advance it only after canonical post-commit self-observation.
