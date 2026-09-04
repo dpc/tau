@@ -102,16 +102,18 @@ fn cleanup_old_sessions_with(
         now,
         remove_dir,
         |_| {},
+        crate::retention_fs::sync_directory,
     )
 }
 
-fn cleanup_old_sessions_with_hooks(
+pub(crate) fn cleanup_old_sessions_with_hooks(
     sessions_dir: PathBuf,
     retention: Duration,
     protected_sessions: Vec<SessionId>,
     now: u64,
     mut remove_dir: impl FnMut(&std::path::Path) -> io::Result<()>,
     mut before_lock: impl FnMut(&Path),
+    mut sync_directory: impl FnMut(&Path) -> io::Result<()>,
 ) -> SessionCleanupSummary {
     let mut summary = SessionCleanupSummary::default();
     let candidates = match list_session_candidates(&sessions_dir) {
@@ -185,22 +187,40 @@ fn cleanup_old_sessions_with_hooks(
             continue;
         }
 
-        let detached_path = match detach_session_dir(&sessions_dir, &path, &session_id) {
-            Ok(path) => path,
-            Err(error) => {
-                summary.failures += 1;
-                tracing::warn!(
-                    target: "tau_harness::session_cleanup",
-                    session_id = %session_id,
-                    path = %path.display(),
-                    %error,
-                    "failed to detach old session directory"
-                );
-                continue;
-            }
-        };
+        let (detached_path, durability) =
+            match detach_session_dir(&sessions_dir, &path, &session_id, &mut sync_directory) {
+                Ok(detached) => detached,
+                Err(error) => {
+                    summary.failures += 1;
+                    tracing::warn!(
+                        target: "tau_harness::session_cleanup",
+                        session_id = %session_id,
+                        path = %path.display(),
+                        %error,
+                        "failed to detach old session directory"
+                    );
+                    continue;
+                }
+            };
         summary.detached += 1;
-        let result = remove_dir(&detached_path);
+        if let Err(error) = durability {
+            summary.failures += 1;
+            tracing::warn!(
+                target: "tau_harness::session_cleanup",
+                session_id = %session_id,
+                path = %detached_path.display(),
+                %error,
+                "failed to commit detached session staging boundary"
+            );
+            drop(cleanup_lock);
+            continue;
+        }
+        let result = crate::retention_fs::remove_staged_tree(
+            &detached_path,
+            &detached_sessions_dir(&sessions_dir),
+            &mut remove_dir,
+            &mut sync_directory,
+        );
         drop(cleanup_lock);
         if let Err(error) = result {
             summary.failures += 1;
@@ -332,9 +352,10 @@ fn detach_session_dir(
     sessions_dir: &Path,
     session_path: &Path,
     session_id: &SessionId,
-) -> io::Result<PathBuf> {
+    sync_directory: &mut dyn FnMut(&Path) -> io::Result<()>,
+) -> io::Result<(PathBuf, io::Result<()>)> {
     let cleanup_dir = detached_sessions_dir(sessions_dir);
-    fs::create_dir_all(&cleanup_dir)?;
+    crate::retention_fs::prepare_staging_directory(&cleanup_dir, sync_directory)?;
     loop {
         let suffix = CLEANUP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
         let detached_path = cleanup_dir.join(format!(
@@ -343,7 +364,14 @@ fn detach_session_dir(
             std::process::id()
         ));
         match fs::rename(session_path, &detached_path) {
-            Ok(()) => return Ok(detached_path),
+            Ok(()) => {
+                let durability = crate::retention_fs::sync_detach_boundary(
+                    sessions_dir,
+                    &cleanup_dir,
+                    sync_directory,
+                );
+                return Ok((detached_path, durability));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
@@ -367,6 +395,18 @@ pub(crate) fn finalize_detached_sessions(sessions_dir: &Path) -> io::Result<()> 
 }
 
 fn remove_stale_detached_sessions(sessions_dir: &Path) -> io::Result<()> {
+    remove_stale_detached_sessions_with(
+        sessions_dir,
+        |path| fs::remove_dir_all(path),
+        crate::retention_fs::sync_directory,
+    )
+}
+
+fn remove_stale_detached_sessions_with(
+    sessions_dir: &Path,
+    mut remove_dir: impl FnMut(&Path) -> io::Result<()>,
+    mut sync_directory: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     let cleanup_dir = detached_sessions_dir(sessions_dir);
     let entries = match fs::read_dir(&cleanup_dir) {
         Ok(entries) => entries,
@@ -375,7 +415,13 @@ fn remove_stale_detached_sessions(sessions_dir: &Path) -> io::Result<()> {
     };
     for entry in entries {
         let path = entry?.path();
-        match fs::remove_dir_all(&path) {
+        crate::retention_fs::sync_detach_boundary(sessions_dir, &cleanup_dir, &mut sync_directory)?;
+        match crate::retention_fs::remove_staged_tree(
+            &path,
+            &cleanup_dir,
+            &mut remove_dir,
+            &mut sync_directory,
+        ) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),

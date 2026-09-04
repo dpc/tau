@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::io as path_std_io;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::time::Duration;
@@ -157,6 +158,7 @@ fn cleanup_detaches_tree_before_removal_and_writer_reload() {
 fn cleanup_removes_stale_detached_trees() {
     let temp = TempDir::new().expect("temp sessions");
     let sessions_dir = sessions_dir(&temp);
+    std::fs::create_dir_all(&sessions_dir).expect("sessions root");
     let stale = detached_sessions_dir(&sessions_dir).join("old-123-0");
     std::fs::create_dir_all(&stale).expect("stale detached tree");
     std::fs::write(stale.join("events.cbor"), b"stale").expect("stale journal");
@@ -294,6 +296,7 @@ fn cleanup_revalidates_session_directory_identity_after_entry_swap() {
                 write_session_meta(&sessions_dir, "swapped", 0);
             }
         },
+        crate::retention_fs::sync_directory,
     );
 
     assert!(sessions_dir.join("swapped/meta.json").exists());
@@ -318,4 +321,78 @@ fn cleanup_preserves_session_with_nonregular_lock() {
     );
 
     assert!(sessions_dir.join("bad-lock/meta.json").exists());
+}
+
+/// A sync failure after the atomic session rename leaves a restart-finalizable
+/// staging tree and prevents recursive deletion in the current pass.
+#[test]
+fn cleanup_defers_recursive_removal_until_staging_boundary_is_durable() {
+    let temp = TempDir::new().expect("temp sessions");
+    let sessions_dir = sessions_dir(&temp);
+    write_session_meta(&sessions_dir, "old", 0);
+    let mut remove_called = false;
+    let mut sync_calls = 0;
+
+    let summary = super::cleanup_old_sessions_with_hooks(
+        sessions_dir.clone(),
+        Duration::from_secs(1),
+        Vec::new(),
+        100,
+        |_| {
+            remove_called = true;
+            Ok(())
+        },
+        |_| {},
+        |path| {
+            sync_calls += 1;
+            if sync_calls == 3 {
+                Err(path_std_io::Error::other(
+                    "injected post-rename staging sync failure",
+                ))
+            } else {
+                crate::retention_fs::sync_directory(path)
+            }
+        },
+    );
+
+    assert_eq!(summary.detached, 1);
+    assert_eq!(summary.removed, 0);
+    assert_eq!(summary.failures, 1);
+    assert!(!remove_called);
+    assert!(!sessions_dir.join("old").exists());
+    assert_eq!(
+        std::fs::read_dir(super::detached_sessions_dir(&sessions_dir))
+            .expect("staging root")
+            .count(),
+        1
+    );
+    super::finalize_detached_sessions(&sessions_dir).expect("restart finalization");
+}
+
+/// Restart finalization does not recurse into staging until both rename
+/// parents have been synchronized.
+#[test]
+fn session_finalizer_boundary_sync_failure_preserves_staging() {
+    let temp = TempDir::new().expect("temp sessions");
+    let sessions_dir = sessions_dir(&temp);
+    std::fs::create_dir_all(&sessions_dir).expect("sessions root");
+    let staging = super::detached_sessions_dir(&sessions_dir).join("old");
+    std::fs::create_dir_all(&staging).expect("staging");
+    let mut remove_called = false;
+
+    let error = super::remove_stale_detached_sessions_with(
+        &sessions_dir,
+        |_| {
+            remove_called = true;
+            Ok(())
+        },
+        |_| Err(path_std_io::Error::other("injected staging sync failure")),
+    )
+    .expect_err("boundary sync must fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert!(!remove_called);
+    assert!(staging.exists());
+    super::finalize_detached_sessions(&sessions_dir).expect("retry finalization");
+    assert!(!staging.exists());
 }

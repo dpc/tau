@@ -527,6 +527,7 @@ fn detach_rename_failure_leaves_live_tree_for_retry() {
         Err(path_std_io::Error::other("injected rename failure"))
     };
     let mut remove = |path: &std::path::Path| path_std_fs::remove_dir_all(path);
+    let mut sync_directory = |path: &std::path::Path| crate::retention_fs::sync_directory(path);
     let failed = super::cleanup_agents_with_hooks(
         &temp.path().join("agents"),
         &temp.path().join("sessions"),
@@ -537,6 +538,7 @@ fn detach_rename_failure_leaves_live_tree_for_retry() {
             create_tombstone: &mut tombstone,
             rename: &mut rename,
             remove_dir: &mut remove,
+            sync_directory: &mut sync_directory,
         },
     );
     assert_eq!(failed.failures, 1);
@@ -577,6 +579,7 @@ fn removal_failure_restart_preserves_replacement_live_directory() {
             "injected recursive removal failure",
         ))
     };
+    let mut sync_directory = |path: &std::path::Path| crate::retention_fs::sync_directory(path);
     let summary = super::cleanup_agents_with_hooks(
         &agents_dir,
         &temp.path().join("sessions"),
@@ -587,6 +590,7 @@ fn removal_failure_restart_preserves_replacement_live_directory() {
             create_tombstone: &mut tombstone,
             rename: &mut rename,
             remove_dir: &mut remove,
+            sync_directory: &mut sync_directory,
         },
     );
     assert!(injected);
@@ -643,16 +647,150 @@ fn replacement_during_rescan_survives_identity_revalidation() {
 fn detached_staging_finalization_failure_is_retryable() {
     let temp = TempDir::new().expect("temp state");
     let agents_dir = temp.path().join("agents");
+    path_std_fs::create_dir_all(&agents_dir).expect("agents root");
     let staging = temp.path().join(".agents.cleanup/stale");
     path_std_fs::create_dir_all(&staging).expect("staging");
 
-    let failed = super::finalize_detached_agents_with(&agents_dir, |_| {
-        Err(path_std_io::Error::other("injected finalizer failure"))
-    });
+    let failed = super::finalize_detached_agents_with(
+        &agents_dir,
+        |_| Err(path_std_io::Error::other("injected finalizer failure")),
+        crate::retention_fs::sync_directory,
+    );
     assert_eq!(failed.failures, 1);
     assert!(staging.exists());
 
     let retried = super::finalize_detached_agents(&agents_dir);
     assert_eq!(retried.removed, 1);
     assert!(!staging.exists());
+}
+
+/// A sync failure after rename commits logical deletion but prevents recursive
+/// removal until a later startup can durably publish the staging boundary.
+#[test]
+fn detach_staging_sync_failure_defers_recursive_removal() {
+    let temp = TempDir::new().expect("temp state");
+    write_old_agent(temp.path(), "detach-sync");
+    let agents_dir = temp.path().join("agents");
+    let mut before_rescan = |_: &AgentId| {};
+    let mut tombstone =
+        |agents_dir: &std::path::Path, id: &AgentId| super::create_tombstone(agents_dir, id);
+    let mut rename = |source: &std::path::Path, destination: &std::path::Path| {
+        path_std_fs::rename(source, destination)
+    };
+    let mut remove_called = false;
+    let mut remove = |path: &std::path::Path| {
+        remove_called = true;
+        path_std_fs::remove_dir_all(path)
+    };
+    let mut sync_calls = 0;
+    let mut sync_directory = |path: &std::path::Path| {
+        sync_calls += 1;
+        if sync_calls == 3 {
+            Err(path_std_io::Error::other(
+                "injected post-rename staging sync failure",
+            ))
+        } else {
+            crate::retention_fs::sync_directory(path)
+        }
+    };
+
+    let summary = super::cleanup_agents_with_hooks(
+        &agents_dir,
+        &temp.path().join("sessions"),
+        Duration::from_secs(1),
+        SystemTime::now() + Duration::from_secs(60),
+        super::AgentCleanupHooks {
+            before_rescan: &mut before_rescan,
+            create_tombstone: &mut tombstone,
+            rename: &mut rename,
+            remove_dir: &mut remove,
+            sync_directory: &mut sync_directory,
+        },
+    );
+
+    assert_eq!(summary.detached, 1);
+    assert_eq!(summary.removed, 0);
+    assert_eq!(summary.failures, 1);
+    assert!(!remove_called);
+    assert!(!agents_dir.join("detach-sync").exists());
+    assert_eq!(
+        path_std_fs::read_dir(temp.path().join(".agents.cleanup"))
+            .expect("staging root")
+            .count(),
+        1
+    );
+    let finalized = super::finalize_detached_agents(&agents_dir);
+    assert_eq!(finalized.removed, 1);
+}
+
+/// Restart finalization synchronizes the source and staging parents before it
+/// recursively removes a committed detached tree.
+#[test]
+fn finalizer_boundary_sync_failure_preserves_staging_for_retry() {
+    let temp = TempDir::new().expect("temp state");
+    let agents_dir = temp.path().join("agents");
+    path_std_fs::create_dir_all(&agents_dir).expect("agents root");
+    let staging = temp.path().join(".agents.cleanup/stale");
+    path_std_fs::create_dir_all(&staging).expect("staging");
+    let mut remove_called = false;
+
+    let failed = super::finalize_detached_agents_with(
+        &agents_dir,
+        |_| {
+            remove_called = true;
+            Ok(())
+        },
+        |_| Err(path_std_io::Error::other("injected staging sync failure")),
+    );
+
+    assert_eq!(failed.failures, 1);
+    assert!(!remove_called);
+    assert!(staging.exists());
+    let retried = super::finalize_detached_agents(&agents_dir);
+    assert_eq!(retried.removed, 1);
+    assert!(!staging.exists());
+}
+
+/// Manifest I/O uncertainty in a valid-named retained session aborts the whole
+/// agent-deletion pass rather than erasing unknown ownership evidence.
+#[cfg(unix)]
+#[test]
+fn unreadable_session_manifest_aborts_agent_deletion() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = TempDir::new().expect("temp state");
+    write_old_agent(temp.path(), "possibly-referenced");
+    let session_id = SessionId::parse("session").expect("session id");
+    let mut sessions = SessionStore::open(temp.path().join("sessions")).expect("session store");
+    sessions
+        .append_session_event(
+            session_id.as_str(),
+            None,
+            Event::SessionAgentLoaded(SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("init")
+                    .expect("initialization id"),
+                session_id: session_id.clone(),
+                agent_id: AgentId::parse("possibly-referenced").expect("agent id"),
+                ephemeral: false,
+            }),
+        )
+        .expect("append membership");
+    drop(sessions);
+    let manifest = temp.path().join("sessions/session/meta.json");
+    let original = path_std_fs::metadata(&manifest)
+        .expect("manifest metadata")
+        .permissions();
+    path_std_fs::set_permissions(&manifest, path_std_fs::Permissions::from_mode(0o000))
+        .expect("make manifest unreadable");
+
+    let summary = super::cleanup_agents(
+        &temp.path().join("agents"),
+        &temp.path().join("sessions"),
+        Duration::from_secs(1),
+        SystemTime::now() + Duration::from_secs(60),
+    );
+
+    path_std_fs::set_permissions(&manifest, original).expect("restore manifest permissions");
+    assert_eq!(summary.failures, 1);
+    assert!(temp.path().join("agents/possibly-referenced").exists());
 }

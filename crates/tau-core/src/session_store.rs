@@ -14,6 +14,7 @@ mod tests;
 
 #[cfg(test)]
 mod record_bound_tests;
+mod retention;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -25,6 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+pub use retention::SessionRetentionReferences;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, Event, SessionId, UnixMicros};
 
@@ -1774,7 +1776,25 @@ pub fn read_session_ever_loaded_agents(
             ),
         });
     }
-    let events = load_session_events_from_file(&path, &mut file)?;
+    let mut loaded = HashSet::new();
+    let mut expected_seq = PersistedSessionEventSeq::new(0);
+    read_cbor_records_from_file(&mut file, &path, |record: PersistedSessionEvent| {
+        if record.seq != expected_seq {
+            return Err(SessionStoreError::InvalidSequence {
+                path: path.clone(),
+                expected: expected_seq,
+                actual: record.seq,
+            });
+        }
+        expected_seq = expected_seq.next();
+        validate_session_event(session_id.as_str(), &record.event)?;
+        if let Event::SessionAgentLoaded(event) = record.event
+            && !event.ephemeral
+        {
+            loaded.insert(event.agent_id);
+        }
+        Ok(())
+    })?;
     if !path_still_names_file(&path, &metadata).map_err(|source| SessionStoreError::Read {
         path: path.clone(),
         source,
@@ -1786,15 +1806,6 @@ pub fn read_session_ever_loaded_agents(
                 "session journal was replaced during retention inspection",
             ),
         });
-    }
-    let mut loaded = HashSet::new();
-    for record in events {
-        validate_session_event(session_id.as_str(), &record.event)?;
-        if let Event::SessionAgentLoaded(event) = record.event
-            && !event.ephemeral
-        {
-            loaded.insert(event.agent_id);
-        }
     }
     Ok(loaded)
 }
@@ -1973,6 +1984,7 @@ fn load_session_events_from_file(
     let mut events = Vec::new();
     read_cbor_records_from_file(file, path, |record: PersistedSessionEvent| {
         events.push(record);
+        Ok(())
     })?;
     for (idx, record) in events.iter().enumerate() {
         let expected = PersistedSessionEventSeq::new(idx as u64);
@@ -2044,7 +2056,7 @@ fn read_cbor_records_from_file<T, F>(
 ) -> Result<(), SessionStoreError>
 where
     T: for<'de> Deserialize<'de>,
-    F: FnMut(T),
+    F: FnMut(T) -> Result<(), SessionStoreError>,
 {
     loop {
         let Some(record_length) =
@@ -2089,7 +2101,7 @@ where
                 ),
             });
         }
-        handle(record);
+        handle(record)?;
     }
 }
 

@@ -1,3 +1,4 @@
+use std::io as path_std_io;
 use std::time::{Duration, SystemTime};
 
 use tau_core::{AgentEventParent, AgentStore, SessionStore};
@@ -104,4 +105,72 @@ fn disabled_agent_policy_preserves_live_agent_tree() {
     assert!(temp.path().join("agents/owned-agent").exists());
     assert!(!detached_agent.exists());
     assert!(!detached_session.exists());
+}
+
+/// A session detached without a durable source-parent boundary cannot disappear
+/// from agent reference authority until a later startup finalizes that detach.
+#[test]
+fn uncertain_session_detach_suppresses_agent_deletion_until_restart_finalization() {
+    let temp = TempDir::new().expect("temp state");
+    let agent_id = seed_agent_and_session(&temp);
+    let cleanup = super::RetentionCleanup {
+        state_dir: temp.path().to_path_buf(),
+        sessions_dir: temp.path().join("sessions"),
+        session_persistence: tau_core::SessionPersistenceMode::Durable,
+        agent_persistence: tau_core::AgentPersistenceMode::Durable,
+        current_session: SessionId::parse("current").expect("session id"),
+        session_retention: Some(Duration::from_secs(1)),
+        agent_retention: Some(Duration::from_secs(1)),
+        diagnostic_retention: None,
+    };
+    let now = SystemTime::now() + Duration::from_secs(60);
+    let mut sync_calls = 0;
+
+    super::run_retention_cleanup_with_session_cleanup(
+        cleanup.clone(),
+        now,
+        |sessions_dir, retention, protected, now| {
+            crate::session_cleanup::cleanup_old_sessions_with_hooks(
+                sessions_dir,
+                retention,
+                protected,
+                now.duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("post-epoch clock")
+                    .as_secs(),
+                |path| std::fs::remove_dir_all(path),
+                |_| {},
+                |path| {
+                    sync_calls += 1;
+                    if sync_calls == 4 {
+                        Err(path_std_io::Error::other(
+                            "injected post-rename source-parent sync failure",
+                        ))
+                    } else {
+                        crate::retention_fs::sync_directory(path)
+                    }
+                },
+            )
+        },
+    );
+
+    assert!(!temp.path().join("sessions/owner-session").exists());
+    assert_eq!(
+        std::fs::read_dir(temp.path().join(".sessions.cleanup"))
+            .expect("detached session staging")
+            .count(),
+        1
+    );
+    assert!(temp.path().join("agents/owned-agent").exists());
+    assert!(!tau_core::retired_agent_tombstone(&temp.path().join("agents"), &agent_id).exists());
+
+    super::run_retention_cleanup(cleanup, now);
+
+    assert_eq!(
+        std::fs::read_dir(temp.path().join(".sessions.cleanup"))
+            .expect("finalized session staging")
+            .count(),
+        0
+    );
+    assert!(!temp.path().join("agents/owned-agent").exists());
+    assert!(tau_core::retired_agent_tombstone(&temp.path().join("agents"), &agent_id).exists());
 }

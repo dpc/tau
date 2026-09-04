@@ -15,6 +15,7 @@ use crate::diagnostic_cleanup::DiagnosticCleanupSummary;
 use crate::session_cleanup::SessionCleanupSummary;
 
 /// Immutable startup retention inputs.
+#[derive(Clone)]
 pub(crate) struct RetentionCleanup {
     /// Tau state root containing the global agent store.
     pub(crate) state_dir: PathBuf,
@@ -52,12 +53,31 @@ pub(crate) fn spawn_retention_cleanup(cleanup: RetentionCleanup) {
 }
 
 fn run_retention_cleanup(cleanup: RetentionCleanup, now: SystemTime) {
+    run_retention_cleanup_with_session_cleanup(
+        cleanup,
+        now,
+        crate::session_cleanup::cleanup_old_sessions_at,
+    );
+}
+
+fn run_retention_cleanup_with_session_cleanup(
+    cleanup: RetentionCleanup,
+    now: SystemTime,
+    mut cleanup_sessions: impl FnMut(
+        PathBuf,
+        Duration,
+        Vec<SessionId>,
+        SystemTime,
+    ) -> SessionCleanupSummary,
+) {
     let mut failures = 0_u64;
+    let mut session_authority_certain = true;
     if cleanup.session_persistence.is_durable() {
         let session_staging =
             crate::session_cleanup::finalize_detached_sessions(&cleanup.sessions_dir);
         failures += u64::from(session_staging.is_err());
         if let Err(error) = session_staging {
+            session_authority_certain = false;
             tracing::warn!(target: "tau_harness::retention_cleanup", %error, "failed to finalize detached sessions");
         }
     }
@@ -72,14 +92,16 @@ fn run_retention_cleanup(cleanup: RetentionCleanup, now: SystemTime) {
     if cleanup.session_persistence.is_durable()
         && let Some(retention) = cleanup.session_retention
     {
-        sessions = crate::session_cleanup::cleanup_old_sessions_at(
+        sessions = cleanup_sessions(
             cleanup.sessions_dir.clone(),
             retention,
             vec![cleanup.current_session.clone()],
             now,
         );
+        session_authority_certain &= sessions.failures == 0;
     }
     if cleanup.agent_persistence.is_durable()
+        && session_authority_certain
         && let Some(retention) = cleanup.agent_retention
     {
         let current = crate::agent_cleanup::cleanup_agents(

@@ -65,8 +65,8 @@ pub use session::{
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,
-    SessionPersistenceMode, SessionStore, SessionStoreError, list_session_metas,
-    read_session_ever_loaded_agents, session_is_locked,
+    SessionPersistenceMode, SessionRetentionReferences, SessionStore, SessionStoreError,
+    list_session_metas, read_session_ever_loaded_agents, session_is_locked,
 };
 pub use tool_registry::{
     RegisterToolReport, ToolArgumentRepair, ToolArgumentValidationError, ToolProvider,

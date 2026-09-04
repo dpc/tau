@@ -495,11 +495,19 @@ surviving canonical session, removes only exact old unreferenced agents after a
 durable permanent ID tombstone, then removes expired session `events.jsonl`
 regular files and exact compressed `.json.zst` provider request/response
 captures. Session and agent deletion are disabled by default; diagnostics
-default to thirty days. Canonical-session journal uncertainty aborts agent
-deletion, and locked, stale, future, corrupt, replaced, or symlinked artifacts
-remain untouched. Focused filesystem, reference, tombstone, and ordering oracles
-live beside `session_cleanup`, `agent_cleanup`, `retention_cleanup`, and
-`diagnostic_cleanup`.
+default to thirty days. Manifest or journal I/O uncertainty aborts agent
+deletion; missing or malformed manifests remain noncanonical. Reference
+discovery streams bounded records and reuses validated journal boundaries so
+candidate rescans consume only appended suffixes. Locked, stale, future,
+corrupt, replaced, or symlinked artifacts remain untouched. Atomic detach is
+logical deletion, but recursive removal starts only after synchronizing the
+staging parent before the canonical source parent. Completed removal
+synchronizes staging again, and restart finalization first re-establishes the
+same durable boundary. Any session finalization or cleanup failure suppresses
+agent eligibility deletion for that pass, because an incompletely committed
+session detach may return after a crash. Focused filesystem, reference,
+tombstone, and ordering oracles live beside `session_cleanup`, `agent_cleanup`,
+`retention_cleanup`, and `diagnostic_cleanup`.
 
 Summary files intentionally omit prompt previews. Legacy preview-bearing
 sidecars are unverified hints and are scrubbed when strict journal migration can

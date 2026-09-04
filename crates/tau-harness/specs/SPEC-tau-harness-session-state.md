@@ -188,14 +188,23 @@ transcripts, and finally removes expired `events.jsonl` regular files and
 recognized compressed `.json.zst` provider captures below
 `debug/provider-requests`. Session and agent deletion are nullable and disabled
 by default; diagnostic deletion defaults to thirty days. A canonical session
-with an uncertain journal aborts agent deletion for that pass, and unload does
-not remove historical protection needed for cold accounting restore.
+with an uncertain manifest or journal aborts agent deletion for that pass,
+while missing or malformed manifests remain noncanonical. Reference authority
+streams each journal once, retains only durable loaded-agent IDs, and
+candidate-specific refreshes consume only newly appended validated suffixes.
+Any failure while finalizing or deleting whole sessions also aborts agent
+eligibility deletion, because a detached session without a durable rename
+boundary may return after a crash. Unload does not remove historical protection
+needed for cold accounting restore.
 
 Agent deletion requires an exclusive existing lock, a fresh checkpoint bound to
 the exact journal EOF, a nonzero expired semantic timestamp, and an independently
 expired journal mtime. Before atomic detach it durably publishes a permanent
 content-free retired-ID tombstone. Successful rename commits logical deletion;
-later startups finish recursive removal independent of the current policy.
+recursive removal begins only after the staging name and canonical-source
+removal are durably synchronized in that order. Staging removal is itself
+directory-synchronized, and later startups re-establish the same committed
+boundary before finishing recursive removal independent of the current policy.
 Locked, future, stale, corrupt, missing, replaced, symlinked, or otherwise
 uncertain state is retained. Per-file diagnostic cleanup skips the current and
 locked sessions, does not follow symlinks, and never removes canonical CBOR

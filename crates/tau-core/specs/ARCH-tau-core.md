@@ -7,6 +7,13 @@ memory-only membership does not consume that cursor. Both durable journal
 writers reject encoded records larger than the shared 64 MiB reader allocation
 limit before opening or mutating the journal.
 
+Startup retention uses a strict `SessionRetentionReferences` projection. It
+classifies canonical manifests without following final-component symlinks,
+fails closed on manifest or journal I/O uncertainty, streams one bounded record
+at a time, and retains only durable loaded-agent IDs plus validated per-session
+EOF cursors. Candidate refreshes validate appended suffixes instead of
+materializing or replaying complete session histories repeatedly.
+
 `AgentTree` folds `agent.initialization_context_set` as replaceable side state,
 not a transcript node. The latest bootstrap/skill replacement survives replay
 and remains outside branch-head movement and compaction.

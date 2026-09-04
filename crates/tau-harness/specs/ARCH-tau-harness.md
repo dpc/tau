@@ -314,12 +314,17 @@ and worker under
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 Startup runs one ordered detached retention worker. It finalizes previously
 committed session and agent detaches, removes expired whole sessions, derives
-surviving canonical session references, removes expired unreferenced agents,
-then removes expired `events.jsonl` files and exact compressed provider
+surviving canonical session references with strict streaming journal scans and
+incremental candidate refreshes, removes expired unreferenced agents, then
+removes expired `events.jsonl` files and exact compressed provider
 request/response or failed-attempt captures. Session and agent deletion are
 disabled by default; diagnostics default to thirty days. The worker excludes
 current or locked resources, symlinks, unrelated diagnostics, stderr logs, and
-canonical journals from per-file diagnostic deletion.
+canonical journals from per-file diagnostic deletion. Manifest or journal I/O
+uncertainty aborts agent deletion, as does any whole-session finalization or
+cleanup failure. Session and agent recursive removal starts only after both
+rename parents have synchronized the detached staging boundary; successful
+recursive removal synchronizes the staging parent again.
 
 Opaque Provider debug captures arrive through a dedicated non-event protocol
 message with Provider-supplied session/prompt attribution. The harness accepts

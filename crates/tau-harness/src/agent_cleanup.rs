@@ -3,7 +3,6 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -41,8 +40,6 @@ pub(crate) struct AgentCleanupSummary {
 struct AgentCleanupContext<'a> {
     /// Global durable agent root.
     agents_dir: &'a Path,
-    /// Canonical durable session root.
-    sessions_dir: &'a Path,
     /// Required minimum age for both clocks.
     retention: Duration,
     /// One wall-clock snapshot shared by the pass.
@@ -59,16 +56,23 @@ struct AgentCleanupHooks<'a> {
     rename: &'a mut dyn FnMut(&Path, &Path) -> io::Result<()>,
     /// Detached-tree recursive removal operation.
     remove_dir: &'a mut dyn FnMut(&Path) -> io::Result<()>,
+    /// Exact directory durability operation.
+    sync_directory: &'a mut dyn FnMut(&Path) -> io::Result<()>,
 }
 
 /// Finalizes prior committed detaches regardless of the current policy.
 pub(crate) fn finalize_detached_agents(agents_dir: &Path) -> AgentCleanupSummary {
-    finalize_detached_agents_with(agents_dir, |path| fs::remove_dir_all(path))
+    finalize_detached_agents_with(
+        agents_dir,
+        |path| fs::remove_dir_all(path),
+        crate::retention_fs::sync_directory,
+    )
 }
 
 fn finalize_detached_agents_with(
     agents_dir: &Path,
     mut remove_dir: impl FnMut(&Path) -> io::Result<()>,
+    mut sync_directory: impl FnMut(&Path) -> io::Result<()>,
 ) -> AgentCleanupSummary {
     let mut summary = AgentCleanupSummary::default();
     let cleanup_dir = detached_agents_dir(agents_dir);
@@ -95,7 +99,24 @@ fn finalize_detached_agents_with(
                 continue;
             }
         };
-        match remove_dir(&path) {
+        if let Err(error) =
+            crate::retention_fs::sync_detach_boundary(agents_dir, &cleanup_dir, &mut sync_directory)
+        {
+            summary.failures += 1;
+            tracing::warn!(
+                target: "tau_harness::retention_cleanup",
+                path = %path.display(),
+                %error,
+                "failed to commit detached agent staging boundary"
+            );
+            continue;
+        }
+        match crate::retention_fs::remove_staged_tree(
+            &path,
+            &cleanup_dir,
+            &mut remove_dir,
+            &mut sync_directory,
+        ) {
             Ok(()) => summary.removed += 1,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -125,6 +146,7 @@ pub(crate) fn cleanup_agents(
         |agents_dir: &Path, agent_id: &AgentId| create_tombstone(agents_dir, agent_id);
     let mut rename = |source: &Path, destination: &Path| fs::rename(source, destination);
     let mut remove_dir = |path: &Path| fs::remove_dir_all(path);
+    let mut sync_directory = |path: &Path| crate::retention_fs::sync_directory(path);
     cleanup_agents_with_hooks(
         agents_dir,
         sessions_dir,
@@ -135,6 +157,7 @@ pub(crate) fn cleanup_agents(
             create_tombstone: &mut create_tombstone,
             rename: &mut rename,
             remove_dir: &mut remove_dir,
+            sync_directory: &mut sync_directory,
         },
     )
 }
@@ -152,6 +175,7 @@ fn cleanup_agents_with_before_rescan(
         |agents_dir: &Path, agent_id: &AgentId| create_tombstone(agents_dir, agent_id);
     let mut rename = |source: &Path, destination: &Path| fs::rename(source, destination);
     let mut remove_dir = |path: &Path| fs::remove_dir_all(path);
+    let mut sync_directory = |path: &Path| crate::retention_fs::sync_directory(path);
     cleanup_agents_with_hooks(
         agents_dir,
         sessions_dir,
@@ -162,6 +186,7 @@ fn cleanup_agents_with_before_rescan(
             create_tombstone: &mut create_tombstone,
             rename: &mut rename,
             remove_dir: &mut remove_dir,
+            sync_directory: &mut sync_directory,
         },
     )
 }
@@ -174,7 +199,7 @@ fn cleanup_agents_with_hooks(
     mut hooks: AgentCleanupHooks<'_>,
 ) -> AgentCleanupSummary {
     let mut summary = AgentCleanupSummary::default();
-    let coarse_references = match surviving_references(sessions_dir) {
+    let mut references = match tau_core::SessionRetentionReferences::capture(sessions_dir) {
         Ok(references) => references,
         Err(error) => {
             summary.failures += 1;
@@ -188,7 +213,6 @@ fn cleanup_agents_with_hooks(
     };
     let context = AgentCleanupContext {
         agents_dir,
-        sessions_dir,
         retention,
         now,
     };
@@ -228,18 +252,28 @@ fn cleanup_agents_with_hooks(
             continue;
         };
         summary.scanned += 1;
-        if coarse_references.contains(&agent_id) {
+        if references.contains(&agent_id) {
             summary.skipped_referenced += 1;
             continue;
         }
-        consider_agent(
+        if let Err(error) = consider_agent(
             &context,
             &entry.path(),
             &directory_metadata,
             &agent_id,
+            &mut references,
             &mut summary,
             &mut hooks,
-        );
+        ) {
+            summary.failures += 1;
+            tracing::warn!(
+                target: "tau_harness::retention_cleanup",
+                %agent_id,
+                %error,
+                "canonical session uncertainty aborted agent cleanup"
+            );
+            break;
+        }
     }
     summary
 }
@@ -249,31 +283,32 @@ fn consider_agent(
     agent_dir: &Path,
     directory_metadata: &fs::Metadata,
     agent_id: &AgentId,
+    references: &mut tau_core::SessionRetentionReferences,
     summary: &mut AgentCleanupSummary,
     hooks: &mut AgentCleanupHooks<'_>,
-) {
+) -> Result<(), tau_core::SessionStoreError> {
     let _lock = match try_lock_existing(&agent_dir.join("lock")) {
         Ok(Some(lock)) => lock,
         Ok(None) => {
             summary.skipped_locked += 1;
-            return;
+            return Ok(());
         }
         Err(error) => {
             summary.skipped_invalid += 1;
             tracing::warn!(target: "tau_harness::retention_cleanup", %agent_id, %error, "agent is ineligible for cleanup");
-            return;
+            return Ok(());
         }
     };
     if !path_still_names_directory(agent_dir, directory_metadata) {
         summary.skipped_invalid += 1;
-        return;
+        return Ok(());
     }
     let evidence = match tau_core::inspect_agent_retention_evidence(agent_dir, agent_id) {
         Ok(evidence) => evidence,
         Err(error) => {
             summary.skipped_invalid += 1;
             tracing::warn!(target: "tau_harness::retention_cleanup", %agent_id, %error, "agent checkpoint is not exact cleanup authority");
-            return;
+            return Ok(());
         }
     };
     if let Err(error) =
@@ -281,76 +316,69 @@ fn consider_agent(
     {
         summary.skipped_invalid += 1;
         tracing::warn!(target: "tau_harness::retention_cleanup", %agent_id, %error, "agent journal failed strict retention replay");
-        return;
+        return Ok(());
     }
     if !path_still_names_directory(agent_dir, directory_metadata) {
         summary.skipped_invalid += 1;
-        return;
+        return Ok(());
     }
     if !expired(context.now, evidence.last_touched, context.retention)
         || !expired(context.now, evidence.journal_modified, context.retention)
     {
-        return;
+        return Ok(());
     }
     (hooks.before_rescan)(agent_id);
-    match surviving_references(context.sessions_dir) {
-        Ok(references) if references.contains(agent_id) => {
-            summary.skipped_referenced += 1;
-            return;
-        }
-        Ok(_) => {}
-        Err(error) => {
-            summary.failures += 1;
-            tracing::warn!(target: "tau_harness::retention_cleanup", %agent_id, %error, "session rescan aborted agent deletion");
-            return;
-        }
+    references.refresh()?;
+    if references.contains(agent_id) {
+        summary.skipped_referenced += 1;
+        return Ok(());
     }
     if !path_still_names_directory(agent_dir, directory_metadata) {
         summary.skipped_invalid += 1;
-        return;
+        return Ok(());
     }
     if let Err(error) = (hooks.create_tombstone)(context.agents_dir, agent_id) {
         summary.failures += 1;
         tracing::warn!(target: "tau_harness::retention_cleanup", %agent_id, %error, "failed to commit retired agent id");
-        return;
+        return Ok(());
     }
     if !path_still_names_directory(agent_dir, directory_metadata) {
         summary.skipped_invalid += 1;
-        return;
+        return Ok(());
     }
-    let detached = match detach_agent_dir_with(
+    let (detached, durability) = match detach_agent_dir_with(
         context.agents_dir,
         agent_dir,
         agent_id,
         hooks.rename,
+        hooks.sync_directory,
     ) {
         Ok(path) => path,
         Err(error) => {
             summary.failures += 1;
             tracing::warn!(target: "tau_harness::retention_cleanup", %agent_id, %error, "failed to detach expired agent");
-            return;
+            return Ok(());
         }
     };
     summary.detached += 1;
-    match (hooks.remove_dir)(&detached) {
+    if let Err(error) = durability {
+        summary.failures += 1;
+        tracing::warn!(target: "tau_harness::retention_cleanup", path = %detached.display(), %error, "failed to commit detached agent staging boundary");
+        return Ok(());
+    }
+    match crate::retention_fs::remove_staged_tree(
+        &detached,
+        &detached_agents_dir(context.agents_dir),
+        hooks.remove_dir,
+        hooks.sync_directory,
+    ) {
         Ok(()) => summary.removed += 1,
         Err(error) => {
             summary.failures += 1;
             tracing::warn!(target: "tau_harness::retention_cleanup", path = %detached.display(), %error, "failed to remove detached agent");
         }
     }
-}
-
-fn surviving_references(sessions_dir: &Path) -> io::Result<HashSet<AgentId>> {
-    let mut references = HashSet::new();
-    for (session_id, _) in tau_core::list_session_metas(sessions_dir)? {
-        let session_dir = sessions_dir.join(session_id.as_str());
-        references.extend(
-            tau_core::read_session_ever_loaded_agents(&session_dir, &session_id)
-                .map_err(io::Error::other)?,
-        );
-    }
-    Ok(references)
+    Ok(())
 }
 
 fn expired(now: SystemTime, timestamp: SystemTime, retention: Duration) -> bool {
@@ -496,9 +524,10 @@ fn detach_agent_dir_with(
     path: &Path,
     agent_id: &AgentId,
     rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
-) -> io::Result<PathBuf> {
+    sync_directory: &mut dyn FnMut(&Path) -> io::Result<()>,
+) -> io::Result<(PathBuf, io::Result<()>)> {
     let cleanup_dir = detached_agents_dir(agents_dir);
-    fs::create_dir_all(&cleanup_dir)?;
+    crate::retention_fs::prepare_staging_directory(&cleanup_dir, sync_directory)?;
     loop {
         let suffix = CLEANUP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
         let detached = cleanup_dir.join(format!(
@@ -507,7 +536,14 @@ fn detach_agent_dir_with(
             std::process::id()
         ));
         match rename(path, &detached) {
-            Ok(()) => return Ok(detached),
+            Ok(()) => {
+                let durability = crate::retention_fs::sync_detach_boundary(
+                    agents_dir,
+                    &cleanup_dir,
+                    sync_directory,
+                );
+                return Ok((detached, durability));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
