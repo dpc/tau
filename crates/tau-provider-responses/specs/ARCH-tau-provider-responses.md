@@ -15,13 +15,17 @@ Invalid and canceled attempts release no semantic output. Ordinary inference
 streaming and opted-in private debug capture retain their existing behavior.
 
 The backend replays the complete typed Responses transcript on every request.
-It supports assistant text, plain `reasoning_text` reasoning, and Function
-tools. Plain reasoning produces full displayable reasoning under the existing
+It supports assistant text, completed reasoning items, and Function tools.
+Plain `reasoning_text` produces full displayable reasoning under the existing
 thinking-visibility policy and a separate opaque durable item; replay skips the
 display companion and emits the opaque item's required validated raw JSON
 directly. Completed reasoning without exact raw JSON rejects before durable
 output is formed; replay has no structured fallback or raw-less migration.
-Encrypted, summary-only, malformed, or mixed reasoning remains unsupported. The backend
+Opaque, summary-only, and encrypted reasoning produces only the opaque durable
+item and is not projected as reasoning text. Documented combinations of summary,
+encrypted content, and plain reasoning content retain the same rule: only
+`reasoning_text` content is displayable, while the complete raw item is replayed.
+Malformed identities, encrypted content, summaries, or content remain unsupported. The backend
 also preserves Responses assistant and function-call replay sidecars and never
 sends `previous_response_id` or provider-side compaction controls. The
 extension owns profile storage, model publication, retry scheduling,

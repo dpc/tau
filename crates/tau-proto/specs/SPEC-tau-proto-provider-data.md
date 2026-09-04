@@ -83,8 +83,9 @@ older raw-less records.
 The public Responses backend represents validated plain `reasoning_text` output
 as both `ReasoningTextKind::Full` display content and an opaque `Reasoning` item.
 The display item follows the existing thinking-visibility policy and is not
-replayed; the opaque item is the durable replay authority. Encrypted,
-summary-only, malformed, and mixed reasoning items do not enter the transcript.
+replayed; the opaque item is the durable replay authority. Opaque, summary-only,
+and encrypted reasoning has no display companion and replays through the same
+opaque authority. Malformed reasoning items do not enter the transcript.
 
 ## Responses assistant message dual representation
 

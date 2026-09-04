@@ -1339,8 +1339,11 @@ persisted trace state.
 successor in an ordinary user outer turn, and only when the accepted response
 contains only reasoning the selected adapter can replay exactly. Chat Completions
 requires non-empty full reasoning; generic public Responses requires at least one
-provider-native opaque reasoning item and permits only its non-empty full display
-companion. Private ChatGPT/Codex Responses does not acquire this authority.
+opaque reasoning item with no `encrypted_content`, an absent or empty `summary`,
+and a non-empty `content` array consisting only of string `reasoning_text` parts.
+It permits only the matching non-empty full display companion. Summary-bearing,
+encrypted, empty, and mixed reasoning cannot acquire continuation authority.
+Private ChatGPT/Codex Responses does not acquire this authority.
 
 The durable authority chain is
 `provider.response_finished(plan)` → exact trusted internal steer → matching

@@ -195,10 +195,11 @@ official OpenAI base URL and SSE for compatible endpoints. Runtime never probes,
 infers, or falls back between transports. It
 requires user-configured models and does not discover models or choose provider
 presets. Each turn sends the complete typed Responses transcript. It supports
-assistant text, plain `reasoning_text` reasoning, and Function tools. Plain
-reasoning follows the existing `show-thinking` UI behavior and is retained for
-full-transcript replay; encrypted, summary-only, malformed, and mixed reasoning
-is rejected. The backend preserves Responses replay sidecars and does not send
+assistant text, completed reasoning items, and Function tools. Plain
+`reasoning_text` follows the existing `show-thinking` UI behavior. Opaque,
+summary-only, and encrypted reasoning is retained without a display projection;
+malformed reasoning is rejected. The complete validated item is replayed
+verbatim. The backend preserves Responses replay sidecars and does not send
 `previous_response_id` or `store`; it does not expose hosted/custom tools,
 image/file inputs, or compaction. Existing `openrouter` profiles remain on Chat
 Completions.

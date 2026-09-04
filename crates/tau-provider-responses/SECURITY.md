@@ -8,7 +8,7 @@ payloads remain untrusted model data. The WebSocket transport applies the
 existing 1 MiB limit to each frame and to fragmented-message assembly before
 the application receives a complete message; a postassembly event check remains
 as defense in depth. Response and SSE-line bounds apply before the parser admits
-only supported assistant text, plain reasoning, and Function calls.
+only supported assistant text, completed reasoning, and Function calls.
 
 Explicit durable-session debug capture stores the finalized HTTP/SSE request at
 its send boundary or the exact WebSocket `response.create` envelope at frame
@@ -60,17 +60,19 @@ reflects sensitive content in that bounded diagnostic. Revisit this boundary
 when changing captured fields, the scalar cap, escaping policy, public
 diagnostic destinations, or classification/recovery flow.
 
-Validated plain `reasoning_text` is sensitive transcript content. Tau retains
-both its displayable full-reasoning projection and the exact provider item
-sidecar in the durable response, regardless of whether the UI's
-`show-thinking` setting currently displays it. The sidecar may contain
+Validated reasoning is sensitive transcript content. For plain
+`reasoning_text`, Tau retains both its displayable full-reasoning projection
+and the exact provider item sidecar in the durable response, regardless of
+whether the UI's `show-thinking` setting currently displays it. Opaque,
+summary-only, and encrypted reasoning retains only the exact provider item.
+The sidecar may contain
 provider-controlled fields and secrets reflected by model output. Replay
 validates its semantic shape but preserves its exact JSON syntax, then sends it
 only as part of the next complete transcript to the selected configured public
 Responses endpoint.
 
-Malformed, encrypted, summary-only, mixed, incomplete, or contradictory
-reasoning never becomes a durable replay item. The parser also continues to
+Malformed, incomplete, or contradictory reasoning never becomes a durable
+replay item. The parser also continues to
 reject image/file output, custom or hosted tools, and unknown output families.
 These validations limit the supported transcript surface; they do not make
 provider output trusted or redact reasoning from journals, session inspection,

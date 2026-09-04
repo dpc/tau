@@ -958,10 +958,11 @@ endpoint, API-key authority, and models. It
 preselects WebSocket only for the exact official
 `https://api.openai.com/v1` base URL and otherwise preselects SSE. Tau does not
 infer endpoint support at runtime or discover models. Every turn sends the complete typed
-Responses transcript. It supports assistant text, plain `reasoning_text`
-reasoning, and Function tools. Plain reasoning uses the existing
-`show-thinking` UI behavior and is retained for full-transcript replay.
-Encrypted, summary-only, malformed, and mixed reasoning remains unsupported.
+Responses transcript. It supports assistant text, completed reasoning items,
+and Function tools. Plain `reasoning_text` uses the existing `show-thinking` UI
+behavior. Opaque, summary-only, and encrypted reasoning is retained without a
+display projection. The complete validated reasoning item is replayed verbatim;
+malformed reasoning remains unsupported.
 The backend preserves assistant-message, reasoning-item, and Function-call
 replay sidecars. It deliberately omits `previous_response_id`, `store`,
 hosted/custom tools, image/file inputs, and public compaction. Existing

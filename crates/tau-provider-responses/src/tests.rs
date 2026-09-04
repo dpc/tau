@@ -550,6 +550,87 @@ fn plain_reasoning_streams_displays_and_materializes_for_replay() {
     ));
 }
 
+/// Completed opaque, summary-only, encrypted, and mixed reasoning items must
+/// retain exact replay authority while only plain reasoning content is shown.
+#[test]
+fn completed_documented_reasoning_shapes_preserve_raw_replay_and_display_policy() {
+    let items = [
+        r#"{"type":"reasoning","id":"rs_opaque","status":"completed","summary":[]}"#,
+        r#"{"type":"reasoning","id":"rs_summary","summary":[{"type":"summary_text","text":"brief"}]}"#,
+        r#"{"type":"reasoning","id":"rs_encrypted","encrypted_content":"SEALED","summary":[]}"#,
+        r#"{"type":"reasoning","id":"rs_mixed","encrypted_content":"SEALED-MIXED","summary":[{"type":"summary_text","text":"brief"}],"content":[{"type":"reasoning_text","text":"display me"}],"provider_number":1.2300}"#,
+    ];
+
+    for (index, raw_item) in items.into_iter().enumerate() {
+        let mut state = State::default();
+        let event = format!(
+            r#"{{"type":"response.completed","response":{{"id":"resp_{index}","output":[{raw_item},{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"answer"}}]}}]}}}}"#
+        );
+        state
+            .apply_event(&event)
+            .expect("documented reasoning shape");
+        let output = state.output_items();
+        let reasoning = output
+            .iter()
+            .find_map(|item| match item {
+                ContextItem::Reasoning(item) => Some(item),
+                _ => None,
+            })
+            .expect("opaque reasoning authority");
+        assert_eq!(reasoning.raw_json(), raw_item);
+        let display = output
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::ReasoningText(reasoning) => Some(reasoning.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if raw_item.contains(r#""reasoning_text""#) {
+            assert_eq!(display, vec!["display me"]);
+        } else {
+            assert!(display.is_empty(), "opaque summary must not become display");
+        }
+        let lowered = lower_item(&ContextItem::Reasoning(reasoning.clone()))
+            .expect("reasoning lowering")
+            .expect("reasoning replay item");
+        assert_eq!(
+            serde_json::to_string(&lowered).expect("replay JSON"),
+            raw_item
+        );
+    }
+}
+
+/// An opaque reasoning stub must remain incomplete until the matching completed
+/// item supplies its replay authority; completion itself is semantic progress.
+#[test]
+fn streamed_opaque_reasoning_materializes_only_from_matching_done_item() {
+    let mut state = State::default();
+    assert!(
+        !state
+            .apply_event(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_streamed","status":"in_progress","summary":[]}}"#,
+            )
+            .expect("opaque reasoning stub")
+    );
+    assert!(state.has_incomplete_reasoning());
+    assert!(state.output_items().is_empty());
+
+    assert!(
+        state
+            .apply_event(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_streamed","status":"completed","encrypted_content":"SEALED-STREAMED","summary":[]}}"#,
+            )
+            .expect("opaque reasoning completion")
+    );
+    assert!(!state.has_incomplete_reasoning());
+    assert!(matches!(
+        state.output_items().as_slice(),
+        [ContextItem::Reasoning(reasoning)]
+            if reasoning.raw_json()
+                == r#"{"type":"reasoning","id":"rs_streamed","status":"completed","encrypted_content":"SEALED-STREAMED","summary":[]}"#
+    ));
+}
+
 /// Ensures per-event scalar observations and one due borrowed projection do not
 /// clone a growing public Responses display prefix.
 #[test]
@@ -1274,18 +1355,48 @@ fn plain_reasoning_replay_prefers_sidecar_and_skips_display_item() {
     assert_eq!(lowered["provider_future"], 17);
 }
 
-/// Public Responses must keep rejecting every reasoning shape outside plain
-/// `reasoning_text`, as well as unsupported output item families.
+/// Public Responses must reject structurally malformed reasoning while still
+/// rejecting unsupported output item families.
 #[test]
-fn malformed_or_unsupported_reasoning_output_is_rejected() {
-    let unsupported = [
-        r#"{"type":"reasoning","summary":[]}"#,
-        r#"{"type":"reasoning","summary":[],"content":[]}"#,
+fn malformed_reasoning_or_unsupported_output_is_rejected() {
+    let malformed_reasoning = [
+        r#"{"type":"reasoning"}"#,
+        r#"{"type":"reasoning","id":"rs_empty","content":[]}"#,
         r#"{"type":"reasoning","summary":[],"content":"thought"}"#,
         r#"{"type":"reasoning","summary":[],"content":[{"type":"summary_text","text":"summary"}]}"#,
         r#"{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":1}]}"#,
-        r#"{"type":"reasoning","summary":[],"encrypted_content":"SEALED","content":[{"type":"reasoning_text","text":"thought"}]}"#,
-        r#"{"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"thought"}]}"#,
+        r#"{"type":"reasoning","summary":"summary"}"#,
+        r#"{"type":"reasoning","summary":[{"type":"reasoning_text","text":"summary"}]}"#,
+        r#"{"type":"reasoning","summary":[{"type":"summary_text","text":1}]}"#,
+        r#"{"type":"reasoning","encrypted_content":17}"#,
+        r#"{"type":"reasoning","id":17,"summary":[]}"#,
+        r#"{"type":"reasoning","status":17,"summary":[]}"#,
+    ];
+
+    for item in malformed_reasoning {
+        let mut state = State::default();
+        let event = format!(
+            r#"{{"type":"response.completed","response":{{"id":"must-not-stick","output":[{item}]}}}}"#
+        );
+        assert!(
+            matches!(state.apply_event(&event), Err(Error::UnsupportedOutput)),
+            "unexpectedly accepted {item}"
+        );
+        assert!(state.items.is_empty(), "rejection mutated output slots");
+        assert_eq!(state.terminal, None);
+        assert_eq!(state.response_id, None);
+
+        let replay = ContextItem::Reasoning(
+            tau_proto::OpaqueProviderItem::from_raw_json(item)
+                .expect("structurally canonical malformed reasoning"),
+        );
+        assert!(
+            matches!(lower_item(&replay), Err(Error::UnsupportedOutput)),
+            "replay unexpectedly accepted {item}"
+        );
+    }
+
+    let unsupported = [
         r#"{"type":"custom_tool_call","call_id":"call_1","name":"shell","input":"pwd"}"#,
         r#"{"type":"web_search_call","id":"search_1"}"#,
         r#"{"type":"future_output","value":"unknown"}"#,
@@ -1729,17 +1840,21 @@ fn terminal_output_rejects_streamed_reasoning_disagreement() {
     }
 }
 
-/// Replay validation rejects provider-invalid reasoning even after canonical
+/// Replay validation rejects malformed reasoning even after canonical
 /// opaque-item validation has accepted its raw and structured equivalence.
 #[test]
 fn invalid_reasoning_replay_authorities_are_rejected() {
     let invalid = [
         tau_proto::OpaqueProviderItem::from_raw_json(
-                r#"{"type":"reasoning","encrypted_content":"SEALED","content":[{"type":"reasoning_text","text":"thought"}]}"#
+                r#"{"type":"reasoning","encrypted_content":17,"content":[{"type":"reasoning_text","text":"thought"}]}"#
         )
         .expect("canonical but provider-invalid reasoning"),
         tau_proto::OpaqueProviderItem::from_raw_json(
-            r#"{"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}]}"#,
+            r#"{"type":"reasoning","summary":[{"type":"summary_text","text":17}]}"#,
+        )
+        .expect("canonical but provider-invalid reasoning"),
+        tau_proto::OpaqueProviderItem::from_raw_json(
+            r#"{"type":"reasoning","id":17,"summary":[]}"#,
         )
         .expect("canonical but provider-invalid reasoning"),
     ];
@@ -2023,6 +2138,10 @@ fn http_sse_attempt_posts_responses_and_completes() {
         let (mut socket, _) = listener.accept().expect("accept request");
         let (head, body) = read_http_request(&mut socket);
         assert!(head.starts_with("POST /responses HTTP/1.1"));
+        assert!(
+            String::from_utf8_lossy(&body).contains(r#""provider_number":1.2300"#),
+            "tool continuation must preserve exact opaque reasoning JSON"
+        );
         let request: serde_json::Value = serde_json::from_slice(&body).expect("request JSON");
         assert_eq!(request["stream"], true);
         assert_eq!(request["reasoning"]["effort"], "none");
@@ -2042,17 +2161,20 @@ fn http_sse_attempt_posts_responses_and_completes() {
         );
         assert_eq!(request["input"][1]["id"], "msg_1");
         assert_eq!(request["input"][1]["status"], "completed");
-        assert_eq!(request["input"][2]["id"], "fc_1");
-        assert_eq!(request["input"][2]["call_id"], "call_1");
-        assert_eq!(request["input"][2]["name"], "run");
-        assert_eq!(request["input"][2]["arguments"], "{ \"path\" : \"/tmp\" }");
-        assert_eq!(request["input"][3]["type"], "function_call_output");
-        assert_eq!(request["input"][3]["output"], "tool result");
+        assert_eq!(request["input"][2]["id"], "rs_replay");
+        assert_eq!(request["input"][2]["encrypted_content"], "SEALED-REPLAY");
+        assert_eq!(request["input"][2]["provider_number"], 1.23);
+        assert_eq!(request["input"][3]["id"], "fc_1");
+        assert_eq!(request["input"][3]["call_id"], "call_1");
+        assert_eq!(request["input"][3]["name"], "run");
+        assert_eq!(request["input"][3]["arguments"], "{ \"path\" : \"/tmp\" }");
+        assert_eq!(request["input"][4]["type"], "function_call_output");
+        assert_eq!(request["input"][4]["output"], "tool result");
         let oversized_raw = serde_json::json!({
             "type": "response.unknown",
             "padding": "x".repeat(debug_capture::MAX_RESPONSE_EVENT_BYTES),
         });
-        let terminal = "data: {\"type\":\"response.completed\",\"diagnostic\":\"DaTa:ImAgE/PNG;base64,raw-event-canary\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n";
+        let terminal = "data: {\"type\":\"response.completed\",\"diagnostic\":\"DaTa:ImAgE/PNG;base64,raw-event-canary\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_sse\",\"encrypted_content\":\"SEALED-SSE\",\"summary\":[]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n";
         let body = format!("data: {oversized_raw}\n\n{terminal}");
         write!(
             socket,
@@ -2079,7 +2201,7 @@ fn http_sse_attempt_posts_responses_and_completes() {
         r#"{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"assistant replay"}],"diagnostic":"DATA:Image/PNG;base64,replay-sidecar-canary"}"#
             .to_owned(),
     );
-    let ContextItem::ToolCall(call) = &mut block.output_items[1] else {
+    let ContextItem::ToolCall(call) = &mut block.output_items[2] else {
         panic!("assistant replay tool call");
     };
     call.responses_envelope
@@ -2121,6 +2243,12 @@ fn http_sse_attempt_posts_responses_and_completes() {
         panic!("Responses SSE attempt must complete");
     };
     assert_eq!(success.provider_response_id.as_deref(), Some("resp_1"));
+    assert!(matches!(
+        success.output_items.as_slice(),
+        [ContextItem::Reasoning(reasoning), ContextItem::Message(_)]
+            if reasoning.raw_json()
+                == r#"{"type":"reasoning","id":"rs_sse","encrypted_content":"SEALED-SSE","summary":[]}"#
+    ));
     let captures = captures.lock().expect("capture lock");
     assert_eq!(captures.len(), 2);
     assert_eq!(
@@ -2818,7 +2946,7 @@ fn websocket_attempt_uses_response_create_protocol() {
         );
         socket
             .send(Message::Text(
-                r#"{"type":"response.completed","response":{"id":"resp_ws","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}"#
+                r#"{"type":"response.completed","response":{"id":"resp_ws","output":[{"type":"reasoning","id":"rs_ws","summary":[{"type":"summary_text","text":"brief"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}"#
                     .into(),
             ))
             .expect("send completed response");
@@ -2851,6 +2979,12 @@ fn websocket_attempt_uses_response_create_protocol() {
         panic!("WebSocket Responses attempt must complete");
     };
     assert_eq!(success.provider_response_id.as_deref(), Some("resp_ws"));
+    assert!(matches!(
+        success.output_items.as_slice(),
+        [ContextItem::Reasoning(reasoning), ContextItem::Message(_)]
+            if reasoning.raw_json()
+                == r#"{"type":"reasoning","id":"rs_ws","summary":[{"type":"summary_text","text":"brief"}]}"#
+    ));
     let captures = captures.lock().expect("capture lock");
     assert_eq!(captures.len(), 2);
     assert_eq!(
@@ -4480,6 +4614,12 @@ fn prompt_with_replayed_user_text() -> tau_proto::AgentPromptCreated {
                             r#"{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"assistant replay"}]}"#.to_owned(),
                         ),
                     }),
+                    ContextItem::Reasoning(
+                        tau_proto::OpaqueProviderItem::from_raw_json(
+                            r#"{"type":"reasoning","id":"rs_replay","encrypted_content":"SEALED-REPLAY","summary":[],"provider_number":1.2300}"#,
+                        )
+                        .expect("opaque reasoning replay item"),
+                    ),
                     ContextItem::ToolCall(ToolCallItem {
                         call_id: tau_proto::ToolCallId::new("call_1"),
                         name: tau_proto::ToolName::try_new("run".to_owned())

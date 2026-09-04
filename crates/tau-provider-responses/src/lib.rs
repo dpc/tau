@@ -843,7 +843,7 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
             Error::Canceled => "request canceled".to_owned(),
             Error::UnsupportedTool => "Responses supports Function tools only".to_owned(),
             Error::UnsupportedOutput => {
-                "Responses supports text, plain reasoning, and Function output only".to_owned()
+                "Responses supports text, reasoning, and Function output only".to_owned()
             }
             Error::InvalidRequest => "Responses request was invalid".to_owned(),
             Error::RepetitionDetected(repetition) => repetition.to_string(),
@@ -924,7 +924,7 @@ enum ReasoningPartPhase {
     Done,
 }
 
-/// Validated plain reasoning content and its full display projection.
+/// Validated reasoning content and its optional full display projection.
 struct PlainReasoning {
     /// Content text keyed by provider content index.
     parts: BTreeMap<ReasoningContentIndex, String>,
@@ -1207,7 +1207,7 @@ impl Slot {
                 if self.reasoning_item_id.is_some() && self.reasoning_item_id != item_id {
                     return Err(Error::UnsupportedOutput);
                 }
-                let final_reasoning = plain_reasoning(item, phase)?;
+                let final_reasoning = validated_reasoning(item, phase)?;
                 if phase == OutputItemPhase::Completed {
                     for (index, part) in &self.reasoning_parts {
                         if final_reasoning.parts.get(index) != Some(&part.text) {
@@ -2265,24 +2265,42 @@ fn reasoning_slots_agree(streamed: &Slot, terminal: &Slot) -> bool {
     streamed.state != SlotState::ReasoningCompleted || streamed.item == terminal.item
 }
 
-fn plain_reasoning(item: &Value, phase: OutputItemPhase) -> Result<PlainReasoning, Error> {
-    if item.get("encrypted_content").is_some()
-        || item
-            .get("summary")
-            .is_some_and(|summary| !matches!(summary, Value::Array(parts) if parts.is_empty()))
+fn validated_reasoning(item: &Value, phase: OutputItemPhase) -> Result<PlainReasoning, Error> {
+    if item.get("status").is_some_and(|status| !status.is_string()) {
+        return Err(Error::UnsupportedOutput);
+    }
+    if item
+        .get("encrypted_content")
+        .is_some_and(|encrypted| !encrypted.is_string())
     {
         return Err(Error::UnsupportedOutput);
     }
+    if let Some(summary) = item.get("summary") {
+        let parts = summary.as_array().ok_or(Error::UnsupportedOutput)?;
+        for part in parts {
+            if part["type"].as_str() != Some("summary_text") || !part["text"].is_string() {
+                return Err(Error::UnsupportedOutput);
+            }
+        }
+    }
     let Some(content) = item.get("content") else {
-        return matches!(phase, OutputItemPhase::Added)
-            .then_some(PlainReasoning {
-                parts: BTreeMap::new(),
-                display: None,
-            })
-            .ok_or(Error::UnsupportedOutput);
+        if !matches!(phase, OutputItemPhase::Added)
+            && item.get("summary").is_none()
+            && item.get("encrypted_content").is_none()
+        {
+            return Err(Error::UnsupportedOutput);
+        }
+        return Ok(PlainReasoning {
+            parts: BTreeMap::new(),
+            display: None,
+        });
     };
     let parts = content.as_array().ok_or(Error::UnsupportedOutput)?;
-    if !matches!(phase, OutputItemPhase::Added) && parts.is_empty() {
+    if !matches!(phase, OutputItemPhase::Added)
+        && parts.is_empty()
+        && item.get("summary").is_none()
+        && item.get("encrypted_content").is_none()
+    {
         return Err(Error::UnsupportedOutput);
     }
     let mut reasoning_parts = BTreeMap::new();
@@ -2651,7 +2669,11 @@ fn lower_borrowed_item(item: BorrowedContextItem<'_>) -> Result<Option<Responses
         ContextItem::Reasoning(item) => {
             let value = serde_json::from_str::<Value>(item.raw_json())
                 .map_err(|_| Error::UnsupportedOutput)?;
-            plain_reasoning(&value, OutputItemPhase::Completed)?;
+            if value["type"].as_str() != Some("reasoning") {
+                return Err(Error::UnsupportedOutput);
+            }
+            reasoning_item_id(&value)?;
+            validated_reasoning(&value, OutputItemPhase::Completed)?;
             RawValue::from_string(item.raw_json().to_owned())
                 .map(ResponsesInputItem::Raw)
                 .map(Some)
