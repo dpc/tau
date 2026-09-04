@@ -164,6 +164,46 @@ monotonic stage markers. They contain bounded classes and process-local ordinals
 not Slack identifiers, message text, tokens, URLs, agent identities, or durable
 events; retain them only in bounded local logs.
 
+## Socket Mode reconnection diagnosis
+
+For the next harness start, use:
+
+```sh
+TAU_LOG='slack=trace,warn' tau
+```
+
+`slack` is the extension's exact tracing target. Set the variable when starting
+or restarting the harness; setting it on a later `tau attach` changes only that
+new UI process, not the already-running extension.
+
+First find the affected session with `tau session list`, then set its log
+directory. The authoritative private stderr file is
+`logs/<configured-extension-instance>.log`, so list it rather than assuming the
+instance is named `std-slack`:
+
+```sh
+logs="${XDG_STATE_HOME:-$HOME/.local/state}/tau/sessions/<session_id>/logs"
+find "$logs" -maxdepth 1 -type f -name '*.log' -printf '%f\n'
+grep -lE 'target=slack|Slack Socket Mode' "$logs"/*.log
+```
+
+The Slack-specific fields are `lifecycle=connected|hello|reconnecting|degraded|stopped`,
+`ack=sent|failed`, `failure=socket_worker|installation_restart_required`,
+`failure_class=...`, `reconnect_reason=...`, `stop_reason=...`, and
+`rejection=...`. The closed `failure_class` and reason fields identify the
+worker stage without raw provider or transport detail. The README explains their
+connection, heartbeat, and installation meaning. For the standard process, log,
+mirror, privacy, and retention workflow, use
+`tau-self-knowledge-debugging-extensions`.
+
+These are deliberately closed-category logs: Slack-owned records omit tokens,
+websocket URLs, native IDs, message payloads, and provider response text. The
+raw per-extension stderr file is nevertheless private and unredacted at its sink
+boundary; dependency or custom-extension output can contain identifiers or local
+paths. Review it before sharing. See the [README troubleshooting
+procedure](../../tau-ext-slack/README.md#troubleshooting) for the detailed
+reconnection runbook.
+
 For missing delivery, check the exact `message.*`/`app_mention` subscription and
 history/app-mention scope, reinstall after scope changes, verify app membership,
 and ensure app/bot tokens share one workspace installation. `missing_scope`

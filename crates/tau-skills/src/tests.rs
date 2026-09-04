@@ -861,6 +861,7 @@ const BUILT_IN_SKILL_NAMES: &[&str] = &[
     "tau-self-knowledge-source-code",
     "tau-self-knowledge-community",
     "tau-self-knowledge-debugging",
+    "tau-self-knowledge-debugging-extensions",
     "tau-self-knowledge-tracing",
     "tau-self-knowledge-e2e-testing",
 ];

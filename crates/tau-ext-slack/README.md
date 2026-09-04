@@ -357,3 +357,68 @@ memory-only and does not add a post-ACK durability claim.
 websocket receipt, ACK, admission, identity, post, report submission, and result
 timing, but contain no Slack identifiers, text, tokens, URLs, response bodies,
 or durable diagnostic events.
+
+## Troubleshooting
+
+For a Socket Mode reconnection loop, start or restart the harness with:
+
+```sh
+TAU_LOG='slack=trace,warn' tau
+```
+
+`slack` is the exact extension tracing target. `TAU_LOG` uses
+`RUST_LOG`/`EnvFilter` directive syntax; a valid value replaces the usual
+`slack=info,warn` filter, and the trailing `warn` retains warnings from other
+targets. The supervised extension inherits the harness environment but reads
+the filter only at process startup. Stop and relaunch the harness, or restart
+the service, with this environment set. Running `TAU_LOG=... tau attach` later
+changes only that new UI process and cannot reconfigure the extension already
+running in the harness.
+
+Find the affected session with `tau session list`. Its authoritative extension
+stderr is under
+`${XDG_STATE_HOME:-$HOME/.local/state}/tau/sessions/<session_id>/logs/`, named
+after the configured extension instance rather than necessarily `std-slack`.
+List and identify the file instead of guessing:
+
+```sh
+logs="${XDG_STATE_HOME:-$HOME/.local/state}/tau/sessions/<session_id>/logs"
+find "$logs" -maxdepth 1 -type f -name '*.log' -printf '%f\n'
+grep -lE 'target=slack|Slack Socket Mode' "$logs"/*.log
+```
+
+Then inspect a bounded recent window:
+
+```sh
+log="$logs/<extension-instance>.log"
+grep -E 'lifecycle=|ack=|failure=|rejection=' "$log" | tail -n 200
+tail -n 200 "$log"
+```
+
+`lifecycle=connected` followed by `lifecycle=hello` shows a healthy Socket
+Mode connection. `ack=sent` records a local Socket Mode envelope ACK flush;
+`ack=failed` means that socket write failed. `lifecycle=reconnecting` includes
+`reconnect_reason=server_disconnect|socket_eof|socket_close`.
+
+Repeated `lifecycle=degraded failure=socket_worker` includes a closed
+`failure_class`: `auth_test_*`, `socket_ticket_*`, `socket_ticket_url`,
+`websocket_tls_configuration`, `websocket_connect`, `websocket_frame`,
+`ping_write`, `pong_write`, `ack_write`, `heartbeat_timeout`, or
+`admission_queue`. These identify the failed stage without exposing raw Slack,
+DNS/TCP/TLS/certificate, WebSocket, or credential detail. The first failure in
+a worker process also creates one bounded live UI notice. The worker sends
+Pings every 10 seconds and reconnects 40 seconds after the last Pong, but does
+not log individual Ping/Pong frames. `lifecycle=stopped
+failure=installation_restart_required stop_reason=installation_identity`
+means reconnect identity evidence no longer matches the established
+bot/workspace installation: correct the tokens or installation, then restart.
+Other worker stops record
+`stop_reason=shutdown_requested|server_disconnect`. `rejection=...` records a
+dropped inbound frame such as `malformed_frame`, `installation_context`, or
+`oversized_frame`; it is not by itself a reconnection-loop cause.
+
+Slack-owned logs deliberately expose only closed categories. They omit tokens,
+websocket URLs, native IDs, message payloads, and provider response text. The
+raw per-extension stderr sink is still private and unredacted: dependency or
+custom-extension output can contain identifiers or local paths. Review it before
+sharing.

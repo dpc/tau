@@ -43,6 +43,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-source-code` — where to fetch Tau source code for debugging or detailed understanding.
 - `tau-self-knowledge-community` — places to ask questions or talk about Tau.
 - `tau-self-knowledge-debugging` — debugging workflow for Tau sessions, daemon behavior, logs, state, and provider request captures.
+- `tau-self-knowledge-debugging-extensions` — supervised extension logging, startup/crash/reconnect investigation, and stderr privacy.
 - `tau-self-knowledge-tracing` — content-free execution audits, bounded semantic traces, complete journal exports, and privacy boundaries.
 - `tau-self-knowledge-e2e-testing` — manual E2E testing with `tau dev tmux`, scratch state, and opt-in provider profile access through `testing.yaml`.
 When working _on_ Tau project, prefer the repository's local developer-centric skills when available.

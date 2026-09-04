@@ -248,6 +248,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
         content: include_str!("../self-knowledge/tau-self-knowledge-debugging.md"),
     },
     BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-debugging-extensions.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-debugging-extensions.md"),
+    },
+    BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-tracing.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-tracing.md"),
     },

@@ -501,7 +501,9 @@ impl Extension {
                 state.configuration.config_generation,
             )
         };
-        let installation = self.authenticated_installation(&cfg)?;
+        let installation = self
+            .authenticated_installation(&cfg)
+            .map_err(|error| error.to_string())?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.configuration.config_generation != generation
             || state.configuration.config.is_none()

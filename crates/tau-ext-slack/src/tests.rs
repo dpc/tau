@@ -2196,7 +2196,7 @@ async fn shutdown_signal_wait_timeout_wakes_before_long_backoff() {
 async fn socket_worker_result_for_frames(
     frames: Vec<Message>,
 ) -> (
-    Result<WorkerOutcome, String>,
+    Result<WorkerOutcome, SocketWorkerFailure>,
     mpsc::Receiver<HarnessInputMessage>,
 ) {
     let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
@@ -2283,7 +2283,7 @@ async fn socket_worker_caps_unfragmented_text_at_first_excess_byte() {
     .await;
     assert_eq!(
         exact_result.expect("exact frame limit"),
-        WorkerOutcome::ReconnectNow
+        WorkerOutcome::Reconnect(SocketReconnectCause::SocketClose)
     );
     assert_no_ingress(&exact_output);
 
@@ -2293,7 +2293,7 @@ async fn socket_worker_caps_unfragmented_text_at_first_excess_byte() {
     .await;
     assert_eq!(
         excess_result.expect_err("first excess byte must retire the connection"),
-        "Slack websocket frame failed"
+        SocketWorkerFailure::WebsocketFrame
     );
     assert_no_ingress(&excess_output);
 }
@@ -2308,7 +2308,7 @@ async fn socket_worker_caps_fragmented_text_at_first_excess_byte() {
     .await;
     assert_eq!(
         exact_result.expect("exact complete-message limit"),
-        WorkerOutcome::ReconnectNow
+        WorkerOutcome::Reconnect(SocketReconnectCause::SocketClose)
     );
     assert_no_ingress(&exact_output);
 
@@ -2318,7 +2318,7 @@ async fn socket_worker_caps_fragmented_text_at_first_excess_byte() {
     .await;
     assert_eq!(
         excess_result.expect_err("first aggregate excess byte must retire the connection"),
-        "Slack websocket frame failed"
+        SocketWorkerFailure::WebsocketFrame
     );
     assert_no_ingress(&excess_output);
 }
@@ -2333,7 +2333,7 @@ async fn socket_worker_caps_binary_at_first_excess_byte() {
     .await;
     assert_eq!(
         exact_result.expect("exact binary frame limit"),
-        WorkerOutcome::ReconnectNow
+        WorkerOutcome::Reconnect(SocketReconnectCause::SocketClose)
     );
     assert_no_ingress(&exact_output);
 
@@ -2343,7 +2343,7 @@ async fn socket_worker_caps_binary_at_first_excess_byte() {
     .await;
     assert_eq!(
         excess_result.expect_err("first binary excess byte must retire the connection"),
-        "Slack websocket frame failed"
+        SocketWorkerFailure::WebsocketFrame
     );
     assert_no_ingress(&excess_output);
 }
@@ -2397,7 +2397,10 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
         .expect("socket worker should stop promptly")
         .expect("socket worker should not panic")
         .expect("socket worker should exit cleanly");
-    assert_eq!(outcome, WorkerOutcome::Shutdown);
+    assert_eq!(
+        outcome,
+        WorkerOutcome::Shutdown(SocketStopCause::ShutdownRequested)
+    );
     server.abort();
 }
 
@@ -2451,7 +2454,7 @@ async fn socket_worker_once_reconnects_after_missing_heartbeat_pong() {
         .expect("stale websocket should be detected promptly")
         .expect("socket worker should not panic")
         .expect_err("missing heartbeat pong must reconnect");
-    assert_eq!(error, SOCKET_HEARTBEAT_TIMEOUT_ERROR);
+    assert_eq!(error, SocketWorkerFailure::HeartbeatTimeout);
     server.abort();
 }
 
@@ -2529,7 +2532,10 @@ async fn socket_worker_once_keeps_responsive_idle_connection() {
         .expect("responsive worker should honor shutdown")
         .expect("socket worker should not panic")
         .expect("socket worker should exit cleanly");
-    assert_eq!(outcome, WorkerOutcome::Shutdown);
+    assert_eq!(
+        outcome,
+        WorkerOutcome::Shutdown(SocketStopCause::ShutdownRequested)
+    );
     server.abort();
 }
 
@@ -2597,7 +2603,7 @@ async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic(
         .expect("independent pong deadline should win before outer timeout")
         .expect("socket worker should not panic")
         .expect_err("non-pong traffic must not keep the connection alive");
-    assert_eq!(error, SOCKET_HEARTBEAT_TIMEOUT_ERROR);
+    assert_eq!(error, SocketWorkerFailure::HeartbeatTimeout);
     assert_eq!(pong_at.elapsed(), Duration::from_secs(40));
     assert!(!ext.state.lock().expect("state").socket.worker_online);
     server.abort();
@@ -2620,11 +2626,14 @@ async fn blocked_socket_write_remains_shutdown_interruptible() {
         &shutdown,
         pong_deadline.as_mut(),
         std::future::pending::<Result<(), ()>>(),
-        "write failed",
+        SocketWorkerFailure::PingWrite,
     )
     .await
     .expect("shutdown is not a write failure");
-    assert_eq!(outcome, Some(WorkerOutcome::Shutdown));
+    assert_eq!(
+        outcome,
+        Some(WorkerOutcome::Shutdown(SocketStopCause::ShutdownRequested))
+    );
 }
 
 /// A WebSocket write that remains pending must be preempted at the exact Pong
@@ -2640,11 +2649,11 @@ async fn blocked_socket_write_remains_pong_deadline_bounded() {
         &shutdown,
         pong_deadline.as_mut(),
         std::future::pending::<Result<(), ()>>(),
-        "write failed",
+        SocketWorkerFailure::PingWrite,
     )
     .await
     .expect_err("pong deadline must preempt the blocked write");
-    assert_eq!(error, SOCKET_HEARTBEAT_TIMEOUT_ERROR);
+    assert_eq!(error, SocketWorkerFailure::HeartbeatTimeout);
     assert_eq!(started_at.elapsed(), Duration::from_secs(40));
 }
 
@@ -2653,8 +2662,8 @@ async fn blocked_socket_write_remains_pong_deadline_bounded() {
 #[test]
 fn worker_connection_failure_notice_is_bounded_and_one_shot() {
     let (ext, rx, _client) = extension();
-    ext.report_worker_connection_failure_once(SOCKET_HEARTBEAT_TIMEOUT_ERROR);
-    ext.report_worker_connection_failure_once("Slack websocket connection failed");
+    ext.report_worker_connection_failure_once(SocketWorkerFailure::HeartbeatTimeout);
+    ext.report_worker_connection_failure_once(SocketWorkerFailure::WebsocketConnect);
 
     let notices = rx
         .try_iter()
@@ -2677,6 +2686,83 @@ fn worker_connection_failure_notice_is_bounded_and_one_shot() {
             .socket
             .worker_connection_failure_reported
     );
+}
+
+/// Ensures a shutdown waking a worker's reconnect-backoff wait emits exactly
+/// one closed stop record rather than leaving a degraded loop without a
+/// terminal lifecycle boundary.
+#[test]
+fn socket_worker_backoff_shutdown_logs_one_stop_reason() {
+    let listener =
+        path_std_net::TcpListener::bind("127.0.0.1:0").expect("reserve closed loopback port");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("loopback listener address")
+    );
+    drop(listener);
+    let expected_socket_url = socket_url.clone();
+
+    let (ext, rx, _client) = extension();
+    let retirement = SendRetirement {
+        state: Arc::clone(&ext.state),
+        output_submission_gate: Arc::clone(&ext.output_submission_gate),
+        wake: Arc::clone(&ext.send_wake),
+        output_failed: Arc::clone(&ext.output_failed),
+    };
+    let client = Arc::clone(&ext.client);
+    let output = ext.output.clone();
+    let shutdown = Arc::clone(&ext.shutdown);
+    let worker_shutdown = Arc::clone(&shutdown);
+    let trace = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatch, || {
+            socket_worker_loop(
+                retirement,
+                client,
+                output,
+                cfg(),
+                Some(WorkerStartup {
+                    bot_user_id: "UBOT123".to_owned(),
+                    installation_team_id: "T123".to_owned(),
+                    socket_url: test_socket_url(socket_url),
+                }),
+                worker_shutdown,
+            );
+        });
+        done_tx.send(()).expect("worker completion");
+    });
+
+    let notice = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("failed connection must announce its bounded notice");
+    assert!(matches!(
+        notice,
+        HarnessInputMessage::ExtensionNoticeRequest(_)
+    ));
+    shutdown.request();
+    done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("shutdown must interrupt reconnect backoff");
+    worker.join().expect("worker thread");
+
+    let output = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+    assert!(output.contains("failure_class=\"websocket_connect\""));
+    assert_eq!(
+        output.matches("stop_reason=\"shutdown_requested\"").count(),
+        1
+    );
+    assert!(!output.contains(&expected_socket_url));
 }
 
 /// A blocked users.info call runs only on the serial actor: the reader still
@@ -2795,7 +2881,10 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
         .expect("shutdown must not wait for users.info")
         .expect("reader task")
         .expect("reader outcome");
-    assert_eq!(outcome, WorkerOutcome::Shutdown);
+    assert_eq!(
+        outcome,
+        WorkerOutcome::Shutdown(SocketStopCause::ShutdownRequested)
+    );
     release_tx.send(()).expect("release identity");
     queue.close();
     actor.join().expect("serial actor exits");
@@ -6088,31 +6177,31 @@ fn socket_envelope_classes_select_one_explicit_disposition() {
         (
             r#"{"type":"disconnect"}"#,
             EnvelopeClass::Disconnect,
-            SocketDisposition::Reconnect,
+            SocketDisposition::Reconnect(SocketReconnectCause::ServerDisconnect),
             None,
         ),
         (
             r#"{"type":"disconnect","reason":"warning","envelope_id":"env-warning"}"#,
             EnvelopeClass::Disconnect,
-            SocketDisposition::Reconnect,
+            SocketDisposition::Reconnect(SocketReconnectCause::ServerDisconnect),
             Some("env-warning"),
         ),
         (
             r#"{"type":"disconnect","reason":"refresh_requested"}"#,
             EnvelopeClass::Disconnect,
-            SocketDisposition::Reconnect,
+            SocketDisposition::Reconnect(SocketReconnectCause::ServerDisconnect),
             None,
         ),
         (
             r#"{"type":"disconnect","reason":"link_disabled","envelope_id":"env-stop"}"#,
             EnvelopeClass::Disconnect,
-            SocketDisposition::Shutdown,
+            SocketDisposition::Shutdown(SocketStopCause::ServerDisconnect),
             Some("env-stop"),
         ),
         (
             r#"{"type":"disconnect","reason":7}"#,
             EnvelopeClass::Disconnect,
-            SocketDisposition::Reconnect,
+            SocketDisposition::Reconnect(SocketReconnectCause::ServerDisconnect),
             None,
         ),
     ];
@@ -7029,8 +7118,8 @@ fn socket_ack_diagnostics_are_safe_and_failure_prevents_routing() {
     tracing::subscriber::with_default(subscriber, || {
         log_socket_ack_sent(false);
         assert_eq!(
-            finish_socket_ack(Err("wire closed".to_owned()), true),
-            Err("wire closed".to_owned())
+            finish_socket_ack(Err(SocketWorkerFailure::AckWrite), true),
+            Err(SocketWorkerFailure::AckWrite)
         );
     });
     let output = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
@@ -7059,11 +7148,56 @@ fn socket_ack_diagnostics_are_safe_and_failure_prevents_routing() {
     let action = handle_socket_text(&ext, &routed_text);
     let queue = AdmissionQueue::<DecodedSlackEvent>::new();
     let reservation = queue.reserve().expect("reserve before ACK");
-    assert!(finish_socket_ack(Err("forced ACK write failure".to_owned()), true).is_err());
+    assert!(finish_socket_ack(Err(SocketWorkerFailure::AckWrite), true).is_err());
     drop(reservation);
     assert!(queue.reserve().is_ok(), "ACK failure must release capacity");
     assert!(action.event.is_some(), "fixture must decode supported work");
     assert_no_ingress(&rx);
+}
+
+/// Ensures Socket Mode lifecycle records expose stable closed failure and
+/// transition categories without leaking the arbitrary source error detail.
+#[test]
+fn socket_worker_lifecycle_logs_use_closed_categories() {
+    let trace = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        log_socket_worker_failure(SocketWorkerFailure::AuthTest(SlackApiError::TransportTls));
+        log_socket_worker_failure(SocketWorkerFailure::SocketTicket(
+            SlackApiError::MissingScope,
+        ));
+        log_socket_worker_failure(SocketWorkerFailure::HeartbeatTimeout);
+        log_socket_worker_reconnect(SocketReconnectCause::SocketEof);
+        log_socket_worker_stop(SocketStopCause::ServerDisconnect);
+        let mut stop_logged = false;
+        log_socket_worker_stop_once(&mut stop_logged, SocketStopCause::ShutdownRequested);
+        log_socket_worker_stop_once(&mut stop_logged, SocketStopCause::ShutdownRequested);
+    });
+    let output = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+    assert!(output.contains("failure=\"socket_worker\""));
+    assert!(output.contains("failure_class=\"auth_test_transport_tls\""));
+    assert!(output.contains("failure_class=\"socket_ticket_missing_scope\""));
+    assert!(output.contains("failure_class=\"heartbeat_timeout\""));
+    assert!(output.contains("lifecycle=\"reconnecting\""));
+    assert!(output.contains("reconnect_reason=\"socket_eof\""));
+    assert!(output.contains("lifecycle=\"stopped\""));
+    assert!(output.contains("stop_reason=\"server_disconnect\""));
+    assert_eq!(
+        output.matches("stop_reason=\"shutdown_requested\"").count(),
+        1,
+        "backoff and loop-exit shutdown paths must converge on one stop record"
+    );
+    assert!(!output.contains("xapp-test"));
+    assert!(!output.contains("xoxb-test"));
+    assert!(!output.contains("wss://"));
 }
 
 /// Latency markers expose only local ordinals, durations, and bounded classes;

@@ -94,7 +94,10 @@ fn log_socket_ack_sent(has_supported_event: bool) {
 }
 
 /// Finish one ACK attempt, surfacing failure without untrusted envelope data.
-fn finish_socket_ack(result: Result<(), String>, has_supported_event: bool) -> Result<(), String> {
+fn finish_socket_ack(
+    result: Result<(), SocketWorkerFailure>,
+    has_supported_event: bool,
+) -> Result<(), SocketWorkerFailure> {
     match result {
         Ok(()) => {
             log_socket_ack_sent(has_supported_event);
@@ -2139,7 +2142,9 @@ impl Extension {
     }
 
     fn prepare_worker_start(&self, cfg: &RuntimeConfig) -> Result<WorkerStartup, String> {
-        let installation = self.authenticated_installation(cfg)?;
+        let installation = self
+            .authenticated_installation(cfg)
+            .map_err(|error| error.to_string())?;
         self.match_established_installation(&installation)?;
         let socket_url = self
             .client
@@ -2160,14 +2165,14 @@ impl Extension {
     fn authenticated_installation(
         &self,
         cfg: &RuntimeConfig,
-    ) -> Result<SlackInstallationIdentity, String> {
+    ) -> Result<SlackInstallationIdentity, SlackApiError> {
         let raw = match self.client.auth_test(cfg) {
             Ok(raw) => raw,
             Err(error) => {
                 if error == SlackApiError::MalformedResponse {
                     self.latch_invalid_installation_if_established();
                 }
-                return Err(error.to_string());
+                return Err(error);
             }
         };
         let validated = validate_user_id("auth.test user_id", &raw.bot_user_id).and_then(|bot| {
@@ -2181,7 +2186,7 @@ impl Extension {
         if validated.is_err() {
             self.latch_invalid_installation_if_established();
         }
-        validated
+        validated.map_err(|_| SlackApiError::MalformedResponse)
     }
 
     /// Compare every complete observation with an already established pair
@@ -2256,7 +2261,7 @@ impl Extension {
         Ok(())
     }
 
-    fn report_worker_connection_failure_once(&self, message: &str) {
+    fn report_worker_connection_failure_once(&self, failure: SocketWorkerFailure) {
         let should_report = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.socket.worker_online || state.socket.worker_connection_failure_reported {
@@ -2267,9 +2272,10 @@ impl Extension {
             }
         };
         if should_report {
+            let message = failure.notice_message();
             let message = format!(
                 "Slack Socket Mode startup or reconnect failed; check std-slack tokens, Socket Mode settings, and network access: {}",
-                bounded_text(message, 128)
+                bounded_text(&message, 128)
             );
             self.output.request_notice(
                 bounded_text(&message, MAX_DIAGNOSTIC_BYTES),
@@ -4263,6 +4269,7 @@ fn socket_worker_loop(
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     let mut startup = startup;
     let mut connection_generation = SlackConnectionGeneration::default();
+    let mut stop_logged = false;
     while !shutdown.is_requested() {
         connection_generation = connection_generation.wrapping_next();
         let outcome = runtime.block_on(socket_worker_once(
@@ -4273,12 +4280,15 @@ fn socket_worker_loop(
             connection_generation,
         ));
         match outcome {
-            Ok(WorkerOutcome::ReconnectNow) => {
-                tracing::warn!(target: LOG_TARGET, lifecycle = "reconnecting", "Slack Socket Mode connection ended; reconnecting");
+            Ok(WorkerOutcome::Reconnect(cause)) => {
+                log_socket_worker_reconnect(cause);
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
-            Ok(WorkerOutcome::Shutdown) => break,
-            Err(message) => {
+            Ok(WorkerOutcome::Shutdown(cause)) => {
+                log_socket_worker_stop_once(&mut stop_logged, cause);
+                break;
+            }
+            Err(failure) => {
                 if ext
                     .state
                     .lock()
@@ -4287,22 +4297,24 @@ fn socket_worker_loop(
                     .installation_mismatch
                 {
                     ext.report_installation_restart_once();
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        lifecycle = "stopped",
-                        failure = "installation_restart_required",
-                        "Slack Socket Mode worker requires restart after installation identity failure"
-                    );
+                    log_socket_worker_installation_stop_once(&mut stop_logged);
                     break;
                 }
-                ext.report_worker_connection_failure_once(&message);
-                tracing::warn!(target: LOG_TARGET, lifecycle = "degraded", failure = "socket_worker", "Slack Socket Mode worker failed; reconnecting");
+                ext.report_worker_connection_failure_once(failure);
+                log_socket_worker_failure(failure);
                 if runtime.block_on(shutdown.wait_timeout(backoff)) {
+                    log_socket_worker_stop_once(
+                        &mut stop_logged,
+                        SocketStopCause::ShutdownRequested,
+                    );
                     break;
                 }
                 backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
             }
         }
+    }
+    if shutdown.is_requested() {
+        log_socket_worker_stop_once(&mut stop_logged, SocketStopCause::ShutdownRequested);
     }
     admission.close();
     let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -4395,10 +4407,202 @@ struct WorkerStartup {
     socket_url: SlackSocketUrl,
 }
 
+/// Closed categories for a Socket Mode worker attempt that must reconnect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SocketWorkerFailure {
+    /// The `auth.test` preflight request failed with a classified Slack API
+    /// error.
+    AuthTest(SlackApiError),
+    /// The Socket Mode ticket request failed with a classified Slack API error.
+    SocketTicket(SlackApiError),
+    /// Slack returned a Socket Mode ticket URL that failed local validation.
+    SocketTicketUrl,
+    /// Local TLS connector construction failed before WebSocket connection.
+    WebsocketTlsConfiguration,
+    /// The WebSocket handshake or connection attempt failed.
+    WebsocketConnect,
+    /// A client-originated WebSocket Ping write failed.
+    PingWrite,
+    /// A peer-originated WebSocket Ping could not receive its Pong response.
+    PongWrite,
+    /// A Socket Mode envelope ACK could not be written.
+    AckWrite,
+    /// The WebSocket reader returned an error.
+    WebsocketFrame,
+    /// The latest Pong exceeded the Socket Mode heartbeat deadline.
+    HeartbeatTimeout,
+    /// The established installation identity no longer matches.
+    InstallationIdentity,
+    /// The local bounded admission queue was unavailable before an ACK.
+    AdmissionQueue,
+}
+
+impl SocketWorkerFailure {
+    /// Return the stable, content-free field value recorded for this failure.
+    fn class(self) -> &'static str {
+        match self {
+            Self::AuthTest(error) => match error {
+                SlackApiError::Authentication => "auth_test_authentication",
+                SlackApiError::MissingScope => "auth_test_missing_scope",
+                SlackApiError::RateLimited => "auth_test_rate_limited",
+                SlackApiError::TargetUnavailable => "auth_test_target_unavailable",
+                SlackApiError::PermissionDenied => "auth_test_permission_denied",
+                SlackApiError::InvalidRequest => "auth_test_invalid_request",
+                SlackApiError::MalformedResponse => "auth_test_malformed_response",
+                SlackApiError::TransportTimeout => "auth_test_transport_timeout",
+                SlackApiError::TransportConnect => "auth_test_transport_connect",
+                SlackApiError::TransportTls => "auth_test_transport_tls",
+                SlackApiError::Transport => "auth_test_transport",
+                SlackApiError::RemoteFailure => "auth_test_remote_failure",
+            },
+            Self::SocketTicket(error) => match error {
+                SlackApiError::Authentication => "socket_ticket_authentication",
+                SlackApiError::MissingScope => "socket_ticket_missing_scope",
+                SlackApiError::RateLimited => "socket_ticket_rate_limited",
+                SlackApiError::TargetUnavailable => "socket_ticket_target_unavailable",
+                SlackApiError::PermissionDenied => "socket_ticket_permission_denied",
+                SlackApiError::InvalidRequest => "socket_ticket_invalid_request",
+                SlackApiError::MalformedResponse => "socket_ticket_malformed_response",
+                SlackApiError::TransportTimeout => "socket_ticket_transport_timeout",
+                SlackApiError::TransportConnect => "socket_ticket_transport_connect",
+                SlackApiError::TransportTls => "socket_ticket_transport_tls",
+                SlackApiError::Transport => "socket_ticket_transport",
+                SlackApiError::RemoteFailure => "socket_ticket_remote_failure",
+            },
+            Self::SocketTicketUrl => "socket_ticket_url",
+            Self::WebsocketTlsConfiguration => "websocket_tls_configuration",
+            Self::WebsocketConnect => "websocket_connect",
+            Self::PingWrite => "ping_write",
+            Self::PongWrite => "pong_write",
+            Self::AckWrite => "ack_write",
+            Self::WebsocketFrame => "websocket_frame",
+            Self::HeartbeatTimeout => "heartbeat_timeout",
+            Self::InstallationIdentity => "installation_identity",
+            Self::AdmissionQueue => "admission_queue",
+        }
+    }
+
+    /// Return the bounded notice text for the first worker failure notice.
+    fn notice_message(self) -> String {
+        match self {
+            Self::AuthTest(error) | Self::SocketTicket(error) => error.to_string(),
+            Self::SocketTicketUrl => "Slack Socket Mode ticket URL was invalid".to_owned(),
+            Self::WebsocketTlsConfiguration => {
+                "Slack Socket Mode TLS configuration failed".to_owned()
+            }
+            Self::WebsocketConnect => "Slack websocket connection failed".to_owned(),
+            Self::PingWrite => "Slack websocket ping failed".to_owned(),
+            Self::PongWrite => "Slack websocket pong failed".to_owned(),
+            Self::AckWrite => "Slack websocket acknowledgement failed".to_owned(),
+            Self::WebsocketFrame => "Slack websocket frame failed".to_owned(),
+            Self::HeartbeatTimeout => SOCKET_HEARTBEAT_TIMEOUT_ERROR.to_owned(),
+            Self::InstallationIdentity => {
+                "Slack installation identity changed; restart Tau before reconnecting".to_owned()
+            }
+            Self::AdmissionQueue => "Slack Socket Mode admission queue was unavailable".to_owned(),
+        }
+    }
+}
+
+/// Closed reasons why an established Socket Mode worker reconnects immediately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SocketReconnectCause {
+    /// Slack sent a Socket Mode disconnect envelope that requests reconnect.
+    ServerDisconnect,
+    /// The peer ended the WebSocket stream without a close frame.
+    SocketEof,
+    /// The peer sent a WebSocket close frame.
+    SocketClose,
+}
+
+impl SocketReconnectCause {
+    /// Return the stable, content-free field value recorded for this reconnect.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ServerDisconnect => "server_disconnect",
+            Self::SocketEof => "socket_eof",
+            Self::SocketClose => "socket_close",
+        }
+    }
+}
+
+/// Closed reasons why the Socket Mode worker stops without reconnecting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SocketStopCause {
+    /// Tau requested shutdown.
+    ShutdownRequested,
+    /// Slack sent a Socket Mode disconnect envelope that forbids reconnect.
+    ServerDisconnect,
+}
+
+impl SocketStopCause {
+    /// Return the stable, content-free field value recorded for this stop.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ShutdownRequested => "shutdown_requested",
+            Self::ServerDisconnect => "server_disconnect",
+        }
+    }
+}
+
+/// One closed Socket Mode worker result that changes the connection lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerOutcome {
-    ReconnectNow,
-    Shutdown,
+    /// Retire this connection and immediately start a replacement connection.
+    Reconnect(SocketReconnectCause),
+    /// Stop the Socket Mode worker without another connection attempt.
+    Shutdown(SocketStopCause),
+}
+
+/// Record one closed worker failure before its bounded reconnect backoff.
+fn log_socket_worker_failure(failure: SocketWorkerFailure) {
+    tracing::warn!(
+        target: LOG_TARGET,
+        lifecycle = "degraded",
+        failure = "socket_worker",
+        failure_class = failure.class(),
+        "Slack Socket Mode worker failed; reconnecting"
+    );
+}
+
+/// Record one closed immediate reconnect reason without Slack-provided data.
+fn log_socket_worker_reconnect(cause: SocketReconnectCause) {
+    tracing::warn!(
+        target: LOG_TARGET,
+        lifecycle = "reconnecting",
+        reconnect_reason = cause.as_str(),
+        "Slack Socket Mode connection ended; reconnecting"
+    );
+}
+
+/// Record one closed Socket Mode stop reason without Slack-provided data.
+fn log_socket_worker_stop(cause: SocketStopCause) {
+    tracing::info!(
+        target: LOG_TARGET,
+        lifecycle = "stopped",
+        stop_reason = cause.as_str(),
+        "Slack Socket Mode worker stopped"
+    );
+}
+
+/// Record a worker stop at most once when concurrent shutdown paths converge.
+fn log_socket_worker_stop_once(stop_logged: &mut bool, cause: SocketStopCause) {
+    if !std::mem::replace(stop_logged, true) {
+        log_socket_worker_stop(cause);
+    }
+}
+
+/// Record the terminal installation-identity stop at most once.
+fn log_socket_worker_installation_stop_once(stop_logged: &mut bool) {
+    if !std::mem::replace(stop_logged, true) {
+        tracing::warn!(
+            target: LOG_TARGET,
+            lifecycle = "stopped",
+            failure = "installation_restart_required",
+            stop_reason = "installation_identity",
+            "Slack Socket Mode worker requires restart after installation identity failure"
+        );
+    }
 }
 
 /// Marks one WebSocket connection offline on every return path.
@@ -4423,7 +4627,7 @@ async fn socket_worker_once(
     startup: Option<WorkerStartup>,
     admission: &Arc<AdmissionQueue<AdmissionWork>>,
     connection_generation: SlackConnectionGeneration,
-) -> Result<WorkerOutcome, String> {
+) -> Result<WorkerOutcome, SocketWorkerFailure> {
     socket_worker_once_with_heartbeat(
         ext,
         cfg,
@@ -4446,7 +4650,7 @@ async fn socket_worker_once_with_heartbeat(
     admission: &Arc<AdmissionQueue<AdmissionWork>>,
     connection_generation: SlackConnectionGeneration,
     heartbeat: SocketHeartbeat,
-) -> Result<WorkerOutcome, String> {
+) -> Result<WorkerOutcome, SocketWorkerFailure> {
     // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(!heartbeat.ping_interval.is_zero());
     // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -4465,18 +4669,23 @@ async fn socket_worker_once_with_heartbeat(
                 .install_or_match_installation(startup.bot_user_id, startup.installation_team_id)
             {
                 ext.send_wake.notify_lifecycle_change();
-                return Err(error);
+                let _ = error;
+                return Err(SocketWorkerFailure::InstallationIdentity);
             }
             startup.socket_url
         }
         None => {
-            let installation = ext.authenticated_installation(cfg)?;
-            ext.match_established_installation(&installation)?;
+            let installation = ext
+                .authenticated_installation(cfg)
+                .map_err(SocketWorkerFailure::AuthTest)?;
+            ext.match_established_installation(&installation)
+                .map_err(|_| SocketWorkerFailure::InstallationIdentity)?;
             let ws_url = ext
                 .client
                 .open_socket(cfg)
-                .map_err(|error| error.to_string())?;
-            let ws_url = SlackSocketUrl::parse_exact(ws_url)?;
+                .map_err(SocketWorkerFailure::SocketTicket)?;
+            let ws_url = SlackSocketUrl::parse_exact(ws_url)
+                .map_err(|_| SocketWorkerFailure::SocketTicketUrl)?;
             let _submission = ext
                 .output_submission_gate
                 .lock()
@@ -4486,12 +4695,14 @@ async fn socket_worker_once_with_heartbeat(
                 state.install_or_match_installation(installation.bot_user_id, installation.team_id)
             {
                 ext.send_wake.notify_lifecycle_change();
-                return Err(error);
+                let _ = error;
+                return Err(SocketWorkerFailure::InstallationIdentity);
             }
             ws_url
         }
     };
-    let connector = socket_connector(&ws_url).map_err(str::to_owned)?;
+    let connector =
+        socket_connector(&ws_url).map_err(|_| SocketWorkerFailure::WebsocketTlsConfiguration)?;
     let (mut ws, _response) = tokio_tungstenite::connect_async_tls_with_config(
         ws_url.raw(),
         Some(socket_websocket_config()),
@@ -4499,7 +4710,7 @@ async fn socket_worker_once_with_heartbeat(
         Some(connector),
     )
     .await
-    .map_err(|_| "Slack websocket connection failed".to_owned())?;
+    .map_err(|_| SocketWorkerFailure::WebsocketConnect)?;
     tracing::debug!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
     let connected_at = Instant::now();
     let mut hello_at = None;
@@ -4515,17 +4726,17 @@ async fn socket_worker_once_with_heartbeat(
         let frame = tokio::select! {
             biased;
             () = ext.shutdown.wait() => {
-                return Ok(WorkerOutcome::Shutdown);
+                return Ok(WorkerOutcome::Shutdown(SocketStopCause::ShutdownRequested));
             }
             () = &mut pong_deadline => {
-                return Err(SOCKET_HEARTBEAT_TIMEOUT_ERROR.to_owned());
+                return Err(SocketWorkerFailure::HeartbeatTimeout);
             }
             _ = heartbeat_tick.tick() => {
                 if let Some(outcome) = await_socket_write(
                     &ext.shutdown,
                     pong_deadline.as_mut(),
                     ws.send(Message::Ping(Vec::new().into())),
-                    "Slack websocket ping failed",
+                    SocketWorkerFailure::PingWrite,
                 )
                 .await?
                 {
@@ -4536,9 +4747,9 @@ async fn socket_worker_once_with_heartbeat(
             frame = ws.next() => frame,
         };
         let Some(frame) = frame else {
-            return Ok(WorkerOutcome::ReconnectNow);
+            return Ok(WorkerOutcome::Reconnect(SocketReconnectCause::SocketEof));
         };
-        let frame = frame.map_err(|_| "Slack websocket frame failed".to_owned())?;
+        let frame = frame.map_err(|_| SocketWorkerFailure::WebsocketFrame)?;
         if matches!(&frame, Message::Pong(_)) {
             pong_deadline
                 .as_mut()
@@ -4585,19 +4796,19 @@ async fn await_socket_write<F, E>(
     shutdown: &ShutdownSignal,
     pong_deadline: Pin<&mut tokio::time::Sleep>,
     write: F,
-    failure: &'static str,
-) -> Result<Option<WorkerOutcome>, String>
+    failure: SocketWorkerFailure,
+) -> Result<Option<WorkerOutcome>, SocketWorkerFailure>
 where
     F: Future<Output = Result<(), E>>,
 {
     tokio::pin!(write);
     tokio::select! {
         biased;
-        () = shutdown.wait() => Ok(Some(WorkerOutcome::Shutdown)),
-        () = pong_deadline => Err(SOCKET_HEARTBEAT_TIMEOUT_ERROR.to_owned()),
+        () = shutdown.wait() => Ok(Some(WorkerOutcome::Shutdown(SocketStopCause::ShutdownRequested))),
+        () = pong_deadline => Err(SocketWorkerFailure::HeartbeatTimeout),
         result = &mut write => result
             .map(|()| None)
-            .map_err(|_| failure.to_owned()),
+            .map_err(|_| failure),
     }
 }
 
@@ -4609,7 +4820,7 @@ async fn handle_socket_frame(
     timing: SocketFrameTiming,
     hello_at: &mut Option<Instant>,
     pong_deadline: Pin<&mut tokio::time::Sleep>,
-) -> Result<Option<WorkerOutcome>, String> {
+) -> Result<Option<WorkerOutcome>, SocketWorkerFailure> {
     match frame {
         Message::Text(text) => {
             handle_socket_text_frame(
@@ -4623,13 +4834,15 @@ async fn handle_socket_frame(
             )
             .await
         }
-        Message::Close(_) => Ok(Some(WorkerOutcome::ReconnectNow)),
+        Message::Close(_) => Ok(Some(WorkerOutcome::Reconnect(
+            SocketReconnectCause::SocketClose,
+        ))),
         Message::Ping(payload) => {
             await_socket_write(
                 &ext.shutdown,
                 pong_deadline,
                 ws.send(Message::Pong(payload)),
-                "Slack websocket pong failed",
+                SocketWorkerFailure::PongWrite,
             )
             .await
         }
@@ -4656,7 +4869,7 @@ async fn handle_socket_text_frame(
     timing: SocketFrameTiming,
     hello_at: &mut Option<Instant>,
     mut pong_deadline: Pin<&mut tokio::time::Sleep>,
-) -> Result<Option<WorkerOutcome>, String> {
+) -> Result<Option<WorkerOutcome>, SocketWorkerFailure> {
     let SocketFrameTiming {
         connection_generation,
         trace_seq,
@@ -4712,10 +4925,10 @@ async fn handle_socket_text_frame(
     let authority = if action.event.is_some() {
         let state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
         if !state.socket.session_active {
-            return Err("Slack admission unavailable without an active session".to_owned());
+            return Err(SocketWorkerFailure::AdmissionQueue);
         }
         let Some(installation_team_id) = state.socket.installation_team_id.clone() else {
-            return Err("Slack admission unavailable without installation identity".to_owned());
+            return Err(SocketWorkerFailure::AdmissionQueue);
         };
         Some((
             state.ingress.ingress_epoch,
@@ -4728,9 +4941,7 @@ async fn handle_socket_text_frame(
     };
     let reservation = if action.event.is_some() {
         if action.ack_envelope_id.is_none() {
-            return Err(
-                "supported Slack envelope is missing an acknowledgement identity".to_owned(),
-            );
+            return Err(SocketWorkerFailure::AdmissionQueue);
         }
         match admission.reserve() {
             Ok(reservation) => {
@@ -4761,7 +4972,7 @@ async fn handle_socket_text_frame(
                     queue_depth_bucket = admission.depth_bucket().as_str(),
                     "slack.ws.admission_slot_reserved"
                 );
-                return Err(format!("Slack admission queue unavailable: {outcome}"));
+                return Err(SocketWorkerFailure::AdmissionQueue);
             }
         }
     } else {
@@ -4828,13 +5039,13 @@ async fn send_socket_ack(
     ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     envelope_id: &str,
     pong_deadline: Pin<&mut tokio::time::Sleep>,
-) -> Result<Option<WorkerOutcome>, String> {
+) -> Result<Option<WorkerOutcome>, SocketWorkerFailure> {
     let ack = serde_json::json!({ "envelope_id": envelope_id }).to_string();
     await_socket_write(
         &ext.shutdown,
         pong_deadline,
         ws.send(Message::Text(ack.into())),
-        "Slack websocket acknowledgement failed",
+        SocketWorkerFailure::AckWrite,
     )
     .await
 }
@@ -4845,9 +5056,9 @@ enum SocketDisposition {
     #[default]
     Continue,
     /// Retire the current websocket and reconnect without backoff.
-    Reconnect,
+    Reconnect(SocketReconnectCause),
     /// Retire the Socket Mode worker without reconnecting.
-    Shutdown,
+    Shutdown(SocketStopCause),
 }
 
 impl SocketDisposition {
@@ -4855,8 +5066,8 @@ impl SocketDisposition {
     fn worker_outcome(self) -> Option<WorkerOutcome> {
         match self {
             Self::Continue => None,
-            Self::Reconnect => Some(WorkerOutcome::ReconnectNow),
-            Self::Shutdown => Some(WorkerOutcome::Shutdown),
+            Self::Reconnect(cause) => Some(WorkerOutcome::Reconnect(cause)),
+            Self::Shutdown(cause) => Some(WorkerOutcome::Shutdown(cause)),
         }
     }
 }
@@ -4912,9 +5123,9 @@ fn handle_socket_text(ext: &Extension, text: &str) -> SocketAction {
             let reason = value.get("reason").and_then(|value| value.as_str());
             action.disposition =
                 if matches!(reason, Some("warning" | "refresh_requested")) || reason.is_none() {
-                    SocketDisposition::Reconnect
+                    SocketDisposition::Reconnect(SocketReconnectCause::ServerDisconnect)
                 } else {
-                    SocketDisposition::Shutdown
+                    SocketDisposition::Shutdown(SocketStopCause::ServerDisconnect)
                 };
         }
         Some("events_api") => {
