@@ -428,9 +428,10 @@ Models before GPT-5.6 require a separate declaration. Their documented typical
 in-memory eviction after 5–10 minutes and possible retention for up to one hour
 are not a guaranteed TTL, so a conservative automatic-prefix declaration uses
 `ttl: { kind: unknown }`, `renewal: unsupported`, and `output_floor: unknown`.
-The legacy `prompt_cache_retention` request control selects an OpenAI retention
-policy; it does not turn typical behavior or a maximum into a minimum, fixed,
-or sliding policy fact.
+The retired `prompt_cache_retention` request control selected a legacy OpenAI
+retention policy; it never turned typical behavior or a maximum into a minimum,
+fixed, or sliding policy fact. Its former `24h` value is not equivalent to the
+new public cache `ttl: 30m` contract.
 
 Tau's cache-refresh scheduler is disabled by default. Opt in globally:
 
@@ -749,16 +750,19 @@ optional request fields do not unnecessarily remove endpoints.
 Generic OpenAI-compatible routes may opt into typed cache request controls only
 when the exact configured route supports them. Tau never infers these controls
 from a provider name, model name, base URL, or OpenRouter route. `extra_body`
-cannot supply `prompt_cache_key`, `prompt_cache_retention`, or
+cannot supply `prompt_cache_key`, retired `prompt_cache_retention`, or
 `prompt_cache_options`; typed compatibility owns those top-level fields.
 
-Chat Completions provider or model compatibility accepts one of these policies:
+Chat Completions provider or model compatibility selects cache mode and lifetime
+independently:
 
 ```yaml
 compat:
   openai_prompt_cache:
     key: agent
-    retention: in_memory # or "24h"
+    options:
+      mode: implicit
+      ttl: 30m
 ```
 
 ```yaml
@@ -772,16 +776,21 @@ compat:
 ```
 
 `key: agent` derives Tau's stable `tau:<agent-id>` key; profiles cannot select
-an arbitrary shared key. The first policy uses the provider's legacy automatic
-cache behavior. It deliberately accepts that the provider can choose a volatile
-suffix and, where the route prices cache writes separately, can charge a
-write premium. The explicit policy instead marks the end of the non-empty
-system prompt and sends `prompt_cache_options.mode: explicit`, so Tau does not
-create an implicit suffix breakpoint. `retention` and `options` are mutually
-exclusive. The retired `compat.prompt_cache_key: bool` is invalid.
+an arbitrary shared key. Implicit mode sends
+`prompt_cache_options: { mode: implicit, ttl: 30m }` and no content marker, so
+the provider selects any breakpoint. It deliberately accepts that the provider
+can choose a volatile suffix and, where the route prices cache writes
+separately, can charge a write premium. Explicit mode instead marks the end of
+the non-empty system prompt and sends `mode: explicit`, so Tau does not create
+an implicit suffix breakpoint. `boundary` is forbidden in implicit mode and
+required in explicit mode. The former `retention: in_memory` / `"24h"` profile
+control is rejected with migration guidance: legacy
+`prompt_cache_retention: "24h"` and the new `ttl: 30m` are different provider
+contracts and Tau deliberately does not translate one into the other. The
+retired `compat.prompt_cache_key: bool` is invalid.
 
-Public Responses profiles accept the same legacy policy and this separate
-explicit policy at provider or model `compat`:
+Public Responses profiles accept the same independent controls at provider or
+model `compat`:
 
 ```yaml
 compat:
@@ -793,11 +802,14 @@ compat:
       boundary: first_input_text
 ```
 
-This strictly opt-in policy leaves top-level `instructions` unchanged and marks
-the earliest Tau-constructed non-assistant `input_text` block. It is per-agent,
-multi-turn cost control, not a system-prompt boundary or cross-agent reuse. A
-request without that block fails locally rather than sending explicit options
-without a marker. HTTP/SSE and WebSocket serialize the same cache fields.
+Public Responses also accepts implicit
+`options: { mode: implicit, ttl: 30m }` without a boundary or marker. Explicit
+mode leaves top-level `instructions` unchanged and marks the earliest
+Tau-constructed non-assistant `input_text` block. It is per-agent, multi-turn
+cost control, not a system-prompt boundary or cross-agent reuse. A request
+without that block fails locally rather than sending explicit options without a
+marker. HTTP/SSE and WebSocket serialize the same cache fields; neither public
+route emits legacy `prompt_cache_retention`.
 
 ### Scoped provider credentials
 

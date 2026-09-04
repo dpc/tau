@@ -16,6 +16,10 @@ through the production Responses and Chat Completions seams.
 The September 4, 2026 user-approved `gpt-6-astra` catalog addition refreshes
 that routing snapshot with Astra's conservative fallback metadata; it does not
 change the recorded routing or event semantics.
+The zzd2 cache-control migration uses
+`options: { mode: implicit, ttl: "30m" }`; the retired legacy
+`prompt_cache_retention` contract is deliberately absent because its old `24h`
+retention is not the new 30-minute TTL.
 The approved runtime-cache-contract change 590b extends the routing snapshot
 with the private ChatGPT/Codex model's conservative, content-free response-chain
 contract; generic profiles remain absent unless explicitly configured.

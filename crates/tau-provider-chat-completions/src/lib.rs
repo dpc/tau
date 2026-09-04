@@ -408,34 +408,48 @@ pub enum ReasoningReplay {
     Both,
 }
 
-/// Typed OpenAI prompt-cache controls selected for one Chat Completions route.
+/// Exact OpenAI prompt-cache controls selected for one Chat Completions route.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromptCache {
-    /// Use OpenAI's legacy automatic caching with an explicit retention value.
-    Legacy {
-        /// Legacy retention sent as `prompt_cache_retention`.
-        retention: PromptCacheRetention,
-    },
-    /// Mark the stable system prompt and disable implicit cache writes.
-    ExplicitSystemPrompt,
+pub struct PromptCache {
+    /// Select whether OpenAI or Tau chooses the cache breakpoint.
+    pub mode: PromptCacheMode,
+    /// Select the cache lifetime independently from the breakpoint mode.
+    pub ttl: PromptCacheTtl,
 }
 
-/// Legacy OpenAI prompt-cache retention values supported by this adapter.
+/// Public Chat Completions cache breakpoint selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromptCacheRetention {
-    /// Use the provider's ordinary in-memory retention behavior.
-    InMemory,
-    /// Request the provider's 24-hour retention behavior.
-    Hours24,
+pub enum PromptCacheMode {
+    /// Let OpenAI select an automatic breakpoint without a Tau content marker.
+    Implicit,
+    /// Mark Tau's stable system-prompt boundary.
+    Explicit,
 }
 
-impl PromptCacheRetention {
-    /// Return the exact OpenAI wire spelling for this retention selection.
+/// Public Chat Completions cache lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCacheTtl {
+    /// Request OpenAI's 30-minute cache lifetime.
+    Minutes30,
+}
+
+impl PromptCacheMode {
+    /// Return the exact Chat Completions wire spelling.
     #[must_use]
     pub const fn wire(self) -> &'static str {
         match self {
-            Self::InMemory => "in_memory",
-            Self::Hours24 => "24h",
+            Self::Implicit => "implicit",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+impl PromptCacheTtl {
+    /// Return the exact Chat Completions wire spelling.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Minutes30 => "30m",
         }
     }
 }
@@ -2055,10 +2069,7 @@ struct ChatRequest {
     parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
-    /// Legacy OpenAI retention selected for an explicitly cache-capable route.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_retention: Option<&'static str>,
-    /// Explicit OpenAI cache options selected for the stable system boundary.
+    /// OpenAI cache mode and lifetime selected for this public route.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_options: Option<PromptCacheOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2076,12 +2087,12 @@ struct StreamOptions {
     include_usage: bool,
 }
 
-/// Explicit OpenAI cache options emitted for the stable system-prompt boundary.
+/// OpenAI cache options emitted for this public route.
 #[derive(Serialize)]
 struct PromptCacheOptions {
-    /// Disable provider-created implicit breakpoints.
+    /// Explicit or implicit cache breakpoint selection.
     mode: &'static str,
-    /// Current OpenAI minimum lifetime for explicit cache entries.
+    /// Current OpenAI minimum cache lifetime.
     ttl: &'static str,
 }
 
@@ -2102,10 +2113,10 @@ fn try_build_request(
             })
         })
         .transpose()?;
-    let explicit_system_prompt = matches!(
-        provider.compat.prompt_cache,
-        Some(PromptCache::ExplicitSystemPrompt)
-    );
+    let explicit_system_prompt = provider
+        .compat
+        .prompt_cache
+        .is_some_and(|cache| cache.mode == PromptCacheMode::Explicit);
     if explicit_system_prompt && prompt.system_prompt.trim().is_empty() {
         return Err(LlmError::PromptCacheSystemPromptRequired);
     }
@@ -2212,14 +2223,13 @@ fn build_request_after_prefix_admission(
             .prompt_cache
             .is_some()
             .then(|| format!("tau:{}", prompt.agent_id)),
-        prompt_cache_retention: match provider.compat.prompt_cache {
-            Some(PromptCache::Legacy { retention }) => Some(retention.wire()),
-            Some(PromptCache::ExplicitSystemPrompt) | None => None,
-        },
-        prompt_cache_options: explicit_system_prompt.then_some(PromptCacheOptions {
-            mode: "explicit",
-            ttl: "30m",
-        }),
+        prompt_cache_options: provider
+            .compat
+            .prompt_cache
+            .map(|cache| PromptCacheOptions {
+                mode: cache.mode.wire(),
+                ttl: cache.ttl.wire(),
+            }),
         reasoning_effort: provider.compat.reasoning_effort.and_then(|wire| {
             prompt
                 .model_params

@@ -11,8 +11,8 @@ use std::cell::RefCell;
 use std::num::NonZeroU32;
 
 pub use prompt_cache::{
-    OpenAiExplicitPromptCacheMode, OpenAiPromptCache, OpenAiPromptCacheBoundary,
-    OpenAiPromptCacheOptions, OpenAiPromptCachePolicy, OpenAiPromptCacheTtl,
+    OpenAiPromptCache, OpenAiPromptCacheBoundary, OpenAiPromptCacheMode, OpenAiPromptCacheOptions,
+    OpenAiPromptCacheTtl,
 };
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -145,7 +145,7 @@ impl ResponsesModel {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponsesCompat {
-    /// Exact legacy OpenAI prompt-cache controls accepted by this route.
+    /// Exact OpenAI prompt-cache controls accepted by this route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_prompt_cache: Option<OpenAiPromptCache>,
 }
@@ -349,20 +349,20 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
         ),
         transport: provider.transport,
         prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
-            OpenAiPromptCacheKey::Agent => match cache.policy {
-                OpenAiPromptCachePolicy::Legacy { retention } => {
-                    tau_provider_responses::PromptCachePolicy::Legacy(match retention {
-                        crate::OpenAiPromptCacheRetention::InMemory => {
-                            tau_provider_responses::PromptCacheRetention::InMemory
-                        }
-                        crate::OpenAiPromptCacheRetention::Hours24 => {
-                            tau_provider_responses::PromptCacheRetention::Hours24
-                        }
-                    })
-                }
-                OpenAiPromptCachePolicy::Explicit { .. } => {
-                    tau_provider_responses::PromptCachePolicy::Explicit
-                }
+            OpenAiPromptCacheKey::Agent => tau_provider_responses::PromptCachePolicy {
+                mode: match cache.options.mode {
+                    OpenAiPromptCacheMode::Implicit => {
+                        tau_provider_responses::PromptCacheMode::Implicit
+                    }
+                    OpenAiPromptCacheMode::Explicit => {
+                        tau_provider_responses::PromptCacheMode::Explicit
+                    }
+                },
+                ttl: match cache.options.ttl {
+                    OpenAiPromptCacheTtl::Minutes30 => {
+                        tau_provider_responses::PromptCacheTtl::Minutes30
+                    }
+                },
             },
         }),
     };

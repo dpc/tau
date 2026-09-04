@@ -101,12 +101,14 @@ executing Length-stopped calls, or exposing standalone partial output as context
 Only an operator-declared exact route may send
 `compat.openai_prompt_cache` controls. Tau sends its stable
 `tau:<agent-id>` key to that configured external provider, making it a
-provider-visible correlation value. Legacy retention accepts the provider's
-retention posture and possible volatile-suffix cache-write premium. Explicit
-first-input-text caching is opt-in per-agent multi-turn cost control, not
-cross-agent reuse.
+provider-visible correlation value. Every selected route sends
+`prompt_cache_options` with independent mode and TTL. Implicit mode accepts the
+provider's automatic breakpoint and possible volatile-suffix cache-write premium;
+explicit first-input-text caching is opt-in per-agent multi-turn cost control,
+not cross-agent reuse. Tau rejects retired `prompt_cache_retention` rather than
+equating its former `24h` retention with the current `30m` TTL.
 
 The backend preserves top-level `instructions`, never rewrites it into input
 content, and rejects explicit mode locally when no Tau-constructed
-non-assistant input-text block exists. HTTP/SSE and WebSocket serialize the same
-cache policy fields.
+non-assistant input-text block exists. Implicit mode supplies no content marker.
+HTTP/SSE and WebSocket serialize the same cache policy fields.

@@ -199,31 +199,48 @@ pub struct AttemptConfig {
     pub prompt_cache: Option<PromptCachePolicy>,
 }
 
-/// Legacy OpenAI prompt-cache retention values supported by public Responses.
+/// Exact OpenAI prompt-cache controls supported by public Responses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromptCacheRetention {
-    /// Use the provider's ordinary in-memory retention behavior.
-    InMemory,
-    /// Request the provider's 24-hour retention behavior.
-    Hours24,
+pub struct PromptCachePolicy {
+    /// Select whether OpenAI or Tau chooses the cache breakpoint.
+    pub mode: PromptCacheMode,
+    /// Select the cache lifetime independently from the breakpoint mode.
+    pub ttl: PromptCacheTtl,
 }
 
-/// One valid OpenAI prompt-cache policy for a public Responses route.
+/// Public Responses cache breakpoint selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromptCachePolicy {
-    /// Legacy automatic caching with a provider-selected retention policy.
-    Legacy(PromptCacheRetention),
-    /// Explicit caching at Tau's first typed input-text boundary.
+pub enum PromptCacheMode {
+    /// Let OpenAI select an automatic breakpoint without a Tau content marker.
+    Implicit,
+    /// Mark Tau's first typed input-text boundary.
     Explicit,
 }
 
-impl PromptCacheRetention {
-    /// Return the exact legacy OpenAI wire spelling.
+/// Public Responses cache lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCacheTtl {
+    /// Request OpenAI's 30-minute cache lifetime.
+    Minutes30,
+}
+
+impl PromptCacheMode {
+    /// Return the exact public Responses wire spelling.
     #[must_use]
     pub const fn wire(self) -> &'static str {
         match self {
-            Self::InMemory => "in_memory",
-            Self::Hours24 => "24h",
+            Self::Implicit => "implicit",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+impl PromptCacheTtl {
+    /// Return the exact public Responses wire spelling.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Minutes30 => "30m",
         }
     }
 }
@@ -2430,13 +2447,10 @@ struct RequestBody {
     /// Optional provider instructions.
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
-    /// Stable agent-derived cache key for an explicitly cache-capable route.
+    /// Stable agent-derived cache key for a cache-capable public route.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
-    /// Legacy automatic-cache retention for an explicitly cache-capable route.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_retention: Option<&'static str>,
-    /// Explicit OpenAI cache policy for a route with one typed breakpoint.
+    /// OpenAI cache mode and lifetime for a cache-capable public route.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_options: Option<PromptCacheOptions>,
     /// Optional output-token limit.
@@ -2514,12 +2528,12 @@ enum ResponsesInputItem {
     TauInputMessage(Value),
 }
 
-/// Exact explicit cache policy accepted by the public Responses wire API.
+/// Exact cache policy accepted by the public Responses wire API.
 #[derive(Serialize)]
 struct PromptCacheOptions {
-    /// Explicit mode suppresses OpenAI's implicit cache breakpoint.
+    /// Explicit or implicit cache breakpoint selection.
     mode: &'static str,
-    /// OpenAI's currently supported explicit cache lifetime.
+    /// OpenAI's currently supported cache lifetime.
     ttl: &'static str,
 }
 
@@ -2544,14 +2558,12 @@ fn build_request(
         (ToolChoice::Auto, false) => Some("auto".to_owned()),
         _ => None,
     };
-    let explicit_cache = matches!(config.prompt_cache, Some(PromptCachePolicy::Explicit));
+    let explicit_cache = config
+        .prompt_cache
+        .is_some_and(|cache| cache.mode == PromptCacheMode::Explicit);
     if explicit_cache && !mark_first_input_text(&mut input) {
         return Err(Error::InvalidRequest);
     }
-    let legacy_retention = match config.prompt_cache {
-        Some(PromptCachePolicy::Legacy(retention)) => Some(retention.wire()),
-        Some(PromptCachePolicy::Explicit) | None => None,
-    };
     Ok(RequestBody {
         model: model.id.as_str().to_owned(),
         input,
@@ -2570,10 +2582,9 @@ fn build_request(
             .prompt_cache
             .is_some()
             .then(|| format!("tau:{}", prompt.agent_id)),
-        prompt_cache_retention: legacy_retention,
-        prompt_cache_options: explicit_cache.then_some(PromptCacheOptions {
-            mode: "explicit",
-            ttl: "30m",
+        prompt_cache_options: config.prompt_cache.map(|cache| PromptCacheOptions {
+            mode: cache.mode.wire(),
+            ttl: cache.ttl.wire(),
         }),
         max_output_tokens: (config.max_output_tokens != 0).then_some(config.max_output_tokens),
         tools,

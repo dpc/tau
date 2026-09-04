@@ -1177,7 +1177,10 @@
         "compat": {
           "openai_prompt_cache": {
             "key": "agent",
-            "retention": "in_memory"
+            "options": {
+              "mode": "implicit",
+              "ttl": "30m"
+            }
           },
           "parallel_tool_calls": true,
           "reasoning_effort": {
@@ -1204,7 +1207,10 @@
         "compat": {
           "openai_prompt_cache": {
             "key": "agent",
-            "retention": "in_memory"
+            "options": {
+              "mode": "implicit",
+              "ttl": "30m"
+            }
           },
           "stream_options": true
         },

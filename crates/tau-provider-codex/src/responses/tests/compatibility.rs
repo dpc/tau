@@ -130,6 +130,21 @@ fn compatibility_compact_request_snapshot(mode: ResponsesMode) -> serde_json::Va
     build_compact_request(&config, &request).expect("build compatibility compact request")
 }
 
+/// Assert that a frozen private Codex wire fixture cannot acquire public
+/// OpenAI cache-control fields through a shared public-provider refactor.
+fn assert_private_fixture_owns_cache_policy(fixture: &serde_json::Value) {
+    let object = fixture.as_object().expect("private request fixture object");
+    assert!(
+        object.contains_key("prompt_cache_key"),
+        "private fixture must retain its stable provider-owned cache identity"
+    );
+    assert!(
+        !object.contains_key("prompt_cache_options")
+            && !object.contains_key("prompt_cache_retention"),
+        "private fixture must not acquire public cache controls"
+    );
+}
+
 /// Standard and explicit Lite request lowering are frozen as complete JSON
 /// goldens before transport and ownership changes begin.
 #[test]
@@ -146,6 +161,7 @@ fn standard_and_lite_request_goldens() {
             .unwrap_or_else(|error| panic!("read Responses golden {fixture}: {error}")),
         )
         .unwrap_or_else(|error| panic!("decode Responses golden {fixture}: {error}"));
+        assert_private_fixture_owns_cache_policy(&expected);
         let actual = compatibility_request_snapshot(mode);
         assert_eq!(
             actual,

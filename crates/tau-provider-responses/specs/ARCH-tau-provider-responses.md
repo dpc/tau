@@ -116,12 +116,14 @@ reasoning selector as `reasoning.effort`; provider-default, fixed, and
 unsupported selections omit it. The public API accepts the canonical native
 levels `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
-An exact configured route may opt into legacy OpenAI automatic-cache retention
-or explicit first-input-text caching. The adapter sends an agent-derived
-`prompt_cache_key` and either retention or explicit options in the shared
-HTTP/SSE and WebSocket request body. Explicit mode keeps top-level
-`instructions` unchanged and marks only the earliest Tau-constructed
-non-assistant `input_text` block. It is per-agent multi-turn cost control, not a
-system-prompt boundary or cross-agent reuse; no eligible input fails before
-egress. The legacy policy accepts the provider's automatic cache behavior and
-any associated volatile-suffix/write-premium risk.
+An exact configured route may opt into OpenAI cache mode and lifetime controls.
+The adapter sends an agent-derived `prompt_cache_key` and
+`prompt_cache_options: { mode, ttl }` in the shared HTTP/SSE and WebSocket
+request body. Implicit mode sends no Tau content marker and accepts the
+provider's automatic breakpoint behavior and any associated volatile-suffix/write
+premium risk. Explicit mode keeps top-level `instructions` unchanged and marks
+only the earliest Tau-constructed non-assistant `input_text` block. It is
+per-agent multi-turn cost control, not a system-prompt boundary or cross-agent
+reuse; no eligible input fails before egress. The retired legacy
+`prompt_cache_retention` control is rejected rather than translating its `24h`
+retention contract into the distinct `30m` TTL.

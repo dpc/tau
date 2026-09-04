@@ -1677,7 +1677,10 @@ fn cache_prefix_prompt() -> tau_proto::AgentPromptCreated {
 #[test]
 fn explicit_prompt_cache_marks_the_system_prompt_boundary() {
     let mut provider = provider();
-    provider.compat.prompt_cache = Some(PromptCache::ExplicitSystemPrompt);
+    provider.compat.prompt_cache = Some(PromptCache {
+        mode: PromptCacheMode::Explicit,
+        ttl: PromptCacheTtl::Minutes30,
+    });
     let request = build_request(
         &resolved_provider(&provider),
         &provider.models[0],
@@ -1707,7 +1710,10 @@ fn explicit_prompt_cache_marks_the_system_prompt_boundary() {
 #[test]
 fn explicit_prompt_cache_rejects_an_empty_system_prompt() {
     let mut provider = provider();
-    provider.compat.prompt_cache = Some(PromptCache::ExplicitSystemPrompt);
+    provider.compat.prompt_cache = Some(PromptCache {
+        mode: PromptCacheMode::Explicit,
+        ttl: PromptCacheTtl::Minutes30,
+    });
     let mut prompt = cache_prefix_prompt();
     prompt.system_prompt.clear();
 
@@ -1717,13 +1723,14 @@ fn explicit_prompt_cache_rejects_an_empty_system_prompt() {
     ));
 }
 
-/// Legacy cache retention must retain the provider's automatic policy while
-/// avoiding GPT-5.6 explicit-cache fields and synthetic content markers.
+/// Implicit cache mode must send its public options without a synthetic content
+/// marker or the retired retention field.
 #[test]
-fn legacy_prompt_cache_emits_only_the_legacy_top_level_fields() {
+fn implicit_prompt_cache_emits_options_without_a_boundary_marker() {
     let mut provider = provider();
-    provider.compat.prompt_cache = Some(PromptCache::Legacy {
-        retention: PromptCacheRetention::Hours24,
+    provider.compat.prompt_cache = Some(PromptCache {
+        mode: PromptCacheMode::Implicit,
+        ttl: PromptCacheTtl::Minutes30,
     });
     let request = build_request(
         &resolved_provider(&provider),
@@ -1733,8 +1740,11 @@ fn legacy_prompt_cache_emits_only_the_legacy_top_level_fields() {
     let json = serde_json::to_value(request).expect("request json");
 
     assert_eq!(json["prompt_cache_key"], "tau:agent-test");
-    assert_eq!(json["prompt_cache_retention"], "24h");
-    assert!(json.get("prompt_cache_options").is_none());
+    assert_eq!(
+        json["prompt_cache_options"],
+        serde_json::json!({"mode": "implicit", "ttl": "30m"})
+    );
+    assert!(json.get("prompt_cache_retention").is_none());
     assert_eq!(json["messages"][0]["content"], "stable system authority");
 }
 
@@ -2093,7 +2103,10 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
             },
         ));
     let mut config = resolved_provider(&provider());
-    config.compat.prompt_cache = Some(PromptCache::ExplicitSystemPrompt);
+    config.compat.prompt_cache = Some(PromptCache {
+        mode: PromptCacheMode::Explicit,
+        ttl: PromptCacheTtl::Minutes30,
+    });
     config.local_summary_compaction = Some(
         LocalSummaryCompactionConfig::new(
             NonZeroU64::new(8192).expect("positive"),
@@ -2121,10 +2134,6 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
     assert_eq!(request.tool_choice, ordinary.tool_choice);
     assert_eq!(request.parallel_tool_calls, ordinary.parallel_tool_calls);
     assert_eq!(request.prompt_cache_key, ordinary.prompt_cache_key);
-    assert_eq!(
-        request.prompt_cache_retention,
-        ordinary.prompt_cache_retention
-    );
     assert_eq!(
         serde_json::to_value(&request.prompt_cache_options).expect("cache options"),
         serde_json::to_value(&ordinary.prompt_cache_options).expect("cache options")

@@ -72,8 +72,6 @@ impl Serialize for WebSocketRequestInsertionOrder<'_> {
             "max_output_tokens"
         } else if body.prompt_cache_options.is_some() {
             "prompt_cache_options"
-        } else if body.prompt_cache_retention.is_some() {
-            "prompt_cache_retention"
         } else if body.prompt_cache_key.is_some() {
             "prompt_cache_key"
         } else if body.instructions.is_some() {
@@ -86,7 +84,6 @@ impl Serialize for WebSocketRequestInsertionOrder<'_> {
             "reasoning",
             "instructions",
             "prompt_cache_key",
-            "prompt_cache_retention",
             "prompt_cache_options",
             "max_output_tokens",
             "tools",
@@ -119,9 +116,6 @@ where
         "prompt_cache_key" => body
             .prompt_cache_key
             .as_ref()
-            .map_or(Ok(()), |value| map.serialize_entry(member, value)),
-        "prompt_cache_retention" => body
-            .prompt_cache_retention
             .map_or(Ok(()), |value| map.serialize_entry(member, value)),
         "prompt_cache_options" => body
             .prompt_cache_options
@@ -159,9 +153,6 @@ struct WebSocketRequestSortedOrder<'a> {
     /// Explicit prompt-cache controls.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_options: &'a Option<super::PromptCacheOptions>,
-    /// Optional legacy prompt-cache retention.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_retention: &'a Option<&'static str>,
     /// Reasoning controls.
     reasoning: &'a super::Reasoning,
     /// Optional closed tool selection.
@@ -219,7 +210,6 @@ impl<'a> WebSocketRequestBody<'a> {
             model: &body.model,
             prompt_cache_key: &body.prompt_cache_key,
             prompt_cache_options: &body.prompt_cache_options,
-            prompt_cache_retention: &body.prompt_cache_retention,
             reasoning: &body.reasoning,
             tool_choice: &body.tool_choice,
             tools: &body.tools,

@@ -269,22 +269,20 @@ fn lower_compat(
         parallel_tool_calls: compat.parallel_tool_calls,
         tool_choice: compat.tool_choice,
         prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
-            crate::OpenAiPromptCacheKey::Agent => match cache.policy {
-                super::OpenAiPromptCachePolicy::Legacy { retention } => {
-                    tau_provider_chat_completions::PromptCache::Legacy {
-                        retention: match retention {
-                            crate::OpenAiPromptCacheRetention::InMemory => {
-                                tau_provider_chat_completions::PromptCacheRetention::InMemory
-                            }
-                            crate::OpenAiPromptCacheRetention::Hours24 => {
-                                tau_provider_chat_completions::PromptCacheRetention::Hours24
-                            }
-                        },
+            crate::OpenAiPromptCacheKey::Agent => tau_provider_chat_completions::PromptCache {
+                mode: match cache.options.mode {
+                    super::OpenAiPromptCacheMode::Implicit => {
+                        tau_provider_chat_completions::PromptCacheMode::Implicit
                     }
-                }
-                super::OpenAiPromptCachePolicy::Explicit { .. } => {
-                    tau_provider_chat_completions::PromptCache::ExplicitSystemPrompt
-                }
+                    super::OpenAiPromptCacheMode::Explicit => {
+                        tau_provider_chat_completions::PromptCacheMode::Explicit
+                    }
+                },
+                ttl: match cache.options.ttl {
+                    super::OpenAiPromptCacheTtl::Minutes30 => {
+                        tau_provider_chat_completions::PromptCacheTtl::Minutes30
+                    }
+                },
             },
         }),
         reasoning_effort: compat

@@ -1387,9 +1387,9 @@ fn gemini_explicit_object_profile_publishes_policy_without_lifecycle_state() {
     );
 }
 
-/// Proves the generic Chat Completions config owner publishes GPT-5.6's
-/// documented minimum and prices while keeping an older model's legacy request
-/// control and conservative unknown residency in a separate exact-route policy.
+/// Proves the generic Chat Completions config owner keeps explicit and implicit
+/// breakpoints independent from their common 30-minute lifetime while
+/// publishing their distinct cache contracts.
 #[test]
 fn openai_model_configs_publish_distinct_cache_policies() {
     let gpt_5_6: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
@@ -1433,7 +1433,10 @@ fn openai_model_configs_publish_distinct_cache_policies() {
         "compat": {
             "openai_prompt_cache": {
                 "key": "agent",
-                "retention": "24h"
+                "options": {
+                    "mode": "implicit",
+                    "ttl": "30m"
+                }
             }
         },
         "cache_contract": {
@@ -1462,8 +1465,9 @@ fn openai_model_configs_publish_distinct_cache_policies() {
             .expect("GPT-5.6 compatibility")
             .openai_prompt_cache
             .expect("GPT-5.6 cache request control")
-            .policy,
-        OpenAiPromptCachePolicy::Explicit { .. }
+            .options
+            .mode,
+        OpenAiPromptCacheMode::Explicit
     ));
     assert!(matches!(
         older
@@ -1471,8 +1475,9 @@ fn openai_model_configs_publish_distinct_cache_policies() {
             .expect("older compatibility")
             .openai_prompt_cache
             .expect("older cache request control")
-            .policy,
-        OpenAiPromptCachePolicy::Legacy { .. }
+            .options
+            .mode,
+        OpenAiPromptCacheMode::Implicit
     ));
 
     let provider = ChatCompletionsProvider {
@@ -1524,6 +1529,32 @@ fn openai_model_configs_publish_distinct_cache_policies() {
         older_policy.renewal,
         tau_proto::ProviderCacheRenewal::Unsupported
     );
+}
+
+/// Chat Completions must reject retired retention and boundaries that disagree
+/// with the selected cache mode before publishing a route.
+#[test]
+fn openai_prompt_cache_profile_rejects_retired_and_mismatched_controls() {
+    for cache in [
+        serde_json::json!({"key": "agent", "retention": "24h"}),
+        serde_json::json!({"key": "agent", "retention": null}),
+        serde_json::json!({"key": "agent", "options": {
+            "mode": "implicit", "ttl": "30m", "boundary": "system_prompt"
+        }}),
+        serde_json::json!({"key": "agent", "options": {
+            "mode": "explicit", "ttl": "30m"
+        }}),
+    ] {
+        let error = serde_json::from_value::<ChatCompletionsModel>(serde_json::json!({
+            "id": "test-model",
+            "compat": {"openai_prompt_cache": cache}
+        }))
+        .expect_err("invalid prompt-cache configuration");
+        assert!(
+            error.to_string().contains("openai_prompt_cache"),
+            "cache validation must name the invalid configuration: {error}"
+        );
+    }
 }
 
 /// Ensures the extension-owned sampler preserves the successful append-only

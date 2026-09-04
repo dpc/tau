@@ -198,7 +198,10 @@ fn openrouter_conversion_strips_upstream_cache_contract() {
             "parallel_tool_calls": true,
             "openai_prompt_cache": {
                 "key": "agent",
-                "retention": "in_memory"
+                "options": {
+                    "mode": "implicit",
+                    "ttl": "30m"
+                }
             },
             "cache_usage": "deep_seek"
         },

@@ -596,6 +596,6 @@ pub(super) use attempt::{PromptAttemptOutcome, models_for_provider, run_prompt_a
 pub(super) use openrouter::fetch_openrouter_models;
 pub use openrouter::{OpenRouterDiscoveryError, OpenRouterProfile};
 pub use prompt_cache::{
-    OpenAiExplicitPromptCacheMode, OpenAiPromptCache, OpenAiPromptCacheBoundary,
-    OpenAiPromptCacheOptions, OpenAiPromptCachePolicy, OpenAiPromptCacheTtl,
+    OpenAiPromptCache, OpenAiPromptCacheBoundary, OpenAiPromptCacheMode, OpenAiPromptCacheOptions,
+    OpenAiPromptCacheTtl,
 };

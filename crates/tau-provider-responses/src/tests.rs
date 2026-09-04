@@ -2228,7 +2228,10 @@ fn http_sse_attempt_posts_responses_and_completes() {
             api_key: " capture-secret ".to_owned(),
             max_output_tokens: 0,
             transport: Transport::Sse,
-            prompt_cache: Some(PromptCachePolicy::Explicit),
+            prompt_cache: Some(PromptCachePolicy {
+                mode: PromptCacheMode::Explicit,
+                ttl: PromptCacheTtl::Minutes30,
+            }),
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -2541,16 +2544,19 @@ fn message_route_context_omits_outbound_body_from_assistant_wire_content() {
     );
 }
 
-/// Public Responses must send only the approved legacy automatic-cache fields
-/// and leave its `instructions` representation unchanged.
+/// Public Responses implicit mode must send its options without a Tau content
+/// marker and retain its top-level `instructions` representation.
 #[test]
-fn request_lowers_legacy_prompt_cache_retention() {
+fn request_lowers_implicit_prompt_cache_without_a_boundary_marker() {
     let config = AttemptConfig {
         base_url: "https://example.test/v1".to_owned(),
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
-        prompt_cache: Some(PromptCachePolicy::Legacy(PromptCacheRetention::InMemory)),
+        prompt_cache: Some(PromptCachePolicy {
+            mode: PromptCacheMode::Implicit,
+            ttl: PromptCacheTtl::Minutes30,
+        }),
     };
     let request = build_request(
         &minimal_prompt(),
@@ -2563,9 +2569,16 @@ fn request_lowers_legacy_prompt_cache_retention() {
     let request = serde_json::to_value(request).expect("serialize request");
 
     assert_eq!(request["prompt_cache_key"], "tau:agent-test");
-    assert_eq!(request["prompt_cache_retention"], "in_memory");
-    assert!(request.get("prompt_cache_options").is_none());
+    assert_eq!(
+        request["prompt_cache_options"],
+        serde_json::json!({"mode": "implicit", "ttl": "30m"})
+    );
+    assert!(request.get("prompt_cache_retention").is_none());
     assert_eq!(request["instructions"], "test system");
+    assert!(
+        !request.to_string().contains("prompt_cache_breakpoint"),
+        "implicit mode must not serialize a Tau breakpoint marker"
+    );
 }
 
 /// Explicit caching must retain top-level instruction authority and mark only
@@ -2577,7 +2590,10 @@ fn request_lowers_explicit_prompt_cache_at_first_input_text() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
-        prompt_cache: Some(PromptCachePolicy::Explicit),
+        prompt_cache: Some(PromptCachePolicy {
+            mode: PromptCacheMode::Explicit,
+            ttl: PromptCacheTtl::Minutes30,
+        }),
     };
     let request = build_request(
         &cache_prefix_prompt(),
@@ -2609,7 +2625,10 @@ fn explicit_prompt_cache_rejects_missing_input_text() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
-        prompt_cache: Some(PromptCachePolicy::Explicit),
+        prompt_cache: Some(PromptCachePolicy {
+            mode: PromptCacheMode::Explicit,
+            ttl: PromptCacheTtl::Minutes30,
+        }),
     };
     assert!(matches!(
         build_request(
@@ -2671,7 +2690,10 @@ fn explicit_prompt_cache_marks_only_earliest_constructed_input() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
-            prompt_cache: Some(PromptCachePolicy::Explicit),
+            prompt_cache: Some(PromptCachePolicy {
+                mode: PromptCacheMode::Explicit,
+                ttl: PromptCacheTtl::Minutes30,
+            }),
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -2964,7 +2986,10 @@ fn websocket_attempt_uses_response_create_protocol() {
             api_key: "test-key".to_owned(),
             max_output_tokens: 0,
             transport: Transport::Websocket,
-            prompt_cache: Some(PromptCachePolicy::Explicit),
+            prompt_cache: Some(PromptCachePolicy {
+                mode: PromptCacheMode::Explicit,
+                ttl: PromptCacheTtl::Minutes30,
+            }),
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -4453,7 +4478,10 @@ fn local_compaction_request_extends_the_actual_ordinary_wire_prefix() {
         api_key: String::new(),
         max_output_tokens: 4096,
         transport: Transport::Sse,
-        prompt_cache: Some(PromptCachePolicy::Explicit),
+        prompt_cache: Some(PromptCachePolicy {
+            mode: PromptCacheMode::Explicit,
+            ttl: PromptCacheTtl::Minutes30,
+        }),
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),
@@ -4487,7 +4515,6 @@ fn local_compaction_request_extends_the_actual_ordinary_wire_prefix() {
         "reasoning",
         "instructions",
         "prompt_cache_key",
-        "prompt_cache_retention",
         "prompt_cache_options",
         "max_output_tokens",
         "tools",

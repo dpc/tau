@@ -476,25 +476,30 @@ fn local_summary_compaction_uses_generic_defaults_and_partial_overrides() {
     );
 }
 
-/// Public Responses accepts legacy retention and its one opt-in typed
-/// input-text boundary while rejecting the Chat Completions boundary.
+/// Public Responses accepts implicit caching without a marker, requires its
+/// explicit boundary, and rejects retired or nonsensical cache controls.
 #[test]
-fn profile_accepts_supported_cache_policies_and_rejects_wrong_boundary() {
-    let profile: ResponsesProvider = serde_json::from_value(serde_json::json!({
+fn profile_validates_independent_cache_mode_lifetime_and_boundary() {
+    let implicit: ResponsesProvider = serde_json::from_value(serde_json::json!({
         "compat": {
             "openai_prompt_cache": {
                 "key": "agent",
-                "retention": "24h"
+                "options": {
+                    "mode": "implicit",
+                    "ttl": "30m"
+                }
             }
         }
     }))
-    .expect("legacy cache profile");
+    .expect("implicit cache profile");
     assert_eq!(
-        profile.compat.openai_prompt_cache,
+        implicit.compat.openai_prompt_cache,
         Some(OpenAiPromptCache {
             key: crate::OpenAiPromptCacheKey::Agent,
-            policy: OpenAiPromptCachePolicy::Legacy {
-                retention: crate::OpenAiPromptCacheRetention::Hours24,
+            options: OpenAiPromptCacheOptions {
+                mode: OpenAiPromptCacheMode::Implicit,
+                ttl: OpenAiPromptCacheTtl::Minutes30,
+                boundary: None,
             },
         })
     );
@@ -515,29 +520,55 @@ fn profile_accepts_supported_cache_policies_and_rejects_wrong_boundary() {
     assert!(matches!(
         explicit.compat.openai_prompt_cache,
         Some(OpenAiPromptCache {
-            policy: OpenAiPromptCachePolicy::Explicit { .. },
+            options: OpenAiPromptCacheOptions {
+                mode: OpenAiPromptCacheMode::Explicit,
+                boundary: Some(OpenAiPromptCacheBoundary::FirstInputText),
+                ..
+            },
             ..
         })
     ));
 
-    let unsupported = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
-        "compat": {"openai_prompt_cache": {"key": "agent", "options": {
-            "mode": "explicit", "ttl": "30m", "boundary": "system_prompt"
-        }}}
-    }));
-    assert!(unsupported.is_err());
-
-    for invalid in [
-        serde_json::json!({"key": "agent"}),
-        serde_json::json!({"key": "agent", "retention": "24h", "options": {
-            "mode": "explicit", "ttl": "30m", "boundary": "first_input_text"
-        }}),
-    ] {
+    let invalid = [
+        (
+            serde_json::json!({"key": "agent"}),
+            "openai_prompt_cache requires `options`",
+        ),
+        (
+            serde_json::json!({"key": "agent", "retention": "24h"}),
+            "openai_prompt_cache.retention is retired",
+        ),
+        (
+            serde_json::json!({"key": "agent", "retention": null}),
+            "openai_prompt_cache.retention is retired",
+        ),
+        (
+            serde_json::json!({"key": "agent", "options": {
+                "mode": "implicit", "ttl": "30m", "boundary": "first_input_text"
+            }}),
+            "boundary requires `mode: explicit`",
+        ),
+        (
+            serde_json::json!({"key": "agent", "options": {
+                "mode": "explicit", "ttl": "30m"
+            }}),
+            "mode `explicit` requires `boundary`",
+        ),
+        (
+            serde_json::json!({"key": "agent", "options": {
+                "mode": "explicit", "ttl": "30m", "boundary": "system_prompt"
+            }}),
+            "unknown variant `system_prompt`",
+        ),
+    ];
+    for (cache, expected) in invalid {
+        let error = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
+            "compat": {"openai_prompt_cache": cache}
+        }))
+        .expect_err("invalid cache configuration");
         assert!(
-            serde_json::from_value::<ResponsesProvider>(serde_json::json!({
-                "compat": {"openai_prompt_cache": invalid}
-            }))
-            .is_err()
+            error.to_string().contains(expected),
+            "cache validation must report `{expected}`: {error}"
         );
     }
 }

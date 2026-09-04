@@ -32,9 +32,8 @@ fn borrowed_request_envelope_matches_value_reference_bytes() {
         },
         instructions: Some("system".to_owned()),
         prompt_cache_key: Some("tau:agent".to_owned()),
-        prompt_cache_retention: Some("24h"),
         prompt_cache_options: Some(super::super::PromptCacheOptions {
-            mode: "explicit",
+            mode: "implicit",
             ttl: "30m",
         }),
         max_output_tokens: Some(4096),
@@ -64,8 +63,6 @@ fn borrowed_request_envelope_matches_value_reference_bytes() {
     body.max_output_tokens = None;
     assert_matches_reference(&body);
     body.prompt_cache_options = None;
-    assert_matches_reference(&body);
-    body.prompt_cache_retention = None;
     assert_matches_reference(&body);
     body.prompt_cache_key = None;
     assert_matches_reference(&body);

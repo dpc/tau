@@ -328,17 +328,19 @@ eviction or a recent read never infers a TTL.
 
 Generic OpenAI-compatible cache request controls are opt-in and route-local:
 `compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat
-Completions accepts either legacy `retention: in_memory`/`"24h"` or explicit
+Completions accepts `options: { mode: implicit, ttl: 30m }` without a marker or
 `options: { mode: explicit, ttl: 30m, boundary: system_prompt }`. Explicit mode
 marks the end of a non-empty system prompt, preventing an implicit breakpoint
-from writing a volatile transcript suffix. The legacy retention policy instead
-accepts the provider's automatic behavior, including a possible volatile-suffix
-write premium. Public Responses also accepts
+from writing a volatile transcript suffix. Implicit mode accepts the provider's
+automatic behavior, including a possible volatile-suffix write premium. Public
+Responses also accepts `options: { mode: implicit, ttl: 30m }` and
 `options: { mode: explicit, ttl: 30m, boundary: first_input_text }`. It preserves
 top-level `instructions`, marks the earliest Tau-constructed non-assistant
 input-text block, and rejects locally when no eligible block exists. This is
 per-agent multi-turn cost control, not a system-prompt boundary or cross-agent
-reuse.
+reuse. The former `retention: in_memory` / `"24h"` profile setting is rejected:
+legacy `prompt_cache_retention: "24h"` and new `ttl: 30m` are different
+contracts and Tau does not translate one into the other.
 The retired `compat.prompt_cache_key: bool` is invalid. Tau neither guesses
 cache support from route names nor adds native Anthropic/Gemini cache clients or
 cache lifecycle traffic.

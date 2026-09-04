@@ -1,60 +1,47 @@
 //! Typed OpenAI prompt-cache profile controls for public Responses routes.
 
-use serde::de::Error as _;
+use serde::de::{Error as _, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{OpenAiPromptCacheKey, OpenAiPromptCacheRetention};
+use crate::OpenAiPromptCacheKey;
 
 /// Exact OpenAI prompt-cache controls for one public Responses route.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct OpenAiPromptCache {
     /// Tau-owned namespace used to derive the stable cache key.
     pub key: OpenAiPromptCacheKey,
-    /// One valid legacy or explicit cache policy.
-    #[serde(flatten)]
-    pub policy: OpenAiPromptCachePolicy,
+    /// Independent cache mode, lifetime, and boundary controls.
+    pub options: OpenAiPromptCacheOptions,
 }
 
-/// One valid OpenAI prompt-cache policy for a public Responses route.
+/// Typed OpenAI prompt-cache options for public Responses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(untagged)]
-pub enum OpenAiPromptCachePolicy {
-    /// Legacy automatic caching with a provider retention request.
-    Legacy {
-        /// Legacy OpenAI retention request.
-        retention: OpenAiPromptCacheRetention,
-    },
-    /// Explicit caching at the first typed input-text block.
-    Explicit {
-        /// Exact explicit cache options supported by public Responses.
-        options: OpenAiPromptCacheOptions,
-    },
-}
-
-/// Typed explicit OpenAI prompt-cache options for public Responses.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiPromptCacheOptions {
-    /// Explicit mode disables provider-selected implicit breakpoints.
-    pub mode: OpenAiExplicitPromptCacheMode,
-    /// Current OpenAI explicit-cache lifetime.
+    /// Select whether OpenAI or Tau chooses the cache breakpoint.
+    pub mode: OpenAiPromptCacheMode,
+    /// Current OpenAI cache lifetime.
     pub ttl: OpenAiPromptCacheTtl,
-    /// A boundary that preserves Tau's top-level instructions representation.
-    pub boundary: OpenAiPromptCacheBoundary,
+    /// Required Tau-owned breakpoint for explicit mode and absent for implicit
+    /// mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<OpenAiPromptCacheBoundary>,
 }
 
-/// Only explicit mode is accepted for public Responses cache options.
+/// Public Responses cache breakpoint selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OpenAiExplicitPromptCacheMode {
-    /// Use only Tau's explicit typed input-text breakpoint.
+pub enum OpenAiPromptCacheMode {
+    /// Let OpenAI select an automatic breakpoint without a Tau content marker.
+    Implicit,
+    /// Mark Tau's typed input-text breakpoint and disable implicit selection.
     Explicit,
 }
 
-/// OpenAI's currently supported explicit-cache lifetime.
+/// OpenAI's currently supported public cache lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OpenAiPromptCacheTtl {
-    /// Request OpenAI's 30-minute explicit-cache lifetime.
+    /// Request OpenAI's 30-minute public cache lifetime.
     #[serde(rename = "30m")]
     Minutes30,
 }
@@ -67,40 +54,97 @@ pub enum OpenAiPromptCacheBoundary {
     FirstInputText,
 }
 
-/// Permissive serialized cache shape decoded before exactly-one-policy
-/// validation.
+/// Permissive serialized cache shape decoded before migration validation.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UnvalidatedOpenAiPromptCache {
-    /// Tau-owned namespace parsed before policy validation.
+    /// Tau-owned namespace parsed before cache-option validation.
     key: OpenAiPromptCacheKey,
-    /// Optional legacy retention parsed before exclusivity validation.
+    /// Retired public request control parsed only to report migration guidance.
     #[serde(default)]
-    retention: Option<OpenAiPromptCacheRetention>,
-    /// Optional explicit options parsed before exclusivity validation.
+    retention: RetiredRetention,
+    /// Required independent cache options.
     #[serde(default)]
     options: Option<OpenAiPromptCacheOptions>,
 }
 
 impl<'de> Deserialize<'de> for OpenAiPromptCache {
-    /// Reject empty and ambiguous policy configurations.
+    /// Reject retired retention and incomplete cache controls.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let raw = UnvalidatedOpenAiPromptCache::deserialize(deserializer)?;
-        let policy = match (raw.retention, raw.options) {
-            (Some(retention), None) => OpenAiPromptCachePolicy::Legacy { retention },
-            (None, Some(options)) => OpenAiPromptCachePolicy::Explicit { options },
-            (None, None) | (Some(_), Some(_)) => {
-                return Err(D::Error::custom(
-                    "openai_prompt_cache requires exactly one of `retention` or `options`",
-                ));
-            }
-        };
+        if matches!(raw.retention, RetiredRetention::Present) {
+            return Err(D::Error::custom(
+                "openai_prompt_cache.retention is retired; use `options` with `mode` and `ttl` instead; \
+                 legacy prompt_cache_retention `24h` is not equivalent to the new `30m` TTL",
+            ));
+        }
+        let options = raw.options.ok_or_else(|| {
+            D::Error::custom("openai_prompt_cache requires `options` with `mode` and `ttl`")
+        })?;
         Ok(Self {
             key: raw.key,
-            policy,
+            options,
         })
+    }
+}
+
+/// Tracks whether a retired `retention` member was present, including `null`.
+#[derive(Default)]
+enum RetiredRetention {
+    /// The profile omitted the retired member.
+    #[default]
+    Absent,
+    /// The profile supplied the retired member with any value.
+    Present,
+}
+
+impl<'de> Deserialize<'de> for RetiredRetention {
+    /// Consume a retired member solely to produce deterministic migration
+    /// advice.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let _ = IgnoredAny::deserialize(deserializer)?;
+        Ok(Self::Present)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenAiPromptCacheOptions {
+    /// Require a Tau boundary exactly when explicit mode selects one.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct UnvalidatedOpenAiPromptCacheOptions {
+            /// Requested automatic or explicit breakpoint selection.
+            mode: OpenAiPromptCacheMode,
+            /// Requested cache lifetime.
+            ttl: OpenAiPromptCacheTtl,
+            /// Optional boundary validated against the requested mode.
+            #[serde(default)]
+            boundary: Option<OpenAiPromptCacheBoundary>,
+        }
+
+        let raw = UnvalidatedOpenAiPromptCacheOptions::deserialize(deserializer)?;
+        match (raw.mode, raw.boundary) {
+            (OpenAiPromptCacheMode::Implicit, None)
+            | (OpenAiPromptCacheMode::Explicit, Some(_)) => Ok(Self {
+                mode: raw.mode,
+                ttl: raw.ttl,
+                boundary: raw.boundary,
+            }),
+            (OpenAiPromptCacheMode::Implicit, Some(_)) => Err(D::Error::custom(
+                "openai_prompt_cache.options.boundary requires `mode: explicit`",
+            )),
+            (OpenAiPromptCacheMode::Explicit, None) => Err(D::Error::custom(
+                "openai_prompt_cache.options.mode `explicit` requires `boundary`",
+            )),
+        }
     }
 }

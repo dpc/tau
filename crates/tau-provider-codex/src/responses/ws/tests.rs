@@ -23,7 +23,7 @@ use scripted_tcp_server::ScriptedTcpServer;
 use test_ca::TestCa;
 use test_server::{ServerScript, TestWsServer};
 
-use super::super::BorrowedContextItem;
+use super::super::{BorrowedContextItem, build_ws_envelope};
 use super::*;
 
 fn outbound_error(result: Result<WsConn, LlmError>) -> tau_provider::OutboundError {
@@ -741,6 +741,43 @@ fn test_responses_config() -> ResponsesConfig {
         supports_compaction: true,
         supports_prompt_cache_key: true,
     }
+}
+
+/// Private ChatGPT/Codex upgrades must keep their stable provider cache/thread
+/// identity while excluding public OpenAI cache-control fields from the wire.
+#[test]
+fn private_upgrade_keeps_cache_thread_identity_without_public_cache_controls() {
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let payload = fixture.payload();
+    let cache_key = payload.prompt_cache_key(&config.base_url, config.mode);
+
+    let upgrade = build_request(&config, &cache_key).expect("private upgrade request");
+    assert_eq!(
+        upgrade
+            .headers()
+            .get("session-id")
+            .expect("session id")
+            .to_str()
+            .expect("ASCII session id"),
+        cache_key
+    );
+    assert_eq!(
+        upgrade
+            .headers()
+            .get("thread-id")
+            .expect("thread id")
+            .to_str()
+            .expect("ASCII thread id"),
+        cache_key
+    );
+
+    let envelope =
+        serde_json::to_value(build_ws_envelope(&config, &payload, None, None)).expect("wire JSON");
+    assert_eq!(envelope["prompt_cache_key"], cache_key);
+    assert!(envelope.get("previous_response_id").is_none());
+    assert!(envelope.get("prompt_cache_options").is_none());
+    assert!(envelope.get("prompt_cache_retention").is_none());
 }
 
 fn padded_json(json: &str, len: usize) -> String {

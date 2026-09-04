@@ -51,10 +51,10 @@ pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
     ChatCompletionsReasoningEffort, ChatCompletionsReasoningEffortWire,
     ChatCompletionsReasoningEfforts, ChatCompletionsReasoningEffortsError,
-    ChatCompletionsReasoningReplay, LocalSummaryCompactionConfig, OpenAiExplicitPromptCacheMode,
+    ChatCompletionsReasoningReplay, LocalSummaryCompactionConfig,
     OpenAiPromptCache as ChatCompletionsOpenAiPromptCache, OpenAiPromptCacheBoundary,
-    OpenAiPromptCacheOptions, OpenAiPromptCachePolicy as ChatCompletionsOpenAiPromptCachePolicy,
-    OpenAiPromptCacheTtl, OpenRouterDiscoveryError, OpenRouterProfile,
+    OpenAiPromptCacheMode, OpenAiPromptCacheOptions, OpenAiPromptCacheTtl,
+    OpenRouterDiscoveryError, OpenRouterProfile,
 };
 use chat_completions::{
     PromptAttemptOutcome as ChatCompletionsAttemptOutcome, fetch_openrouter_models,
@@ -62,7 +62,7 @@ use chat_completions::{
 };
 use dialoguer::{Confirm, Input, Password, Select};
 use oauth_refresh_rejection::{OAuthRefreshRejectionCache, RefreshCredentialsError};
-pub use openai_prompt_cache::{OpenAiPromptCacheKey, OpenAiPromptCacheRetention};
+pub use openai_prompt_cache::OpenAiPromptCacheKey;
 use output_cost_observation::{
     SamplerObservation, WorkerDrainObservation, WorkerOutputObservation, WorkerQueueState,
 };
@@ -76,11 +76,10 @@ pub use quota_test_support::run_quota_recovery_fixture;
 use receipt_observation::{ReceiptObservation, ReceiptOutcome};
 use report_sink::ProviderReportSink;
 pub use responses::{
-    OpenAiExplicitPromptCacheMode as ResponsesOpenAiExplicitPromptCacheMode,
     OpenAiPromptCache as ResponsesOpenAiPromptCache,
     OpenAiPromptCacheBoundary as ResponsesOpenAiPromptCacheBoundary,
+    OpenAiPromptCacheMode as ResponsesOpenAiPromptCacheMode,
     OpenAiPromptCacheOptions as ResponsesOpenAiPromptCacheOptions,
-    OpenAiPromptCachePolicy as ResponsesOpenAiPromptCachePolicy,
     OpenAiPromptCacheTtl as ResponsesOpenAiPromptCacheTtl, ResponsesCompat, ResponsesModel,
     ResponsesNativeReasoningEfforts, ResponsesProvider,
 };

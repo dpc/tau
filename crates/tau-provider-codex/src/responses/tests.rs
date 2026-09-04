@@ -1639,6 +1639,10 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
         serde_json::to_value(build_request(&config, &request, Some(&anchor))).expect("serialize");
     assert_eq!(body["previous_response_id"], "resp_abc");
     assert!(body["prompt_cache_key"].is_string());
+    assert!(
+        body.get("prompt_cache_options").is_none() && body.get("prompt_cache_retention").is_none(),
+        "private Codex chaining owns cache policy and must not inherit public controls"
+    );
 }
 
 /// The Responses backend must keep the wire `prompt_cache_key` stable for the

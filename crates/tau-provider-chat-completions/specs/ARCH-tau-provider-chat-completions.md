@@ -41,12 +41,14 @@ completion with unknown semantics.
 
 The extension may opt one exact configured route into typed OpenAI prompt-cache
 controls. The adapter never infers this capability from a provider, endpoint, or
-model name. A legacy retention policy sends an agent-derived key plus
-`prompt_cache_retention` and otherwise retains provider-selected automatic
-behavior. An explicit policy sends the same key, explicit `30m` options, and
-marks the end of a non-empty system message with the documented content-block
-breakpoint. It does not mark conversation or tool suffixes, so it does not
-implicitly write a volatile suffix. The standalone local compactor preserves these ordinary cache fields and appends its instruction after the unchanged ordinary message prefix. Opaque `extra_body` cannot collide with these typed top-level members.
+model name. Every selected route sends an agent-derived key and explicit `30m`
+options. Implicit mode sends no content marker and retains provider-selected
+automatic behavior. Explicit mode marks the end of a non-empty system message
+with the documented content-block breakpoint. It does not mark conversation or
+tool suffixes, so it does not implicitly write a volatile suffix. The standalone
+local compactor preserves these ordinary cache fields and appends its instruction
+after the unchanged ordinary message prefix. Opaque `extra_body` cannot collide
+with these typed top-level members.
 
 ## Local summary response validation
 

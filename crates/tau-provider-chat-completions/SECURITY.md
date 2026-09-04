@@ -27,15 +27,18 @@ credentials, so every capture must be treated as potentially credential-bearing.
 Only an operator-declared exact route may send `compat.openai_prompt_cache`.
 Tau sends its stable `tau:<agent-id>` key to that configured external provider;
 the key is a provider-visible correlation value and profiles cannot select an
-arbitrary shared key. Legacy retention retains provider-selected automatic
-caching, including the selected provider's retention posture and possible
+arbitrary shared key. Every selected route sends independent mode and 30-minute
+TTL options. Implicit mode supplies no content marker and accepts
+provider-selected automatic caching, including any retention posture and
 volatile-suffix cache-write premium.
 
-The explicit policy requires a non-empty system prompt. It sends explicit mode
-with the fixed 30-minute TTL and marks the end of that system text, leaving
-conversation and tool suffixes unmarked. `extra_body` cannot override the key,
-retention, or options fields. Standalone summary compaction preserves the same cache controls as ordinary
-inference so its unchanged prefix remains cache-eligible.
+Explicit mode requires a non-empty system prompt and marks the end of that
+system text, leaving conversation and tool suffixes unmarked. The retired legacy
+`prompt_cache_retention` control is rejected rather than translating former
+`24h` retention into the distinct `30m` TTL. `extra_body` cannot override the
+key, retired retention, or options fields. Standalone summary compaction
+preserves the same cache controls as ordinary inference so its unchanged prefix
+remains cache-eligible.
 
 ## Local summary compactor boundary
 
