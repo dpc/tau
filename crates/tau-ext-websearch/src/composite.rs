@@ -252,16 +252,21 @@ impl ProviderDispatcher for HostedProviderDispatcher<'_> {
                     count: _,
                     allowed_domains: _,
                 },
-            ) => self.parallel_client.call_with_timeout(
+            ) => self.parallel_client.call_attempt(
                 PARALLEL_REMOTE_SEARCH_TOOL,
-                serde_json::json!({"query": query}),
+                serde_json::json!({
+                    "objective": query,
+                    "search_queries": [query],
+                }),
                 attempt.timeout,
+                attempt.cancelled,
             ),
             (WebAdapter::Parallel, HostedRequest::Fetch { url }) => {
-                self.parallel_client.call_with_timeout(
+                self.parallel_client.call_attempt(
                     PARALLEL_REMOTE_FETCH_TOOL,
                     serde_json::json!({"urls": [url]}),
                     attempt.timeout,
+                    attempt.cancelled,
                 )
             }
             (

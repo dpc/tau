@@ -18,6 +18,77 @@ use super::composite::{
 };
 use super::*;
 
+fn read_http_fixture_request(stream: &std::net::TcpStream) -> String {
+    let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+    let mut request = Vec::new();
+    let mut content_len = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read line");
+        request.extend_from_slice(line.as_bytes());
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_len = value.trim().parse().expect("content length");
+        }
+    }
+    let mut body = vec![0; content_len];
+    reader.read_exact(&mut body).expect("body");
+    request.extend_from_slice(&body);
+    String::from_utf8(request).expect("fixture request UTF-8")
+}
+
+fn write_http_fixture_response(
+    stream: &mut std::net::TcpStream,
+    status: &str,
+    headers: &str,
+    body: &str,
+) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    path_std_io::Write::write_all(stream, response.as_bytes()).expect("write response");
+}
+
+fn http_fixture_json(request: &str) -> serde_json::Value {
+    let (_, body) = request.split_once("\r\n\r\n").expect("request body");
+    serde_json::from_str(body).expect("request JSON")
+}
+
+fn serve_parallel_success(listener: TcpListener, result: &str) -> Vec<String> {
+    let mut requests = Vec::new();
+    for index in 0..3 {
+        let (mut stream, _) = listener.accept().expect("accept");
+        requests.push(read_http_fixture_request(&stream));
+        match index {
+            0 => write_http_fixture_response(
+                &mut stream,
+                "200 OK",
+                "Mcp-Session-Id: parallel-session\r\n",
+                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"parallel","version":"1.27.0"}}}"#,
+            ),
+            1 => write_http_fixture_response(&mut stream, "202 Accepted", "", ""),
+            2 => write_http_fixture_response(
+                &mut stream,
+                "200 OK",
+                "",
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"content": [{"type": "text", "text": result}]},
+                })
+                .to_string(),
+            ),
+            _ => unreachable!(),
+        }
+    }
+    requests
+}
+
 /// Hidden fetch policy accepts exact/subdomain targets and rejects other hosts
 /// before any extractor can be contacted.
 #[test]
@@ -1539,6 +1610,76 @@ fn hybrid_cancellation_stops_after_current_attempt() {
     );
 }
 
+/// Ensures explicit Parallel tools register their cancellation flag and route
+/// the request through the cancellation-aware attempt API.
+#[test]
+fn explicit_parallel_cancellation_reaches_active_attempt() {
+    /// Parallel stub that remains active until the extension-owned flag
+    /// changes.
+    struct CancelAwareParallel {
+        /// Announces entry into the cancellation-aware call path.
+        started: mpsc::Sender<()>,
+    }
+
+    impl ParallelClient for CancelAwareParallel {
+        fn call(
+            &self,
+            _remote_tool: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<String, String> {
+            panic!("explicit Parallel must use call_attempt")
+        }
+
+        fn call_attempt(
+            &self,
+            _remote_tool: &str,
+            _arguments: serde_json::Value,
+            _timeout: Duration,
+            cancelled: &AtomicBool,
+        ) -> Result<String, String> {
+            self.started.send(()).expect("announce start");
+            while !cancelled.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            Err("parallel MCP request cancelled".to_owned())
+        }
+    }
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (mut reader, mut writer) = spawn_extension(
+        StubSearcher::ok("unused"),
+        Arc::new(CancelAwareParallel {
+            started: started_tx,
+        }),
+    );
+    drain_startup(&mut reader);
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
+            call_id: "explicit-parallel-cancel".into(),
+            tool_name: ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
+            arguments: tau_proto::json_to_cbor(&serde_json::json!({"query": "rust"})),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("write start");
+    writer.flush().expect("flush start");
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("attempt started");
+    writer
+        .write_event(&Event::ToolCancelRequest(tau_proto::ToolCancelRequest {
+            target_call_id: "explicit-parallel-cancel".into(),
+        }))
+        .expect("write cancellation");
+    writer.flush().expect("flush cancellation");
+    let Event::ToolCancelledReported(cancelled) = read_terminal_including_progress(&mut reader)
+    else {
+        panic!("expected cancelled terminal");
+    };
+    assert_eq!(cancelled.call_id.as_str(), "explicit-parallel-cancel");
+}
+
 /// Ensures the newly exposed Exa fetch adapter accepts Tau's singular URL and
 /// returns canonical Exa fetch provenance.
 #[test]
@@ -2550,7 +2691,12 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     let calls = parallel.calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, PARALLEL_REMOTE_SEARCH_TOOL);
-    assert_eq!(calls[0].1["query"], "latest rust release");
+    assert!(calls[0].1.get("query").is_none());
+    assert_eq!(calls[0].1["objective"], "latest rust release");
+    assert_eq!(
+        calls[0].1["search_queries"],
+        serde_json::json!(["latest rust release"])
+    );
     assert_eq!(calls[0].1["max_results"], 3);
 }
 
@@ -2750,9 +2896,10 @@ fn parallel_fetch_invalid_url_is_rejected_before_forwarding() {
             },
             parallel.as_ref(),
             PARALLEL_REMOTE_FETCH_TOOL,
-            "url",
             adapt_parallel_fetch_arguments,
             String::new(),
+            &AtomicBool::new(false),
+            Instant::now() + REQUEST_TIMEOUT,
         );
         let Event::ToolError(error) = event else {
             panic!("expected ToolError, got {event:?}");
@@ -3164,9 +3311,10 @@ fn hosted_mcp_rate_limits_ignore_untrusted_bodies() {
         },
         &parallel,
         PARALLEL_REMOTE_SEARCH_TOOL,
-        "query",
-        passthrough_parallel_arguments,
+        adapt_parallel_search_arguments,
         String::new(),
+        &AtomicBool::new(false),
+        Instant::now() + REQUEST_TIMEOUT,
     );
     let Event::ToolError(parallel_error) = parallel_event else {
         panic!("expected ToolError, got {parallel_event:?}");
@@ -3398,36 +3546,7 @@ fn config_rejects_literal_api_key_field() {
 fn parallel_fetch_adapter_posts_urls_array_without_authorization_header() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
-    let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept");
-        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
-        let mut headers = Vec::new();
-        let mut content_len = 0usize;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).expect("read line");
-            if line == "\r\n" {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                content_len = value.trim().parse().expect("content length");
-            }
-            headers.push(line);
-        }
-        let mut body = vec![0; content_len];
-        reader.read_exact(&mut body).expect("body");
-        let response_body =
-            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
-        (headers, String::from_utf8(body).expect("utf8"))
-    });
+    let server = thread::spawn(move || serve_parallel_success(listener, "ok"));
 
     let client = HttpParallelClient::new(endpoint);
     let event = dispatch_parallel(
@@ -3444,33 +3563,68 @@ fn parallel_fetch_adapter_posts_urls_array_without_authorization_header() {
         },
         &client,
         PARALLEL_REMOTE_FETCH_TOOL,
-        "url",
         adapt_parallel_fetch_arguments,
         String::new(),
+        &AtomicBool::new(false),
+        Instant::now() + REQUEST_TIMEOUT,
     );
     assert!(matches!(event, Event::ToolResult(_)), "event: {event:?}");
 
-    let (headers, body) = server.join().expect("join");
-    assert!(
-        !headers
-            .iter()
-            .any(|h| h.to_ascii_lowercase().starts_with("authorization:")),
-        "headers: {headers:?}"
-    );
-    assert!(
-        headers
-            .iter()
-            .any(|h| h.eq_ignore_ascii_case("MCP-Protocol-Version: 2025-06-18\r\n")),
-        "headers: {headers:?}"
-    );
-    let body: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    let requests = server.join().expect("join");
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "request: {request}"
+        );
+    }
+    assert!(!requests[0].to_ascii_lowercase().contains("mcp-session-id:"));
+    assert!(!requests[0].contains("MCP-Protocol-Version:"));
+    for request in &requests[1..] {
+        assert!(request.contains("mcp-session-id: parallel-session\r\n"));
+        assert!(request.contains("mcp-protocol-version: 2025-06-18\r\n"));
+    }
+    let (_, body) = requests[2].split_once("\r\n\r\n").expect("request body");
+    let body: serde_json::Value = serde_json::from_str(body).expect("json body");
     assert_eq!(body["method"], "tools/call");
     assert_eq!(body["params"]["name"], PARALLEL_REMOTE_FETCH_TOOL);
     assert_eq!(
-        body["params"]["arguments"]["urls"],
-        serde_json::json!(["https://example.com/article"])
+        body["params"]["arguments"],
+        serde_json::json!({"urls": ["https://example.com/article"]})
     );
-    assert!(body["params"]["arguments"].get("url").is_none());
+}
+
+/// Ensures cancellation after Parallel initialization prevents the initialized
+/// notification and quota-bearing explicit tool call.
+#[test]
+fn parallel_client_cancellation_after_initialize_stops_later_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let server_cancelled = Arc::clone(&cancelled);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let request = read_http_fixture_request(&stream);
+        server_cancelled.store(true, Ordering::Release);
+        write_http_fixture_response(
+            &mut stream,
+            "200 OK",
+            "Mcp-Session-Id: parallel-session\r\n",
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"parallel","version":"1.27.0"}}}"#,
+        );
+        request
+    });
+    let error = HttpParallelClient::new(endpoint)
+        .call_attempt(
+            PARALLEL_REMOTE_SEARCH_TOOL,
+            adapt_parallel_search_arguments(serde_json::json!({"query": "rust"})).expect("adapt"),
+            REQUEST_TIMEOUT,
+            cancelled.as_ref(),
+        )
+        .expect_err("cancellation must stop later requests");
+    let request = server.join().expect("join");
+    assert_eq!(http_fixture_json(&request)["method"], "initialize");
+    assert_eq!(error, "parallel MCP request cancelled");
 }
 
 /// Ensures the real Exa fetch client calls `web_fetch_exa` with its required
@@ -3648,36 +3802,7 @@ fn authenticated_mcp_jsonrpc_errors_redact_credentials() {
 fn parallel_client_sends_configured_bearer_token() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
-    let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept");
-        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
-        let mut headers = Vec::new();
-        let mut content_len = 0usize;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).expect("read line");
-            if line == "\r\n" {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                content_len = value.trim().parse().expect("content length");
-            }
-            headers.push(line);
-        }
-        let mut body = vec![0; content_len];
-        reader.read_exact(&mut body).expect("body");
-        let response_body =
-            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
-        headers
-    });
+    let server = thread::spawn(move || serve_parallel_success(listener, "ok"));
 
     let client = HttpParallelClient::new(endpoint);
     client.set_api_key(Some(tau_proto::SecretValue::new("parallel-fixture-secret")));
@@ -3685,15 +3810,58 @@ fn parallel_client_sends_configured_bearer_token() {
         client
             .call(
                 PARALLEL_REMOTE_SEARCH_TOOL,
-                serde_json::json!({"query": "rust"}),
+                adapt_parallel_search_arguments(serde_json::json!({
+                    "query": "rust",
+                }))
+                .expect("adapt search arguments"),
             )
             .expect("Parallel call"),
         "ok"
     );
-    let headers = server.join().expect("join");
-    assert!(
-        headers.iter().any(|header| header
-            .eq_ignore_ascii_case("authorization: Bearer parallel-fixture-secret\r\n")),
-        "headers: {headers:?}"
+    let requests = server.join().expect("join");
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        assert!(
+            request.contains("authorization: Bearer parallel-fixture-secret\r\n"),
+            "request: {request}"
+        );
+    }
+    assert_eq!(
+        http_fixture_json(&requests[0]),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "tau-ext-websearch",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            },
+        })
+    );
+    assert_eq!(
+        http_fixture_json(&requests[1]),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        })
+    );
+    assert_eq!(
+        http_fixture_json(&requests[2]),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search",
+                "arguments": {
+                    "objective": "rust",
+                    "search_queries": ["rust"],
+                },
+            },
+        })
     );
 }

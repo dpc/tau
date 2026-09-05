@@ -45,7 +45,9 @@ post-filtering as an egress control.
 - Exa uses its hosted MCP at <https://mcp.exa.ai/mcp>. Parallel uses its Search
   MCP at <https://search.parallel.ai/mcp>. Both are anonymously accessible,
   support optional API-key authentication for higher limits, and supply search
-  and fetch.
+  and fetch. Each Parallel attempt performs MCP initialization, returns any
+  server-issued session id on the initialized notification and tool call, and
+  sends the negotiated protocol header after initialization.
 - You.com search defaults to the anonymous
   <https://api.you.com/mcp?profile=free> profile. Its documented limit is 100
   searches per day; this profile does not support fetch. Configuring a You.com
@@ -61,10 +63,11 @@ routes. Tau deliberately does not guess those semantics: the current standard
 Tavily REST and Firecrawl v2 REST contracts require bearer credentials, so
 these adapters remain credentialed-only.
 
-Hybrid search retains Exa's `query` and optional `num_results` input. Parallel
-receives the query and uses its own fixed result budget. Hybrid fetch accepts one
-`url`; both adapters convert it to the provider's `urls` array. Explicit
-Parallel tools retain their provider-specific pass-through arguments.
+Hybrid search retains Exa's `query` and optional `num_results` input. Tau maps
+that query to Parallel's required `objective` and one-element `search_queries`;
+Parallel uses its own fixed result budget. Hybrid fetch accepts one `url`; both
+adapters convert it to the provider's `urls` array. Explicit Parallel tools keep
+the same Tau-facing inputs and translate them to the current upstream shape.
 
 ## Configuration
 

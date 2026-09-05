@@ -36,8 +36,8 @@ the blocking transport can continue until its allocated attempt deadline and
 may consume quota; its response is discarded when cancellation wins before the
 serial protocol loop commits another terminal. Every issued failover attempt
 may independently consume quota or incur charges. Multi-request adapters check
-cancellation between requests, so a canceled You.com initialization cannot
-proceed to its quota-bearing tool call.
+cancellation between requests, so a canceled Parallel or You.com initialization
+cannot proceed to its quota-bearing tool call.
 
 Exa result count defaults to five and accepts only 1–100. Replay-marked
 `ToolStarted` deliveries are ignored: they issue no provider request and publish

@@ -271,6 +271,17 @@ trait ParallelClient: Send + Sync + 'static {
         self.call(remote_tool, arguments)
     }
 
+    /// Call one remote tool with a scheduler-owned deadline and cancellation.
+    fn call_attempt(
+        &self,
+        remote_tool: &str,
+        arguments: serde_json::Value,
+        timeout: Duration,
+        _cancelled: &AtomicBool,
+    ) -> Result<String, String> {
+        self.call_with_timeout(remote_tool, arguments, timeout)
+    }
+
     /// Apply a runtime endpoint update from a harness `Configure`.
     fn set_endpoint(&self, _endpoint: String) {}
 
@@ -1052,7 +1063,12 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
             return Ok(());
         }
         let cancelled = Arc::new(AtomicBool::new(false));
-        if composite_providers.is_some() {
+        let cancellable = composite_providers.is_some()
+            || matches!(
+                local_tool_name.as_str(),
+                PARALLEL_SEARCH_TOOL_NAME | PARALLEL_FETCH_TOOL_NAME
+            );
+        if cancellable {
             cx.state
                 .cancellations
                 .lock()
@@ -1094,6 +1110,8 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
                     searcher.as_ref(),
                     parallel_client.as_ref(),
                     display_args,
+                    cancelled.as_ref(),
+                    deadline,
                 )
             };
             let terminal = tau_client::ToolTerminalOutcome::try_from(event).map_err(|event| {
@@ -1176,6 +1194,8 @@ fn dispatch_tool_invoke(
     searcher: &dyn Searcher,
     parallel_client: &dyn ParallelClient,
     display_args: String,
+    cancelled: &AtomicBool,
+    deadline: Instant,
 ) -> Event {
     match local_tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher, display_args),
@@ -1184,17 +1204,19 @@ fn dispatch_tool_invoke(
             invoke,
             parallel_client,
             PARALLEL_REMOTE_SEARCH_TOOL,
-            "query",
-            passthrough_parallel_arguments,
+            adapt_parallel_search_arguments,
             display_args,
+            cancelled,
+            deadline,
         ),
         PARALLEL_FETCH_TOOL_NAME => dispatch_parallel(
             invoke,
             parallel_client,
             PARALLEL_REMOTE_FETCH_TOOL,
-            "url",
             adapt_parallel_fetch_arguments,
             display_args,
+            cancelled,
+            deadline,
         ),
         _ => Event::ToolError(ToolError {
             presentation: Default::default(),
@@ -1369,15 +1391,23 @@ fn dispatch_parallel(
     invoke: ToolStarted,
     client: &dyn ParallelClient,
     remote_tool: &'static str,
-    required_field: &str,
     adapt_arguments: fn(serde_json::Value) -> Result<serde_json::Value, String>,
     display_args: String,
+    cancelled: &AtomicBool,
+    deadline: Instant,
 ) -> Event {
+    let required_field = match remote_tool {
+        PARALLEL_REMOTE_SEARCH_TOOL => "query",
+        PARALLEL_REMOTE_FETCH_TOOL => "url",
+        _ => "",
+    };
     match validate_parallel_args(&invoke.arguments, required_field)
         .and_then(|()| cbor_to_json(&invoke.arguments))
         .and_then(adapt_arguments)
     {
-        Ok(arguments) => match client.call(remote_tool, arguments) {
+        Ok(arguments) => match remaining_parallel(deadline)
+            .and_then(|timeout| client.call_attempt(remote_tool, arguments, timeout, cancelled))
+        {
             Ok(text) => {
                 tracing::debug!(target: LOG_TARGET, remote_tool, response_len = text.len(), "parallel search MCP returned");
                 let operation = match remote_tool {
@@ -1413,9 +1443,29 @@ fn dispatch_parallel(
     }
 }
 
-fn passthrough_parallel_arguments(
-    arguments: serde_json::Value,
+fn adapt_parallel_search_arguments(
+    mut arguments: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let object = arguments
+        .as_object_mut()
+        .ok_or_else(|| "arguments must be an object".to_owned())?;
+    let query = object
+        .remove("query")
+        .ok_or_else(|| "missing string argument: query".to_owned())?;
+    let serde_json::Value::String(query) = query else {
+        return Err("`query` must be a string".to_owned());
+    };
+    if query.trim().is_empty() {
+        return Err("`query` must not be empty".to_owned());
+    }
+    object.insert(
+        "objective".to_owned(),
+        serde_json::Value::String(query.clone()),
+    );
+    object.insert(
+        "search_queries".to_owned(),
+        serde_json::Value::Array(vec![serde_json::Value::String(query)]),
+    );
     Ok(arguments)
 }
 
@@ -1820,6 +1870,17 @@ impl ParallelClient for HttpParallelClient {
         arguments: serde_json::Value,
         timeout: Duration,
     ) -> Result<String, String> {
+        self.call_attempt(remote_tool, arguments, timeout, &AtomicBool::new(false))
+    }
+
+    fn call_attempt(
+        &self,
+        remote_tool: &str,
+        arguments: serde_json::Value,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<String, String> {
+        check_parallel_cancelled(cancelled)?;
         let config = self
             .config
             .lock()
@@ -1827,21 +1888,85 @@ impl ParallelClient for HttpParallelClient {
             .clone();
         let endpoint = config.endpoint;
         let api_key = config.api_key;
-        let body = serde_json::json!({
+        let deadline = Instant::now() + timeout;
+        let initialize = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "tau-ext-websearch",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            },
+        });
+        let (payload, session_id) = post_parallel_mcp(
+            &endpoint,
+            api_key.as_ref(),
+            initialize,
+            None,
+            false,
+            remaining_parallel(deadline)?,
+        )?;
+        let initialized = parse_sse_or_json(&payload, "parallel").map_err(|error| {
+            sanitize_mcp_diagnostic(
+                &error,
+                &endpoint,
+                api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
+            )
+        })?;
+        let negotiated = initialized
+            .pointer("/result/protocolVersion")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                "parallel invalid response: initialize omitted protocol version".to_owned()
+            })?;
+        if negotiated != MCP_PROTOCOL_VERSION {
+            return Err(format!(
+                "parallel invalid response: unsupported negotiated MCP version `{negotiated}`"
+            ));
+        }
+        if initialized
+            .pointer("/result/capabilities/tools")
+            .and_then(serde_json::Value::as_object)
+            .is_none()
+        {
+            return Err(
+                "parallel invalid response: initialize did not negotiate tools capability"
+                    .to_owned(),
+            );
+        }
+        check_parallel_cancelled(cancelled)?;
+        post_parallel_mcp(
+            &endpoint,
+            api_key.as_ref(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            }),
+            session_id.as_deref(),
+            true,
+            remaining_parallel(deadline)?,
+        )?;
+        check_parallel_cancelled(cancelled)?;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
             "method": "tools/call",
             "params": {
                 "name": remote_tool,
                 "arguments": arguments,
             },
         });
-        let payload = post_mcp(
-            &provider_http_agent(timeout),
+        let (payload, _) = post_parallel_mcp(
             &endpoint,
+            api_key.as_ref(),
             body,
-            "parallel",
-            api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
+            session_id.as_deref(),
+            true,
+            remaining_parallel(deadline)?,
         )?;
         let text = decode_mcp_text_result(&payload, "parallel").map_err(|error| {
             sanitize_mcp_diagnostic(
@@ -1883,6 +2008,76 @@ impl ParallelClient for HttpParallelClient {
         }
         config.api_key = api_key;
     }
+}
+
+fn check_parallel_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("parallel MCP request cancelled".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn remaining_parallel(deadline: Instant) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| "parallel MCP request timed out".to_owned())
+}
+
+fn post_parallel_mcp(
+    endpoint: &str,
+    api_key: Option<&tau_proto::SecretValue>,
+    body: serde_json::Value,
+    session_id: Option<&str>,
+    negotiated: bool,
+    timeout: Duration,
+) -> Result<(String, Option<String>), String> {
+    let agent = provider_http_agent(timeout);
+    let mut request = agent
+        .post(endpoint)
+        .content_type("application/json")
+        .header("Accept", "application/json, text/event-stream");
+    if negotiated {
+        request = request.header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION);
+    }
+    if let Some(session_id) = session_id {
+        request = request.header("Mcp-Session-Id", session_id);
+    }
+    if let Some(api_key) = api_key {
+        request = request.header(
+            "Authorization",
+            &format!("Bearer {}", api_key.expose_secret()),
+        );
+    }
+    let mut response = request.send(body.to_string()).map_err(|error| {
+        format!(
+            "parallel MCP transport error: {}",
+            sanitize_mcp_diagnostic(
+                &error.to_string(),
+                endpoint,
+                api_key.map(|key| (key, McpAuth::Bearer)),
+            )
+        )
+    })?;
+    if response.status().as_u16() == HTTP_TOO_MANY_REQUESTS {
+        return Err(RATE_LIMITED_ERROR.to_owned());
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = read_capped(response.body_mut().as_reader());
+        return Err(format!(
+            "parallel MCP returned HTTP {status}: {}",
+            sanitize_mcp_diagnostic(&body, endpoint, api_key.map(|key| (key, McpAuth::Bearer)),)
+        ));
+    }
+    let response_session = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    read_success_body(response.body_mut().as_reader(), "parallel")
+        .map(|payload| (payload, response_session))
 }
 
 #[derive(Clone, Copy)]

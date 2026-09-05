@@ -17,7 +17,7 @@ anonymous You.com; fetch defaults to Exa and Parallel.
 | Adapter | Search | Fetch | Tau access | Current provider facts, verified September 5, 2026 |
 |---|:---:|:---:|---|---|
 | Exa | ✓ | ✓ | Default, optional named secret | [Exa MCP][exa-mcp] needs no API key; `exa_api_key_secret` overcomes anonymous rate limits. [Exa currently gives new accounts $20 plus $10/month without a payment method][exa-pricing]. |
-| Parallel | ✓ | ✓ | Default, optional named secret | [Search MCP][parallel-mcp] is free without auth; `parallel_api_key_secret` sends the documented bearer token for higher limits. [Eligible card-backed organizations currently receive $5/month, covering up to 5,000 Search API requests][parallel-free]. |
+| Parallel | ✓ | ✓ | Default, optional named secret | [Search MCP][parallel-mcp] is free without auth; `parallel_api_key_secret` sends the documented bearer token for higher limits. Tau performs the required MCP handshake and maps search queries to the current `objective` plus `search_queries` shape. [Eligible card-backed organizations currently receive $5/month, covering up to 5,000 Search API requests][parallel-free]. |
 | You.com | ✓ | — | Default, optional named secret | The `profile=free` route is [search-only, no-signup, and 100 queries/day][you-mcp]. `you_api_key_secret` selects the authenticated MCP endpoint by default; new accounts currently receive $100 in one-time complimentary credits. |
 | Brave | ✓ | — | Optional named secret | Create an account, activate Search, and supply `brave_api_key_secret`. [Search is currently $5/1,000 calls][brave-plans]; plans include $5 monthly credit, but [there is no standalone free plan and a card is required][brave-faq]. |
 | Tavily | ✓ | ✓ | Optional named secret | Create an account and supply `tavily_api_key_secret`. [Researcher is currently 1,000 credits/month with no card; Project is $30 for 4,000 credits][tavily-credits]. Tau's basic search costs one provider credit. |
@@ -108,8 +108,9 @@ post-filter.
   tools remain registered but disabled by default.
 
 Search accepts `query` and optional `num_results` from 1 to 100; the default is
-5. Fetch accepts one `url`. Explicit Parallel tools retain provider-specific
-pass-through arguments.
+5. Fetch accepts one `url`. Parallel receives the query as its required
+`objective` and one-element `search_queries`; explicit Parallel tools retain
+their Tau-facing input shape while translating to the current upstream request.
 
 
 ## Terminal display

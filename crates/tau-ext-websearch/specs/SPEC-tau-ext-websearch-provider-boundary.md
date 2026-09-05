@@ -23,7 +23,7 @@ Restricted search is eligible only for adapters whose declaration promises
 provider-side per-call filtering. Filtering returned results is not an egress
 control. When no configured adapter declares enforcement, the logical search
 candidate is unavailable and performs zero network activity.
-Each You.com attempt performs the MCP initialize/initialized
+Each Parallel and You.com attempt performs the MCP initialize/initialized
 handshake before `tools/call`, sends the negotiated protocol header only after
 initialization, requires the server's tools capability, and returns any
 server-issued session id on subsequent requests. All handshake requests share
