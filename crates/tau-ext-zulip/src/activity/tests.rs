@@ -99,11 +99,11 @@ fn rendering_is_complete_or_absent_within_the_byte_budget() {
         );
     }
     let snapshot = activity.take("route", now).expect("snapshot");
-    assert!(snapshot.render(NOTE_HEADER.len()).is_none());
+    assert!(snapshot.render(ACTIVITY_SUMMARY_OPENING.len()).is_none());
     let rendered = snapshot
         .render(MAX_ACTIVITY_NOTE_BYTES)
         .expect("bounded complete note");
     assert!(rendered.len() <= MAX_ACTIVITY_NOTE_BYTES);
-    assert!(rendered.starts_with(NOTE_HEADER));
-    assert!(rendered.ends_with(NOTE_FOOTER));
+    assert!(rendered.starts_with(ACTIVITY_SUMMARY_OPENING));
+    assert!(rendered.ends_with(ACTIVITY_SUMMARY_CLOSING));
 }

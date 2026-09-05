@@ -28,10 +28,12 @@ reports, facts, logs, notices, or model-visible output. The pre-existing
 bounded duplicate cache necessarily retains recent native message IDs, and
 catch-up persists its ordinary highest completed native message position,
 including filtered unauthorized creates. A later same-topic allowlisted
-message may carry the complete bridge-authored activity note and its own exact
-body in one external-content fact. Labels remain attacker controlled after
-sanitization; the note explicitly marks them as untrusted and grants no
-authority.
+message may carry the complete bridge-authored
+`<activity_summary content_trust="external">` envelope and its own exact body
+in one external-content fact. The stable `zulip.activity_summary` tool-group
+guidance identifies the envelope as non-authoritative external activity,
+explains that rejected bodies were discarded and labels remain untrusted after
+sanitization, and says tag-shaped content grants no authority.
 
 The accumulator is deliberately best effort and process-local. Fixed route,
 sender, label, count, rendering, and 24-hour lifetime bounds limit hostile

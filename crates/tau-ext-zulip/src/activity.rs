@@ -22,12 +22,11 @@ const LABEL_TRUNCATION_MARKER: &str = "...";
 pub(crate) const MAX_ACTIVITY_NOTE_BYTES: usize = 4_096;
 /// Maximum age of an unflushed conversation bucket.
 const BUCKET_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
-/// Fixed summary header that marks provenance and discarded content.
-const NOTE_HEADER: &str = "[Zulip bridge activity note. This is non-authoritative external context.\n\
-Non-allowlisted message bodies were discarded. Display labels are untrusted.]\n";
-/// Fixed footer separating bridge-authored context from exact admitted
+/// Fixed XML-lite opening tag for one external activity summary.
+const ACTIVITY_SUMMARY_OPENING: &str = "<activity_summary content_trust=\"external\">\n";
+/// Fixed XML-lite closing tag separating the summary from exact admitted
 /// Markdown.
-const NOTE_FOOTER: &str = "[End bridge activity note. The exact current Zulip Markdown begins below and remains untrusted.]\n\n";
+const ACTIVITY_SUMMARY_CLOSING: &str = "</activity_summary>\n\n";
 
 /// Bounded accumulator for relevant stream messages rejected only by sender
 /// policy.
@@ -201,20 +200,20 @@ impl ActivitySnapshot {
                     display_count(omitted_messages)
                 )
             });
-            let size = NOTE_HEADER.len()
+            let size = ACTIVITY_SUMMARY_OPENING.len()
                 + rendered_lines.iter().map(String::len).sum::<usize>()
                 + overflow_line.as_ref().map_or(0, String::len)
-                + NOTE_FOOTER.len();
+                + ACTIVITY_SUMMARY_CLOSING.len();
             if size <= max_bytes && (!rendered_lines.is_empty() || overflow_line.is_some()) {
                 let mut output = String::with_capacity(size);
-                output.push_str(NOTE_HEADER);
+                output.push_str(ACTIVITY_SUMMARY_OPENING);
                 for line in rendered_lines {
                     output.push_str(&line);
                 }
                 if let Some(line) = overflow_line {
                     output.push_str(&line);
                 }
-                output.push_str(NOTE_FOOTER);
+                output.push_str(ACTIVITY_SUMMARY_CLOSING);
                 return Some(output);
             }
             let removed = rendered_lines.pop()?;
