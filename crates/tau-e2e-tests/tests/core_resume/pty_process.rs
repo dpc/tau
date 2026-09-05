@@ -405,12 +405,17 @@ impl PtyProcess {
     }
 
     /// Waits for an empty editable prompt that names the exact role used to
-    /// start the first agent.
+    /// start the first agent after explicitly entering creation mode.
     pub(super) fn wait_ready_to_start_role(
-        &self,
+        &mut self,
         role: &str,
         deadline: Instant,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        let overview = "Overview — select an agent or use :agent new.";
+        self.wait_for_prompt(&format!("prompt `{overview}`"), deadline, |parser| {
+            prompt_ready_for(parser, overview)
+        })?;
+        self.send_line(":new")?;
         let needle = format!("Write a message to start a new {role} agent...");
         self.wait_for_prompt(&format!("prompt `{needle}`"), deadline, |parser| {
             prompt_ready_for(parser, &needle)

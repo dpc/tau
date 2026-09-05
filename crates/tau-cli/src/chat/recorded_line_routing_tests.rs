@@ -1,7 +1,7 @@
 use std::collections as path_std_collections;
 
 use super::*;
-use crate::event_renderer::renderer_state::SelectionIntent;
+use crate::event_renderer::selection_intent::SelectionIntent;
 use crate::list_agents as path_crate_list_agents;
 
 fn action_schema(root: &str, action_id: &str) -> tau_actions::ActionSchema {
@@ -55,7 +55,11 @@ fn action_state_with_email_list() -> ActionCommandState {
 }
 
 fn routing_state_with_selected_agent(selected: Option<&str>) -> InputRoutingState {
-    let current_agent_state = Arc::new(Mutex::new(SelectionIntent::from(selected.map(agent_id))));
+    let mut intent = SelectionIntent::default();
+    if let Some(selected) = selected {
+        intent.set_target(UiTarget::Viewing(agent_id(selected)));
+    }
+    let current_agent_state = Arc::new(Mutex::new(intent));
     let known_agents = Arc::new(Mutex::new(Vec::new()));
     let agent_navigation = Arc::new(Mutex::new(AgentNavigation::default()));
     let ephemeral_agents = Arc::new(Mutex::new(path_std_collections::HashSet::new()));

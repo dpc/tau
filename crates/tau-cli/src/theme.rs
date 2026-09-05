@@ -35,10 +35,21 @@ pub(crate) fn active_prompt_marker(
     tau_cli_term::resolve::themed_text(theme, &text)
 }
 
+/// Semantic input target used to choose prompt placeholder copy.
+pub(crate) enum PromptInputTarget {
+    /// Non-interactive all-agent overview.
+    Overview,
+    /// Explicit new-agent composer.
+    Creating,
+    /// Existing agent prompt target.
+    Agent(String),
+}
+
+/// Builds placeholder text for one semantic input target.
 pub(crate) fn prompt_input_placeholder(
     theme: &tau_themes::Theme,
     role: Option<&str>,
-    current_agent_id: Option<&str>,
+    target: PromptInputTarget,
     current_agent_navigation: Option<(AgentNavigationState, bool)>,
 ) -> tau_cli_term::StyledText {
     let role = role.unwrap_or("agent");
@@ -53,17 +64,20 @@ pub(crate) fn prompt_input_placeholder(
         Some((AgentNavigationState::ActiveAuto, false)) => vec![SpanTree::text(
             "This active-auto agent is idle. Use :resume to keep it in navigation.",
         )],
-        _ => match current_agent_id {
-            Some(agent_id) => vec![
+        _ => match target {
+            PromptInputTarget::Agent(agent_id) => vec![
                 SpanTree::text("Write a message to "),
                 SpanTree::span(role_style, vec![SpanTree::text(agent_id)]),
                 SpanTree::text("..."),
             ],
-            None => vec![
+            PromptInputTarget::Creating => vec![
                 SpanTree::text("Write a message to start a new "),
                 SpanTree::span(role_style, vec![SpanTree::text(role)]),
                 SpanTree::text(" agent..."),
             ],
+            PromptInputTarget::Overview => vec![SpanTree::text(
+                "Overview — select an agent or use :agent new.",
+            )],
         },
     };
 

@@ -43,6 +43,8 @@ pub(crate) struct EventRenderer {
     pub(super) final_publication_in_progress: bool,
     /// Whether hidden-final routing must avoid visible watched-row projection.
     pub(super) hidden_finalization_in_progress: bool,
+    /// Cold-attach redraw scope retained through the replay boundary.
+    pub(super) cold_attach_redraw: Option<tau_cli_term::RedrawSuppressionGuard>,
     /// Test-only midpoint invoked after expensive ordinary-final projection.
     #[cfg(test)]
     pub(super) finished_staging_hook: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -89,43 +91,7 @@ pub(super) struct AgentDiscoveryState {
     pub(super) ephemeral_agents: Arc<Mutex<HashSet<tau_proto::AgentId>>>,
 }
 
-/// Current input target, visible transcript, and detached transcript snapshots.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SelectionIntent {
-    /// Monotonic local-selection claim epoch.
-    pub(crate) epoch: u64,
-    /// Agent currently targeted by prompt input.
-    pub(crate) selected_agent_id: Option<tau_proto::AgentId>,
-}
-
-impl SelectionIntent {
-    /// Returns the selected agent as a borrowed string-like identifier.
-    #[cfg(test)]
-    pub(crate) fn as_ref(&self) -> Option<&tau_proto::AgentId> {
-        self.selected_agent_id.as_ref()
-    }
-
-    /// Returns the selected agent's validated text.
-    #[cfg(test)]
-    pub(crate) fn as_deref(&self) -> Option<&str> {
-        self.selected_agent_id.as_deref()
-    }
-}
-
-impl From<Option<tau_proto::AgentId>> for SelectionIntent {
-    fn from(selected_agent_id: Option<tau_proto::AgentId>) -> Self {
-        Self {
-            epoch: 0,
-            selected_agent_id,
-        }
-    }
-}
-
-impl PartialEq<Option<tau_proto::AgentId>> for SelectionIntent {
-    fn eq(&self, other: &Option<tau_proto::AgentId>) -> bool {
-        self.selected_agent_id == *other
-    }
-}
+use super::selection_intent::SelectionIntent;
 
 /// Current input target, visible transcript, and detached transcript snapshots.
 pub(super) struct AgentSelectionState {

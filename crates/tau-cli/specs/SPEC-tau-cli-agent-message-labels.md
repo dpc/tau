@@ -70,10 +70,11 @@ current-session daemon memory projected into each UI by agent stats. `active` is
 always eligible, `active-auto` is eligible only while stats report a running
 runtime, and `suspended` is ineligible. Delegated agents default to
 `active-auto`; ordinary agents default to `active`. Selection and presentation
-remain UI-local. Keyboard previous/next navigation forms a ring containing the
-no-selection overview followed by the active agents in stable known-agent order;
-suspended agents are skipped. Modes do not affect loading, addressability, or
-delivery.
+remain UI-local. Keyboard previous/next navigation forms a ring containing only
+the active existing agents in stable known-agent order; suspended agents are
+skipped. The no-selection overview is entered explicitly and is never a
+creation or prompt-routing fallback. Modes do not affect loading,
+addressability, or delivery.
 Selection alone preserves mode. Successful admission of direct visible human
 input to the selected existing agent makes that exact target `active` for
 subsequent navigation; complete harness stats, not the local prompt event, update

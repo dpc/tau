@@ -48,7 +48,7 @@ use crate::daemon::{
     DaemonCliOverrides, DaemonHandle, daemon_output_for_chat_session, resolve_daemon,
     storage_mode_from_ephemeral,
 };
-use crate::event_renderer::renderer_state::SelectionIntent;
+use crate::event_renderer::selection_intent::{EmptyUiTarget, SelectionIntent, UiTarget};
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
 use crate::prompt_history::{PromptHistoryAdmission, PromptHistoryStore};
 use crate::tool_render::ui_dir_block;
@@ -1323,6 +1323,7 @@ fn run_chat_session(
         completion_rules,
         terminal_options,
     )?;
+    let cold_attach_redraw = attach.then(|| handle.suppress_redraws());
     *input_shutdown_handle.lock().expect(MUTEX_POISONED) = Some(handle.clone());
     if remote_disconnected.load(Ordering::Acquire) {
         handle.request_input_shutdown();
@@ -1368,6 +1369,7 @@ fn run_chat_session(
         settings.prompt_symbol.clone(),
         settings.submitted_prompt_symbol,
     );
+    renderer.set_cold_attach_redraw(cold_attach_redraw);
     renderer.set_startup_profile_selection(startup_profile);
     renderer.set_osc8_links(settings.osc8_links);
     renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
@@ -1434,6 +1436,24 @@ fn run_chat_session(
         queued_remote_items,
         renderer_byte_budget,
     );
+    if attach {
+        let roster_tx = event_tx.clone();
+        let roster_socket = harness_socket_path.clone();
+        let roster_session_id = session_id.clone();
+        spawn_optional_attach_roster(
+            move || {
+                crate::list_agents::request_at_socket(
+                    &roster_socket,
+                    &roster_session_id,
+                    tau_proto::SessionAgentListScope::History,
+                )
+                .map_err(|error| error.to_string())
+            },
+            move |result| {
+                let _ = roster_tx.send(RendererCmd::AttachRoster { result });
+            },
+        );
+    }
 
     // Spawn the prompt-draft debounce thread. The input loop signals
     // it on every `BufferChanged` event with the latest buffer
@@ -1543,6 +1563,19 @@ fn run_chat_session(
     }
 }
 
+/// Runs optional attach-roster metadata work away from terminal and renderer
+/// startup, then publishes its bounded result if the UI still exists.
+fn spawn_optional_attach_roster<Lookup, Publish>(
+    lookup: Lookup,
+    publish: Publish,
+) -> std::thread::JoinHandle<()>
+where
+    Lookup: FnOnce() -> Result<Vec<tau_proto::SessionAgentListEntry>, String> + Send + 'static,
+    Publish: FnOnce(Result<Vec<tau_proto::SessionAgentListEntry>, String>) + Send + 'static,
+{
+    std::thread::spawn(move || publish(lookup()))
+}
+
 /// Starts the renderer worker after command queues and shared accounting are
 /// ready.
 #[allow(clippy::too_many_arguments)]
@@ -1648,12 +1681,12 @@ fn spawn_renderer_thread(
                                         delivery_id,
                                     );
                                 }
-                                cold_attach_stager::RendererPresentation::SelectAttachAgent {
+                                cold_attach_stager::RendererPresentation::FinishAttach {
                                     agent_id,
                                 } => {
-                                    renderer.handle_attach_agent_selection_socket_delivery(
+                                    renderer.handle_attach_replay_complete_socket_delivery(
                                         &event,
-                                        &agent_id,
+                                        agent_id.as_deref(),
                                         recorded_at,
                                         delivery_id,
                                     );
@@ -1694,8 +1727,11 @@ fn spawn_renderer_thread(
                         } => {
                             renderer.apply_claimed_agent(agent_id, intent_epoch);
                         }
-                        RendererCmd::ClearSelectedAgent { intent_epoch } => {
-                            renderer.apply_claimed_clear(intent_epoch);
+                        RendererCmd::SetEmptyTarget {
+                            intent_epoch,
+                            target,
+                        } => {
+                            renderer.apply_claimed_empty_target(intent_epoch, target);
                         }
                         RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
                         RendererCmd::ShowSessionStats => renderer.show_session_token_stats(),
@@ -1704,6 +1740,10 @@ fn spawn_renderer_thread(
                             owner_agent_id,
                         } => renderer.record_action_invocation(invocation_id, owner_agent_id),
                         RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
+                        RendererCmd::AttachRoster { result } => match result {
+                            Ok(entries) => renderer.show_attach_roster(&entries),
+                            Err(error) => renderer.show_attach_roster_error(&error),
+                        },
                     }
                     ui_io_tracker.sample_if_due(&mut renderer);
                 }
@@ -2139,6 +2179,11 @@ fn tool_timer_loop(state: Arc<(Mutex<ToolTimerState>, Condvar)>, renderer_tx: Lo
 /// Local commands remain independent from socket admission, while prompt and
 /// cancel uplink bypass renderer work entirely.
 enum RendererCmd {
+    /// Optional attach-time historical roster loaded off the startup path.
+    AttachRoster {
+        /// Requester-directed metadata result from the separate roster client.
+        result: Result<Vec<tau_proto::SessionAgentListEntry>, String>,
+    },
     /// Toggle the process-local top-level transcript presentation mode.
     ToggleVerboseMode,
     /// `:set <name> <value>` — validated by the input loop before send.
@@ -2155,10 +2200,12 @@ enum RendererCmd {
         /// Exact input-intent epoch authorizing this display command.
         intent_epoch: u64,
     },
-    /// Return to the start-new-agent prompt state.
-    ClearSelectedAgent {
+    /// Show one semantic empty-input target without selecting an agent.
+    SetEmptyTarget {
         /// Exact input-intent epoch authorizing this display command.
         intent_epoch: u64,
+        /// Explicit overview or new-agent composer target.
+        target: EmptyUiTarget,
     },
     /// `:theme <name>` — apply a theme to this UI process only.
     SetTheme {
@@ -2271,20 +2318,72 @@ impl InputRoutingState {
         self.current_agent_state
             .lock()
             .ok()
-            .and_then(|intent| intent.selected_agent_id.clone())
+            .and_then(|intent| intent.selected_agent_id().cloned())
     }
 
+    /// Returns the existing agent targeted by side-channel input actions.
     fn selected_side_agent_id(&self) -> Option<tau_proto::AgentId> {
         self.selected_agent_id()
     }
 
-    pub(crate) fn set_selected_agent(&self, agent_id: Option<tau_proto::AgentId>) -> u64 {
+    /// Advances the attachment-local semantic target and returns its epoch.
+    pub(crate) fn set_target(&self, target: UiTarget) -> u64 {
         if let Ok(mut intent) = self.current_agent_state.lock() {
-            intent.epoch = intent.epoch.saturating_add(1);
-            intent.selected_agent_id = agent_id;
-            return intent.epoch;
+            return intent.set_target(target);
         }
         0
+    }
+
+    #[cfg(test)]
+    /// Selects one optional agent through the same semantic target transition
+    /// used by input tests.
+    pub(crate) fn set_selected_agent(&self, agent_id: Option<tau_proto::AgentId>) -> u64 {
+        self.set_target(agent_id.map_or(UiTarget::Overview, UiTarget::Viewing))
+    }
+
+    fn target(&self) -> UiTarget {
+        self.current_agent_state
+            .lock()
+            .map(|intent| intent.target().clone())
+            .unwrap_or(UiTarget::Overview)
+    }
+
+    fn target_description(&self) -> String {
+        match self.target() {
+            UiTarget::InitialOverview | UiTarget::Overview => "overview".to_owned(),
+            UiTarget::Viewing(agent_id) => agent_id.to_string(),
+            UiTarget::Creating => "new agent".to_owned(),
+        }
+    }
+
+    fn stage_create(
+        &self,
+        request: tau_proto::UiCreateAgent,
+        editor_revision: u64,
+    ) -> Result<(), &'static str> {
+        let mut intent = self
+            .current_agent_state
+            .lock()
+            .map_err(|_| "input routing unavailable")?;
+        intent.stage_create(request, editor_revision)
+    }
+
+    fn has_pending_create(&self) -> bool {
+        self.current_agent_state
+            .lock()
+            .is_ok_and(|intent| intent.has_pending_create())
+    }
+
+    fn clear_staged_create(&self, request_id: &str) {
+        if let Ok(mut intent) = self.current_agent_state.lock() {
+            intent.clear_staged_create(request_id);
+        }
+    }
+
+    fn record_editable_draft(&self, text: &str) {
+        if let Ok(mut intent) = self.current_agent_state.lock() {
+            intent.record_editable_draft(text);
+        }
     }
 
     fn known_agents(&self) -> Vec<String> {
@@ -3383,11 +3482,7 @@ impl<'a> TerminalInputSession<'a> {
     fn handle_agent_command(&mut self, text: &str) {
         match agent_command_effect(text, &self.ctx.routing) {
             Ok(AgentCommandEffect::ShowStatus) => {
-                let current = self
-                    .ctx
-                    .routing
-                    .selected_agent_id()
-                    .map_or_else(|| "none".to_owned(), |agent_id| agent_id.to_string());
+                let current = self.ctx.routing.target_description();
                 let known_agents = self.ctx.routing.known_agents();
                 let active_count = self.ctx.routing.active_count();
                 self.output.command_feedback(&format!(
@@ -3466,32 +3561,35 @@ impl<'a> TerminalInputSession<'a> {
         } else {
             self.pending_new_agent_options.clear_role();
         }
-        self.clear_selected_agent();
+        self.set_empty_target(EmptyUiTarget::Creating);
     }
 
-    fn clear_selected_agent(&mut self) {
-        let intent_epoch = self.ctx.routing.set_selected_agent(None);
+    fn set_empty_target(&mut self, target: EmptyUiTarget) {
+        let intent_epoch = self.ctx.routing.set_target(target.into());
         self.dismiss_completion_menu();
         self.retarget_current_draft();
-        let _ = self
-            .ctx
-            .renderer_tx
-            .send(RendererCmd::ClearSelectedAgent { intent_epoch });
+        let _ = self.ctx.renderer_tx.send(RendererCmd::SetEmptyTarget {
+            intent_epoch,
+            target,
+        });
     }
 
     fn apply_agent_switch(&mut self, target: Option<tau_proto::AgentId>) {
         match target {
             None => {
-                let intent_epoch = self.ctx.routing.set_selected_agent(None);
-                let _ = self
-                    .ctx
-                    .renderer_tx
-                    .send(RendererCmd::ClearSelectedAgent { intent_epoch });
+                let intent_epoch = self.ctx.routing.set_target(UiTarget::Overview);
+                let _ = self.ctx.renderer_tx.send(RendererCmd::SetEmptyTarget {
+                    intent_epoch,
+                    target: EmptyUiTarget::Overview,
+                });
                 self.dismiss_completion_menu();
                 self.retarget_current_draft();
             }
             Some(agent_id) => {
-                let intent_epoch = self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
+                let intent_epoch = self
+                    .ctx
+                    .routing
+                    .set_target(UiTarget::Viewing(agent_id.clone()));
                 let _ = self.ctx.renderer_tx.send(RendererCmd::SwitchAgent {
                     agent_id,
                     intent_epoch,
@@ -3667,13 +3765,15 @@ impl<'a> TerminalInputSession<'a> {
         text: &str,
         command_handling: PromptCommandHandling,
     ) -> Option<InputLoopExit> {
-        self.invalidate_pending_draft();
-
-        let selected_agent = self.ctx.routing.selected_agent_id();
-        self.ctx
-            .agent_in_progress
-            .store(true, path_std_sync_atomic::Ordering::Relaxed);
-        let event = if let Some(target_agent_id) = selected_agent {
+        let target = self.ctx.routing.target();
+        if matches!(target, UiTarget::InitialOverview | UiTarget::Overview) {
+            self.term.handle().set_buffer(text.to_owned(), text.len());
+            self.output
+                .command_feedback("Select an existing agent or use :agent new.");
+            self.update_draft();
+            return None;
+        }
+        let event = if let UiTarget::Viewing(target_agent_id) = target {
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 literal: matches!(command_handling, PromptCommandHandling::LiteralEscape),
                 session_id: self.session_id.clone(),
@@ -3684,29 +3784,47 @@ impl<'a> TerminalInputSession<'a> {
                 ctx_id: None,
             })
         } else {
-            let current_role = self
-                .ctx
-                .current_role_state
-                .lock()
-                .ok()
-                .and_then(|role| role.clone())
-                .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_owned());
-            let role = take_new_agent_role(&mut self.pending_new_agent_options, current_role);
-            let model_override = self.pending_new_agent_options.take_model();
-            let ephemeral = self.pending_new_agent_options.take_ephemeral();
-            Event::UiCreateAgent(create_user_agent_prompt(
-                self.session_id,
-                role,
-                text,
-                CreateUserAgentPromptOptions {
-                    model_override,
-                    ephemeral,
-                    command_handling,
-                },
-            ))
+            let event =
+                route_create_submission(&self.ctx.routing, self.term.handle(), text, || {
+                    let current_role = self
+                        .ctx
+                        .current_role_state
+                        .lock()
+                        .ok()
+                        .and_then(|role| role.clone())
+                        .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_owned());
+                    let role =
+                        take_new_agent_role(&mut self.pending_new_agent_options, current_role);
+                    let model_override = self.pending_new_agent_options.take_model();
+                    let ephemeral = self.pending_new_agent_options.take_ephemeral();
+                    create_user_agent_prompt(
+                        self.session_id,
+                        role,
+                        text,
+                        CreateUserAgentPromptOptions {
+                            model_override,
+                            ephemeral,
+                            command_handling,
+                        },
+                    )
+                });
+            if let Err(message) = event {
+                self.output.command_feedback(message);
+                self.update_draft();
+                return None;
+            }
+            Event::UiCreateAgent(event.expect("create submission result checked"))
         };
+        self.invalidate_pending_draft();
+        self.ctx
+            .agent_in_progress
+            .store(true, path_std_sync_atomic::Ordering::Relaxed);
         let frame_started = Instant::now();
         let event_kind = event.name();
+        let create_request_id = match &event {
+            Event::UiCreateAgent(request) => Some(request.request_id.clone()),
+            _ => None,
+        };
         let message = durable_emit_message_owned(event);
         tracing::trace!(
             target: "tau_cli::prompt_submission",
@@ -3717,6 +3835,9 @@ impl<'a> TerminalInputSession<'a> {
             "content-free prompt frame construction stage"
         );
         if send_frame_with_diagnostic(self.writer, &message, self.prompt_diagnostic_seq).is_err() {
+            if let Some(request_id) = create_request_id.as_deref() {
+                self.ctx.routing.clear_staged_create(request_id);
+            }
             return Some(InputLoopExit::Quit);
         }
 
@@ -3749,6 +3870,7 @@ impl<'a> TerminalInputSession<'a> {
         // Queue the first change immediately, then coalesce later changes into
         // one `UiPromptDraft` per `DRAFT_DEBOUNCE` window.
         let text = self.term.handle().get_buffer();
+        self.ctx.routing.record_editable_draft(&text);
         let target_agent_id = self.selected_side_agent_id();
         queue_prompt_draft_snapshot(
             self.ctx.draft_handle.as_ref(),
@@ -3761,6 +3883,7 @@ impl<'a> TerminalInputSession<'a> {
 
     fn retarget_current_draft(&self) {
         let text = self.term.handle().get_buffer();
+        self.ctx.routing.record_editable_draft(&text);
         let target_agent_id = self.selected_side_agent_id();
         retarget_prompt_draft_snapshot(
             self.ctx.draft_handle.as_ref(),
@@ -3804,10 +3927,6 @@ impl<'a> TerminalInputSession<'a> {
             AgentCycleAction::KeepSelection => {}
             AgentCycleAction::Select(_) => {
                 self.pending_new_agent_options.clear();
-                self.dismiss_completion_menu();
-                self.retarget_current_draft();
-            }
-            AgentCycleAction::ClearSelection => {
                 self.dismiss_completion_menu();
                 self.retarget_current_draft();
             }
@@ -3873,7 +3992,10 @@ impl<'a> TerminalInputSession<'a> {
 
     fn switch_to_agent(&mut self, agent_id: tau_proto::AgentId) {
         self.pending_new_agent_options.clear();
-        let intent_epoch = self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
+        let intent_epoch = self
+            .ctx
+            .routing
+            .set_target(UiTarget::Viewing(agent_id.clone()));
         self.dismiss_completion_menu();
         self.retarget_current_draft();
         let _ = self.ctx.renderer_tx.send(RendererCmd::SwitchAgent {
@@ -4160,9 +4282,7 @@ impl SubmittedLineHandlers for TerminalInputSession<'_> {
 pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<SelectionIntent>>) -> bool {
     current_agent_state
         .lock()
-        .ok()
-        .and_then(|intent| intent.selected_agent_id.clone())
-        .is_none()
+        .is_ok_and(|intent| intent.is_creating())
 }
 
 pub(crate) fn next_agent_cycle_selection(
@@ -4175,18 +4295,19 @@ pub(crate) fn next_agent_cycle_selection(
         .iter()
         .filter(|agent| active_agent_ids.contains(agent.as_str()))
         .collect::<Vec<_>>();
-    let cycle_len = active_agents.len() as isize + 1;
+    let cycle_len = active_agents.len() as isize;
+    if cycle_len == 0 {
+        return None;
+    }
     let current_index = current
         .and_then(|current| {
             active_agents
                 .iter()
                 .position(|agent| agent.as_str() == current)
         })
-        .map_or(0, |index| index as isize + 1);
+        .map_or_else(|| if delta < 0 { 0 } else { -1 }, |index| index as isize);
     let next_index = (current_index + delta).rem_euclid(cycle_len) as usize;
-    next_index
-        .checked_sub(1)
-        .map(|index| active_agents[index].to_string())
+    Some(active_agents[next_index].to_string())
 }
 
 /// Input-loop action required to move from one selection to the next cycle
@@ -4197,8 +4318,6 @@ enum AgentCycleAction {
     KeepSelection,
     /// Select the named active agent.
     Select(tau_proto::AgentId),
-    /// Clear the input target and show the all-agent overview.
-    ClearSelection,
 }
 
 /// Translate a computed cycle selection into the input-loop operation that
@@ -4212,7 +4331,7 @@ fn agent_cycle_action(
     } else if let Some(next) = next {
         AgentCycleAction::Select(next)
     } else {
-        AgentCycleAction::ClearSelection
+        AgentCycleAction::KeepSelection
     }
 }
 
@@ -4229,15 +4348,11 @@ fn dispatch_agent_cycle(
     match &action {
         AgentCycleAction::KeepSelection => {}
         AgentCycleAction::Select(agent_id) => {
-            let intent_epoch = routing.set_selected_agent(Some(agent_id.clone()));
+            let intent_epoch = routing.set_target(UiTarget::Viewing(agent_id.clone()));
             let _ = renderer_tx.send(RendererCmd::SwitchAgent {
                 agent_id: agent_id.clone(),
                 intent_epoch,
             });
-        }
-        AgentCycleAction::ClearSelection => {
-            let intent_epoch = routing.set_selected_agent(None);
-            let _ = renderer_tx.send(RendererCmd::ClearSelectedAgent { intent_epoch });
         }
     }
     action
@@ -4300,8 +4415,38 @@ fn terminal_input_loop(
     .run()
 }
 
+/// Returns the exact post-clear revision paired with the submitted line,
+/// falling back only for non-raw test callers that have no line capture.
+fn submitted_editor_revision(handle: &tau_cli_term::TermHandle) -> u64 {
+    handle
+        .last_submitted_buffer_revision()
+        .unwrap_or_else(|| handle.get_buffer_revision())
+}
+
+/// Stages one explicit create submission using the raw terminal's exact
+/// post-submit revision, restoring the submitted text when creation is already
+/// pending or staging fails.
+fn route_create_submission(
+    routing: &InputRoutingState,
+    handle: &tau_cli_term::TermHandle,
+    text: &str,
+    make_request: impl FnOnce() -> tau_proto::UiCreateAgent,
+) -> Result<tau_proto::UiCreateAgent, &'static str> {
+    if routing.has_pending_create() {
+        handle.set_buffer(text.to_owned(), text.len());
+        return Err("Agent creation is already pending.");
+    }
+    let request = make_request();
+    let editor_revision = submitted_editor_revision(handle);
+    if let Err(message) = routing.stage_create(request.clone(), editor_revision) {
+        handle.set_buffer(text.to_owned(), text.len());
+        return Err(message);
+    }
+    Ok(request)
+}
+
 const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
-    ("new", "Clear the selected agent"),
+    ("new", "Enter explicit new-agent creation mode"),
     ("switch", "Show a known agent transcript"),
     ("suspend", "Exclude an active agent from navigation"),
     ("resume", "Make a loaded agent always navigation-eligible"),

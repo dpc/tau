@@ -9,7 +9,7 @@ use tau_proto::{
     SessionAgentLifecycle, SessionAgentListEntry, SessionAgentPersistence, SessionId, ToolCallId,
 };
 
-use super::{Identities, ProviderTurns, agent_start_projection};
+use super::{Identities, MAIN_PROMPT, ProviderTurns, agent_start_projection};
 use crate::observer::{ObservedEvent, SideObserver};
 use crate::provider_finished_contains;
 
@@ -255,6 +255,20 @@ pub(super) fn assert_replay_only_before_input(
         return Err(format!("S8 observed {resume} resume starts").into());
     }
     assert_replayed_agent_start(events, identities)?;
+    let main_prompts = events
+        .iter()
+        .filter(|observed| {
+            observed.replay
+                && matches!(
+                    &observed.event,
+                    Event::AgentPromptSubmitted(prompt)
+                        if prompt.agent_id == identities.main && prompt.text == MAIN_PROMPT
+                )
+        })
+        .count();
+    if main_prompts != 1 {
+        return Err(format!("S8 replayed main prompt count changed: {main_prompts}").into());
+    }
     let replayed_loads = events
         .iter()
         .filter_map(|observed| {

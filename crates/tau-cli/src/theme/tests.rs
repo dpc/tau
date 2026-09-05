@@ -324,6 +324,7 @@ fn display_cwd_replaces_home_prefix() {
     );
 }
 
+/// Creation and existing-agent placeholders preserve nested role styling.
 #[test]
 fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
     let theme = tau_themes::Theme::parse(
@@ -337,7 +338,8 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
             "##,
     )
     .expect("test theme parses");
-    let prompt = prompt_input_placeholder(&theme, Some("engineer"), None, None);
+    let prompt =
+        prompt_input_placeholder(&theme, Some("engineer"), PromptInputTarget::Creating, None);
     let spans = prompt.spans();
 
     assert_eq!(spans.len(), 3);
@@ -355,7 +357,7 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
     let prompt = prompt_input_placeholder(
         &theme,
         Some("engineer"),
-        Some("engineer_abc"),
+        PromptInputTarget::Agent("engineer_abc".to_owned()),
         Some((AgentNavigationState::Active, true)),
     );
     let spans = prompt.spans();
@@ -366,16 +368,14 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
     assert!(spans[2].style.italic);
 }
 
+/// Suspended-agent placeholder copy points to the explicit resume action.
 #[test]
 fn suspended_prompt_input_placeholder_explains_explicit_resume() {
-    // Regression coverage for the disabled-input copy shown while the selected
-    // agent is suspended. The text must make clear that users need to resume it
-    // without incorrectly claiming that accepted input changes its mode.
     let theme = tau_themes::Theme::new();
     let prompt = prompt_input_placeholder(
         &theme,
         Some("engineer"),
-        Some("engineer_abc"),
+        PromptInputTarget::Agent("engineer_abc".to_owned()),
         Some((AgentNavigationState::Suspended, false)),
     );
     let text: String = prompt

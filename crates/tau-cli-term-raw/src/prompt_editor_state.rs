@@ -12,6 +12,11 @@ pub(super) struct PromptEditorState {
     pub(super) input_placeholder: StyledText,
     /// Current editable input.
     pub(super) buffer: String,
+    /// Monotonic revision advanced before every raw key/paste edit attempt and
+    /// every external buffer replacement.
+    pub(super) revision: u64,
+    /// Exact post-clear revision captured for the most recently submitted line.
+    pub(super) last_submitted_revision: Option<u64>,
     /// Byte offset of the input cursor.
     pub(super) cursor: usize,
     /// Visual column the cursor "wants" to be on for vertical motion
@@ -56,6 +61,8 @@ impl PromptEditorState {
             right_prompt: StyledText::new(),
             input_placeholder: StyledText::new(),
             buffer: String::new(),
+            revision: 0,
+            last_submitted_revision: None,
             cursor: 0,
             sticky_col: None,
             input_history: Vec::new(),

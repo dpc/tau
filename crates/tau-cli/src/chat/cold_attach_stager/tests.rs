@@ -10,6 +10,7 @@ use super::{
     RendererPresentation, RetainedUsage, ShellStartPresentation, ToolReconciliation,
     renderer_event_from_delivery, tool_terminal_id,
 };
+use crate::event_renderer::selection_intent::UiTarget;
 
 /// Builds one plain replayable transcript prompt.
 fn historical_prompt(text: &str) -> Event {
@@ -60,10 +61,10 @@ fn render_delivery(
                 delivery.delivery_id,
             );
         }
-        RendererPresentation::SelectAttachAgent { agent_id } => {
-            renderer.handle_attach_agent_selection_socket_delivery(
+        RendererPresentation::FinishAttach { agent_id } => {
+            renderer.handle_attach_replay_complete_socket_delivery(
                 &delivery.event,
-                &agent_id,
+                agent_id.as_deref(),
                 delivery.recorded_at,
                 delivery.delivery_id,
             );
@@ -218,6 +219,43 @@ fn historical_tool_error() -> Event {
     })
 }
 
+/// A terminal observed before a duplicate reconstructed start must keep that
+/// completed call out of the pending attach baseline.
+#[test]
+fn late_duplicate_start_after_terminal_stays_settled() {
+    let mut stager = ColdAttachStager::staging();
+    let terminal = Event::ToolError(tau_proto::ToolError {
+        presentation: Default::default(),
+        call_id: "settled-call".into(),
+        tool_name: tau_proto::ToolName::new("fixture"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "done".to_owned(),
+        details: None,
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    });
+    assert_eq!(stager.admit(replay(terminal, 1, 1)).len(), 1);
+    let start = Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: Default::default(),
+        call_id: "settled-call".into(),
+        tool_name: tau_proto::ToolName::new("fixture"),
+        arguments: tau_proto::CborValue::Null,
+        agent_id: "agent-1".parse().expect("valid agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    });
+    assert!(stager.admit(replay(start, 1, 2)).is_empty());
+    let ready = stager.admit(live(replay_complete(), 3));
+    assert!(
+        !ready.iter().any(|delivery| {
+            matches!(
+                delivery.event.as_ref(),
+                Event::ToolStarted(started) if started.call_id.as_str() == "settled-call"
+            )
+        }),
+        "settled duplicate start must not reappear at attach completion"
+    );
+}
+
 /// Attach must select the only agent whose journal replay succeeded and whose
 /// current runtime snapshot proves it is actually restored, even after
 /// tool-bearing history ends plain transcript staging.
@@ -249,8 +287,9 @@ fn selects_unique_successful_runtime_agent_at_replay_boundary() {
 
     assert!(matches!(
         ready.last().map(|delivery| &delivery.presentation),
-        Some(RendererPresentation::SelectAttachAgent { agent_id })
-            if agent_id.as_str() == "restored-agent"
+        Some(RendererPresentation::FinishAttach {
+            agent_id: Some(agent_id),
+        }) if agent_id.as_str() == "restored-agent"
     ));
 }
 
@@ -286,7 +325,7 @@ fn bounds_and_releases_attach_selection_metadata() {
     let boundary = overflowing.admit(live(replay_complete(), 3));
     assert!(matches!(
         boundary.last().map(|delivery| &delivery.presentation),
-        Some(RendererPresentation::Ordinary)
+        Some(RendererPresentation::FinishAttach { agent_id: None })
     ));
 
     let mut disconnected = ColdAttachStager::staging();
@@ -325,8 +364,48 @@ fn leaves_ambiguous_runtime_agents_unselected() {
 
     assert!(matches!(
         ready.last().map(|delivery| &delivery.presentation),
-        Some(RendererPresentation::Ordinary)
+        Some(RendererPresentation::FinishAttach { agent_id: None })
     ));
+}
+
+/// Live prompt traffic racing catch-up remains display-only until the attach
+/// boundary resolves an empty candidate set to overview.
+#[test]
+fn live_prompt_before_empty_boundary_cannot_claim_initial_selection() {
+    let (_term, handle, _vt) = crate::tests::setup(100, 24);
+    let mut renderer = crate::tests::marker_test_renderer(handle);
+    let selected = renderer.current_agent_state();
+    let mut stager = ColdAttachStager::staging();
+
+    let ready = stager.admit(live(
+        historical_prompt_for("live-agent", "racing live prompt"),
+        1,
+    ));
+    assert!(matches!(
+        ready.as_slice(),
+        [delivery]
+            if matches!(
+                delivery.presentation,
+                RendererPresentation::ColdAttachReplay
+            )
+    ));
+    for delivery in ready {
+        render_delivery(&mut renderer, delivery);
+    }
+    assert!(
+        selected
+            .lock()
+            .expect("selection intent")
+            .selected_agent_id()
+            .is_none()
+    );
+
+    for delivery in stager.admit(live(replay_complete(), 2)) {
+        render_delivery(&mut renderer, delivery);
+    }
+    let intent = selected.lock().expect("selection intent");
+    assert!(intent.selected_agent_id().is_none());
+    assert!(matches!(intent.target(), UiTarget::Overview));
 }
 
 /// Transcript rows for multiple valid restored agents must remain display-only

@@ -259,11 +259,11 @@ fn prompt_stdin_accepted_provider_failure_exits_without_stdout()
     Ok(())
 }
 
-/// Proves a second exact public CLI attached after one complete turn presents
-/// current state before catch-up transcript while protocol catch-up keeps its
-/// historical-first delivery order and attachment spends no provider action.
+/// Proves a second exact public CLI presents historical conversation followed
+/// by one live boundary, suppresses routine current-state snapshots, and spends
+/// no provider action.
 #[test]
-fn late_attached_public_pty_stages_current_state_before_completed_turn()
+fn late_attached_public_pty_publishes_history_before_boundary()
 -> Result<(), Box<dyn std::error::Error>> {
     let nonce = format!("{:x}", std::process::id());
     let prompt = format!("attach-parity-prompt-{nonce}");
@@ -361,8 +361,8 @@ fn late_attached_public_pty_stages_current_state_before_completed_turn()
     attached.wait_for(&response, deadline)?;
     let original_frame = original.wait_ready_for(agent_id.as_str(), deadline)?;
     let attached_frame = attached.wait_ready_for(agent_id.as_str(), deadline)?;
-    assert_attach_semantics(&original_frame, &prompt, &response, &agent_id)?;
-    assert_attach_semantics(&attached_frame, &prompt, &response, &agent_id)?;
+    assert_attach_semantics(&original_frame, &prompt, &response, &agent_id, false)?;
+    assert_attach_semantics(&attached_frame, &prompt, &response, &agent_id, true)?;
     assert_exact_ready_set(&observer.events)?;
     let matched = fixture
         .trace()?
@@ -385,6 +385,56 @@ fn late_attached_public_pty_stages_current_state_before_completed_turn()
     drop(observer);
     attached.finish()?;
     original.finish_exited()?;
+    fixture.require_boot_gone(session_id.as_str())?;
+    fixture.complete();
+    Ok(())
+}
+
+/// Production input routing keeps overview Enter local.
+#[test]
+fn overview_enter_emits_no_prompt_or_create_wire_frame() -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "negative-create-wire",
+        vec![ScenarioLaneV2 {
+            ctx_id: "negative-create".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "<user>first create prompt</user>".to_owned(),
+                response: "first create complete".to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut terminal = PtyProcess::spawn(fixture.command(None), false, None)?;
+    let deadline = Instant::now() + DEADLINE;
+    let (socket, session_id) = discover_daemon(fixture.runtime_home(), None, deadline)?;
+    let mut observer = SideObserver::connect(
+        &socket,
+        &session_id,
+        fixture.artifact_path("negative-create-observer.json"),
+        deadline,
+    )?;
+    wait_extensions(&mut observer, deadline)?;
+    wait_for_dummy_role_selection(&mut observer, deadline)?;
+    terminal.wait_for("Overview — select an agent", deadline)?;
+
+    let before = observer.events.len();
+    terminal.send_line("overview retained draft")?;
+    terminal.wait_for("overview retained draft", deadline)?;
+    terminal.send_clear_prompt_key()?;
+    terminal.send_line(":role deterministic-e2e")?;
+    observer.recv_until(deadline, |observed| {
+        !observed.replay && matches!(observed.event, Event::HarnessRoleSelected(_))
+    })?;
+    if observer.events[before..].iter().any(|observed| {
+        matches!(
+            observed.event,
+            Event::UiPromptSubmitted(_) | Event::AgentPromptSubmitted(_)
+        )
+    }) {
+        return Err("overview Enter emitted a prompt/create lifecycle".into());
+    }
+    drop(observer);
+    terminal.finish()?;
     fixture.require_boot_gone(session_id.as_str())?;
     fixture.complete();
     Ok(())
@@ -698,6 +748,8 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
         deadline,
     )?;
     wait_extensions(&mut observer_b, deadline)?;
+    boot_b.send_line(&format!(":agent switch {agent_id}"))?;
+    boot_b.wait_ready_for(agent_id.as_str(), deadline)?;
     boot_b.wait_for(&tool_complete, deadline)?;
     let restored = boot_b.wait_ready(deadline)?;
     assert_terminal_tool_row(&restored)?;
@@ -746,6 +798,7 @@ fn assert_attach_semantics(
     prompt: &str,
     response: &str,
     agent_id: &AgentId,
+    attached: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rows = frame.lines().collect::<Vec<_>>();
     let find = |needle: &str| {
@@ -755,15 +808,27 @@ fn assert_attach_semantics(
     };
 
     let submitted = find(prompt)?;
-    let initialized = find(&format!("initialized {}", agent_id.as_str()))?;
     let answered = find(response)?;
     let editable = find(&format!("Write a message to {}...", agent_id.as_str()))?;
     let status = find(&format!("@{}", agent_id.as_str()))?;
-    if !(submitted < answered && answered < editable && editable <= status) {
+    let valid_order = if attached {
+        let boundary = find("attached to")?;
+        !frame.contains(&format!("initialized {}", agent_id.as_str()))
+            && submitted < answered
+            && answered < boundary
+            && boundary < editable
+            && editable <= status
+    } else {
+        submitted < answered && answered < editable && editable <= status
+    };
+    if frame.match_indices(prompt).count() != 1
+        || frame.match_indices(response).count() != 1
+        || (attached && frame.match_indices("attached to").count() != 1)
+        || !valid_order
+    {
         return Err(format!(
-            "semantic row order violated: initialized={initialized}, \
-             submitted={submitted}, answered={answered}, \
-             editable={editable}, status={status}\n{frame}"
+            "semantic row order violated: submitted={submitted}, answered={answered}, \
+             attached={attached}, editable={editable}, status={status}\n{frame}"
         )
         .into());
     }

@@ -137,10 +137,12 @@ authoritative for membership and transcript prefix/suffix integrity.
 The same target also owns one live dual-PTY attach baseline. The owning exact
 public CLI creates the daemon, completes one closed text action, and then a
 second exact public CLI explicitly attaches to that session. Normalized VT row
-classes compare stable semantic elements and partial order rather than terminal
-bytes. A late replay-aware socket observer proves canonical delivery order
-remains unchanged while the attached UI presents current state before
-transcript. Exact fake-provider consumption, bounded synchronization,
+classes require every stable terminal response/message row exactly once and
+the attach history/live boundary before editable input, rather than comparing
+terminal bytes. The late replay-aware socket observer separately requires the
+submitted prompt and canonical delivery order while the attached UI suppresses
+routine replay snapshots and publishes transcript before the boundary. Exact
+fake-provider consumption, bounded synchronization,
 process-group teardown, and absence of runtime discovery artifacts remain
 separate authorities. A correlated `HoldUntilCancel` lane also attaches only
 after its hold-ready fact and requires both terminals to present the same

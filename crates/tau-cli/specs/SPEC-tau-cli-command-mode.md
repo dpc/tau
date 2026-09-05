@@ -41,9 +41,11 @@ and the single successful raw `ActionInvoke` still goes to the exact owning
 extension so the action can complete.
 
 `:model <provider>/<model>` has two CLI-owned paths: with a selected agent it
-emits a targeted `ui.agent_model_select`; after `:new`, with no selected agent,
-it stages a one-shot `ui.create_agent.model_override` for the next prompt-created
-agent instead of sending an untargeted agent update.
+emits a targeted `ui.agent_model_select`; with no selected agent, whether in
+overview or the explicit composer, it stages a one-shot
+`ui.create_agent.model_override` for the next prompt-created agent instead of
+sending an untargeted agent update. Bare `:new` enters the composer, clears only
+a stale staged role, and preserves staged model and ephemeral options.
 
 Agent switch commands distinguish known transcript selection from effective
 prompt routing. `:agent switch` completions list effectively active agents and

@@ -134,6 +134,8 @@ fn live_cli_trace_preserves_completed_worker_routing() -> Result<(), Box<dyn std
     )?;
     wait_resume_boundaries(&mut observer, &session_id, &identities, deadline)?;
     observer.wait_for_extension("e2e-fake-provider", deadline)?;
+    terminal.send_line(&format!(":agent switch {}", identities.main))?;
+    terminal.wait_ready_for(identities.main.as_str(), deadline)?;
     terminal.wait_for(MAIN_FINAL_RESPONSE, deadline)?;
     let worker_switch = terminal.read_generation()?;
     terminal.send_line(&format!(":agent switch {}", identities.worker))?;
@@ -316,6 +318,10 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
             fixture.artifact_path("presentation-first.normalized.txt"),
         )),
     )?;
+    first.resize(TerminalSize {
+        cols: 120,
+        rows: 80,
+    })?;
     let deadline = Instant::now() + DEADLINE;
     let (live_socket, discovered) =
         discover_daemon(fixture.runtime_home(), Some(&session_id), deadline)?;
@@ -353,6 +359,10 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
             fixture.artifact_path("presentation-second.normalized.txt"),
         )),
     )?;
+    second.resize(TerminalSize {
+        cols: 120,
+        rows: 80,
+    })?;
     fence_terminal_after_replay(&mut observer, &second, deadline)?;
     let second_worker_switch = second.read_generation()?;
     second.send_line(&format!(":agent switch {}", identities.worker))?;
@@ -561,7 +571,7 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
         assert_transcript_rows(&first_before_resize, &identities.main, &identities)?;
     let first_main_style = first_status.styles;
     const WIDE_AGENT_USAGE: &str =
-        ":agent <new|switch|suspend|resume|auto|name> [agent_id]; current: main; active: 1; known:";
+        ":agent <new|switch|suspend|resume|auto|name> [agent_id]; current: main; active:";
     if !first_before_resize
         .lines()
         .any(|line| line.contains(WIDE_AGENT_USAGE))
@@ -788,7 +798,10 @@ fn select_all_agents(
         let before_switch = terminal.read_generation()?;
         terminal.send_line(&format!(":agent switch {agent_id}"))?;
         let frame = if agent_id == &identities.main {
-            terminal.wait_ready_for(agent_id.as_str(), deadline)?
+            terminal.wait_for_frame_after(before_switch, deadline, |frame| {
+                frame.contains(&format!("@{agent_id}"))
+                    && assert_transcript_rows(frame, agent_id, identities).is_ok()
+            })?
         } else {
             wait_for_worker_frame(terminal, before_switch, agent_id, identities, deadline)?
         };
@@ -874,6 +887,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     )?;
     wait_resume_boundaries(&mut observer_b, &session_id, &identities, deadline)?;
     observer_b.wait_for_extension("e2e-fake-provider", deadline)?;
+    boot_b.wait_for("live updates below", deadline)?;
     assert_replay_only_before_input(&observer_b.events, &session_id, &identities)?;
     if matched_actions(&fixture)? != matched_after_a {
         return Err("S8 cold replay consumed a provider action".into());

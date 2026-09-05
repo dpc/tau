@@ -1,6 +1,8 @@
 use std::collections as path_std_collections;
 use std::sync::atomic as path_std_sync_atomic;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use super::*;
 fn routing_state(
     known: Arc<Mutex<Vec<String>>>,
@@ -33,10 +35,10 @@ fn routing_state(
     )
 }
 
+/// `:agent` completion starts with concrete subcommands rather than treating
+/// the first token as an implicit switch.
 #[test]
 fn agent_completer_offers_subcommands_first() {
-    // `:agent` is now a command group; the first argument must guide users
-    // to the concrete action instead of switching immediately.
     let completer = build_agent_arg_completer(
         routing_state(
             Arc::new(Mutex::new(Vec::new())),
@@ -55,7 +57,7 @@ fn agent_completer_offers_subcommands_first() {
     assert_eq!(
         entries,
         vec![
-            ("new", "Clear the selected agent"),
+            ("new", "Enter explicit new-agent creation mode"),
             ("switch", "Show a known agent transcript"),
             ("suspend", "Exclude an active agent from navigation"),
             ("resume", "Make a loaded agent always navigation-eligible"),
@@ -324,10 +326,10 @@ fn agent_commands_reject_malformed_prefixed_references() {
     }
 }
 
-/// Previous/next application navigation updates the input target and publishes
-/// the matching renderer command at both sides of the overview boundary.
+/// Previous/next application navigation cycles existing agents without entering
+/// the non-interactive overview.
 #[test]
-fn agent_cycle_dispatches_overview_and_agent_transitions() {
+fn agent_cycle_dispatches_only_agent_transitions() {
     let known = Arc::new(Mutex::new(vec!["alpha".to_owned(), "bravo".to_owned()]));
     let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "alpha".to_owned(),
@@ -345,22 +347,22 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
     routing.set_selected_agent(Some(agent_id("bravo")));
     assert_eq!(
         dispatch_agent_cycle(&routing, &renderer_tx, 1),
-        AgentCycleAction::ClearSelection
-    );
-    assert_eq!(routing.selected_agent_id(), None);
-    assert!(matches!(
-        renderer_rx.try_recv().expect("overview renderer command"),
-        RendererCmd::ClearSelectedAgent { .. }
-    ));
-
-    assert_eq!(
-        dispatch_agent_cycle(&routing, &renderer_tx, 1),
         AgentCycleAction::Select(agent_id("alpha"))
     );
     assert_eq!(routing.selected_agent_id().as_deref(), Some("alpha"));
     assert!(matches!(
         renderer_rx.try_recv().expect("agent renderer command"),
         RendererCmd::SwitchAgent { agent_id, .. } if agent_id.as_str() == "alpha"
+    ));
+
+    assert_eq!(
+        dispatch_agent_cycle(&routing, &renderer_tx, 1),
+        AgentCycleAction::Select(agent_id("bravo"))
+    );
+    assert_eq!(routing.selected_agent_id().as_deref(), Some("bravo"));
+    assert!(matches!(
+        renderer_rx.try_recv().expect("agent renderer command"),
+        RendererCmd::SwitchAgent { agent_id, .. } if agent_id.as_str() == "bravo"
     ));
 
     routing.set_selected_agent(None);
@@ -372,6 +374,160 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
         renderer_rx.try_recv().expect("reverse renderer command"),
         RendererCmd::SwitchAgent { agent_id, .. } if agent_id.as_str() == "bravo"
     ));
+}
+
+/// Explicit creation owns at most one in-flight request; overview alone never
+/// grants creation authority and a repeated Enter-equivalent staging attempt is
+/// rejected locally.
+#[test]
+fn explicit_creation_stages_exactly_one_pending_request() {
+    let routing = routing_state(
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Default::default())),
+        Arc::new(Mutex::new(Default::default())),
+    );
+    let request = create_user_agent_prompt(
+        &"session-1".parse().expect("valid session id"),
+        "engineer",
+        "hello",
+        CreateUserAgentPromptOptions::default(),
+    );
+
+    assert_eq!(
+        routing.stage_create(request.clone(), 0),
+        Err("Use :agent new before creating an agent.")
+    );
+    routing.set_target(UiTarget::Creating);
+    routing
+        .stage_create(request.clone(), 0)
+        .expect("explicit creation owns first request");
+    assert_eq!(
+        routing.stage_create(request, 0),
+        Err("Agent creation is already pending.")
+    );
+}
+
+/// Production create routing stages the exact post-submit revision, suppresses
+/// repeated pending submissions, and preserves both recovery owners.
+#[test]
+fn staged_create_revision_reaches_both_recovery_paths() {
+    let (term, handle, input_tx) = tau_cli_term_raw::Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    let submit_raw_line = |text: &str| {
+        handle.set_buffer(text.to_owned(), text.len());
+        input_tx
+            .send(tau_cli_term_raw::RawEvent::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL,
+            )))
+            .expect("submit raw line");
+        assert!(matches!(
+            term.get_next_event().expect("submitted line"),
+            tau_cli_term_raw::Event::Line(_)
+        ));
+    };
+    let route_first_and_repeat = |routing: &InputRoutingState, first: &str| {
+        routing.set_target(UiTarget::Creating);
+        submit_raw_line(first);
+        let submitted_revision = submitted_editor_revision(&handle);
+        handle.set_buffer("later edit".to_owned(), "later edit".len());
+        assert_ne!(submitted_revision, handle.get_buffer_revision());
+
+        let session_id = "session-1".parse().expect("valid session id");
+        let request = route_create_submission(routing, &handle, first, || {
+            create_user_agent_prompt(
+                &session_id,
+                "engineer",
+                first,
+                CreateUserAgentPromptOptions::default(),
+            )
+        })
+        .expect("first create route");
+
+        submit_raw_line("later edit");
+        let repeated = route_create_submission(routing, &handle, "later edit", || {
+            create_user_agent_prompt(
+                &session_id,
+                "engineer",
+                "later edit",
+                CreateUserAgentPromptOptions::default(),
+            )
+        });
+        assert_eq!(repeated, Err("Agent creation is already pending."));
+        assert_eq!(handle.get_buffer(), "later edit");
+        (request, submitted_revision)
+    };
+
+    let rejected_routing = routing_state(
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Default::default())),
+        Arc::new(Mutex::new(Default::default())),
+    );
+    let (rejected, rejected_revision) = route_first_and_repeat(&rejected_routing, "rejected");
+    let rejected_result = tau_proto::UiCreateAgentResult {
+        request_id: rejected.request_id,
+        session_id: rejected.session_id,
+        outcome: tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::RoleUnavailable,
+            message: "rejected".to_owned(),
+            agent_id: None,
+        },
+    };
+    assert_eq!(
+        rejected_routing
+            .current_agent_state
+            .lock()
+            .expect("selection intent")
+            .test_claim_create_recovery_revision(&rejected_result),
+        Some(rejected_revision)
+    );
+
+    let created_routing = routing_state(
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Default::default())),
+        Arc::new(Mutex::new(Default::default())),
+    );
+    let (created, created_revision) = route_first_and_repeat(&created_routing, "delayed failure");
+    let request_id = created.request_id.clone();
+    let ctx_id = created.ctx_id.clone().expect("create context");
+    let created_agent = agent_id("created-agent");
+    let created_result = tau_proto::UiCreateAgentResult {
+        request_id: created.request_id,
+        session_id: created.session_id,
+        outcome: tau_proto::UiCreateAgentOutcome::Created {
+            agent_id: created_agent.clone(),
+            initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+        },
+    };
+    assert_eq!(
+        created_routing
+            .current_agent_state
+            .lock()
+            .expect("selection intent")
+            .test_claim_create_recovery_revision(&created_result),
+        None
+    );
+    let failed = Event::AgentPromptFailed(tau_proto::AgentPromptFailed {
+        request_id,
+        agent_id: created_agent,
+        ctx_id,
+        stage: tau_proto::AgentPromptFailureStage::Submission,
+        message: "failed".to_owned(),
+    });
+    assert_eq!(
+        created_routing
+            .current_agent_state
+            .lock()
+            .expect("selection intent")
+            .test_claim_initial_failure_revision(&failed),
+        Some(created_revision)
+    );
+    drop(term);
 }
 
 #[test]

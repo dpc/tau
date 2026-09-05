@@ -386,10 +386,12 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     }));
 
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         None
     );
 
@@ -403,10 +405,12 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "worker answer"));
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         None
     );
 
@@ -1412,12 +1416,9 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     assert!(!vt.screen_contains(80, "&q-worker"));
 }
 
+/// Background queued prompts cannot steal selection from the no-agent target.
 #[test]
 fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
-    // Regression: after `:agent new`, an already-running agent can still emit
-    // queued/dequeued prompt events. Those background events must not reselect
-    // the old agent while the user is typing the prompt meant to create a fresh
-    // agent.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1463,10 +1464,12 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
     assert!(!vt.screen_contains(80, "queued old-agent prompt"));
     assert!(!vt.screen_contains(80, "stale old-agent prompt"));
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         None
     );
 
@@ -1476,11 +1479,13 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
     }));
     sync(&handle);
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
-        Some(agent_id("new-agent"))
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
+        None
     );
 }
 
@@ -1506,10 +1511,12 @@ fn queued_prompt_selects_agent_from_empty_state() {
 
     assert!(vt.screen_contains(80, "queued live-agent prompt"));
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         Some(agent_id("live-agent"))
     );
 }

@@ -1317,21 +1317,28 @@ impl Drop for OutputTransactionGuard<'_> {
     }
 }
 
-struct RedrawSuppressionGuard<'a> {
-    handle: &'a TermHandle,
+/// Owned redraw-suppression scope that may span multiple renderer calls.
+///
+/// Dropping the guard releases one nesting level and emits at most one
+/// coalesced redraw notification for all mutations made while it was held.
+#[must_use = "redraw suppression ends immediately when the guard is dropped"]
+pub struct RedrawSuppressionGuard {
+    handle: TermHandle,
 }
 
-impl<'a> RedrawSuppressionGuard<'a> {
-    fn new(handle: &'a TermHandle) -> Self {
+impl RedrawSuppressionGuard {
+    fn new(handle: &TermHandle) -> Self {
         {
             let mut st = handle.lock();
             st.terminal.redraw_suppression = st.terminal.redraw_suppression.saturating_add(1);
         }
-        Self { handle }
+        Self {
+            handle: handle.clone(),
+        }
     }
 }
 
-impl Drop for RedrawSuppressionGuard<'_> {
+impl Drop for RedrawSuppressionGuard {
     fn drop(&mut self) {
         let notify = {
             let mut st = self.handle.lock();
@@ -1493,6 +1500,15 @@ impl TermHandle {
     pub fn with_redraw_suppressed<R>(&self, f: impl FnOnce() -> R) -> R {
         let _guard = RedrawSuppressionGuard::new(self);
         f()
+    }
+
+    /// Suppress redraw notifications until the returned owned guard is dropped.
+    ///
+    /// Prefer [`Self::with_redraw_suppressed`] for one lexical operation. This
+    /// owned form exists for bounded multi-message publication such as initial
+    /// attachment catch-up.
+    pub fn suppress_redraws(&self) -> RedrawSuppressionGuard {
+        RedrawSuppressionGuard::new(self)
     }
 
     /// Run `f` while terminal output snapshot mutations from other threads are
@@ -2067,12 +2083,24 @@ impl TermHandle {
         self.lock().editor.cursor
     }
 
+    /// Returns the current monotonic editor revision.
+    pub fn get_buffer_revision(&self) -> u64 {
+        self.lock().editor.revision
+    }
+
+    /// Returns the exact editor revision captured after the most recent raw
+    /// line submission cleared the prompt.
+    pub fn last_submitted_buffer_revision(&self) -> Option<u64> {
+        self.lock().editor.last_submitted_revision
+    }
+
     /// Replaces the input buffer and cursor position. Also clears
     /// any active history-navigation, completion menu, and prompt undo
     /// state — an external buffer set is treated as a fresh starting
     /// point.
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
+        st.editor.revision = st.editor.revision.wrapping_add(1);
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.editor.buffer = text;
         let abandoned_history_nav = st.editor.history_nav.take().is_some();
@@ -2085,11 +2113,38 @@ impl TermHandle {
         }
     }
 
+    /// Replaces the input buffer only if no raw or external editor mutation has
+    /// occurred since `expected_revision`.
+    pub fn set_buffer_if_revision(
+        &self,
+        expected_revision: u64,
+        text: String,
+        cursor: usize,
+    ) -> bool {
+        let mut st = self.lock();
+        if st.editor.revision != expected_revision {
+            return false;
+        }
+        st.editor.revision = st.editor.revision.wrapping_add(1);
+        let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
+        st.editor.buffer = text;
+        let abandoned_history_nav = st.editor.history_nav.take().is_some();
+        st.editor.completion = None;
+        st.editor.current_undo.clear();
+        st.editor.current_redo.clear();
+        st.write_cursor(new_cursor);
+        if abandoned_history_nav {
+            st.limit_input_history();
+        }
+        true
+    }
+
     /// Recalls a queued prompt before the current draft, matching
     /// prompt-history navigation so pressing Down restores the draft that
     /// was present at recall time.
     pub fn recall_prompt_before_current(&self, text: String) {
         let mut st = self.lock();
+        st.editor.revision = st.editor.revision.wrapping_add(1);
         st.recall_prompt_before_current(text);
     }
 
@@ -2102,6 +2157,7 @@ impl TermHandle {
     /// the replacement becomes the new editable draft.
     pub fn set_buffer_preserving_undo(&self, text: String, cursor: usize) {
         let mut st = self.lock();
+        st.editor.revision = st.editor.revision.wrapping_add(1);
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.editor.buffer = text;
         let abandoned_history_nav = st.editor.history_nav.take().is_some();
@@ -2542,6 +2598,10 @@ impl Term {
 
             match raw {
                 RawEvent::Key(key) => {
+                    {
+                        let mut st = self.handle.lock();
+                        st.editor.revision = st.editor.revision.wrapping_add(1);
+                    }
                     if let Some(event) = self.handle_key(key)? {
                         self.handle.redraw();
                         return Ok(event);
@@ -2580,6 +2640,7 @@ impl Term {
                     let text = normalize_paste_text(text);
                     {
                         let mut st = self.handle.lock();
+                        st.editor.revision = st.editor.revision.wrapping_add(1);
                         st.record_undo();
                         let cursor = st.editor.cursor;
                         st.editor.buffer.insert_str(cursor, &text);
@@ -3318,6 +3379,7 @@ impl Term {
                 .input_history
                 .last()
                 .is_some_and(|draft| draft.buffer == line);
+            st.editor.last_submitted_revision = Some(st.editor.revision);
             line
         };
         tracing::trace!(

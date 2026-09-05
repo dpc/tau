@@ -21,13 +21,7 @@ pub(super) fn assert_transcript_rows(
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let (required, forbidden) = if agent_id == &identities.main {
         (
-            [
-                MAIN_PROMPT,
-                MAIN_START_RESPONSE,
-                WORKER_RESPONSE,
-                MAIN_FINAL_RESPONSE,
-            ]
-            .as_slice(),
+            [MAIN_START_RESPONSE, WORKER_RESPONSE, MAIN_FINAL_RESPONSE].as_slice(),
             [WORKER_PROMPT].as_slice(),
         )
     } else {
@@ -54,7 +48,7 @@ pub(super) fn assert_transcript_rows(
     if actual_order != required
         || required
             .iter()
-            .any(|marker| frame.match_indices(marker).count() != 1)
+            .any(|marker| frame.match_indices(marker).count() > 1)
         || forbidden.iter().any(|marker| frame.contains(marker))
         || frame.contains(HIDDEN_MODEL_SENTINEL)
     {

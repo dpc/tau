@@ -60,11 +60,10 @@ pub(super) enum RendererPresentation {
         /// fold.
         owner: tau_proto::AgentId,
     },
-    /// Select the sole successfully replayed runtime agent at attach
-    /// completion.
-    SelectAttachAgent {
-        /// Agent proven both replayable and present in the current runtime.
-        agent_id: Box<tau_proto::AgentId>,
+    /// Finish attach-time target resolution at the replay boundary.
+    FinishAttach {
+        /// Sole replayable current runtime, or `None` for explicit overview.
+        agent_id: Option<Box<tau_proto::AgentId>>,
     },
 }
 
@@ -90,7 +89,7 @@ enum ToolFold {
 /// Historical tool reconstruction exists only until one replay boundary.
 enum ToolReconciliation {
     /// Retain the bounded inputs needed to derive a pending baseline.
-    Active(ToolReconstructionState),
+    Active(Box<ToolReconstructionState>),
     /// Historical input exceeded the bound; suppress replay starts until the
     /// boundary rather than publishing an incomplete pending baseline.
     FailedClosed,
@@ -126,6 +125,9 @@ struct RetainedUsage {
 struct ToolReconstructionState {
     /// Durable dispatched starts not yet closed by a canonical terminal.
     pending_starts: HashMap<tau_proto::ToolCallId, RendererDelivery>,
+    /// Canonical terminals already observed, including before a duplicate
+    /// replay start or current-state reconstruction row.
+    settled_calls: HashMap<tau_proto::ToolCallId, usize>,
     /// Live tool frames held until the historical lifecycle fold is complete.
     buffered_live: Vec<RendererDelivery>,
     /// Current replayed session identity used to scope loaded-agent facts.
@@ -141,6 +143,7 @@ impl ToolReconstructionState {
     fn new() -> Self {
         Self {
             pending_starts: HashMap::new(),
+            settled_calls: HashMap::new(),
             buffered_live: Vec::new(),
             current_session_id: None,
             loaded_agents: HashMap::new(),
@@ -256,7 +259,9 @@ impl ColdAttachStager {
                 starts: HashMap::new(),
                 snapshotted: HashSet::new(),
             },
-            tool_reconciliation: ToolReconciliation::Active(ToolReconstructionState::new()),
+            tool_reconciliation: ToolReconciliation::Active(Box::new(
+                ToolReconstructionState::new(),
+            )),
             attach_selection: AttachSelection::Collecting {
                 successful_replays: HashMap::new(),
                 runtime_agents: HashMap::new(),
@@ -282,8 +287,7 @@ impl ColdAttachStager {
     /// Admits one decoded delivery and returns deliveries ready for rendering.
     pub(super) fn admit(&mut self, mut delivery: RendererDelivery) -> Vec<RendererDelivery> {
         self.observe_attach_agent_candidate(delivery.event.as_ref(), delivery.queue_bytes);
-        if delivery.replay
-            && !matches!(self.attach_selection, AttachSelection::Disabled)
+        if !matches!(self.attach_selection, AttachSelection::Disabled)
             && matches!(
                 delivery.presentation,
                 RendererPresentation::Ordinary | RendererPresentation::Replay
@@ -311,11 +315,9 @@ impl ColdAttachStager {
             };
         }
         if replay_complete {
-            if let Some(agent_id) = self.take_unique_attach_agent() {
-                delivery.presentation = RendererPresentation::SelectAttachAgent {
-                    agent_id: Box::new(agent_id),
-                };
-            }
+            delivery.presentation = RendererPresentation::FinishAttach {
+                agent_id: self.take_unique_attach_agent().map(Box::new),
+            };
             delivery.abandoned_shell_starts = self.finish_shell_reconciliation();
         }
         match (&mut self.shell_reconciliation, delivery.event.as_ref()) {
@@ -631,6 +633,7 @@ impl ColdAttachStager {
                 let duplicate = match &self.tool_reconciliation {
                     ToolReconciliation::Active(state) => {
                         state.pending_starts.contains_key(&started.call_id)
+                            || state.settled_calls.contains_key(&started.call_id)
                     }
                     ToolReconciliation::FailedClosed | ToolReconciliation::Disabled => {
                         unreachable!("checked active state")
@@ -652,10 +655,25 @@ impl ColdAttachStager {
             }
             event if tool_terminal_id(event).is_some() => {
                 let call_id = tool_terminal_id(event).expect("matched terminal");
+                let (adds_item, old_charge) = match &self.tool_reconciliation {
+                    ToolReconciliation::Active(state) => (
+                        !state.settled_calls.contains_key(call_id),
+                        state.settled_calls.get(call_id).copied().unwrap_or(0),
+                    ),
+                    ToolReconciliation::FailedClosed | ToolReconciliation::Disabled => {
+                        unreachable!("checked active state")
+                    }
+                };
+                if !self.can_replace_metadata(adds_item, old_charge, delivery.queue_bytes) {
+                    return ToolFold::Overflow(delivery);
+                }
                 let ToolReconciliation::Active(state) = &mut self.tool_reconciliation else {
                     unreachable!("checked active state");
                 };
                 state.pending_starts.remove(call_id);
+                state
+                    .settled_calls
+                    .insert(call_id.clone(), delivery.queue_bytes);
                 ToolFold::Forward(delivery)
             }
             _ => ToolFold::Forward(delivery),
@@ -707,7 +725,8 @@ impl ColdAttachStager {
         };
         let metadata_items = usize::from(state.current_session_id.is_some())
             .saturating_add(state.loaded_agents.len())
-            .saturating_add(state.transcript_tool_owners.len());
+            .saturating_add(state.transcript_tool_owners.len())
+            .saturating_add(state.settled_calls.len());
         let retained_items = self
             .transcript
             .len()
@@ -726,7 +745,8 @@ impl ColdAttachStager {
                     .values()
                     .map(|entry| entry.bytes)
                     .sum(),
-            );
+            )
+            .saturating_add(state.settled_calls.values().copied().sum());
         let retained_bytes = self
             .transcript_bytes
             .saturating_add(
@@ -770,7 +790,7 @@ impl ColdAttachStager {
     ) -> Vec<RendererDelivery> {
         let previous =
             std::mem::replace(&mut self.tool_reconciliation, ToolReconciliation::Disabled);
-        let ToolReconciliation::Active(mut state) = previous else {
+        let ToolReconciliation::Active(state) = previous else {
             return overflow
                 .into_iter()
                 .filter(|delivery| {
@@ -778,6 +798,7 @@ impl ColdAttachStager {
                 })
                 .collect();
         };
+        let mut state = *state;
         if discard_baseline {
             self.tool_reconciliation = ToolReconciliation::FailedClosed;
         }
@@ -965,6 +986,11 @@ fn tool_terminal_id(event: &Event) -> Option<&tau_proto::ToolCallId> {
     match event {
         Event::ToolRejected(event) => Some(&event.call_id),
         Event::ToolResultDisplay(event) if event.kind == tau_proto::ToolResultKind::Final => {
+            Some(&event.call_id)
+        }
+        Event::ToolResult(event) | Event::ProviderToolResult(event)
+            if event.kind == tau_proto::ToolResultKind::Final =>
+        {
             Some(&event.call_id)
         }
         Event::ToolError(event) => Some(&event.call_id),

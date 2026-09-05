@@ -150,7 +150,8 @@ impl VtWriter {
         }
     }
 
-    fn screen_text(&self, w: u16) -> Vec<String> {
+    /// Returns the latest visible virtual-terminal rows.
+    pub(crate) fn screen_text(&self, w: u16) -> Vec<String> {
         self.parser
             .lock()
             .expect("vt")
@@ -159,7 +160,8 @@ impl VtWriter {
             .collect()
     }
 
-    fn screen_contains(&self, w: u16, needle: &str) -> bool {
+    /// Returns whether the latest virtual-terminal rows contain `needle`.
+    pub(crate) fn screen_contains(&self, w: u16, needle: &str) -> bool {
         self.screen_text(w).iter().any(|r| r.contains(needle))
     }
 
@@ -180,11 +182,11 @@ impl VtWriter {
         (cell.fgcolor(), cell.bgcolor(), cell.bold())
     }
 
-    fn frame_generation(&self) -> usize {
+    pub(crate) fn frame_generation(&self) -> usize {
         self.frames.0.lock().expect("frames").len()
     }
 
-    fn wait_for_frame_after(&self, generation: usize) -> Vec<String> {
+    pub(crate) fn wait_for_frame_after(&self, generation: usize) -> Vec<String> {
         self.wait_for_frame_after_until(
             generation,
             Instant::now() + Duration::from_secs(2),
@@ -212,7 +214,11 @@ impl VtWriter {
         frames[generation].clone()
     }
 
-    fn wait_for_frame_containing_after(&self, mut generation: usize, needle: &str) -> usize {
+    pub(crate) fn wait_for_frame_containing_after(
+        &self,
+        mut generation: usize,
+        needle: &str,
+    ) -> usize {
         let starting_generation = generation;
         let deadline = Instant::now() + Duration::from_secs(2);
         let context =

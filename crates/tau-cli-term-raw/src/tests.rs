@@ -1373,6 +1373,62 @@ fn redraw_suppression_is_scoped() {
     drop(term);
 }
 
+/// Editor revisions cover every replacement path used by create-failure
+/// recovery and retain the exact post-clear revision for submitted lines.
+#[test]
+fn editor_revision_covers_raw_and_external_mutations() {
+    let (term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()), CursorShape::Bar);
+    let mut revision = handle.get_buffer_revision();
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )))
+        .expect("type key");
+    assert!(matches!(
+        term.get_next_event().expect("key event"),
+        Event::BufferChanged
+    ));
+    revision = revision.wrapping_add(1);
+    assert_eq!(handle.get_buffer_revision(), revision);
+
+    input_tx
+        .send(RawEvent::Paste("bc".to_owned()))
+        .expect("paste text");
+    assert!(matches!(
+        term.get_next_event().expect("paste event"),
+        Event::BufferChanged
+    ));
+    revision = revision.wrapping_add(1);
+    assert_eq!(handle.get_buffer_revision(), revision);
+
+    handle.set_buffer("submit".to_owned(), 6);
+    revision = revision.wrapping_add(1);
+    assert_eq!(handle.get_buffer_revision(), revision);
+    handle.set_buffer_preserving_undo("submit".to_owned(), 6);
+    revision = revision.wrapping_add(1);
+    assert_eq!(handle.get_buffer_revision(), revision);
+    handle.recall_prompt_before_current("recalled".to_owned());
+    revision = revision.wrapping_add(1);
+    assert_eq!(handle.get_buffer_revision(), revision);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )))
+        .expect("submit line");
+    assert!(matches!(
+        term.get_next_event().expect("submitted line"),
+        Event::Line(_)
+    ));
+    revision = revision.wrapping_add(1);
+    assert_eq!(handle.last_submitted_buffer_revision(), Some(revision));
+    skip_virtual_redraw_on_drop(&term);
+}
+
 /// A redraw notification consumed by the worker during suppression must remain
 /// dirty so the outer guard republishes it even when the transaction is a
 /// no-op.

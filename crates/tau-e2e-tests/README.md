@@ -110,10 +110,9 @@ release frame, then compares both PTYs' successful `ok` and `restart succeeded`
 snapshots while one typed terminal owns lifecycle truth.
 A live-attach case starts one fixed PTY, completes one closed text turn, then
 attaches a second exact public CLI by explicit session. Normalized semantic row
-classes cover session,
-extension-ready, initialization, prompt, response, editable-prompt, and status
-order in both views; a late replay-aware observer separately fixes protocol
-delivery order, while an exact one-action provider trace,
+classes cover prompt, response, attach boundary, editable-prompt, and status
+order while excluding routine replay initialization rows; a late replay-aware
+observer separately fixes protocol delivery order, while an exact one-action provider trace,
 bounded synchronization, process-group teardown, and clean runtime artifacts are
 independent oracles. It does not claim byte-identical rendering, broader
 multi-client ordering, tools, production providers, or multi-agent behavior.

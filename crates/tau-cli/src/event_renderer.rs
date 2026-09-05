@@ -25,7 +25,24 @@ use tau_proto::{
 const MAX_SUBMITTED_PROMPT_CORRELATIONS: usize = 64;
 
 use self::prepared_renderer_event::{DeferredRendererEvent, PreparedRendererEvent};
+pub(crate) use self::presentation_facts::PresentationFactClass;
+#[cfg(test)]
+use self::presentation_facts::presentation_fact_name;
+use self::presentation_facts::{HandlerProgress, presentation_fact};
+use self::prompt_projection::{
+    AGENT_MESSAGE_NAME_MAX_BYTES, AGENT_MESSAGE_NAME_MAX_COLUMNS, COMPLETED_AGENT_RESPONSE_PREFIX,
+    STREAMING_AGENT_RESPONSE_PREFIX, queued_prompt_projection, timer_wakeup_ctx,
+    timer_wakeup_summary,
+};
+#[cfg(test)]
+use self::prompt_projection::{
+    QUEUED_PROJECTION_WINDOW_BYTES, bounded_queued_line_end, bounded_queued_line_start,
+};
 use self::terminal_tool_calls::TerminalToolCalls;
+use self::tool_presentation::{
+    BlockerAction, blocker_action_descriptor, effective_shell_timeout, is_blocker_tool_name,
+    sanitize_blocker_display,
+};
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
@@ -39,6 +56,7 @@ use crate::markdown_render::{
 };
 use crate::renderer_handle::RendererHandle;
 use crate::skill_commands::SkillCommandState;
+use crate::theme::PromptInputTarget;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolLineSegment, ToolStatus, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
@@ -54,7 +72,7 @@ use crate::tool_render::{
 use crate::turn_stats_projection::TurnStatsPresentationProjection;
 use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
 use crate::{
-    MUTEX_POISONED, message_fact_render as path_crate_message_fact_render,
+    message_fact_render as path_crate_message_fact_render,
     provider_quota as path_crate_provider_quota,
 };
 
@@ -191,346 +209,6 @@ fn normalize_terminal_tool_use_state(
         }
     }
     descriptor
-}
-
-/// One safe, finite action accepted by the bundled Swarm blocker tool.
-#[derive(Clone, Copy)]
-enum BlockerAction {
-    Add,
-    Cancel,
-    List,
-}
-
-impl BlockerAction {
-    /// Returns the stable compact label for this action.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Cancel => "cancel",
-            Self::List => "list",
-        }
-    }
-}
-
-/// Extracts the sole safe compact descriptor from a built-in blocker
-/// invocation.
-///
-/// Blocker payloads carry titles, descriptions, answers, and cancellation
-/// reasons. The action discriminant alone distinguishes the operation without
-/// displaying any of that payload.
-fn blocker_action_descriptor(started: &tau_proto::ToolStarted) -> Option<BlockerAction> {
-    if !is_blocker_tool_name(started.tool_name.as_str()) {
-        return None;
-    }
-    let CborValue::Map(entries) = &started.arguments else {
-        return None;
-    };
-    let mut action = None;
-    for (key, value) in entries {
-        if !matches!(key, CborValue::Text(key) if key == "action") {
-            continue;
-        }
-        let CborValue::Text(value) = value else {
-            return None;
-        };
-        if action.is_some() {
-            return None;
-        }
-        action = match value.as_str() {
-            "add" => Some(BlockerAction::Add),
-            "cancel" => Some(BlockerAction::Cancel),
-            "list" => Some(BlockerAction::List),
-            _ => return None,
-        };
-    }
-    action
-}
-
-/// Recognizes the bundled Swarm blocker name with an optional structural
-/// extension-instance prefix, but never its removed legacy alias.
-fn is_blocker_tool_name(name: &str) -> bool {
-    name == BLOCKER_TOOL_NAME
-        || name
-            .strip_suffix("_task_blocker")
-            .is_some_and(|prefix| !prefix.is_empty())
-}
-
-/// Returns the effective timeout for a built-in shell invocation.
-///
-/// Shell providers enforce a 300-second default when the agent omits
-/// `timeout`. This narrow presentation projection retains that declared limit
-/// so the generic duration chip can show elapsed time against the actual
-/// command budget without changing the provider display protocol.
-fn effective_shell_timeout(started: &tau_proto::ToolStarted) -> Option<Duration> {
-    const DEFAULT_TIMEOUT_SECS: u64 = 300;
-
-    if !matches!(started.tool_name.as_str(), "shell" | "gpt_shell") {
-        return None;
-    }
-    let CborValue::Map(entries) = &started.arguments else {
-        return None;
-    };
-
-    let mut timeout = None;
-    for (key, value) in entries {
-        if !matches!(key, CborValue::Text(key) if key == "timeout") {
-            continue;
-        }
-        let CborValue::Integer(value) = value else {
-            return None;
-        };
-        let Ok(value) = u64::try_from(*value) else {
-            return None;
-        };
-        if timeout.replace(value).is_some() {
-            return None;
-        }
-    }
-    Some(Duration::from_secs(timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)))
-}
-
-/// Projects a blocker display through the action-only presentation boundary.
-fn sanitize_blocker_display(
-    display: &mut ToolCallDisplay,
-    is_blocker: bool,
-    action: Option<BlockerAction>,
-) {
-    if !is_blocker {
-        return;
-    }
-    display.mode.clear();
-    display.args = action.map_or_else(String::new, |action| action.as_str().to_owned());
-    display.range = None;
-    display.suffixes.retain(|suffix| {
-        matches!(
-            suffix.status,
-            ToolStatus::Success
-                | ToolStatus::Warning
-                | ToolStatus::Error
-                | ToolStatus::Pending
-                | ToolStatus::Progress
-                | ToolStatus::Time
-        )
-    });
-    display.payload = None;
-}
-
-fn admit_handler_stall_warning(now: Instant) -> bool {
-    let mut last = LAST_HANDLER_STALL_WARNING
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect(MUTEX_POISONED);
-    if last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(5)) {
-        return false;
-    }
-    *last = Some(now);
-    true
-}
-
-/// Content-free renderer stage timing emitted on every handler exit.
-struct HandlerProgress {
-    /// Process-local delivery correlation when the socket supplied this event.
-    delivery_id: Option<RendererDeliveryId>,
-    /// Stable content-free protocol event name.
-    event_name: tau_proto::EventName,
-    /// Monotonic handler start time.
-    started_at: Instant,
-}
-
-impl Drop for HandlerProgress {
-    fn drop(&mut self) {
-        let elapsed = self.started_at.elapsed();
-        tracing::trace!(
-            target: "tau_cli::frontend_progress",
-            delivery_id = self.delivery_id.map(RendererDeliveryId::get),
-            event_name = %self.event_name,
-            handler_us = elapsed.as_micros(),
-            "renderer handler finished"
-        );
-        if Duration::from_millis(500) <= elapsed && admit_handler_stall_warning(Instant::now()) {
-            tracing::warn!(
-                target: "tau_cli::frontend_progress",
-                delivery_id = self.delivery_id.map(RendererDeliveryId::get),
-                event_name = %self.event_name,
-                handler_ms = elapsed.as_millis(),
-                "renderer handler stalled"
-            );
-        }
-    }
-}
-
-/// Selects canonical facts whose visible presentation can be flush-correlated.
-fn presentation_fact(event: &Event) -> Option<PresentationFactClass> {
-    presentation_fact_name(&event.name())
-}
-
-/// CLI-owned canonical selected-presentation fact.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub(super) enum PresentationFactClass {
-    /// A prompt entered the visible queued state.
-    PromptQueued,
-    /// A queued prompt reached its visible submitted state.
-    PromptSubmitted,
-    /// A visible prompt accepted steering content.
-    PromptSteered,
-    /// A streaming response visibly advanced.
-    ResponseUpdated,
-    /// A response visibly reached its canonical terminal presentation.
-    ResponseFinished,
-    /// A prompt visibly ended through cancellation or supersession.
-    PromptTerminated,
-}
-
-impl PresentationFactClass {
-    /// Returns the one invariant event/class label written to operational
-    /// traces.
-    const fn label(self) -> &'static str {
-        match self {
-            Self::PromptQueued => "agent.prompt_queued/prompt_queued",
-            Self::PromptSubmitted => "agent.prompt_submitted/prompt_submitted",
-            Self::PromptSteered => "agent.prompt_steered/prompt_steered",
-            Self::ResponseUpdated => "provider.response_updated/response_updated",
-            Self::ResponseFinished => "provider.response_finished/response_finished",
-            Self::PromptTerminated => "agent.prompt_terminated/prompt_terminated",
-        }
-    }
-
-    /// Returns this fact's opaque terminal-layer invalidation key.
-    fn key(self) -> tau_cli_term::PresentationObservationKey {
-        tau_cli_term::PresentationObservationKey::new(self as u8)
-            .expect("finite CLI presentation class must fit the raw invalidation mask")
-    }
-
-    /// Returns the opaque predecessor-key mask superseded by this fact.
-    fn invalidates(self) -> tau_cli_term::PresentationInvalidation {
-        let none = tau_cli_term::PresentationInvalidation::none();
-        match self {
-            Self::PromptSubmitted => none.with(Self::PromptQueued.key()),
-            Self::ResponseFinished => none.with(Self::ResponseUpdated.key()),
-            Self::PromptTerminated => none
-                .with(Self::PromptQueued.key())
-                .with(Self::PromptSubmitted.key())
-                .with(Self::ResponseUpdated.key()),
-            _ => none,
-        }
-    }
-
-    /// Builds the application-agnostic typed fact accepted by the raw layer.
-    pub(super) fn opaque_fact(self) -> tau_cli_term::OpaquePresentationFact {
-        tau_cli_term::OpaquePresentationFact::new(self.label(), self.key(), self.invalidates())
-    }
-
-    /// Returns whether mutation and registration require atomic capture
-    /// suppression.
-    const fn invalidates_pending(self) -> bool {
-        matches!(
-            self,
-            Self::PromptSubmitted | Self::ResponseFinished | Self::PromptTerminated
-        )
-    }
-}
-
-/// Maps stable canonical event names to content-free presentation classes.
-fn presentation_fact_name(event_name: &tau_proto::EventName) -> Option<PresentationFactClass> {
-    use PresentationFactClass as Class;
-    match event_name {
-        name if name == &tau_proto::EventName::AGENT_PROMPT_QUEUED => Some(Class::PromptQueued),
-        name if name == &tau_proto::EventName::AGENT_PROMPT_SUBMITTED => {
-            Some(Class::PromptSubmitted)
-        }
-        name if name == &tau_proto::EventName::AGENT_PROMPT_STEERED => Some(Class::PromptSteered),
-        name if name == &tau_proto::EventName::PROVIDER_RESPONSE_UPDATED => {
-            Some(Class::ResponseUpdated)
-        }
-        name if name == &tau_proto::EventName::PROVIDER_RESPONSE_FINISHED => {
-            Some(Class::ResponseFinished)
-        }
-        name if name == &tau_proto::EventName::AGENT_PROMPT_TERMINATED => {
-            Some(Class::PromptTerminated)
-        }
-        _ => None,
-    }
-}
-const COMPLETED_AGENT_RESPONSE_PREFIX: &str = "◆ ";
-const STREAMING_AGENT_RESPONSE_PREFIX: &str = "◇ ";
-/// Maximum rendered terminal columns for a supplemental agent message name.
-const AGENT_MESSAGE_NAME_MAX_COLUMNS: usize = 48;
-/// Maximum rendered UTF-8 bytes for a supplemental agent message name.
-const AGENT_MESSAGE_NAME_MAX_BYTES: usize = 192;
-const QUEUED_PROJECTION_WINDOW_BYTES: usize = 16 * 1024;
-
-fn bounded_queued_line_start(text: &str) -> &str {
-    let mut end = text.len().min(QUEUED_PROJECTION_WINDOW_BYTES);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let window = &text[..end];
-    window
-        .find(['\n', '\r'])
-        .map_or(window, |line_end| &window[..line_end])
-}
-
-fn bounded_queued_line_end(text: &str) -> &str {
-    let mut start = text.len().saturating_sub(QUEUED_PROJECTION_WINDOW_BYTES);
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    let window = &text[start..];
-    window
-        .rfind(['\n', '\r'])
-        .map_or(window, |line_end| &window[line_end + 1..])
-}
-
-fn queued_prompt_projection(
-    theme: &tau_themes::Theme,
-    osc8_links: bool,
-    prefix: tau_cli_term::StyledText,
-    text: &str,
-) -> tau_cli_term::TwoLineElision {
-    let styled = |value| {
-        markdown_block_with_osc8(
-            theme,
-            tau_themes::names::USER_PROMPT_QUEUED,
-            value,
-            osc8_links,
-        )
-        .content
-    };
-    let unabridged_text =
-        (text.len() <= QUEUED_PROJECTION_WINDOW_BYTES).then(|| format!("{text} (queued)"));
-    let unabridged = unabridged_text.as_deref().map(styled);
-    tau_cli_term::TwoLineElision {
-        prefix,
-        first: styled(bounded_queued_line_start(text)),
-        last: styled(bounded_queued_line_end(text)),
-        first_omissions: vec![styled("   ┄"), styled("┄")],
-        last_omissions: vec![styled("┄ "), styled("┄")],
-        labels: vec![styled(" (queued)"), styled(" (q)"), styled("q")],
-        unabridged,
-    }
-}
-
-fn timer_wakeup_ctx(ctx_id: Option<&str>) -> Option<(&str, &str)> {
-    let rest = ctx_id?.strip_prefix(TIMER_WAKEUP_CTX_PREFIX)?;
-    rest.rsplit_once(':')
-}
-
-fn timer_wakeup_summary(timer_id: &str, text: Option<&str>) -> String {
-    let Some(text) = text else {
-        return format!("Timer `{timer_id}` woke this agent");
-    };
-    let trimmed = text.trim();
-    let timer_prefix = format!("Timer `{timer_id}` fired:");
-    let message = trimmed
-        .strip_prefix(&timer_prefix)
-        .map(str::trim)
-        .unwrap_or(trimmed);
-    if message.is_empty() {
-        format!("Timer `{timer_id}` woke this agent")
-    } else {
-        format!("Timer `{timer_id}` woke this agent: {message}")
-    }
 }
 
 /// Rolling UI↔harness socket throughput maxima for one terminal UI.
@@ -1853,7 +1531,7 @@ impl EventRenderer {
                 agents_ui_state: HashMap::new(),
                 overview_message_ids: HashSet::new(),
                 current_agent_state: Arc::new(Mutex::new(
-                    renderer_state::SelectionIntent::default(),
+                    selection_intent::SelectionIntent::default(),
                 )),
                 draft_retargeter: None,
             },
@@ -1918,6 +1596,7 @@ impl EventRenderer {
             staged_finished_status: None,
             final_publication_in_progress: false,
             hidden_finalization_in_progress: false,
+            cold_attach_redraw: None,
             #[cfg(test)]
             finished_staging_hook: None,
             #[cfg(test)]
@@ -1930,6 +1609,14 @@ impl EventRenderer {
     /// Configures whether transcript Markdown links carry OSC 8 metadata.
     pub(crate) fn set_osc8_links(&mut self, enabled: bool) {
         self.presentation.osc8_links = enabled;
+    }
+
+    /// Retains a redraw scope acquired before any attach-time terminal output.
+    pub(crate) fn set_cold_attach_redraw(
+        &mut self,
+        guard: Option<tau_cli_term::RedrawSuppressionGuard>,
+    ) {
+        self.cold_attach_redraw = guard;
     }
 
     pub(crate) fn set_tool_timer(&mut self, timer: ToolTimerNotifier) {
@@ -2037,17 +1724,6 @@ impl EventRenderer {
         self.discovery.agent_navigation.clone()
     }
 
-    pub(crate) fn current_agent_state(
-        &self,
-    ) -> std::sync::Arc<std::sync::Mutex<renderer_state::SelectionIntent>> {
-        self.selection.current_agent_state.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn displayed_agent_id_for_test(&self) -> Option<&tau_proto::AgentId> {
-        self.selection.displayed_agent_id.as_ref()
-    }
-
     #[cfg(test)]
     /// Removes the status block so tests can exercise placeholder-only redraws.
     pub(crate) fn clear_model_status_for_test(&mut self) {
@@ -2067,7 +1743,10 @@ impl EventRenderer {
     /// Applies a target already claimed by the input or attach CAS boundary
     /// only while the exact intent epoch and target remain current.
     pub(crate) fn apply_claimed_agent(&mut self, agent_id: tau_proto::AgentId, intent_epoch: u64) {
-        if !self.selection_intent_matches(intent_epoch, Some(&agent_id)) {
+        if !self.selection_intent_matches(
+            intent_epoch,
+            &selection_intent::UiTarget::Viewing(agent_id.clone()),
+        ) {
             return;
         }
         self.switch_agent_after_display_update_inner(agent_id, || {}, false);
@@ -2118,13 +1797,18 @@ impl EventRenderer {
             self.selection.awaiting_new_agent_selection = false;
 
             if target_changed {
-                self.set_current_agent_id(Some(agent_id), false, update_intent);
+                self.set_current_agent_id(
+                    Some(agent_id),
+                    false,
+                    update_intent,
+                    selection_intent::UiTarget::Overview,
+                );
                 self.render_model_status();
                 self.refresh_prompt_placeholder();
                 handle.redraw();
             }
+            self.flush_pending_initial_discovery();
         });
-        self.flush_pending_initial_discovery();
     }
 
     #[cfg(test)]
@@ -2134,24 +1818,27 @@ impl EventRenderer {
 
     /// Applies an empty target already claimed by the input boundary only while
     /// the exact intent epoch remains current.
-    pub(crate) fn apply_claimed_clear(&mut self, intent_epoch: u64) {
-        if !self.selection_intent_matches(intent_epoch, None) {
+    pub(crate) fn apply_claimed_empty_target(
+        &mut self,
+        intent_epoch: u64,
+        target: selection_intent::EmptyUiTarget,
+    ) {
+        let target = selection_intent::UiTarget::from(target);
+        if !self.selection_intent_matches(intent_epoch, &target) {
             return;
         }
-        self.clear_selected_agent_after_display_update_inner(|| {}, false);
+        self.clear_selected_agent_after_display_update_inner(|| {}, false, target);
     }
 
     fn selection_intent_matches(
         &self,
         intent_epoch: u64,
-        agent_id: Option<&tau_proto::AgentId>,
+        target: &selection_intent::UiTarget,
     ) -> bool {
         self.selection
             .current_agent_state
             .lock()
-            .is_ok_and(|intent| {
-                intent.epoch == intent_epoch && intent.selected_agent_id.as_ref() == agent_id
-            })
+            .is_ok_and(|intent| intent.matches(intent_epoch, target))
     }
 
     #[cfg(test)]
@@ -2166,27 +1853,25 @@ impl EventRenderer {
 
     #[cfg(test)]
     fn clear_selected_agent_after_display_update(&mut self, after_display_update: impl FnOnce()) {
-        self.clear_selected_agent_after_display_update_inner(after_display_update, true);
+        self.clear_selected_agent_after_display_update_inner(
+            after_display_update,
+            true,
+            selection_intent::UiTarget::Overview,
+        );
     }
 
     fn clear_selected_agent_after_display_update_inner(
         &mut self,
         after_display_update: impl FnOnce(),
         update_intent: bool,
+        target: selection_intent::UiTarget,
     ) {
         let handle = self.resources.handle.terminal_handle();
         handle.with_redraw_suppressed(|| {
             handle.with_output_transaction(|| {
                 let target_changed = self.selection.current_agent_id.is_some();
                 let display_changed = self.selection.displayed_agent_id.is_some();
-                if target_changed || display_changed {
-                    // Only a clear that actually leaves an agent creates the explicit
-                    // no-agent boundary. A delayed clear command that arrives while
-                    // the UI is already on the no-agent screen must stay a no-op,
-                    // otherwise the next agent would incorrectly clear startup
-                    // history instead of adopting it.
-                    self.selection.awaiting_new_agent_selection = true;
-                }
+                self.selection.awaiting_new_agent_selection = true;
 
                 if display_changed {
                     self.store_visible_agent_state();
@@ -2197,12 +1882,12 @@ impl EventRenderer {
                 }
                 after_display_update();
 
-                if target_changed {
-                    self.set_current_agent_id(None, false, update_intent);
+                if target_changed || update_intent {
+                    self.set_current_agent_id(None, false, update_intent, target);
                     self.render_model_status();
-                    self.refresh_prompt_placeholder();
-                    handle.redraw();
                 }
+                self.refresh_prompt_placeholder();
+                handle.redraw();
             });
         });
     }
@@ -2348,11 +2033,11 @@ impl EventRenderer {
         agent_id: Option<tau_proto::AgentId>,
         retarget_draft: bool,
         update_intent: bool,
+        empty_target: selection_intent::UiTarget,
     ) {
         self.selection.current_agent_id = agent_id.clone();
         if update_intent && let Ok(mut current) = self.selection.current_agent_state.lock() {
-            current.epoch = current.epoch.saturating_add(1);
-            current.selected_agent_id = agent_id;
+            current.set_target(agent_id.map_or(empty_target, selection_intent::UiTarget::Viewing));
         }
         if retarget_draft {
             self.retarget_prompt_draft();
@@ -2777,12 +2462,23 @@ impl EventRenderer {
                             )
                         })
                 });
+        let target = self.selection.current_agent_state.lock().map_or(
+            PromptInputTarget::Overview,
+            |intent| match intent.target() {
+                selection_intent::UiTarget::Viewing(agent_id) => {
+                    PromptInputTarget::Agent(agent_id.to_string())
+                }
+                selection_intent::UiTarget::Creating => PromptInputTarget::Creating,
+                selection_intent::UiTarget::InitialOverview
+                | selection_intent::UiTarget::Overview => PromptInputTarget::Overview,
+            },
+        );
         self.resources
             .handle
             .set_input_placeholder(crate::theme::prompt_input_placeholder(
                 &self.resources.theme,
                 self.role.current_role.as_deref(),
-                self.selection.current_agent_id.as_deref(),
+                target,
                 current_agent_navigation,
             ));
     }
@@ -4884,6 +4580,7 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         delivery_id: RendererDeliveryId,
     ) {
+        self.begin_cold_attach_redraw();
         self.handle_recorded_delivery(event, recorded_at, Some(delivery_id), false, true);
     }
 
@@ -4893,27 +4590,68 @@ impl EventRenderer {
     pub(crate) fn handle_reconstructed_tool_start_socket_delivery(
         &mut self,
         event: &Event,
-        target_agent_id: &tau_proto::AgentId,
+        _target_agent_id: &tau_proto::AgentId,
         recorded_at: UnixMicros,
         delivery_id: RendererDeliveryId,
     ) {
-        let user_originated =
-            matches!(event, Event::ToolStarted(started) if started.originator.is_user());
-        let can_claim = user_originated
-            && self.selection.current_agent_id.is_none()
-            && self.selection.displayed_agent_id.is_none()
-            && !self.selection.awaiting_new_agent_selection
-            && self.can_select_target_from_empty(target_agent_id);
-        if can_claim
-            && let Some(intent_epoch) = self.claim_initial_selection_intent(target_agent_id)
-        {
-            self.apply_claimed_agent(target_agent_id.clone(), intent_epoch);
-        }
         self.handle_replay_socket_delivery(event, recorded_at, delivery_id);
     }
 
-    /// Selects an attach-time replay target only while the UI still has no
-    /// explicit agent choice, then processes the replay boundary normally.
+    /// Completes attach-time target resolution without overriding newer local
+    /// intent, then publishes one local history/live boundary.
+    pub(crate) fn handle_attach_replay_complete_socket_delivery(
+        &mut self,
+        event: &Event,
+        target_agent_id: Option<&tau_proto::AgentId>,
+        recorded_at: UnixMicros,
+        delivery_id: RendererDeliveryId,
+    ) {
+        self.begin_cold_attach_redraw();
+        match target_agent_id {
+            Some(target_agent_id) => {
+                let claimed_epoch = self.claim_initial_selection_intent(target_agent_id);
+                if let Some(intent_epoch) = claimed_epoch {
+                    self.apply_claimed_agent(target_agent_id.clone(), intent_epoch);
+                }
+            }
+            None => {
+                if self.claim_initial_overview_intent() {
+                    self.selection.awaiting_new_agent_selection = true;
+                    self.refresh_prompt_placeholder();
+                }
+            }
+        }
+        self.handle_socket_delivery(event, recorded_at, delivery_id);
+        let session_id = self
+            .session
+            .current_session_id
+            .as_ref()
+            .map_or_else(|| "session".to_owned(), ToString::to_string);
+        self.resources.handle.print_output(
+            "attach-boundary",
+            tau_cli_term::resolve::themed_block(
+                &self.resources.theme,
+                tau_themes::names::SYSTEM_INFO,
+                format!(
+                    "{}attached to {session_id} — live updates below",
+                    crate::transcript_markers::STATUS_UPDATE
+                ),
+            ),
+        );
+        self.resources.handle.terminal_handle().redraw();
+        drop(self.cold_attach_redraw.take());
+    }
+
+    /// Starts one redraw-suppressed initial publication scope on the first
+    /// cold-attach delivery.
+    fn begin_cold_attach_redraw(&mut self) {
+        if self.cold_attach_redraw.is_none() {
+            self.cold_attach_redraw =
+                Some(self.resources.handle.terminal_handle().suppress_redraws());
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn handle_attach_agent_selection_socket_delivery(
         &mut self,
         event: &Event,
@@ -4921,11 +4659,137 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         delivery_id: RendererDeliveryId,
     ) {
-        let claimed_epoch = self.claim_initial_selection_intent(target_agent_id);
-        if let Some(intent_epoch) = claimed_epoch {
-            self.apply_claimed_agent(target_agent_id.clone(), intent_epoch);
+        self.handle_attach_replay_complete_socket_delivery(
+            event,
+            Some(target_agent_id),
+            recorded_at,
+            delivery_id,
+        );
+    }
+
+    /// Claims the untouched initial target as an explicit non-interactive
+    /// overview when attach finds zero or multiple valid runtimes.
+    fn claim_initial_overview_intent(&self) -> bool {
+        self.selection
+            .current_agent_state
+            .lock()
+            .is_ok_and(|mut intent| intent.claim_initial_overview())
+    }
+
+    /// Applies a matching create result only when the request still owns this
+    /// attachment's explicit creation intent.
+    fn apply_ui_create_result(
+        &mut self,
+        result: &tau_proto::UiCreateAgentResult,
+    ) -> UiCreateResultEffect {
+        let effect = self.claim_ui_create_result(result);
+        self.apply_ui_create_result_effect(&effect);
+        effect
+    }
+
+    /// Claims the client-local effect of one matching create result without
+    /// mutating the visible editor.
+    fn claim_ui_create_result(
+        &self,
+        result: &tau_proto::UiCreateAgentResult,
+    ) -> UiCreateResultEffect {
+        self.selection
+            .current_agent_state
+            .lock()
+            .map_or(UiCreateResultEffect::None, |mut intent| {
+                intent.claim_create_result(result)
+            })
+    }
+
+    /// Applies one claimed create-result effect after revalidating any editor
+    /// restoration against its exact intent epoch and target.
+    fn apply_ui_create_result_effect(&mut self, effect: &UiCreateResultEffect) {
+        match effect {
+            UiCreateResultEffect::None => {}
+            UiCreateResultEffect::Select {
+                agent_id,
+                intent_epoch,
+            } => self.apply_claimed_agent(agent_id.clone(), *intent_epoch),
+            UiCreateResultEffect::RestoreDraft {
+                text,
+                intent_epoch,
+                target,
+                editor_revision,
+            } => {
+                self.restore_create_draft_if_owned(text, *intent_epoch, target, *editor_revision);
+            }
+            UiCreateResultEffect::SelectAndRestore {
+                agent_id,
+                intent_epoch,
+                text,
+                editor_revision,
+            } => {
+                self.apply_claimed_agent(agent_id.clone(), *intent_epoch);
+                self.restore_create_draft_if_owned(
+                    text,
+                    *intent_epoch,
+                    &selection_intent::UiTarget::Viewing(agent_id.clone()),
+                    *editor_revision,
+                );
+            }
         }
-        self.handle_socket_delivery(event, recorded_at, delivery_id);
+    }
+
+    /// Clears or restores the locally retained initial create prompt as its
+    /// canonical prompt lifecycle becomes durable.
+    fn apply_initial_create_prompt_lifecycle(&mut self, event: &Event) {
+        let restored = self.claim_initial_create_prompt_lifecycle(event);
+        if let Some(restored) = restored {
+            self.restore_create_draft_if_owned(
+                &restored.text,
+                restored.intent_epoch,
+                &restored.target,
+                restored.editor_revision,
+            );
+        }
+    }
+
+    /// Claims one matching initial-prompt lifecycle effect without mutating the
+    /// visible editor.
+    fn claim_initial_create_prompt_lifecycle(
+        &self,
+        event: &Event,
+    ) -> Option<selection_intent::DraftRecovery> {
+        self.selection
+            .current_agent_state
+            .lock()
+            .ok()
+            .and_then(|mut intent| intent.claim_initial_prompt_lifecycle(event))
+    }
+
+    /// Restores one create submission only while its exact attachment-local
+    /// intent still owns the editor mutation.
+    fn restore_create_draft_if_owned(
+        &self,
+        text: &str,
+        intent_epoch: u64,
+        target: &selection_intent::UiTarget,
+        editor_revision: u64,
+    ) -> bool {
+        let restored = self
+            .selection
+            .current_agent_state
+            .lock()
+            .is_ok_and(|intent| {
+                if !intent.matches(intent_epoch, target) {
+                    return false;
+                }
+                self.resources
+                    .handle
+                    .terminal_handle()
+                    .set_buffer_if_revision(editor_revision, text.to_owned(), text.len())
+            });
+        if !restored {
+            return false;
+        }
+        self.retarget_prompt_draft();
+        self.resources.handle.redraw();
+        true
     }
 
     fn claim_initial_selection_intent(&self, target_agent_id: &tau_proto::AgentId) -> Option<u64> {
@@ -4933,15 +4797,7 @@ impl EventRenderer {
             .current_agent_state
             .lock()
             .ok()
-            .and_then(|mut intent| {
-                if intent.epoch == 0 && intent.selected_agent_id.is_none() {
-                    intent.epoch = 1;
-                    intent.selected_agent_id = Some(target_agent_id.clone());
-                    Some(intent.epoch)
-                } else {
-                    None
-                }
-            })
+            .and_then(|mut intent| intent.claim_initial_agent(target_agent_id.clone()))
     }
 
     fn handle_recorded_delivery(
@@ -5128,6 +4984,7 @@ impl EventRenderer {
             started_at: Instant::now(),
         };
         self.record_session_token_usage(event);
+        self.apply_initial_create_prompt_lifecycle(event);
         let deferred_metadata_target = (!matches!(event, Event::HarnessAgentContextInitialized(_)))
             .then(|| self.agent_id_for_event(event))
             .flatten()
@@ -5135,7 +4992,6 @@ impl EventRenderer {
                 self.selection.current_agent_id.is_none()
                     && self.selection.displayed_agent_id.is_none()
                     && !self.selection.awaiting_new_agent_selection
-                    && !self.event_selects_agent_from_empty(event, target_agent_id)
                     && self
                         .discovery
                         .pending_initial_discovery
@@ -5145,6 +5001,10 @@ impl EventRenderer {
             self.learn_agent_metadata(&prepared);
         } else {
             self.learn_deferred_routing_metadata(&prepared);
+        }
+        if suppress_auto_selection && self.apply_silent_cold_attach_snapshot(event) {
+            self.update_agent_in_progress();
+            return;
         }
         if let Event::HarnessAgentContextInitialized(initialized) = event
             && self.selection.current_agent_id.is_none()
@@ -5205,16 +5065,10 @@ impl EventRenderer {
             return;
         }
         if self.selection.current_agent_id.is_none() {
-            if self.event_selects_agent_from_empty(event, &target_agent_id) {
-                if suppress_auto_selection {
-                    self.handle_recorded_at_for_hidden_agent(
-                        &prepared,
-                        recorded_at,
-                        target_agent_id,
-                    );
-                    self.update_agent_in_progress();
-                    return;
-                }
+            if self.selection_is_initial_overview()
+                && !suppress_auto_selection
+                && Self::event_may_claim_initial_agent(event)
+            {
                 let claimed_epoch = replay_selection_guard
                     .then(|| self.claim_initial_selection_intent(&target_agent_id))
                     .flatten();
@@ -5235,6 +5089,7 @@ impl EventRenderer {
                     Some(target_agent_id.clone()),
                     true,
                     !replay_selection_guard,
+                    selection_intent::UiTarget::Overview,
                 );
                 self.refresh_prompt_placeholder();
                 self.render_model_status();
@@ -5254,6 +5109,7 @@ impl EventRenderer {
                 return;
             }
             if !inter_agent_message
+                && self.selection_is_initial_overview()
                 && !Self::event_originator_is_extension(event)
                 && !Self::event_has_explicit_ui_target(event)
                 && !matches!(event, Event::HarnessAgentContextInitialized(_))
@@ -5278,6 +5134,65 @@ impl EventRenderer {
 
         self.handle_recorded_at_for_hidden_agent(&prepared, recorded_at, target_agent_id);
         self.update_agent_in_progress();
+    }
+
+    /// Applies routine catch-up snapshots without appending live-looking
+    /// lifecycle diagnostics to cold-attach history.
+    fn apply_silent_cold_attach_snapshot(&mut self, event: &Event) -> bool {
+        match event {
+            Event::SessionStarted(started) => {
+                self.handle_existing_session_started(started);
+                true
+            }
+            Event::ExtensionStarting(_)
+            | Event::ExtensionContextReady(_)
+            | Event::HarnessSessionDir(_)
+            | Event::HarnessUiDir(_) => true,
+            Event::ExtensionReady(ready) => {
+                self.session
+                    .ready_extensions
+                    .insert(ready.extension_name.to_string());
+                true
+            }
+            Event::HarnessAgentContextInitialized(initialized) => {
+                self.discovery.initialized_discovery_epochs.insert((
+                    initialized.agent_id.clone(),
+                    initialized.agent_initialization_id.clone(),
+                ));
+                true
+            }
+            Event::HarnessNotice(notice)
+                if notice.purpose == tau_proto::NoticePurpose::Diagnostic =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns whether no explicit local target decision has yet been made.
+    fn selection_is_initial_overview(&self) -> bool {
+        self.selection
+            .current_agent_state
+            .lock()
+            .is_ok_and(|intent| intent.is_initial_overview())
+    }
+
+    /// Returns whether one user-originated lifecycle can adopt the untouched
+    /// startup transcript of the UI that launched the daemon. Explicit overview
+    /// and cold attach never use this fallback.
+    fn event_may_claim_initial_agent(event: &Event) -> bool {
+        match event {
+            Event::AgentPromptCreated(prompt) => prompt.originator.is_user(),
+            Event::AgentPromptStarted(prompt) => prompt.originator.is_user(),
+            Event::AgentCompactionTriggered(triggered) => triggered.originator.is_user(),
+            Event::AgentPromptQueued(queued) => !queued.message_class.is_internal(),
+            Event::AgentPromptSubmitted(prompt) => {
+                prompt.originator.is_user() && !prompt.message_class.is_internal()
+            }
+            Event::UiPromptSubmitted(prompt) => prompt.originator.is_user(),
+            _ => false,
+        }
     }
 
     /// Folds a terminal provider response into the session-wide command total.
@@ -5536,48 +5451,6 @@ impl EventRenderer {
     }
 
     fn agent_message_visible_on_empty_screen(&self, target_agent_id: &tau_proto::AgentId) -> bool {
-        !self.selection.awaiting_new_agent_selection
-            || !self.selection.agents_ui_state.contains_key(target_agent_id)
-    }
-
-    fn event_selects_agent_from_empty(
-        &self,
-        event: &Event,
-        target_agent_id: &tau_proto::AgentId,
-    ) -> bool {
-        match event {
-            Event::AgentPromptCreated(prompt) => {
-                prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
-            }
-            Event::AgentPromptStarted(prompt) => {
-                prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
-            }
-            Event::AgentCompactionTriggered(triggered) => {
-                triggered.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
-            }
-            Event::AgentPromptQueued(queued) => {
-                !queued.message_class.is_internal()
-                    && self.can_select_target_from_empty(target_agent_id)
-            }
-            Event::AgentPromptSubmitted(prompt) => {
-                prompt.originator.is_user()
-                    && !prompt.message_class.is_internal()
-                    && self.can_select_target_from_empty(target_agent_id)
-            }
-            Event::UiPromptSubmitted(prompt) => {
-                prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
-            }
-            _ => false,
-        }
-    }
-
-    fn can_select_target_from_empty(&self, target_agent_id: &tau_proto::AgentId) -> bool {
-        // When the UI is in the explicit start-new-agent state (`:agent new` or
-        // `:agent switch none`), background activity from the previously visible
-        // agent must not steal selection while the user is typing the prompt
-        // meant to create a fresh agent. An event for an agent whose transcript
-        // is already hidden here is therefore treated as background work, not as
-        // the new agent.
         !self.selection.awaiting_new_agent_selection
             || !self.selection.agents_ui_state.contains_key(target_agent_id)
     }
@@ -9314,6 +9187,7 @@ impl EventRenderer {
                 true
             }
             Event::UiCreateAgentResult(result) => {
+                let effect = self.apply_ui_create_result(result);
                 if let tau_proto::UiCreateAgentOutcome::Rejected { message, .. } = &result.outcome {
                     self.transcript
                         .status
@@ -9323,6 +9197,17 @@ impl EventRenderer {
                     self.resources.handle.print_output(
                         "create-agent-result",
                         render_action_output_block(&self.resources.theme, message),
+                    );
+                } else if matches!(effect, UiCreateResultEffect::None)
+                    && let tau_proto::UiCreateAgentOutcome::Created { agent_id, .. } =
+                        &result.outcome
+                {
+                    self.resources.handle.print_output(
+                        "create-agent-result",
+                        render_action_output_block(
+                            &self.resources.theme,
+                            &format!("Created agent {agent_id}."),
+                        ),
                     );
                 }
                 true
@@ -9955,15 +9840,21 @@ impl EventRenderer {
     }
 }
 
+mod attach_presentation;
 mod finished_response_projection;
 mod prepared_renderer_event;
+mod presentation_facts;
+mod prompt_projection;
 pub(crate) mod renderer_state;
+pub(crate) mod selection_intent;
 mod terminal_tool_calls;
 #[cfg(test)]
 mod terminal_tool_calls_tests;
+mod tool_presentation;
 use finished_response_projection::FinishedResponseProjection;
 use renderer_state::AgentUiState;
 pub(crate) use renderer_state::EventRenderer;
+use selection_intent::UiCreateResultEffect;
 
 #[cfg(test)]
 mod tests;

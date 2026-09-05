@@ -89,10 +89,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
             .any(|observed| matches!(observed.event, Event::AgentStarted(_))),
         "target session must be agentless before the peer message"
     );
-    target.wait_for(
-        "Write a message to start a new deterministic-peer agent...",
-        deadline,
-    )?;
+    target.wait_for("Overview — select an agent or use :agent new.", deadline)?;
 
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),
@@ -213,10 +210,7 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
     )?;
     observer.wait_for_extension("e2e-fake-provider", deadline)?;
     observer.wait_for_extension("test-dummy", deadline)?;
-    target.wait_for(
-        "Write a message to start a new deterministic-peer agent...",
-        deadline,
-    )?;
+    target.wait_for("Overview — select an agent or use :agent new.", deadline)?;
 
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),

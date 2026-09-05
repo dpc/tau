@@ -9,6 +9,7 @@ use tau_cli_term_raw::Term;
 use tau_config::settings as path_tau_config_settings;
 
 use super::finished_response_projection::assistant_text_with_citations;
+use super::selection_intent::SelectionIntent;
 use super::{
     AgentActivity, EventRenderer, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES,
     RoleCompletionDetails, assistant_text_from_message_item, assistant_text_from_output_items,
@@ -17,6 +18,7 @@ use super::{
 };
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 use crate::tool_render::render_tool_use_state;
+use crate::ui_prompt::CreateUserAgentPromptOptions;
 
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
@@ -2237,6 +2239,357 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
     assert_eq!(draft.text, None);
 }
 
+/// A matching requester-directed create result may select the created agent
+/// only while the exact explicit-creation epoch still owns this attachment.
+#[test]
+fn matching_create_result_selects_only_owned_intent() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let selected = renderer.current_agent_state();
+    let request = crate::ui_prompt::create_user_agent_prompt(
+        &"s1".parse().expect("valid session id"),
+        "engineer",
+        "hello",
+        CreateUserAgentPromptOptions::default(),
+    );
+    {
+        let mut intent = selected.lock().expect("selection intent");
+        *intent = SelectionIntent::test_creating(7, request.clone(), 7, 0);
+    }
+    renderer.handle(&tau_proto::Event::UiCreateAgentResult(
+        tau_proto::UiCreateAgentResult {
+            request_id: request.request_id,
+            session_id: request.session_id,
+            outcome: tau_proto::UiCreateAgentOutcome::Created {
+                agent_id: agent_id("created-agent"),
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            },
+        },
+    ));
+
+    let intent = selected.lock().expect("selection intent");
+    assert_eq!(
+        intent.selected_agent_id().map(tau_proto::AgentId::as_str),
+        Some("created-agent")
+    );
+    assert!(!intent.has_pending_create());
+    assert_eq!(
+        renderer
+            .displayed_agent_id_for_test()
+            .map(tau_proto::AgentId::as_str),
+        Some("created-agent")
+    );
+}
+
+/// Navigation or editing after create submission invalidates result ownership,
+/// so a delayed result cannot steal selection or overwrite the newer draft.
+#[test]
+fn delayed_create_result_preserves_newer_local_intent() {
+    let (_term, handle, _vt) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    handle.set_buffer("newer draft".to_owned(), "newer draft".len());
+    let mut renderer = super::EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    let selected = renderer.current_agent_state();
+    let request = crate::ui_prompt::create_user_agent_prompt(
+        &"s1".parse().expect("valid session id"),
+        "engineer",
+        "submitted text",
+        CreateUserAgentPromptOptions::default(),
+    );
+    {
+        let mut intent = selected.lock().expect("selection intent");
+        *intent = SelectionIntent::test_viewing_with_pending_create(
+            9,
+            agent_id("local-agent"),
+            "newer draft",
+            request.clone(),
+            8,
+            0,
+        );
+    }
+    renderer.handle(&tau_proto::Event::UiCreateAgentResult(
+        tau_proto::UiCreateAgentResult {
+            request_id: request.request_id,
+            session_id: request.session_id,
+            outcome: tau_proto::UiCreateAgentOutcome::Created {
+                agent_id: agent_id("created-agent"),
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            },
+        },
+    ));
+
+    let intent = selected.lock().expect("selection intent");
+    assert_eq!(
+        intent.selected_agent_id().map(tau_proto::AgentId::as_str),
+        Some("local-agent")
+    );
+    assert_eq!(intent.editable_draft(), "newer draft");
+    assert!(!intent.has_pending_create());
+}
+
+/// A raw editor mutation between create-result claiming and publication
+/// prevents a rejected create from overwriting the newer buffer.
+#[test]
+fn rejected_create_midpoint_buffer_mutation_blocks_draft_restore() {
+    let (_term, handle, _vt) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    let mut renderer = super::EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    let selected = renderer.current_agent_state();
+    let request = crate::ui_prompt::create_user_agent_prompt(
+        &"s1".parse().expect("valid session id"),
+        "engineer",
+        "rejected text",
+        CreateUserAgentPromptOptions::default(),
+    );
+    {
+        let mut intent = selected.lock().expect("selection intent");
+        *intent = SelectionIntent::test_creating(4, request.clone(), 4, 0);
+    }
+    let effect = renderer.claim_ui_create_result(&tau_proto::UiCreateAgentResult {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        outcome: tau_proto::UiCreateAgentOutcome::Rejected {
+            agent_id: Some(agent_id("committed-agent")),
+            reason: tau_proto::UiCreateAgentRejection::InitialPromptFailed,
+            message: "initial prompt rejected".to_owned(),
+        },
+    });
+    handle.set_buffer("newer draft".to_owned(), "newer draft".len());
+
+    renderer.apply_ui_create_result_effect(&effect);
+
+    assert_eq!(handle.get_buffer(), "newer draft");
+    assert_eq!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("selection intent")
+            .selected_agent_id()
+            .map(tau_proto::AgentId::as_str),
+        Some("committed-agent")
+    );
+}
+
+/// A create whose agent committed but whose initial prompt later fails restores
+/// the exact text only while the created-agent epoch still owns the editor.
+#[test]
+fn created_initial_prompt_failure_restores_owned_draft() {
+    let (_term, handle, _vt) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    let mut renderer = super::EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    let selected = renderer.current_agent_state();
+    let request = crate::ui_prompt::create_user_agent_prompt(
+        &"s1".parse().expect("valid session id"),
+        "engineer",
+        "retry me",
+        CreateUserAgentPromptOptions::default(),
+    );
+    let request_id = request.request_id.clone();
+    let ctx_id = request.ctx_id.clone().expect("create prompt context");
+    {
+        let mut intent = selected.lock().expect("selection intent");
+        *intent = SelectionIntent::test_creating(3, request.clone(), 3, 0);
+    }
+    renderer.handle(&tau_proto::Event::UiCreateAgentResult(
+        tau_proto::UiCreateAgentResult {
+            request_id: request.request_id,
+            session_id: request.session_id,
+            outcome: tau_proto::UiCreateAgentOutcome::Created {
+                agent_id: agent_id("created-agent"),
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            },
+        },
+    ));
+    renderer.handle(&tau_proto::Event::AgentPromptFailed(
+        tau_proto::AgentPromptFailed {
+            request_id,
+            agent_id: agent_id("created-agent"),
+            ctx_id,
+            stage: tau_proto::AgentPromptFailureStage::Submission,
+            message: "initial prompt failed".to_owned(),
+        },
+    ));
+
+    assert_eq!(handle.get_buffer(), "retry me");
+    let intent = selected.lock().expect("selection intent");
+    assert_eq!(intent.editable_draft(), "retry me");
+    assert!(!intent.has_pending_initial_prompt());
+}
+
+/// A raw editor mutation between initial-prompt failure claiming and
+/// publication prevents recovery text from overwriting the newer buffer.
+#[test]
+fn initial_prompt_failure_midpoint_buffer_mutation_blocks_draft_restore() {
+    let (_term, handle, _vt) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    let renderer = super::EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    let selected = renderer.current_agent_state();
+    {
+        let mut intent = selected.lock().expect("selection intent");
+        *intent = SelectionIntent::test_viewing_with_initial_prompt(
+            6,
+            agent_id("created-agent"),
+            "create-ctx".to_owned(),
+            "create-request".to_owned(),
+            "retry text".to_owned(),
+            0,
+        );
+    }
+    let recovery = renderer.claim_initial_create_prompt_lifecycle(
+        &tau_proto::Event::AgentPromptFailed(tau_proto::AgentPromptFailed {
+            request_id: "create-request".to_owned(),
+            agent_id: agent_id("created-agent"),
+            ctx_id: "create-ctx".to_owned(),
+            stage: tau_proto::AgentPromptFailureStage::Submission,
+            message: "failed".to_owned(),
+        }),
+    );
+    handle.set_buffer("newer draft".to_owned(), "newer draft".len());
+
+    let recovery = recovery.expect("owned recovery");
+    assert!(!renderer.restore_create_draft_if_owned(
+        &recovery.text,
+        recovery.intent_epoch,
+        &recovery.target,
+        recovery.editor_revision
+    ));
+    assert_eq!(handle.get_buffer(), "newer draft");
+}
+
+/// Cold attach folds routine current-state diagnostics silently, preserves
+/// alert-purpose warnings, and publishes one explicit history/live divider.
+#[test]
+fn cold_attach_suppresses_routine_snapshots_but_keeps_alert_and_boundary() {
+    let (_term, handle, vt) = crate::tests::setup(100, 24);
+    let mut renderer = super::EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    handle.redraw_sync();
+    renderer.set_cold_attach_redraw(Some(handle.suppress_redraws()));
+    let generation = vt.frame_generation();
+    renderer.handle_cold_attach_replay_socket_delivery(
+        &tau_proto::Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: "s1".parse().expect("valid session id"),
+            reason: tau_proto::SessionStartReason::Resume,
+        }),
+        tau_proto::UnixMicros::new(0),
+        RendererDeliveryId::new(9),
+    );
+    renderer.handle_cold_attach_replay_socket_delivery(
+        &tau_proto::Event::HarnessAgentContextInitialized(
+            tau_proto::HarnessAgentContextInitialized {
+                session_id: "s1".parse().expect("valid session id"),
+                agent_id: agent_id("agent-a"),
+                agent_initialization_id: "init-a".parse().expect("valid initialization id"),
+                listed_skills: Vec::new(),
+                agents_files: vec![tau_proto::DiscoveryAgentsFileSummary {
+                    file_path: "/tmp/AGENTS.md".into(),
+                    lines: 1,
+                    bytes: 10,
+                }],
+            },
+        ),
+        tau_proto::UnixMicros::new(1),
+        RendererDeliveryId::new(1),
+    );
+    renderer.handle_cold_attach_replay_socket_delivery(
+        &tau_proto::Event::HarnessNotice(tau_proto::HarnessNotice::alert(
+            tau_proto::notice_kind::HARNESS_NOTICE,
+            "replay warning",
+            tau_proto::NoticeLevel::Warning,
+        )),
+        tau_proto::UnixMicros::new(2),
+        RendererDeliveryId::new(2),
+    );
+    renderer.handle_attach_replay_complete_socket_delivery(
+        &tau_proto::Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            session_id: "s1".parse().expect("valid session id"),
+            error: None,
+        }),
+        None,
+        tau_proto::UnixMicros::new(3),
+        RendererDeliveryId::new(3),
+    );
+    let screen = vt.wait_for_frame_after(generation);
+    assert!(!screen.iter().any(|row| row.contains("/tmp/AGENTS.md")));
+    assert!(
+        screen
+            .iter()
+            .any(|row| row.contains("attached to s1 — live updates below")),
+        "{screen:?}"
+    );
+    handle.redraw_sync();
+    assert!(vt.screen_contains(100, "replay warning"));
+}
+
+/// A late optional roster result remains overview-owned across unique automatic
+/// selection and never contaminates the selected agent transcript.
+#[test]
+fn attach_roster_survives_return_to_overview_without_agent_contamination() {
+    let (_term, handle, vt) = crate::tests::setup(100, 24);
+    let mut renderer = super::EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    renderer.switch_agent(agent_id("agent-a"));
+    renderer.show_attach_roster(&[tau_proto::SessionAgentListEntry {
+        agent_id: agent_id("historical-agent"),
+        lifecycle: tau_proto::SessionAgentLifecycle::Unloaded,
+        persistence: tau_proto::SessionAgentPersistence::Durable,
+        facts: tau_proto::SessionAgentFacts::Missing,
+        work_status: None,
+        turn_activity: None,
+    }]);
+    handle.redraw_sync();
+    assert!(!vt.screen_contains(100, "historical-agent"));
+
+    renderer.clear_selected_agent();
+    handle.redraw_sync();
+    assert!(vt.screen_contains(100, "historical-agent"));
+
+    renderer.switch_agent(agent_id("agent-a"));
+    handle.redraw_sync();
+    assert!(!vt.screen_contains(100, "historical-agent"));
+}
+
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::Event {
     tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
         message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
@@ -2442,10 +2795,10 @@ fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
     );
 }
 
-/// Ordinary tool starts preserve empty-screen selection semantics, while the
-/// validated reconstructed presentation selects only a user-originated owner.
+/// Ordinary and reconstructed tool starts never claim an attachment's input
+/// target; only explicit local intent or the attach boundary may do so.
 #[test]
-fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
+fn reconstructed_tool_start_does_not_select_from_empty() {
     let owner = agent_id("started-agent");
     let user_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
         invocation_policy: tau_proto::ToolInvocationPolicy::default(),
@@ -2471,14 +2824,8 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
         tau_proto::UnixMicros::new(1),
         RendererDeliveryId::new(1),
     );
-    assert_eq!(
-        reconstructed.selection.current_agent_id.as_deref(),
-        Some(owner.as_str())
-    );
-    assert_eq!(
-        reconstructed.selection.displayed_agent_id.as_deref(),
-        Some(owner.as_str())
-    );
+    assert_eq!(reconstructed.selection.current_agent_id, None);
+    assert_eq!(reconstructed.selection.displayed_agent_id, None);
 
     let extension_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
         invocation_policy: tau_proto::ToolInvocationPolicy::default(),

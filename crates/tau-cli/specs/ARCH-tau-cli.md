@@ -288,24 +288,25 @@ therefore consume increasing memory and make selection, resize, and
 retroactive display toggles expensive.
 
 Attach-time automatic selection is presentation-only until it atomically claims
-the shared `SelectionIntent { epoch, selected_agent_id }` from exact empty epoch
-zero. Every explicit input-loop selection, including clearing the target,
-increments that epoch synchronously before enqueueing its renderer command.
+the attachment-local selection intent from exact `InitialOverview` epoch zero.
+That intent owns the current target, create-result correlation, initial-prompt
+recovery, and editable-draft authority; see
+[SPEC-tau-cli-new-agent-staging](SPEC-tau-cli-new-agent-staging.md). Every
+explicit input-loop target change increments its epoch synchronously before
+enqueueing the renderer command.
 Renderer commands carry the claimed epoch and update display state only when the
 shared intent still matches both epoch and target; stale admitted remote work can
-therefore update neither prompt routing nor the visible transcript. Ordinary
-pass-through replay-derived auto-selection uses the same exact epoch-zero claim,
-so replay drained before a queued local display command cannot overwrite the
-input intent that the local command already published. During explicit cold
-attach, pre-boundary transcript rows and reconstructed starts never auto-select;
-only the validated unique-intersection candidate at `SessionReplayComplete` may
-claim epoch zero.
+therefore update neither prompt routing nor the visible transcript. The
+daemon-launching UI may still let its first user-originated lifecycle adopt an
+untouched startup transcript. An attached UI never grants that authority to
+broadcast activity: pre-boundary transcript rows and reconstructed starts never
+auto-select, and only `SessionReplayComplete` may claim `InitialOverview`.
 
 Cold staging derives an automatic attach candidate from the exhaustive
 intersection of two bounded maps: agents with successful replay completion and
 agents present in the current runtime snapshot. It selects only a unique
-intersection member and releases both maps at the replay boundary; overflow or
-ambiguity fails closed without selecting an agent.
+intersection member; zero, overflow, or ambiguity commits explicit Overview.
+The boundary releases both maps.
 
 The socket reader admits decoded deliveries to one FIFO bounded at 1,024 items
 and 64 MiB of encoded frames. Full admission backpressures socket reading and
@@ -341,13 +342,16 @@ diagnostic projection estimate rather than allocator or RSS truth. See
 During initial cold attach, the UI retains the replay marker through socket
 decoding and stages visible replayed prompt/response transcript rows until the
 non-replay `session.replay_complete` boundary. Replay-marked current-state rows
-continue directly to the renderer, so session, extension, context, and agent
-initialization state appears before historical conversation without changing
-wire delivery or shared catch-up semantics. Staging uses the same 1,024-item /
+continue directly to the renderer, but routine session, extension, directory,
+context-initialization, and diagnostic-notice snapshots update local current
+state without appending live-looking lifecycle rows. Alert-purpose warnings
+remain visible. The UI publishes one permanent `attached to <session> — live
+updates below` divider without changing wire delivery or shared catch-up
+semantics. Staging uses the same 1,024-item /
 64-MiB aggregate limits as renderer admission across retained transcript,
 pending tool starts, buffered live tool frames, session/membership/ownership
-indexes, successful per-agent replay terminals, and current runtime-agent
-snapshots. Replayed provider-declared
+indexes, settled tool-call ids, successful per-agent replay terminals, and
+current runtime-agent snapshots. Replayed provider-declared
 tool calls authorize only matching durable starts owned by agents currently
 loaded in this session; canonical terminals close those starts, including
 provider-projected errors. A buffered pre-terminal progress frame retains its
@@ -461,12 +465,15 @@ visible prompts to existing targets, the harness applies the implicit `active`
 write and the later complete stats snapshot is authoritative across submitting,
 observing, reconnecting, and replaying UIs.
 
-The local previous/next cycle includes the no-selection overview alongside the
-active agents. That overview remains the start-new-agent input target and owns a
-deduplicated presentation of inter-agent messages without changing their durable
-sender/recipient projections or prompt routing. It is renderer-local: attachment
-catch-up is limited to projections replayed for currently loaded agents, not a
-new durable session-wide message index.
+The local previous/next cycle contains only active existing agents. The
+no-selection overview is an explicit, non-interactive destination: Enter keeps
+the draft local and sends no create, prompt, start, or provider frame. `:agent
+new` and `:new` alone enter the creation composer. The overview owns a
+deduplicated presentation of inter-agent messages plus metadata-only
+unavailable/unloaded roster diagnostics without changing durable
+sender/recipient projections, loading, or prompt routing. Attachment catch-up
+remains limited to transcripts replayed for currently loaded agents, not a new
+durable session-wide message index.
 
 `tau session list` traverses bounded session-keyed lifetime claims. Each locked
 claim must have a digest-matching basename and an exact admitted responder at

@@ -18,10 +18,12 @@ fn renderer_starts_without_selected_or_default_agent() {
     );
 
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         None
     );
     assert!(
@@ -665,8 +667,8 @@ fn empty_and_output_length_finals_publish_complete_frames() {
     }
 }
 
-/// Deferred discovery catch-up must stage its terminal response after selection
-/// and then use the same live-or-settled frame cut as ordinary delivery.
+/// Deferred discovery catch-up must keep its intermediate live response hidden
+/// until selection publishes the settled transcript atomically.
 #[test]
 fn deferred_initial_discovery_final_uses_atomic_publication_cut() {
     let (_term, handle, vt) = setup(100, 16);
@@ -713,8 +715,8 @@ fn deferred_initial_discovery_final_uses_atomic_publication_cut() {
     let staging_vt = vt.clone();
     renderer.set_finished_staging_hook(Arc::new(move || {
         staging_handle.redraw_sync();
-        assert!(staging_vt.screen_contains(100, "deferred live"));
-        assert!(staging_vt.screen_contains(100, "✨ @main"));
+        assert!(!staging_vt.screen_contains(100, "deferred live"));
+        assert!(!staging_vt.screen_contains(100, "deferred settled"));
     }));
     let commit_handle = handle.clone();
     renderer.set_finished_commit_hook(Arc::new(move || commit_handle.redraw_sync()));
@@ -3927,12 +3929,9 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
     assert!(navigation.is_active(&agent_id("worker-1")));
 }
 
+/// A new agent selected from overview receives a fresh transcript snapshot.
 #[test]
 fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() {
-    // Regression: `:agent none` must restore an empty no-agent screen. The
-    // first prompt that selects a new agent from that state should render into
-    // that agent's own fresh transcript rather than appending to the previously
-    // selected agent's terminal output.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3959,6 +3958,7 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
     sync(&handle);
     assert!(!vt.screen_contains(80, "agent one prompt"));
 
+    renderer.switch_agent(agent_id("agent-two"));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         literal: false,
         session_id: test_session_id("s1"),

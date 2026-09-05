@@ -3,7 +3,7 @@
 use super::*;
 use crate::agent_navigation::AgentNavigation;
 use crate::chat::InputRoutingState;
-use crate::event_renderer::renderer_state::SelectionIntent;
+use crate::event_renderer::selection_intent::{SelectionIntent, UiTarget};
 
 /// Agent-trace help must advertise the compact-overview semantics and both
 /// default values so generated help cannot drift from parser behavior.
@@ -24,23 +24,22 @@ fn agent_trace_help_shows_compact_toon_lite_defaults() {
     assert!(help.contains("complete semantic text/normalized output"));
 }
 
+/// Role cycling is available only in the explicit composer, never overview.
 #[test]
-fn role_cycling_only_enabled_without_selected_agent() {
-    // Regression: role cycling changes the role used for the next new agent,
-    // so once an agent is selected it must stop mutating the live agent's role.
+fn role_cycling_only_enabled_in_explicit_creation_mode() {
     let current_agent_state = Arc::new(Mutex::new(SelectionIntent::default()));
-    assert!(role_cycling_enabled(&current_agent_state));
-
-    current_agent_state
-        .lock()
-        .expect("current agent")
-        .selected_agent_id = Some(agent_id("engineer_abc12345"));
     assert!(!role_cycling_enabled(&current_agent_state));
 
     current_agent_state
         .lock()
         .expect("current agent")
-        .selected_agent_id = None;
+        .set_target(UiTarget::Viewing(agent_id("engineer_abc12345")));
+    assert!(!role_cycling_enabled(&current_agent_state));
+
+    current_agent_state
+        .lock()
+        .expect("current agent")
+        .set_target(UiTarget::Creating);
     assert!(role_cycling_enabled(&current_agent_state));
 }
 
@@ -66,7 +65,7 @@ fn attach_boundary_selects_only_from_unclaimed_empty_state() {
         selected.lock().expect("selected agent").as_ref(),
         Some(&agent_id("restored-agent"))
     );
-    assert_eq!(selected.lock().expect("selected agent").epoch, 1);
+    assert_eq!(selected.lock().expect("selected agent").epoch(), 1);
 
     renderer.handle_attach_agent_selection_socket_delivery(
         &boundary,
@@ -126,8 +125,8 @@ fn attach_boundary_cas_preserves_newer_local_intent() {
         tau_cli_term::RendererDeliveryId::new(2),
     );
     let intent = selected.lock().expect("selected agent");
-    assert!(intent.selected_agent_id.is_none());
-    assert_eq!(intent.epoch, 2);
+    assert!(intent.selected_agent_id().is_none());
+    assert_eq!(intent.epoch(), 2);
 }
 
 /// A replay target admitted before local input but rendered afterward cannot
@@ -146,9 +145,8 @@ fn admitted_attach_selection_cannot_render_after_newer_local_intent() {
     let restored = agent_id("restored-agent");
     let admitted_epoch = {
         let mut intent = selected.lock().expect("selection intent");
-        intent.epoch = 1;
-        intent.selected_agent_id = Some(restored.clone());
-        intent.epoch
+        *intent = SelectionIntent::test_viewing(1, restored.clone());
+        intent.epoch()
     };
 
     routing.set_selected_agent(Some(agent_id("local-agent")));
@@ -219,7 +217,7 @@ fn admitted_replay_before_local_display_preserves_input_intent() {
     );
 }
 
-/// Ctrl-K/Ctrl-J cycle through active agents and the overview while skipping
+/// Ctrl-K/Ctrl-J cycle only through active existing agents while skipping
 /// suspended agents that would refuse user prompts.
 #[test]
 fn agent_switching_cycles_active_agents_and_skips_suspended() {
@@ -232,11 +230,11 @@ fn agent_switching_cycles_active_agents_and_skips_suspended() {
     );
     assert_eq!(
         next_agent_cycle_selection(Some("alpha"), &known_agents, &active_agents, -1),
-        None
+        Some("charlie".to_owned())
     );
     assert_eq!(
         next_agent_cycle_selection(Some("charlie"), &known_agents, &active_agents, 1),
-        None
+        Some("alpha".to_owned())
     );
 }
 
@@ -362,7 +360,7 @@ fn clear_selection_first_frame_has_new_agent_placeholder() {
     assert!(
         frame
             .iter()
-            .any(|row| row.contains("Write a message to start a new agent"))
+            .any(|row| row.contains("Overview — select an agent or use :agent new."))
     );
     assert!(
         !frame
@@ -661,10 +659,15 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
     assert!(!vt.screen_contains(80, "/restored/AGENTS.md"));
     assert!(!vt.screen_contains(80, "context ready"));
 
-    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
-        agent_id: agent_id("restored"),
-        ..agent_prompt_created("restored-prompt", "session-1")
-    }));
+    renderer.handle_attach_agent_selection_socket_delivery(
+        &Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            session_id: test_session_id("session-1"),
+            error: None,
+        }),
+        &agent_id("restored"),
+        tau_proto::UnixMicros::new(1),
+        tau_cli_term::RendererDeliveryId::new(1),
+    );
     sync(&handle);
     assert_eq!(
         renderer
@@ -1393,10 +1396,12 @@ fn old_agent_message_updates_overview_without_selecting_sender() {
     assert!(vt.screen_contains(80, "Message from @old-agent to @other-agent"));
     assert!(vt.screen_contains(80, "hidden old-agent message"));
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         None
     );
 
@@ -1426,10 +1431,12 @@ fn manual_compaction_selects_agent_from_empty_state() {
     sync(&handle);
 
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         Some(agent_id("live-agent"))
     );
 }
@@ -1676,10 +1683,12 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
     sync(&handle);
     assert!(vt.screen_contains(96, "live overview body"));
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
+            .expect("current agent")
+            .selected_agent_id()
+            .cloned(),
         None
     );
 
@@ -1698,8 +1707,8 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
         ctx_id: None,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(96, "start fresh from overview"));
-    assert!(!vt.screen_contains(96, "overview semantic body"));
+    assert!(!vt.screen_contains(96, "start fresh from overview"));
+    assert!(vt.screen_contains(96, "overview semantic body"));
 
     renderer.clear_selected_agent();
     sync(&handle);

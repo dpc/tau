@@ -630,7 +630,10 @@ fn renderer_scheduler_wakes_for_remote_arriving_after_empty_scan() {
         Ok(result) => result,
         Err(error) => {
             local_tx
-                .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+                .send(RendererCmd::SetEmptyTarget {
+                    intent_epoch: 1,
+                    target: EmptyUiTarget::Overview,
+                })
                 .expect("cleanup local wake");
             worker.join().expect("scheduler worker");
             panic!("remote arrival did not wake scheduler: {error}");
@@ -657,7 +660,10 @@ fn renderer_scheduler_wakes_for_local_arriving_after_empty_scan() {
     let worker = std::thread::spawn(move || {
         let mut after_empty_scan = || {
             local_tx
-                .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+                .send(RendererCmd::SetEmptyTarget {
+                    intent_epoch: 1,
+                    target: EmptyUiTarget::Overview,
+                })
                 .expect("local arrival");
         };
         let result =
@@ -674,7 +680,10 @@ fn renderer_scheduler_wakes_for_local_arriving_after_empty_scan() {
     };
     assert!(matches!(
         result,
-        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+        Ok(RendererCmd::SetEmptyTarget {
+            intent_epoch: 1,
+            target: EmptyUiTarget::Overview
+        })
     ));
     worker.join().expect("scheduler worker");
 }
@@ -691,7 +700,10 @@ fn renderer_scheduler_coalesced_wake_preserves_remote_reservation() {
         admitted.fetch_add(1, Ordering::AcqRel);
         remote_tx.send(remote_bell(1)).expect("reserved remote");
         local_tx
-            .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+            .send(RendererCmd::SetEmptyTarget {
+                intent_epoch: 1,
+                target: EmptyUiTarget::Overview,
+            })
             .expect("watermarked local");
     };
 
@@ -704,7 +716,10 @@ fn renderer_scheduler_coalesced_wake_preserves_remote_reservation() {
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::ZERO),
-        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+        Ok(RendererCmd::SetEmptyTarget {
+            intent_epoch: 1,
+            target: EmptyUiTarget::Overview
+        })
     ));
 }
 
@@ -722,11 +737,17 @@ fn renderer_scheduler_remote_close_waits_for_local_or_deadline() {
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
     local_tx
-        .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+        .send(RendererCmd::SetEmptyTarget {
+            intent_epoch: 1,
+            target: EmptyUiTarget::Overview,
+        })
         .expect("local after remote close");
     assert!(matches!(
         scheduler.recv_timeout(Duration::ZERO),
-        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+        Ok(RendererCmd::SetEmptyTarget {
+            intent_epoch: 1,
+            target: EmptyUiTarget::Overview
+        })
     ));
 }
 
@@ -915,7 +936,10 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
     let (remote_tx, local_tx, mut scheduler) =
         renderer_scheduler_channels(8, admitted.clone(), arbiter);
     local_tx
-        .send(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+        .send(RendererCmd::SetEmptyTarget {
+            intent_epoch: 1,
+            target: EmptyUiTarget::Overview,
+        })
         .expect("local selection");
     for delivery_id in 1..=4 {
         admitted.store(delivery_id, Ordering::Release);
@@ -952,7 +976,10 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
     ));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::ClearSelectedAgent { intent_epoch: 1 })
+        Ok(RendererCmd::SetEmptyTarget {
+            intent_epoch: 1,
+            target: EmptyUiTarget::Overview
+        })
     ));
     assert!(matches!(
         next(),
@@ -1478,4 +1505,31 @@ fn handshake_write_error_reads_pending_startup_disconnect() {
 
     assert!(error.to_string().contains("harness startup failed"));
     assert!(error.to_string().contains("missing secret"));
+}
+
+/// A withheld optional roster response cannot block terminal or renderer
+/// startup; publication occurs only after the lookup thread completes.
+#[test]
+fn optional_attach_roster_lookup_runs_off_startup_path() {
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+
+    let worker = spawn_optional_attach_roster(
+        move || {
+            release_rx.recv().expect("release lookup");
+            Ok(Vec::new())
+        },
+        move |result| result_tx.send(result).expect("publish roster result"),
+    );
+
+    assert!(matches!(
+        result_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    release_tx.send(()).expect("release lookup");
+    assert_eq!(
+        result_rx.recv().expect("roster result"),
+        Ok(Vec::<tau_proto::SessionAgentListEntry>::new())
+    );
+    worker.join().expect("roster worker");
 }
