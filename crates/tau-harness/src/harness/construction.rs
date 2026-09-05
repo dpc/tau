@@ -52,6 +52,9 @@ struct ConfiguredHarnessStartup {
     extension_secrets: ResolvedExtensionSecrets,
     /// Missing configured startup role warning to surface after clients attach.
     missing_default_role: Option<MissingDefaultRole>,
+    /// Bounded prompt-template discovery failures captured before clients
+    /// attach.
+    prompt_template_load_warnings: Vec<String>,
     /// Timestamp used for startup tracing.
     started_at: Instant,
 }
@@ -74,8 +77,8 @@ struct StartupRoles {
 struct StartupHarnessParts {
     /// Runtime state directory for this harness.
     state_dir: PathBuf,
-    /// Filesystem/config directories used by the harness.
-    dirs: tau_config::settings::TauDirs,
+    /// Loaded system prompt templates keyed by template name.
+    system_prompt_templates: HashMap<String, String>,
     /// Session store with the eager session not yet loaded.
     store: SessionStore,
     /// Per-agent transcript store.
@@ -359,7 +362,8 @@ impl Harness {
             });
         }
 
-        let system_prompt_templates = load_system_prompt_templates(dirs.config_dir.as_deref());
+        let (system_prompt_templates, prompt_template_load_warnings) =
+            load_system_prompt_templates(dirs.config_dir.as_deref());
         let LoadedRoles {
             roles: available_roles,
             role_overrides,
@@ -498,6 +502,7 @@ impl Harness {
         }
         harness.wait_for_extensions_ready()?;
         harness.emit_unavailable_role_model_warnings();
+        harness.emit_prompt_template_configuration_warnings(prompt_template_load_warnings);
         #[cfg(test)]
         harness.register_harness_tools();
         harness.publish_delegate_roles_context();
@@ -697,6 +702,7 @@ impl Harness {
             return Err(error);
         }
         harness.emit_unavailable_role_model_warnings();
+        harness.emit_prompt_template_configuration_warnings(startup.prompt_template_load_warnings);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "extensions ready");
         #[cfg(test)]
         harness.register_harness_tools();
@@ -742,20 +748,22 @@ impl Harness {
     ) -> Result<(Self, ConfiguredHarnessStartup), HarnessError> {
         let startup_started_at = Instant::now();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
-        let (harness, missing_default_role, extension_secrets) = Self::open_configured_harness(
-            config,
-            state_dir,
-            sessions_dir.clone(),
-            dirs,
-            eager_session_id,
-            construction,
-        )?;
+        let (harness, missing_default_role, extension_secrets, prompt_template_load_warnings) =
+            Self::open_configured_harness(
+                config,
+                state_dir,
+                sessions_dir.clone(),
+                dirs,
+                eager_session_id,
+                construction,
+            )?;
         Ok((
             harness,
             ConfiguredHarnessStartup {
                 sessions_dir,
                 extension_secrets,
                 missing_default_role,
+                prompt_template_load_warnings,
                 started_at: startup_started_at,
             },
         ))
@@ -776,7 +784,15 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         construction: HarnessConstructionInputs,
-    ) -> Result<(Self, Option<MissingDefaultRole>, ResolvedExtensionSecrets), HarnessError> {
+    ) -> Result<
+        (
+            Self,
+            Option<MissingDefaultRole>,
+            ResolvedExtensionSecrets,
+            Vec<String>,
+        ),
+        HarnessError,
+    > {
         let HarnessConstructionInputs {
             launch,
             ignore_secret_source_environment,
@@ -831,6 +847,8 @@ impl Harness {
             .extend(provider_skipped_extensions);
         let harness_settings = config.harness_settings.clone();
         let roles = Self::load_startup_roles(&harness_settings)?;
+        let (system_prompt_templates, prompt_template_load_warnings) =
+            load_system_prompt_templates(dirs.config_dir.as_deref());
         let missing_default_role = roles.missing_default_role.clone();
         let session_retention = harness_settings.session_retention();
         let agent_retention = harness_settings.agent_retention();
@@ -840,7 +858,7 @@ impl Harness {
         tracing::debug!(target: "tau_harness::startup", selected_model = ?roles.selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
         let mut harness = Self::assemble_startup_harness(StartupHarnessParts {
             state_dir,
-            dirs,
+            system_prompt_templates,
             store,
             agent_store,
             persistence_owner,
@@ -884,7 +902,12 @@ impl Harness {
                 diagnostic_retention,
             },
         );
-        Ok((harness, missing_default_role, extension_secrets))
+        Ok((
+            harness,
+            missing_default_role,
+            extension_secrets,
+            prompt_template_load_warnings,
+        ))
     }
     fn open_startup_stores(
         state_dir: &Path,
@@ -1054,7 +1077,7 @@ impl Harness {
             },
             input_wait_timeout_bounds: parts.harness_settings.wait_timeout_bounds(),
             provider_cache_refresh: parts.harness_settings.provider_cache_refresh,
-            system_prompt_templates: load_system_prompt_templates(parts.dirs.config_dir.as_deref()),
+            system_prompt_templates: parts.system_prompt_templates,
         }))
     }
     /// Creates the relay target while the session store retains resume

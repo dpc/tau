@@ -1508,6 +1508,53 @@ impl Harness {
         }
     }
 
+    /// Surface prompt-template discovery failures and explicit role references
+    /// that do not resolve against the templates loaded for this startup.
+    pub(super) fn emit_prompt_template_configuration_warnings(
+        &mut self,
+        load_warnings: Vec<String>,
+    ) {
+        for message in load_warnings {
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_CONFIG_ERROR,
+                tau_proto::NoticeLevel::Warning,
+                tau_proto::NoticePurpose::Alert,
+                &message,
+            );
+        }
+
+        let mut missing = self
+            .config
+            .available_roles
+            .iter()
+            .filter_map(|(role_name, role)| {
+                let template_name = role.prompt_override.as_ref()?;
+                (!self
+                    .prompt_coordination
+                    .context_discovery
+                    .system_prompt_templates
+                    .contains_key(template_name))
+                .then(|| (role_name.clone(), template_name.clone()))
+            })
+            .collect::<Vec<_>>();
+        missing.sort();
+
+        for (role_name, template_name) in missing {
+            let role_name = bounded_prompt_feedback_label(&role_name, 96);
+            let template_name = bounded_prompt_feedback_label(&template_name, 96);
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_CONFIG_ERROR,
+                tau_proto::NoticeLevel::Warning,
+                tau_proto::NoticePurpose::Alert,
+                &format!(
+                    "role `{role_name}` selects prompt template `{template_name}`, but that template \
+                     was not loaded. Correct this role's `prompt_override` or provide a matching \
+                     `.hbs` file in the Tau config `prompts` directory"
+                ),
+            );
+        }
+    }
+
     /// Push the configured `config` value (from `harness.yaml`) to
     /// the just-said-Hello extension. Sends point-to-point so it
     /// arrives even if the extension hasn't subscribed to the

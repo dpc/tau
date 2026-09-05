@@ -2899,6 +2899,327 @@ agents:
     );
 }
 
+/// A missing optional prompts directory is ordinary startup state and must not
+/// produce configuration feedback.
+#[test]
+fn missing_prompt_templates_directory_is_quiet() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .all(|notice| {
+                !notice.message.contains("prompt templates directory")
+                    && !notice.message.contains("prompt template `")
+            })
+    );
+}
+
+/// Existing prompt discovery paths that cannot be traversed must produce a
+/// bounded actionable warning rather than silently retaining only built-ins.
+#[test]
+fn unreadable_prompt_templates_discovery_emits_configuration_warning() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(config_dir.join("prompts"), "not a directory")
+        .expect("write prompts path as file");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    let message = find_mandatory_warning_notice(&h, "could not read prompt templates directory")
+        .expect("prompt discovery warning");
+    assert!(message.contains(&config_dir.join("prompts").display().to_string()));
+    assert!(message.contains("not a directory"));
+    assert!(message.contains("permissions and type"));
+}
+
+/// A dangling prompts symlink is an existing broken discovery path, not the
+/// ordinary missing-directory case, so startup must report it.
+#[test]
+fn dangling_prompt_templates_symlink_emits_configuration_warning() {
+    use std::os::unix::fs::symlink;
+
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    symlink("missing-target", config_dir.join("prompts")).expect("create dangling prompts symlink");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    let message = find_mandatory_warning_notice(&h, "could not read prompt templates directory")
+        .expect("dangling prompts symlink warning");
+    assert!(message.contains("not found"));
+    assert!(message.contains("permissions and type"));
+}
+
+/// A `.hbs` entry that is not a readable file must produce a bounded warning
+/// naming the exact harness-owned template path.
+#[test]
+fn unreadable_prompt_template_file_emits_configuration_warning() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let prompts_dir = config_dir.join("prompts");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(prompts_dir.join("broken.hbs")).expect("mkdir template path");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    let message = find_mandatory_warning_notice(&h, "could not read prompt template")
+        .expect("prompt file warning");
+    assert!(message.contains(&prompts_dir.join("broken.hbs").display().to_string()));
+    assert!(message.contains("is a directory"));
+    assert!(message.contains("was not loaded"));
+}
+
+/// An explicit override that resolves to a loaded custom template must remain
+/// quiet and preserve the loaded template unchanged.
+#[test]
+fn loaded_explicit_prompt_override_is_quiet() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let prompts_dir = config_dir.join("prompts");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&prompts_dir).expect("mkdir prompts");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(prompts_dir.join("review-v2.hbs"), "custom {{role.name}}")
+        .expect("write prompt template");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: reviewer
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          prompt_override: review-v2
+"#,
+    )
+    .expect("write harness config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    assert_eq!(
+        h.system_template_for_role("reviewer").expect("template"),
+        "custom {{role.name}}"
+    );
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .all(|notice| {
+                !notice
+                    .message
+                    .contains("role `reviewer` selects prompt template")
+            })
+    );
+}
+
+/// A malformed but readable template remains a runtime render concern; startup
+/// validates only that the explicit override name resolved.
+#[test]
+fn malformed_loaded_prompt_template_is_not_eagerly_rendered() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let prompts_dir = config_dir.join("prompts");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&prompts_dir).expect("mkdir prompts");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(prompts_dir.join("malformed.hbs"), "{{#if")
+        .expect("write malformed prompt template");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: reviewer
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          prompt_override: malformed
+"#,
+    )
+    .expect("write harness config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    assert_eq!(
+        h.system_template_for_role("reviewer").expect("template"),
+        "{{#if"
+    );
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .all(|notice| {
+                !notice
+                    .message
+                    .contains("role `reviewer` selects prompt template")
+            })
+    );
+}
+
+/// A missing explicit override name must produce an actionable replayable Alert
+/// while preserving the runtime lookup failure and selecting no fallback.
+#[test]
+fn missing_explicit_prompt_override_emits_replayable_configuration_warning() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: reviewer
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          prompt_override: review-v2
+"#,
+    )
+    .expect("write harness config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    let notice = h
+        .runtime_io
+        .replayable_harness_notices
+        .iter()
+        .find(|notice| {
+            notice.kind == tau_proto::notice_kind::HARNESS_CONFIG_ERROR
+                && notice.message.contains("role `reviewer`")
+                && notice.message.contains("prompt template `review-v2`")
+        })
+        .expect("missing override warning");
+    assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Alert);
+    assert!(notice.message.contains("prompt_override"));
+    assert!(notice.message.contains("config `prompts` directory"));
+    assert!(
+        h.system_template_for_role("reviewer")
+            .expect_err("runtime lookup must still fail")
+            .to_string()
+            .contains("unknown system prompt template `review-v2`")
+    );
+
+    let ui_conn = crate::test_connection_id("late-ui-invalid-prompt-override");
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe late");
+    assert!(
+        ui_sink
+            .lock()
+            .expect("ui sink")
+            .iter()
+            .any(|routed| matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if delivery.replay
+                        && matches!(
+                            delivery.event.as_ref(),
+                            Event::HarnessNotice(replayed)
+                                if replayed.kind == tau_proto::notice_kind::HARNESS_CONFIG_ERROR
+                                    && replayed.message.contains("prompt template `review-v2`")
+                        )
+            ))
+    );
+}
+
+/// Prompt feedback bounds and neutralizes config-derived labels so long names,
+/// control characters, and presentation controls cannot reshape an Alert.
+#[test]
+fn prompt_template_configuration_warning_labels_are_bounded_and_sanitized() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let hostile_role = format!("role`\n\u{202e}{}", "r".repeat(1_000));
+    let hostile_template = format!("template`\n\u{200f}{}", "t".repeat(1_000));
+    h.config.available_roles.insert(
+        hostile_role,
+        tau_config::settings::AgentRole {
+            prompt_override: Some(hostile_template),
+            ..Default::default()
+        },
+    );
+
+    h.emit_prompt_template_configuration_warnings(Vec::new());
+
+    let notice = h
+        .runtime_io
+        .replayable_harness_notices
+        .last()
+        .expect("prompt override warning");
+    assert!(notice.message.contains('\u{fffd}'));
+    assert!(notice.message.contains('…'));
+    assert!(!notice.message.contains('\n'));
+    assert!(!notice.message.contains('\u{202e}'));
+    assert!(!notice.message.contains('\u{200f}'));
+    assert!(notice.message.len() < 512);
+}
+
+/// Prompt-template filesystem warnings apply the same fixed display boundary
+/// to harness-owned paths before publishing them.
+#[test]
+fn prompt_template_path_warning_is_bounded_and_sanitized() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td
+        .path()
+        .join(format!("config`\n\u{202e}{}", "x".repeat(180)));
+    std::fs::create_dir_all(&config_dir).expect("mkdir hostile config path");
+    std::fs::write(config_dir.join("prompts"), "not a directory")
+        .expect("write prompts path as file");
+
+    let (_, warnings) = crate::harness::load_system_prompt_templates(Some(&config_dir));
+    let warning = warnings.first().expect("prompt path warning");
+    assert!(warning.contains('\u{fffd}'));
+    assert!(warning.contains('…'));
+    assert!(!warning.contains('\n'));
+    assert!(!warning.contains('\u{202e}'));
+    assert!(warning.len() < 512);
+}
+
 /// Ensures a profile-selected missing default role reaches the existing startup
 /// fallback path instead of being ignored while profiles are applied.
 #[test]

@@ -677,16 +677,49 @@ pub(crate) fn tool_available_again_notice_prompt(tool_name: &ToolName) -> String
     format!("Tool `{tool_name}` is available again.")
 }
 
-fn load_system_prompt_templates(config_dir: Option<&Path>) -> HashMap<String, String> {
+fn load_system_prompt_templates(
+    config_dir: Option<&Path>,
+) -> (HashMap<String, String>, Vec<String>) {
     let mut templates = built_in_system_prompt_templates();
+    let mut warnings = Vec::new();
     let Some(config_dir) = config_dir else {
-        return templates;
+        return (templates, warnings);
     };
     let prompts_dir = config_dir.join("prompts");
-    let Ok(entries) = std::fs::read_dir(prompts_dir) else {
-        return templates;
+    let entries = match std::fs::read_dir(&prompts_dir) {
+        Ok(entries) => entries,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(&prompts_dir).is_err_and(|metadata_error| {
+                    metadata_error.kind() == io::ErrorKind::NotFound
+                }) =>
+        {
+            return (templates, warnings);
+        }
+        Err(error) => {
+            let path = bounded_prompt_feedback_label(&prompts_dir.to_string_lossy(), 160);
+            warnings.push(format!(
+                "could not read prompt templates directory `{path}`: {}. Custom prompt templates \
+                 were not discovered; check this path's permissions and type",
+                bounded_io_error_reason(&error)
+            ));
+            return (templates, warnings);
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                let path = bounded_prompt_feedback_label(&prompts_dir.to_string_lossy(), 160);
+                warnings.push(format!(
+                    "could not inspect an entry in prompt templates directory `{path}`: {}. Some \
+                     custom prompt templates may not have loaded; check this directory's \
+                     permissions",
+                    bounded_io_error_reason(&error)
+                ));
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("hbs") {
             continue;
@@ -700,10 +733,67 @@ fn load_system_prompt_templates(config_dir: Option<&Path>) -> HashMap<String, St
             }
             Err(error) => {
                 tracing::warn!(path = %path.display(), error = %error, "failed to read prompt template");
+                let path = bounded_prompt_feedback_label(&path.to_string_lossy(), 160);
+                warnings.push(format!(
+                    "could not read prompt template `{path}`: {}. The custom template was not loaded; \
+                     check this file's permissions and type",
+                    bounded_io_error_reason(&error)
+                ));
             }
         }
     }
-    templates
+    (templates, warnings)
+}
+
+fn bounded_io_error_reason(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::NotFound => "not found",
+        io::ErrorKind::PermissionDenied => "permission denied",
+        io::ErrorKind::NotADirectory => "not a directory",
+        io::ErrorKind::IsADirectory => "is a directory",
+        io::ErrorKind::InvalidInput => "invalid path or input",
+        io::ErrorKind::InvalidData => "invalid data",
+        io::ErrorKind::TimedOut => "operation timed out",
+        io::ErrorKind::Interrupted => "operation interrupted",
+        _ => "I/O error",
+    }
+}
+
+fn bounded_prompt_feedback_label(raw: &str, byte_limit: usize) -> String {
+    const ELLIPSIS: &str = "…";
+
+    let mut label = String::with_capacity(byte_limit);
+    let mut truncated = false;
+    for character in raw.chars() {
+        let unsafe_for_display = character.is_control()
+            || character == '`'
+            || matches!(
+                character,
+                '\u{00ad}'
+                    | '\u{061c}'
+                    | '\u{200b}'..='\u{200f}'
+                    | '\u{2028}'..='\u{202e}'
+                    | '\u{2060}'..='\u{206f}'
+                    | '\u{fdd0}'..='\u{fdef}'
+                    | '\u{feff}'
+            )
+            || (character as u32 & 0xffff == 0xfffe)
+            || (character as u32 & 0xffff == 0xffff);
+        let character = if unsafe_for_display {
+            '\u{fffd}'
+        } else {
+            character
+        };
+        if label.len() + character.len_utf8() > byte_limit.saturating_sub(ELLIPSIS.len()) {
+            truncated = true;
+            break;
+        }
+        label.push(character);
+    }
+    if truncated {
+        label.push_str(ELLIPSIS);
+    }
+    label
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
