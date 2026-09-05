@@ -218,6 +218,9 @@ message, not `Emit`. The message carries typed session/prompt attribution,
 capture class, and opaque zstd bytes. It is non-journaled, debug-redacted, and
 accepted only from an authenticated configured Provider; the harness owns path
 selection and never parses or decompresses the payload.
+The closed `cache_diagnostic` capture class adds only private scalar observations
+under this same opaque, best-effort transport. It creates no event, journal or
+canonical accounting fields.
 
 Provider-visible images are transport-neutral binary values attached to tool
 results, separate from message authorship. CBOR is the durable/IPC byte

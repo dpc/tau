@@ -15,6 +15,15 @@ process exit can omit a capture or leave a truncated final stream. Changes to
 capture validation, content, compression, queueing, paths, or writes require
 focused security and independent privacy review.
 
+The `cache-diagnostic` class is a bounded scalar exception to raw payload
+capture, not a public log. Its producer admits no arbitrary provider fields or
+payloads, and known configured credentials are excluded from allowlisted model
+identity strings. Full-record reservations include in-flight work and cap
+metadata at 64 records / 16 MiB independently of raw-capture budgets. Each scalar
+record is at most 256 KiB; identity strings are at most 128 UTF-8 bytes.
+The harness still authenticates typed attribution and writes opaque bytes under
+existing private paths and diagnostic retention, without interpreting the schema.
+
 Provider startup captures one immutable `Arc<OutboundNetworkPolicy>`. The
 policy reads lowercase proxy variables before their uppercase forms, selects
 `HTTP_PROXY`/`http_proxy` for HTTP and WS, selects

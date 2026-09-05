@@ -200,6 +200,7 @@ fn provider_list_shows_actionable_chatgpt_login_remediation() {
                 account_id: None,
             },
             responses_lite_compatibility: false,
+            cache_diagnostics: Default::default(),
         }),
         ProviderSetupInput::ProfileOAuth,
     )
@@ -291,6 +292,7 @@ fn provider_add_chatgpt_noninteractive_preflight_preserves_collision_safety() {
                 account_id: None,
             },
             responses_lite_compatibility: false,
+            cache_diagnostics: Default::default(),
         }),
         ProviderSetupInput::ProfileOAuth,
     )
@@ -631,6 +633,7 @@ fn chatgpt_setup_keeps_oauth_credential_publication() {
                 account_id: None,
             },
             responses_lite_compatibility: false,
+            cache_diagnostics: Default::default(),
         }),
         ProviderSetupInput::ProfileOAuth,
     )
@@ -2481,6 +2484,7 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
     let lite = BuiltinProviderProfile::Chatgpt(ChatGptProfile {
         auth: OpenAiAuth::default(),
         responses_lite_compatibility: true,
+        cache_diagnostics: Default::default(),
     });
     let value = serde_json::to_value(&lite).expect("lite profile");
     assert_eq!(value["responses_lite_compatibility"], true);
@@ -2498,6 +2502,26 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
 #[test]
 fn chatgpt_setup_defaults_responses_lite_compatibility_to_no() {
     assert!(!std::hint::black_box(DEFAULT_RESPONSES_LITE_COMPATIBILITY));
+}
+
+/// Metadata selection is a closed default-on profile field, frozen separately
+/// from credential reload and never coupled to existing exact capture policy.
+#[test]
+fn chatgpt_cache_diagnostics_profile_selection_is_closed_and_default_on() {
+    use tau_provider::cache_diagnostic::CacheDiagnostics;
+    let default: ChatGptProfile = serde_json::from_str("{}").expect("default profile");
+    assert_eq!(default.cache_diagnostics, CacheDiagnostics::Metadata);
+    assert!(
+        serde_json::to_value(default)
+            .expect("profile serialization")
+            .get("cache_diagnostics")
+            .is_none()
+    );
+    let off: ChatGptProfile =
+        serde_json::from_str(r#"{"cache_diagnostics":"off"}"#).expect("metadata opt-out");
+    assert_eq!(off.cache_diagnostics, CacheDiagnostics::Off);
+    assert!(serde_json::from_str::<ChatGptProfile>(r#"{"cache_diagnostics":"raw"}"#).is_err());
+    assert!(serde_json::from_str::<ChatGptProfile>(r#"{"cache_diagnostics":false}"#).is_err());
 }
 
 /// Provider setup may recommend WebSocket only for OpenAI's exact official
@@ -2531,6 +2555,7 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
     let mut profile = ChatGptProfile {
         auth: OpenAiAuth::default(),
         responses_lite_compatibility: true,
+        cache_diagnostics: Default::default(),
     };
     profile.replace_auth(OpenAiAuth {
         access_token: "fresh".to_owned(),
@@ -2548,6 +2573,7 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
             responses_lite_compatibility: true,
             auth: OpenAiAuth { access_token, .. },
+            ..
         }) if access_token == "fresh"
     ));
 }
@@ -2939,6 +2965,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
                     auth: expired.clone(),
                     responses_lite_compatibility: false,
+                    cache_diagnostics: Default::default(),
                 }),
             ),
             (
@@ -2946,6 +2973,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
                     auth: expired,
                     responses_lite_compatibility: false,
+                    cache_diagnostics: Default::default(),
                 }),
             ),
             (
@@ -3128,6 +3156,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
                     auth: OpenAiAuth::default(),
                     responses_lite_compatibility: true,
+                    cache_diagnostics: Default::default(),
                 }),
             ),
         ]),

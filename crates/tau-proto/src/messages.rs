@@ -1420,6 +1420,8 @@ pub enum ProviderDebugCaptureClass {
     ResponsesAttemptFailure,
     /// Private causal evidence for one failed unary compact HTTP request.
     CompactHttpFailure,
+    /// Bounded private scalar cache observations, never canonical accounting.
+    CacheDiagnostic,
 }
 
 /// One opaque zstd-compressed Provider debug artifact attributed to a harness

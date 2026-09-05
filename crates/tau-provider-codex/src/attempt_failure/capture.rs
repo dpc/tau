@@ -200,7 +200,7 @@ pub(crate) fn submit_capture_with(
         }
         None => (None, None, false, false),
     };
-    let record = json!({
+    let mut record = json!({
         "schema_version": 1,
         "capture_kind": "provider_attempt_failure",
         "operation": input.operation.label(),
@@ -241,6 +241,9 @@ pub(crate) fn submit_capture_with(
             "identifiers": identifiers_truncated,
         },
     });
+    if let Some(attempt_id) = input.correlation.attempt_id {
+        record["attempt_id"] = json!(attempt_id);
+    }
     let serialized = match serialize_bounded_record(record) {
         Ok(BoundedRecord::Ready { serialized }) => serialized,
         Ok(BoundedRecord::Oversized) => {

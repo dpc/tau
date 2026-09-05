@@ -10,6 +10,14 @@ The harness does not own provider-specific LLM execution; provider extensions ar
 
 ## Prompt-cache prefix stability
 
+For ordinary ChatGPT/Codex inference, `cache_diagnostics: "metadata"` is the
+default in provider profiles; `"off"` disables only scalar cache observations
+after restart. Exact request/response capture remains default-on for durable
+activity. Scalar capture uses existing private storage and diagnostic retention
+and does not alter prompts, provider traffic, retries or accounting. Other
+adapters, compaction, prewarm/cache refresh and per-item attribution are not yet
+supported. See [Private runtime metadata](agent-cache.md#private-runtime-metadata).
+
 Tau keeps each backend's provider-visible request meaning stable whenever only
 local prompt correlation changes or a newest conversation turn is appended.
 System/developer authority, ordered history, full tool definitions and schemas,
@@ -1007,7 +1015,7 @@ reasoning and opaque replay items, and rejects every other semantic item. The
 harness stores the exact final text once as one synthetic user-role checkpoint,
 without a wrapper or deterministic supplement. Events after the immutable cut
 remain suffix history, and live/cold replay reuse the committed checkpoint
-without another model call. Ordinary opted-in provider debug capture applies.
+without another model call. Ordinary default-on durable provider debug capture applies.
 Tau does not infer token fit from byte limits. The object controls only its
 declared resource/output bounds; without an exact token threshold it does not
 proactively schedule. Compaction does not rewrite the ordinary input prefix.

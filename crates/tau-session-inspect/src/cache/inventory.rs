@@ -20,6 +20,8 @@ pub(super) struct CaptureCounts {
     pub response_files: u64,
     /// Files containing a supported failure envelope.
     pub failure_files: u64,
+    /// Recognized scalar files, not reconstructed attempts or canonical joins.
+    pub diagnostic_files: u64,
 }
 
 /// Content-free evidence collected without retaining provider payloads or IDs.
@@ -131,6 +133,9 @@ impl Inventory {
     /// Projects only recognized envelopes; content and arbitrary metadata die
     /// here.
     fn observe(&mut self, session: &SessionId, value: Value, limits: &CacheScanLimits) {
+        let cache_diagnostic = value.get("schema").and_then(Value::as_str)
+            == Some("tau.cache_diagnostic")
+            && value.get("schema_version").and_then(Value::as_u64) == Some(0);
         let known_failure = value.get("schema").is_none()
             && matches!(
                 (
@@ -141,6 +146,7 @@ impl Inventory {
                     | (Some(0), Some("compact_http_failure"))
             );
         if !known_failure
+            && !cache_diagnostic
             && (value.get("schema").is_some() || value.get("schema_version").is_some())
         {
             self.gap("unsupported_capture_schema");
@@ -160,6 +166,10 @@ impl Inventory {
         };
         if captured_session != session.as_str() {
             self.gap("capture_session_mismatch");
+            return;
+        }
+        if cache_diagnostic && !cache_diagnostic_header(&value) {
+            self.gap("malformed_current_cache_diagnostic");
             return;
         }
         if known_failure {
@@ -185,7 +195,9 @@ impl Inventory {
                 .and_then(Value::as_u64)
                 .is_some_and(|status| u16::try_from(status).is_ok())
             && value.get("body").is_some_and(Value::is_string);
-        let kind = if known_failure || chat_http_failure {
+        let kind = if cache_diagnostic {
+            3
+        } else if known_failure || chat_http_failure {
             2
         } else if value.get("body").is_some_and(Value::is_object) {
             0
@@ -211,8 +223,30 @@ impl Inventory {
         match kind {
             0 => counts.request_files += 1,
             1 => counts.response_files += 1,
-            _ => counts.failure_files += 1,
+            2 => counts.failure_files += 1,
+            _ => counts.diagnostic_files += 1,
         }
-        self.gap("legacy_partial");
+        if cache_diagnostic {
+            self.gap("cache_diagnostic_analysis_unavailable");
+        } else {
+            self.gap("legacy_partial");
+        }
     }
+}
+
+/// Recognize only the minimal current scalar header, without interpreting
+/// dispatch facts or promoting inventory to an attempt reader.
+fn cache_diagnostic_header(value: &Value) -> bool {
+    matches!(
+        value.get("record_kind").and_then(Value::as_str),
+        Some("dispatch" | "attempt_end")
+    ) && value.get("record_seq").and_then(Value::as_u64).is_some()
+        && ["attempt_id", "producer_run_id"].iter().all(|field| {
+            value.get(field).and_then(Value::as_str).is_some_and(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        })
 }

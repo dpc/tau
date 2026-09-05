@@ -5,6 +5,7 @@
 //! high-confidence tight exact output loops before they become durable
 //! assistant output.
 
+pub mod cache_diagnostic;
 pub mod debug_capture_writer;
 pub mod local_summary_compaction;
 pub mod outbound_network;

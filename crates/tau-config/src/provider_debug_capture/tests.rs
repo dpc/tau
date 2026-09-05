@@ -34,6 +34,10 @@ fn filename_round_trips_every_supported_compressed_class_only() {
             ProviderDebugCaptureClass::CompactHttpFailure,
             "123-sp-6-compact-http-failure.json.zst",
         ),
+        (
+            ProviderDebugCaptureClass::CacheDiagnostic,
+            "123-sp-6-cache-diagnostic.json.zst",
+        ),
     ] {
         let filename = ProviderDebugCaptureFilename::new(123, &prompt, class);
         assert_eq!(filename.as_str(), expected);

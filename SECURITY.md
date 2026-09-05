@@ -210,6 +210,17 @@ sensitive: provider error bodies can reflect prompt, account, or service-interna
 data even after configured credentials are removed. Configurable diagnostic
 retention defaults to thirty days; disabling cleanup can retain them
 indefinitely.
+Default-on Codex ordinary-inference scalar cache diagnostics use the same
+private opaque path and retention. Metadata has an independent startup-frozen
+profile opt-out and is forced off with existing nonpersistable capture policy;
+exact request/response capture remains default-on for durable activity.
+Scalar records omit payloads, credentials, routes, cache keys, provider IDs and
+error prose, but retain bounded model identities and workload correlation, so
+they remain private rather than public-safe. The metadata budget reserves at
+most 64 records / 16 MiB including in-flight serialized data, with a 256-KiB
+per-record cap. Sequence holes and known-loss counters never prove complete
+capture history. Neither capture failures nor metadata observations affect
+provider execution, canonical accounting, or cache eligibility.
 Disabled-by-default cache refreshes resend an exact previously successful
 Provider-visible prefix. The harness keeps that content in process memory and
 sends refresh/cancel requests point-to-point only to the captured configured

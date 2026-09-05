@@ -12,6 +12,8 @@ use std::io as path_std_io;
 mod backend_observation;
 mod cache_contract;
 mod chat_completions;
+mod chatgpt_profile;
+pub use chatgpt_profile::ChatGptProfile;
 mod credential_record;
 mod oauth_refresh_rejection;
 mod openai_prompt_cache;
@@ -183,35 +185,6 @@ impl BuiltinProviderProfile {
             Self::Responses(provider) => provider.validate_local_summary_compaction(),
             Self::Chatgpt(_) => Ok(()),
         }
-    }
-}
-
-/// ChatGPT/Codex provider profile.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChatGptProfile {
-    /// OAuth credentials used for ChatGPT/Codex Responses calls.
-    #[serde(default)]
-    pub auth: OpenAiAuth,
-    /// Use the legacy Responses Lite contract for audited GPT-5.6 routes.
-    ///
-    /// This is startup-stable route configuration, not authentication data.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub responses_lite_compatibility: bool,
-}
-
-impl ChatGptProfile {
-    fn responses_mode(&self) -> CodexMode {
-        if self.responses_lite_compatibility {
-            CodexMode::LiteCompatibility
-        } else {
-            CodexMode::Standard
-        }
-    }
-
-    #[cfg(test)]
-    fn replace_auth(&mut self, refreshed: OpenAiAuth) {
-        self.auth = refreshed;
     }
 }
 
@@ -920,6 +893,13 @@ pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Set capture-local build attribution from the executable's existing metadata.
+/// This is process-local startup information, not provider configuration or
+/// IPC.
+pub fn initialize_cache_diagnostic_build(identity: String) {
+    tau_provider::cache_diagnostic::initialize_build_identity(identity);
+}
+
 fn provider_cli_target(
     args: &[String],
 ) -> Result<(tau_proto::ExtensionName, Vec<String>), Box<dyn Error>> {
@@ -1240,6 +1220,7 @@ fn cmd_add_chatgpt_in(
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
             auth,
             responses_lite_compatibility,
+            cache_diagnostics: Default::default(),
         }),
         ProviderSetupInput::ProfileOAuth,
         target,
@@ -2564,6 +2545,7 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
             auth,
             responses_lite_compatibility: false,
+            cache_diagnostics: Default::default(),
         }),
     );
     BuiltinProviderProfiles {
@@ -2760,6 +2742,10 @@ where
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
     let startup_responses_modes = startup.profiles.startup_responses_modes();
     let network = Arc::new(tau_provider::OutboundNetworkPolicy::from_env());
+    let codex_runtime = Arc::new(CodexRuntime::new(network));
+    if !startup.publish_models_after_configure {
+        codex_runtime.initialize_cache_diagnostics(startup.profiles.startup_cache_diagnostics());
+    }
     let runtime = ProviderRuntime {
         load_prompt_profiles,
         startup_responses_modes,
@@ -2774,7 +2760,7 @@ where
         retry_clock: executors.retry_clock,
         shared_cooldowns: BTreeMap::new(),
         shared_cooldown_generation: 0,
-        codex_runtime: Arc::new(CodexRuntime::new(network)),
+        codex_runtime,
         prewarm_supervisor: PrewarmSupervisor::default(),
         provider_profile_identities: BTreeMap::new(),
         prewarm_profile_identities: BTreeMap::new(),
@@ -2890,6 +2876,9 @@ where
                 }
                 cx.state
                     .set_startup_responses_modes(profiles.startup_responses_modes());
+                cx.state
+                    .codex_runtime
+                    .initialize_cache_diagnostics(profiles.startup_cache_diagnostics());
                 let usable_profiles = cx.state.load_all_profiles(&cx.handle)?;
                 let model_count = models_for_profiles(&usable_profiles).len();
                 tracing::info!(

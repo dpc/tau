@@ -745,6 +745,7 @@ pub fn main_with_args() -> std::process::ExitCode {
 /// command, using caller-provided component registrations for
 /// `component` dispatch.
 pub fn main_with_args_and_components(components: &[Component]) -> std::process::ExitCode {
+    tau_ext_provider_builtin::initialize_cache_diagnostic_build(build_revision());
     use std::process::ExitCode;
 
     use clap::{CommandFactory, FromArgMatches};

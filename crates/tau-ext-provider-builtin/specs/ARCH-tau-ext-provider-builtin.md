@@ -67,6 +67,14 @@ semantic transcript replay emits. Routes whose templates allow system authority 
 set `single_initial_system_message`; the adapter then rejects later System and
 Developer transcript messages before network dispatch.
 
+ChatGPT profiles also freeze `cache_diagnostics: off|metadata` at configured
+startup, with metadata enabled by default for persistable ordinary inference.
+Credential reload and subsequent initialization cannot change this selection.
+It does not disable or opt in existing default-on exact captures. Other adapters
+and operations remain explicitly unsupported for scalar cache diagnostics.
+The executable passes its existing build identity in process, never through
+prompt/configuration IPC.
+
 ChatGPT profiles capture Responses mode at process startup. Model publication,
 prompt, prewarm, retry, and quota resolution share that value; credential reload
 and OAuth refresh do not change it. An on-disk mode edit takes effect after

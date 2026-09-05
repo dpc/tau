@@ -9,7 +9,7 @@
 
 #[cfg(test)]
 use std::collections as path_std_collections;
-use std::collections::{HashMap, hash_map as path_std_collections_hash_map};
+use std::collections::{BTreeMap, HashMap, hash_map as path_std_collections_hash_map};
 use std::num::NonZeroU32;
 use std::sync as path_std_sync;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,7 @@ use tau_proto::{
     ModelId, ModelName, ModelTag, NativeReasoningEffort, ProviderBackendTransport,
     ProviderModelInfo, ProviderName, ThinkingSummary, Verbosity,
 };
+use tau_provider::cache_diagnostic::CacheDiagnostics;
 use tau_provider::{
     debug_capture_writer as path_tau_provider_debug_capture_writer,
     private_attempt_trace as private_trace,
@@ -51,6 +52,7 @@ const CHATGPT_MODELS: &[&str] = &[
 
 mod attempt_context;
 mod attempt_failure;
+mod cache_diagnostic;
 mod canonical_identifier;
 pub(crate) mod common;
 pub mod oauth;
@@ -82,6 +84,8 @@ pub fn test_stream_state() -> StreamState {
 #[must_use]
 pub fn test_debug_capture() -> CodexDebugCapture {
     CodexDebugCapture {
+        attempt_id: None,
+        wire_dispatch_index: None,
         terminal_event: None,
     }
 }
@@ -596,6 +600,9 @@ impl TurnAbortWaker for NeverAbortWaker {}
 /// Runtime state for ChatGPT/Codex WebSocket inference and compaction
 /// admission.
 pub struct CodexRuntime {
+    /// Startup-frozen metadata policy, independent of exact capture
+    /// eligibility.
+    cache_diagnostics: path_std_sync::OnceLock<BTreeMap<ProviderName, CacheDiagnostics>>,
     /// Shared pool whose connection setup uses `network`.
     ws_pool: responses::pool::SharedWsPool,
     /// Required immutable startup policy for all Codex control-plane and prompt
@@ -700,6 +707,10 @@ pub struct StreamDispatchResult {
 
 /// Opaque Codex debug capture that never exposes raw provider JSON.
 pub struct CodexDebugCapture {
+    /// Private finite inference identity, never exposed through generic Debug.
+    attempt_id: Option<tau_provider::cache_diagnostic::DiagnosticId>,
+    /// Actual successful dispatch index, absent for unsupported operations.
+    wire_dispatch_index: Option<u64>,
     terminal_event: Option<serde_json::Value>,
 }
 
@@ -826,6 +837,7 @@ impl CodexRuntime {
     #[must_use]
     pub fn new(network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>) -> Self {
         Self {
+            cache_diagnostics: path_std_sync::OnceLock::new(),
             ws_pool: path_responses_pool::SharedWsPool::new(path_std_sync::Arc::clone(&network)),
             network,
             compact_routes: CompactAdmission {
@@ -834,6 +846,12 @@ impl CodexRuntime {
                 changed: path_std_sync::Condvar::new(),
             },
         }
+    }
+
+    /// Freeze per-profile scalar capture selection once at configured startup.
+    /// Repeated calls cannot reconfigure active inference or exact captures.
+    pub fn initialize_cache_diagnostics(&self, policies: BTreeMap<ProviderName, CacheDiagnostics>) {
+        let _ = self.cache_diagnostics.set(policies);
     }
 
     /// Return the immutable outbound policy shared by this runtime.
@@ -928,6 +946,8 @@ impl CodexRuntime {
         });
         let mut state = state;
         let debug_capture = CodexDebugCapture {
+            attempt_id: None,
+            wire_dispatch_index: None,
             terminal_event: state.provider_terminal_event.take(),
         };
         Ok(StreamDispatchResult {
@@ -975,8 +995,23 @@ impl CodexRuntime {
             private_trace::Transport::Websocket,
         );
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Inference, logical_attempt);
+        let metadata_enabled = self
+            .cache_diagnostics
+            .get_or_init(BTreeMap::new)
+            .get(&config.wire().profile_namespace)
+            .copied()
+            .unwrap_or_default()
+            == CacheDiagnostics::Metadata;
+        let diagnostic = cache_diagnostic::CacheAttempt::new(
+            agent_prompt_id,
+            request,
+            logical_attempt.get(),
+            metadata_enabled,
+        )
+        .map(path_std_sync::Arc::new);
+        attempt.correlation().diagnostic = diagnostic.clone();
         let mut backend_reached = false;
-        let result = self.stream(
+        let mut result = self.stream(
             agent_prompt_id,
             config.wire(),
             request,
@@ -996,6 +1031,14 @@ impl CodexRuntime {
         }
         let progress = attempt.progress();
         let canceled = abort.is_aborted();
+        if let Some(diagnostic) = &diagnostic {
+            if let Ok(result) = &mut result {
+                result.debug_capture.attempt_id = Some(diagnostic.id);
+                result.debug_capture.wire_dispatch_index =
+                    (diagnostic.dispatch_count() > 0).then_some(diagnostic.dispatch_count());
+            }
+            diagnostic.finish(config.wire(), &result, attempt.snapshot(), canceled);
+        }
         if let Some(trace) = private_trace.take() {
             let trace_outcome = match &result {
                 _ if canceled => private_trace::Outcome::Canceled,
@@ -1349,7 +1392,7 @@ fn submit_response_debug_with(
         .unwrap_or(
             path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::UnknownResponse,
         );
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "session_id": session_id,
         "agent_prompt_id": response.agent_prompt_id,
         "backend": response.backend,
@@ -1358,6 +1401,10 @@ fn submit_response_debug_with(
         "provider_response_finished": response,
         "provider_terminal_event": capture.and_then(|capture| capture.terminal_event.as_ref()),
     });
+    if let Some(capture) = capture.filter(|capture| capture.attempt_id.is_some()) {
+        metadata["attempt_id"] = serde_json::json!(capture.attempt_id);
+        metadata["wire_dispatch_index"] = serde_json::json!(capture.wire_dispatch_index);
+    }
     match serde_json::to_vec_pretty(&metadata) {
         Ok(json) => submit(
             path_tau_provider_debug_capture_writer::ProviderDebugCapture::new(

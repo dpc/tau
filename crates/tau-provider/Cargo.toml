@@ -19,6 +19,7 @@ blake3.workspace = true
 dirs.workspace = true
 httpdate.workspace = true
 ipnet.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true

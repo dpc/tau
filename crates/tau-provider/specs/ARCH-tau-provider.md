@@ -26,6 +26,15 @@ share the ordinary non-preemptive extension IPC writer: a terminal queued after
 an already-started capture frame waits for that frame, with no capture-specific
 terminal gate, priority scheduler, or second stream.
 
+Scalar `cache-diagnostic` captures additionally reserve a full 256-KiB record
+through transport completion, capped at 64 reservations / 16 MiB including
+in-flight serialized data. Admission allocates a process-local sequence before
+its nonblocking capacity check; exhaustion disables new records. Rejected,
+abandoned and failed provider-side records increment a saturating known-loss
+counter. Harness-side loss remains unobserved. This budget does not change
+existing raw-capture limits. The executable supplies its existing build identity
+locally; no normal extension/configuration wire field is introduced.
+
 The harness authenticates the configured Provider instance, accepts only known
 durable-session attribution, derives
 `debug/provider-requests/<instance>/`, and writes through a second bounded

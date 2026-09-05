@@ -127,6 +127,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
                 account_id: Some("fixture-account".to_owned()),
             },
             responses_lite_compatibility: false,
+            cache_diagnostics: Default::default(),
         }),
     );
     let profiles = BuiltinProviderProfiles {

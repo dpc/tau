@@ -451,7 +451,12 @@ fn serialize_and_submit_provider_request_with(
     });
     if let Some(correlation) = correlation {
         metadata["logical_attempt"] = correlation.logical_attempt().into();
-        metadata["wire_dispatch_index"] = correlation.wire_dispatch_index().into();
+        metadata["wire_dispatch_index"] = serde_json::to_value(
+            (correlation.wire_dispatch_index() > 0).then_some(correlation.wire_dispatch_index()),
+        )?;
+        if let Some(diagnostic) = correlation.diagnostic.as_ref() {
+            metadata["attempt_id"] = serde_json::to_value(diagnostic.id)?;
+        }
     }
     let Ok(agent_prompt_id) = tau_proto::AgentPromptId::parse(agent_prompt_id) else {
         tracing::warn!(

@@ -217,7 +217,14 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                 "prompt": options.prompt,
                 "limits": options.limits,
                 "content_policy": "content_free_not_public_safe",
-                "capture_policy": "legacy_inventory_no_terminal_or_dispatch_join",
+                "capture_policy": "capture_inventory_no_terminal_or_dispatch_join",
+                "cache_diagnostic_support": {
+                    "codex_inference": "metadata",
+                    "other_adapters": "unavailable",
+                    "standalone_compaction": "unavailable",
+                    "cache_refresh": "unavailable",
+                    "raw_attribution": "unavailable"
+                },
                 "snapshot_policy": "strict_finite_agent_prefix_membership_rechecked"
                 ,"memory_policy": "conservative_journal_byte_charge_not_measured_peak_memory"
             }

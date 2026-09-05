@@ -1325,16 +1325,21 @@ fn ui_debug_event_stats_requests_are_not_logged() {
 fn provider_debug_captures_are_not_logged() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
-    log.log_harness_event(&HarnessEvent::from_connection_for_test(
-        tau_proto::ConnectionId::parse("provider").expect("connection"),
-        HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
-            session_id: SessionId::parse("session").expect("session"),
-            agent_prompt_id: AgentPromptId::parse("prompt").expect("prompt"),
-            class: tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
-            zstd: b"opaque-sensitive-capture".to_vec(),
-        }),
-    ))
-    .expect("skip Provider capture");
+    for class in [
+        tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
+        tau_proto::ProviderDebugCaptureClass::CacheDiagnostic,
+    ] {
+        log.log_harness_event(&HarnessEvent::from_connection_for_test(
+            tau_proto::ConnectionId::parse("provider").expect("connection"),
+            HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
+                session_id: SessionId::parse("session").expect("session"),
+                agent_prompt_id: AgentPromptId::parse("prompt").expect("prompt"),
+                class,
+                zstd: b"opaque-sensitive-capture".to_vec(),
+            }),
+        ))
+        .expect("skip Provider capture");
+    }
     assert!(read_lines(log.path()).is_empty());
 }
 

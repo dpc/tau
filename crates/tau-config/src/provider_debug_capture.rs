@@ -15,6 +15,7 @@ fn class_label(class: ProviderDebugCaptureClass) -> &'static str {
         ProviderDebugCaptureClass::UnknownResponse => "unknown-response",
         ProviderDebugCaptureClass::ResponsesAttemptFailure => "responses-attempt-failure",
         ProviderDebugCaptureClass::CompactHttpFailure => "compact-http-failure",
+        ProviderDebugCaptureClass::CacheDiagnostic => "cache-diagnostic",
     }
 }
 
@@ -54,6 +55,7 @@ impl ProviderDebugCaptureFilename {
             ProviderDebugCaptureClass::UnknownResponse,
             ProviderDebugCaptureClass::ResponsesAttemptFailure,
             ProviderDebugCaptureClass::CompactHttpFailure,
+            ProviderDebugCaptureClass::CacheDiagnostic,
         ]
         .into_iter()
         .find_map(|class| {

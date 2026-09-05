@@ -5,6 +5,41 @@ use std::io::Write as _;
 
 use super::*;
 
+/// The new capture class is inventoried without pretending Stage-1 performs
+/// attempt attribution, and without misclassifying its schema as stale.
+#[test]
+fn scalar_cache_capture_is_recognized_without_claiming_analysis() {
+    let root = tempfile::tempdir().expect("fixture root");
+    capture(
+        root.path(),
+        "1-prompt-cache-diagnostic.json.zst",
+        br#"{
+        "schema":"tau.cache_diagnostic","schema_version":0,"record_kind":"dispatch",
+        "session_id":"session","agent_prompt_id":"prompt","record_seq":1,
+        "producer_run_id":"0123456789abcdef0123456789abcdef",
+        "attempt_id":"fedcba9876543210fedcba9876543210"
+    }"#,
+    );
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session identity"),
+        &CacheScanLimits::default(),
+    );
+    assert_eq!(
+        inventory
+            .prompts
+            .values()
+            .next()
+            .expect("observed prompt")
+            .diagnostic_files,
+        1
+    );
+    assert_eq!(inventory.gaps["cache_diagnostic_analysis_unavailable"], 1);
+    assert!(!inventory.gaps.contains_key("unsupported_capture_schema"));
+    assert!(!inventory.gaps.contains_key("legacy_partial"));
+}
+
 /// Realized reads, including perfect hits, never invent an eligible ceiling.
 #[test]
 fn reads_do_not_synthesize_eligibility() {

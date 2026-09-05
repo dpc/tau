@@ -1139,9 +1139,12 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         let mut stream = recording_stream(self.record_config);
         let mut observation = TurnObservation::default();
         let updates = path_std_cell::RefCell::new(on_update);
-        let dispatch = correlation
+        let mut dispatch = correlation
             .as_deref_mut()
             .map(path_crate_attempt_failure::AttemptCaptureCorrelation::next_dispatch);
+        if let Some(dispatch) = &mut dispatch {
+            dispatch.connection_state = "reused";
+        }
         match conn.run_response(
             self.config,
             self.agent_prompt_id,
@@ -1219,6 +1222,11 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         }
         if !emit_dispatched && let Some(correlation) = correlation.as_deref_mut() {
             correlation.mark_repair_used();
+            correlation.repair_reason = if stale_chain {
+                "stale_response"
+            } else {
+                "other_typed"
+            };
         }
         on_update(crate::StreamUpdate::Connecting);
         let connect_started = private_trace::started(private_trace);
@@ -1235,9 +1243,12 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         }
         let mut conn = connected?;
         self.pool.record_fresh_open()?;
-        let dispatch = correlation
+        let mut dispatch = correlation
             .as_deref_mut()
             .map(path_crate_attempt_failure::AttemptCaptureCorrelation::next_dispatch);
+        if let Some(dispatch) = &mut dispatch {
+            dispatch.connection_state = if emit_dispatched { "new" } else { "replaced" };
+        }
         conn.carry_response_bytes(carried_response_bytes);
         let mut stream = recording_stream(self.record_config);
         let mut observation = TurnObservation::with_carried_response_bytes(carried_response_bytes);

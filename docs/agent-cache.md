@@ -27,7 +27,10 @@ per-agent sequence boundary; those boundaries are not cross-agent causal order.
 
 The private capture inventory recognizes current Chat Completions, public
 Responses, and Codex request/response envelopes, Chat/Responses failures, and the
-existing Codex finite-attempt and compact HTTP failure envelopes. It streams compressed files
+existing Codex finite-attempt and compact HTTP failure envelopes. It also recognizes
+version-0 scalar cache captures as `diagnostic_files`, while explicitly reporting
+`cache_diagnostic_analysis_unavailable`: inventory is not attempt attribution.
+It streams compressed files
 one at a time and retains only typed session/prompt attribution and file counts.
 These are **file counts, not attempt or dispatch counts**. Identical legacy files
 still count as two files; there is no stable record identity to deduplicate.
@@ -72,8 +75,63 @@ Capture parsing/inventory and in-memory output have separate bounded shares.
 Explicit capture loss and output truncation remain partial results. The source
 directories are never changed.
 
-Attribution, continuity, geometry, shared filters beyond `--prompt`, disposable
-indexes, new capture-local correlation, and runtime metadata are subsequent
-deliveries. Their CLI surfaces are absent rather than empty-success placeholders.
-Exact payload capture remains separately opt-in/default-off; this command
+Attribution, continuity, geometry, shared filters beyond `--prompt`, and disposable
+indexes are subsequent deliveries. Their CLI surfaces are absent rather than
+empty-success placeholders. Exact request/response capture remains **default-on
+for durable activity**, independently of the metadata setting below. This command
 does not alter capture, retention, inference, retry, refresh, or compaction policy.
+
+## Private runtime metadata
+
+ChatGPT/Codex ordinary inference also produces bounded scalar captures in the
+existing owner-private session `debug/provider-requests/<instance>/` directory,
+using the `cache-diagnostic.json.zst` filename class. Set
+`"cache_diagnostics": "off"` in a ChatGPT provider profile to disable only these
+metadata records, or `"metadata"` (the default) to enable them. Restart after
+changing this startup-frozen setting. Ephemeral/memory-only activity remains
+excluded under the existing capture permission; no filesystem probing infers
+durability.
+
+The capture payload uses `schema: "tau.cache_diagnostic"`, internal version `0`.
+Its build identity comes from the executable's existing source metadata
+(uninitialized library embeddings explicitly report `unknown`). Each process
+has a random 128-bit `producer_run_id`; each finite inference attempt has a
+separate random `attempt_id`. Exact inference request/response/failure captures
+carry that attempt identity and the actual dispatch index where one exists.
+An unsent exact request retained after cancellation has a null wire index.
+These identities never affect provider routing or upstream request bodies.
+
+`dispatch` records observe attempted enqueue of the final serialized envelope,
+including failed enqueue to a closed writer—not transport acceptance, successful
+send, provider receipt or billing. `attempt_end` records report the
+dispatch count and success/error/cancellation/pre-dispatch outcome. Repair used
+and another dispatch are independent: a failed replacement upgrade can spend
+repair while leaving the dispatch count at one. Typed socket epochs, reuse,
+anchor-validation and repair facts describe only branches the backend observed.
+No endpoint, credential, cache-key literal, provider response ID, previous-response
+ID, error prose or raw payload enters scalar records.
+
+Raw provider input/read/write/output counters remain separate from normalized
+canonical accounting. Missing counters, exact eligibility, model revision and
+unavailable chain counts stay null. There is no established per-item attribution
+parser yet: `raw_attribution` is false, the attribution array stays empty, and
+present usage is labeled `unsupported_shape` for attribution. Other adapters,
+standalone compaction, prewarm and cache refresh do not implement this capture
+adapter. The inspector reports those capabilities as unavailable rather than
+inventing inference ordinals or complete coverage.
+
+Records are capped at 256 KiB inclusive, with each allowlisted identity capped
+at 128 UTF-8 bytes; over-limit identities are omitted whole with fixed flags.
+Metadata reserves a complete record before optional evidence construction, with
+at most 64 reservations / 16 MiB including in-flight serialized data. It shares
+the existing nonblocking lossy capture worker and opaque protocol transport;
+raw-capture budgets do not change. Sequence exhaustion disables new records.
+Sequence holes and later cumulative known-loss counts expose some losses, not
+exhaustiveness. No wait, retry, drain, shutdown join or fsync is added. An
+already-started capture frame can still delay a following terminal on ordinary
+non-preemptive IPC.
+
+The new class inherits owner-only storage, crash/torn-write behavior and managed
+diagnostic retention (thirty days by default, configurable/disableable). It adds
+no journal fields, canonical accounting, provider probes, cache refreshes,
+automatic index or cache-eligibility authority.

@@ -27,24 +27,38 @@ impl LogicalAttempt {
 }
 
 /// Exact correlation for one upstream dispatch within a logical attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct DispatchCorrelation {
     /// One-based scheduler attempt owning this dispatch.
     logical_attempt: LogicalAttempt,
     /// One-based upstream dispatch within that attempt.
     wire_dispatch_index: u64,
+    /// Private inference attempt; absent for unsupported operations.
+    pub(crate) diagnostic: Option<std::sync::Arc<crate::cache_diagnostic::CacheAttempt>>,
+    /// Whether the backend spent its transparent repair budget.
+    pub(crate) repair_used: bool,
+    /// Closed backend-selected repair branch.
+    pub(crate) repair_reason: &'static str,
+    /// Closed pool-selected connection lifecycle fact.
+    pub(crate) connection_state: &'static str,
 }
 
 impl DispatchCorrelation {
+    /// Preserve unsent exact-request evidence without inventing a wire
+    /// dispatch.
+    pub(crate) fn undispatched(mut self) -> Self {
+        self.wire_dispatch_index = 0;
+        self
+    }
     /// Return the persisted logical-attempt ordinal.
     #[must_use]
-    pub(crate) fn logical_attempt(self) -> u64 {
+    pub(crate) fn logical_attempt(&self) -> u64 {
         self.logical_attempt.get()
     }
 
     /// Return the persisted per-attempt wire-dispatch index.
     #[must_use]
-    pub(crate) fn wire_dispatch_index(self) -> u64 {
+    pub(crate) fn wire_dispatch_index(&self) -> u64 {
         self.wire_dispatch_index
     }
 }
@@ -63,6 +77,10 @@ pub(crate) struct AttemptCaptureCorrelation {
     response_bytes_received: u64,
     /// Sticky parser-accepted semantic progress across wire dispatches.
     semantic_progress: crate::SemanticProgress,
+    /// Capture-only correlation selected at ordinary inference entry.
+    pub(crate) diagnostic: Option<std::sync::Arc<crate::cache_diagnostic::CacheAttempt>>,
+    /// Closed repair branch supplied by the transport owner.
+    pub(crate) repair_reason: &'static str,
 }
 
 impl AttemptCaptureCorrelation {
@@ -75,6 +93,8 @@ impl AttemptCaptureCorrelation {
             repair_used: false,
             response_bytes_received: 0,
             semantic_progress: crate::SemanticProgress::None,
+            diagnostic: None,
+            repair_reason: "none",
         }
     }
 
@@ -85,6 +105,10 @@ impl AttemptCaptureCorrelation {
         DispatchCorrelation {
             logical_attempt: self.logical_attempt,
             wire_dispatch_index: self.last_wire_dispatch_index,
+            diagnostic: self.diagnostic.clone(),
+            repair_used: self.repair_used,
+            repair_reason: self.repair_reason,
+            connection_state: "unknown",
         }
     }
 
@@ -110,10 +134,14 @@ impl AttemptCaptureCorrelation {
     pub(crate) fn snapshot(&self) -> AttemptCaptureSnapshot {
         AttemptCaptureSnapshot {
             logical_attempt: self.logical_attempt,
-            wire_dispatches: self.last_wire_dispatch_index,
+            wire_dispatches: self
+                .diagnostic
+                .as_ref()
+                .map_or(self.last_wire_dispatch_index, |d| d.dispatch_count()),
             repair_used: self.repair_used,
             response_bytes_received: self.response_bytes_received,
             semantic_progress: self.semantic_progress,
+            attempt_id: self.diagnostic.as_ref().map(|d| d.id),
         }
     }
 }
@@ -121,6 +149,8 @@ impl AttemptCaptureCorrelation {
 /// Immutable final correlation facts for one failed finite attempt.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AttemptCaptureSnapshot {
+    /// Capture-local identity, absent for unsupported operations.
+    pub(crate) attempt_id: Option<tau_provider::cache_diagnostic::DiagnosticId>,
     /// One-based scheduler attempt owning the failure.
     logical_attempt: LogicalAttempt,
     /// Count of request envelopes actually dispatched.

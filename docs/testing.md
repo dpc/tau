@@ -582,8 +582,17 @@ runs the phases once in that order and never blocks startup. Captures live under
 `debug/provider-requests/<provider-instance>/`.
 
 Provider-capture filename grammar tests live in
-`tau-config::provider_debug_capture`, the dependency-neutral contract used by
-writers and cleanup. Worker and producer-integration tests live in
+`tau-config::provider_debug_capture`, including `cache-diagnostic`. Scalar
+admission/loss and in-flight budget tests live in
+`tau-provider::cache_diagnostic`; Codex ordinary success, repair with a second
+dispatch, replacement-upgrade failure, cancellation and immutable opt-out are
+covered by deterministic loopback tests in `tau-provider-codex`.
+The shared opaque writer and retention tests exercise the new class without
+parsing it. Stage-1 inventory tests recognize it while preserving unavailable
+analysis rather than treating file counts as attempts.
+
+Writers and cleanup use that same dependency-neutral filename contract.
+Worker and producer-integration tests live in
 `tau-provider::debug_capture_writer`, `tau-harness::provider_capture_writer`,
 and the concrete provider backends. Exercise immediate bounded admission,
 Provider-side zstd round trips, redacted protocol Debug, late-session

@@ -6,6 +6,46 @@ use super::{
     enforce_encoded_bound, run_worker, start_transport_with,
 };
 
+/// Metadata's inclusive byte cap cannot silently inherit the much larger raw
+/// capture limit or accept a raw class through the metadata reservation path.
+#[test]
+fn cache_metadata_has_its_own_inclusive_record_cap() {
+    let mut capture = job(
+        "prompt",
+        &vec![0; crate::cache_diagnostic::MAX_RECORD_BYTES],
+    )
+    .capture;
+    assert!(!super::cache_capture_fits_bound(&capture));
+    capture.class = tau_proto::ProviderDebugCaptureClass::CacheDiagnostic;
+    assert!(super::cache_capture_fits_bound(&capture));
+    capture.json.push(0);
+    assert!(!super::cache_capture_fits_bound(&capture));
+}
+
+/// Receiving a job does not release its metadata capacity: a blocked in-flight
+/// compression/transport operation must still prevent a sixty-fifth
+/// reservation.
+#[test]
+fn cache_metadata_worker_retains_reservation_until_send_finishes() {
+    use crate::cache_diagnostic::Reservation;
+    let reservation = Reservation::acquire().expect("empty budget");
+    let mut held: Vec<_> = (0..63)
+        .map(|_| Reservation::acquire().expect("reservation below bound"))
+        .collect();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let mut job = job("prompt", b"{}");
+    job.capture.class = tau_proto::ProviderDebugCaptureClass::CacheDiagnostic;
+    job.metadata_reservation = Some(reservation);
+    assert!(sender.try_send(job).is_ok());
+    drop(sender);
+    run_worker(receiver, |_| {
+        assert!(Reservation::acquire().is_none());
+        held.clear();
+        Ok(())
+    });
+    assert!(Reservation::acquire().is_some());
+}
+
 /// Build one typed capture job for worker and queue tests.
 fn job(prompt: &str, json: &[u8]) -> CaptureJob {
     CaptureJob::new(ProviderDebugCapture::new(

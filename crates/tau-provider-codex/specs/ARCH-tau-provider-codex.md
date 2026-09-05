@@ -262,8 +262,8 @@ This crate sends prompt/tool context to ChatGPT/Codex endpoints and parses provi
 responses back into Tau stream state. Treat upstream responses and diagnostics as
 crossing an external-provider trust boundary.
 
-Explicitly enabled durable-session request and response captures serialize on
-the producer and enter the shared
+Default-on durable-session request and response captures serialize on the
+producer and enter the shared
 [`tau-provider`](../../tau-provider/specs/ARCH-tau-provider.md) bounded
 process-wide FIFO
 without waiting. Its detached worker performs zstd compression and filesystem
@@ -280,6 +280,26 @@ including a replacement-upgrade failure that never dispatches a second envelope.
 Request captures from that finite inference path carry the same
 `logical_attempt` and exact `wire_dispatch_index`. Unary compaction captures
 omit these fields rather than fabricating inference correlation.
+
+Ordinary inference now also owns a private version-0 `tau.cache_diagnostic`
+adapter. Durable activity selects metadata by default, independently of the
+unchanged default-on exact captures; profile `cache_diagnostics: off` disables
+only scalar metadata. Each finite attempt shares a cryptographically random
+capture-local identity across exact and scalar records. The attempted enqueue
+boundary—not pool checkout, lowering or upgrade—owns dispatch observations.
+Observation occurs immediately before enqueue, including failed enqueue to a
+closed writer; it does not assert acceptance, successful send or receipt.
+Unsent exact requests remain available with a null wire index. A normal attempt
+exit emits one best-effort summary, including actual count, typed repair/chain
+facts and established raw usage counters. Nothing changes terminal accounting,
+provider request shape, retry or cancellation authority.
+
+Metadata contains only bounded allowlisted identities and scalar/closed facts.
+No per-item attribution schema is established: its capability is unavailable,
+and usage presence reports unsupported attribution shape without deriving an
+eligible ceiling. Compaction and prewarm/cache-refresh have no scalar adapter
+and do not borrow inference ordinals. The shared provider worker owns capacity,
+process correlation and loss; the harness remains the opaque persistence owner.
 
 The retired unary compact HTTP path submitted one private
 schema-v0 `compact-http-failure` capture while provider diagnostics are enabled.

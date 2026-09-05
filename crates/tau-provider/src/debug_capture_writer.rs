@@ -71,12 +71,17 @@ impl ProviderDebugCapture {
 struct CaptureJob {
     /// Capture metadata and uncompressed JSON accepted by the bounded queue.
     capture: ProviderDebugCapture,
+    /// Metadata-only admission budget, retained through the in-flight send.
+    metadata_reservation: Option<crate::cache_diagnostic::Reservation>,
 }
 
 impl CaptureJob {
     /// Build one capture transport job.
     fn new(capture: ProviderDebugCapture) -> Self {
-        Self { capture }
+        Self {
+            capture,
+            metadata_reservation: None,
+        }
     }
 }
 
@@ -190,6 +195,10 @@ fn start_transport_with(spawn: impl FnOnce() -> io::Result<CaptureQueue>) -> Opt
 /// compression, protocol, or harness I/O failure may omit the best-effort
 /// artifact.
 pub fn submit_provider_debug_capture(capture: ProviderDebugCapture) {
+    if capture.class == ProviderDebugCaptureClass::CacheDiagnostic {
+        // Metadata producers must reserve before constructing the payload.
+        return;
+    }
     if !capture_fits_raw_bound(&capture) {
         tracing::warn!(
             target: "tau_provider::debug_capture_writer",
@@ -200,6 +209,27 @@ pub fn submit_provider_debug_capture(capture: ProviderDebugCapture) {
         return;
     }
     submit(CaptureJob::new(capture));
+}
+
+/// Submit bounded scalar metadata on the existing worker without altering raw
+/// capture budgets. Dropping any rejected job releases and records its loss.
+pub fn submit_cache_diagnostic(
+    capture: ProviderDebugCapture,
+    reservation: crate::cache_diagnostic::Reservation,
+) {
+    if !cache_capture_fits_bound(&capture) {
+        return;
+    }
+    submit(CaptureJob {
+        capture,
+        metadata_reservation: Some(reservation),
+    });
+}
+
+/// Check both class and inclusive scalar byte bound without inspecting content.
+fn cache_capture_fits_bound(capture: &ProviderDebugCapture) -> bool {
+    capture.class == ProviderDebugCaptureClass::CacheDiagnostic
+        && capture.json.len() <= crate::cache_diagnostic::MAX_RECORD_BYTES
 }
 
 /// Return whether one uncompressed job fits the established protocol bound
@@ -213,7 +243,7 @@ fn run_worker(
     receiver: mpsc::Receiver<CaptureJob>,
     mut write: impl FnMut(&CaptureJob) -> io::Result<()>,
 ) {
-    while let Ok(job) = receiver.recv() {
+    while let Ok(mut job) = receiver.recv() {
         if let Err(error) = write(&job) {
             tracing::warn!(
                 target: "tau_provider::debug_capture_writer",
@@ -221,6 +251,8 @@ fn run_worker(
                 %error,
                 "failed to send compressed provider debug capture"
             );
+        } else if let Some(reservation) = job.metadata_reservation.as_mut() {
+            reservation.delivered();
         }
     }
 }

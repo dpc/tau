@@ -99,6 +99,16 @@ continuation. Cancellation and invalidation generations are rechecked at socket
 publication so stale work cannot reinstall credential-bearing transport state.
 # Provider VCR boundary
 
+Ordinary Codex inference has a private scalar cache-diagnostic adapter, selected
+by startup-frozen `cache_diagnostics: off|metadata`. Metadata defaults on only
+where existing durable capture policy permits it; exact captures keep their
+existing default-on behavior. Scalar records retain random capture-local
+correlation, bounded model identities, typed connection/chain/repair facts and
+allowlisted raw usage, never provider IDs, routes, headers, error prose or body
+content. Missing eligibility and unsupported attribution remain unavailable.
+Normal inference, retry/repair, cancellation, billing and canonical accounting
+have no dependence on metadata admission or delivery.
+
 Raw provider captures are private sensitive test artifacts and may contain
 prompts, credentials, identifiers, reasoning, tool output, or host paths. They
 are stored as private `.json.zst` diagnostics but compression does not redact

@@ -31,7 +31,7 @@
 //! back from the reader.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{io as path_std_io, thread, time as path_std_time};
@@ -171,6 +171,12 @@ struct EnvelopeTimeouts {
 
 /// Optional recording, evidence, and deadline policy for one envelope run.
 struct EnvelopeExecution<'a> {
+    /// Observe attempted enqueue after the final cancellation check, including
+    /// a closed writer; this does not assert acceptance or successful send.
+    on_transport_dispatch: Option<&'a mut dyn FnMut(usize)>,
+    /// Exact capture after the enqueue attempt, even on failure; serialization
+    /// cannot move cancellation checks.
+    after_transport_dispatch: Option<&'a mut dyn FnMut(&super::WsResponseCreate)>,
     /// VCR stream receiving accepted provider frames.
     recording_stream: Option<&'a mut ProviderRawEventStream>,
     /// Parser work allowed for failure evidence.
@@ -398,6 +404,9 @@ impl InboundSender {
 /// `run_turn` is a thin sync wrapper that pushes the envelope onto
 /// the outbound channel and pulls events off the inbound one.
 pub struct WsConn {
+    /// Process-local diagnostic socket epoch, allocated lazily without routing
+    /// use.
+    diagnostic_epoch: Option<u64>,
     outbound_tx: UnboundedSender<WsCommand>,
     inbound_rx: Receiver<InboundEvent>,
     inbound_control: Arc<InboundControl>,
@@ -424,6 +433,17 @@ pub struct WsConn {
     prewarm_baseline: Option<Box<PrewarmBaseline>>,
     /// Bytes retained from the one discarded transport-repair attempt.
     carried_response_bytes: u64,
+}
+
+/// Allocate a process-monotonic socket observation; exhaustion stays unknown.
+#[allow(
+    deprecated,
+    reason = "try_update requires Rust 1.95, newer than the workspace MSRV"
+)]
+fn next_diagnostic_epoch() -> Option<u64> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .ok()
 }
 
 /// Exact request shape and lowered input accepted by one cache-only response.
@@ -535,6 +555,7 @@ impl WsConn {
             .abort_handle();
 
         Ok(Self {
+            diagnostic_epoch: None,
             outbound_tx,
             inbound_rx,
             inbound_control,
@@ -707,6 +728,8 @@ impl WsConn {
         capture_submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
     ) -> Result<WsTurnResult, LlmError> {
         let lowering_started = private_trace::started(private_trace);
+        let anchor_was_available =
+            self.cached_response_anchor.is_some() || self.prewarm_baseline.is_some();
         let mut envelope =
             build_ws_envelope(config, request, self.cached_response_anchor.as_ref(), None);
         if self.cached_response_anchor.is_none()
@@ -723,23 +746,53 @@ impl WsConn {
             trace.lowering_finished_from(started);
         }
         let request_body = recorded_request_body(&envelope, recording_stream.is_some())?;
-        let capture_started = private_trace::started(private_trace);
-        super::maybe_debug_submit_provider_request_with(
+        let diagnostic = correlation.as_ref().and_then(|correlation| {
+            let attempt = correlation.diagnostic.clone()?;
+            if self.diagnostic_epoch.is_none() {
+                self.diagnostic_epoch = next_diagnostic_epoch();
+            }
+            Some(crate::cache_diagnostic::DispatchEvidence {
+                attempt,
+                fields: crate::cache_diagnostic::dispatch_fields(
+                    config,
+                    request,
+                    crate::cache_diagnostic::RequestShape {
+                        input_count: envelope.body.input.len(),
+                        previous_response_present: envelope.body.previous_response_id.is_some(),
+                        anchor_was_available,
+                        connection_epoch: self.diagnostic_epoch,
+                        reasoning_selector: envelope.body.reasoning.as_ref().and_then(|r| r.effort),
+                        service_tier: envelope.body.service_tier,
+                    },
+                    correlation,
+                ),
+            })
+        });
+        let mut capture_submit = Some(capture_submit);
+        let mut on_transport_dispatch = |bytes| {
+            if let Some(diagnostic) = &diagnostic {
+                diagnostic.dispatched(bytes);
+            }
+        };
+        let mut after_transport_dispatch = |envelope: &super::WsResponseCreate| {
+            super::maybe_debug_submit_provider_request_with(
+                agent_prompt_id,
+                config,
+                request,
+                tau_proto::ProviderBackendTransport::Websocket,
+                correlation.clone(),
+                envelope,
+                capture_submit
+                    .take()
+                    .expect("one actual dispatch per envelope"),
+            );
+        };
+        let result = self.run_envelope_with_timeouts(
             agent_prompt_id,
-            config,
-            request,
-            tau_proto::ProviderBackendTransport::Websocket,
-            correlation,
             &envelope,
-            capture_submit,
-        );
-        if let (Some(trace), Some(started)) = (private_trace.as_mut(), capture_started) {
-            trace.capture_finished(started);
-        }
-        let mut state = self.run_envelope_with_timeouts(
-            agent_prompt_id,
-            envelope,
             EnvelopeExecution {
+                on_transport_dispatch: Some(&mut on_transport_dispatch),
+                after_transport_dispatch: Some(&mut after_transport_dispatch),
                 recording_stream,
                 evidence_mode: if request.debug_provider_requests {
                     path_crate_attempt_failure::ProviderEvidenceMode::Persistent
@@ -756,7 +809,20 @@ impl WsConn {
             on_dispatched,
             on_update,
             private_trace,
-        )?;
+        );
+        // Preserve exact unsent-request evidence without inventing a dispatch.
+        if let Some(capture_submit) = capture_submit.take() {
+            super::maybe_debug_submit_provider_request_with(
+                agent_prompt_id,
+                config,
+                request,
+                tau_proto::ProviderBackendTransport::Websocket,
+                correlation.map(path_crate_attempt_failure::DispatchCorrelation::undispatched),
+                &envelope,
+                capture_submit,
+            );
+        }
+        let mut state = result?;
         let response_input_tokens = state.input_tokens;
         self.cached_response_anchor = state.response_id.clone().and_then(|response_id| {
             if response_mode == ResponseMode::Compact {
@@ -813,8 +879,10 @@ impl WsConn {
         }
         let state = self.run_envelope_with_timeouts(
             "<prewarm>",
-            envelope,
+            &envelope,
             EnvelopeExecution {
+                on_transport_dispatch: None,
+                after_transport_dispatch: None,
                 recording_stream: None,
                 evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
                 timeouts: EnvelopeTimeouts {
@@ -846,19 +914,24 @@ impl WsConn {
     fn run_envelope_with_timeouts(
         &mut self,
         agent_prompt_id: &str,
-        envelope: super::WsResponseCreate,
+        envelope: &super::WsResponseCreate,
         mut execution: EnvelopeExecution<'_>,
         abort: &mut impl TurnAbort,
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
         private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<StreamState, LlmError> {
-        serialize_and_enqueue_envelope_observed(
-            &envelope,
+        let mut dispatch_attempted = false;
+        let dispatch_result = serialize_and_enqueue_envelope_observed(
+            envelope,
             abort,
             on_dispatched,
             private_trace,
             |text| {
+                dispatch_attempted = true;
+                if let Some(observe) = execution.on_transport_dispatch.as_mut() {
+                    observe(text.len());
+                }
                 self.outbound_tx
                     .send(WsCommand::SendText(text))
                     .map_err(|_| {
@@ -872,7 +945,15 @@ impl WsConn {
                             )
                     })
             },
-        )?;
+        );
+        if dispatch_attempted && let Some(capture) = execution.after_transport_dispatch.as_mut() {
+            let started = private_trace::started(private_trace);
+            capture(envelope);
+            if let (Some(trace), Some(started)) = (private_trace.as_mut(), started) {
+                trace.capture_finished(started);
+            }
+        }
+        dispatch_result?;
 
         let mut state = StreamState::new();
         let mut compact_shape =

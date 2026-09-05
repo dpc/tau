@@ -62,6 +62,39 @@ fn writes_opaque_bytes_to_harness_owned_path() {
     }
 }
 
+/// The new class inherits opaque handling and owner-only file creation, rather
+/// than introducing a parsed or public metadata storage path.
+#[test]
+fn cache_diagnostics_inherit_private_opaque_capture_storage() {
+    let temp = TempDir::new().expect("temporary state");
+    let session = temp.path().join("session");
+    fs::create_dir(&session).expect("session root");
+    let mut capture = job(&session, b"opaque cache bytes");
+    capture.filename = ProviderDebugCaptureFilename::new(
+        1,
+        &tau_proto::AgentPromptId::parse("prompt").expect("prompt identity"),
+        tau_proto::ProviderDebugCaptureClass::CacheDiagnostic,
+    );
+    write_capture(&capture).expect("opaque capture write");
+    let path = session.join("debug/provider-requests/provider/1-prompt-cache-diagnostic.json.zst");
+    assert_eq!(
+        fs::read(&path).expect("capture contents"),
+        b"opaque cache bytes"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            fs::metadata(path)
+                .expect("capture permissions")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
 /// Existing capture directories with permissive modes must be tightened before
 /// a private provider artifact is created.
 #[cfg(unix)]

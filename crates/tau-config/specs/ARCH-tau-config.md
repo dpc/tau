@@ -149,7 +149,7 @@ canonical decimal microsecond timestamp, validated `AgentPromptId`, one valid
 transport/direction class, and exact compressed `.json.zst` extension.
 
 The recognized current classes include
-`responses-attempt-failure.json.zst`. It uses the same eligibility, path
+`responses-attempt-failure.json.zst` and `cache-diagnostic.json.zst`. They use the same eligibility, path
 validation, compression, best-effort failure behavior, and
 `diagnostic_retention` cleanup as request/response captures; it has no
 separate retention knob.

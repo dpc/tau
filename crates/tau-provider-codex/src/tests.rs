@@ -2,6 +2,7 @@ use std::sync::{Arc, atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc}
 use std::{io as path_std_io, net as path_std_net, sync as path_std_sync, time as path_std_time};
 
 use super::*;
+use crate::cache_diagnostic::tests as cache_capture_tests;
 
 /// In-memory trace writer for runtime-level production assertions.
 #[derive(Clone, Default)]
@@ -562,6 +563,9 @@ impl Drop for WsLoopbackServer {
 
 #[derive(Clone, Copy)]
 enum LoopbackResponseMode {
+    OrdinarySuccess,
+    RepairThenSuccess,
+    RepairThenUpgradeFailure,
     Upgrade426,
     CloseWithoutResponse,
     ContextWindowExceeded,
@@ -608,9 +612,21 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 return;
             }
             let _ = stream.set_read_timeout(Some(path_std_time::Duration::from_secs(2)));
+            if matches!(mode, LoopbackResponseMode::RepairThenUpgradeFailure) && 0 < request_index {
+                let _ = read_bounded_http_request_head(&mut stream);
+                thread_counts
+                    .ws_upgrade_requests
+                    .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
+                let _ = path_std_io::Write::write_all(&mut stream,
+                    b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                continue;
+            }
             if matches!(
                 mode,
-                LoopbackResponseMode::ContextWindowExceeded
+                LoopbackResponseMode::OrdinarySuccess
+                    | LoopbackResponseMode::RepairThenSuccess
+                    | LoopbackResponseMode::RepairThenUpgradeFailure
+                    | LoopbackResponseMode::ContextWindowExceeded
                     | LoopbackResponseMode::DirectContextWindowExceeded
                     | LoopbackResponseMode::SemanticThenClose
                     | LoopbackResponseMode::CompactErrorWithEmbeddedItem
@@ -625,6 +641,26 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     .ws_upgrade_requests
                     .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
                 let _ = socket.read();
+                if matches!(
+                    mode,
+                    LoopbackResponseMode::OrdinarySuccess
+                        | LoopbackResponseMode::RepairThenSuccess
+                        | LoopbackResponseMode::RepairThenUpgradeFailure
+                ) {
+                    let event = if request_index == 0
+                        && !matches!(mode, LoopbackResponseMode::OrdinarySuccess)
+                    {
+                        serde_json::json!({"type":"error","code":"previous_response_not_found","message":"PRIVATE_ERROR"})
+                    } else {
+                        serde_json::json!({"type":"response.completed","response":{
+                            "id":"PRIVATE_RESPONSE_ID","model":"gpt-test",
+                            "usage":{"input_tokens":100,"output_tokens":4,
+                                "input_tokens_details":{"cached_tokens":60,"cache_write_tokens":10}}
+                        }})
+                    };
+                    let _ = socket.send(tungstenite::Message::Text(event.to_string().into()));
+                    continue;
+                }
                 if matches!(mode, LoopbackResponseMode::DirectContextWindowExceeded) {
                     let _ = socket.send(tungstenite::Message::Text(
                         serde_json::json!({
@@ -792,6 +828,9 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 }
                 LoopbackResponseMode::CloseWithoutResponse => {}
                 LoopbackResponseMode::ContextWindowExceeded
+                | LoopbackResponseMode::OrdinarySuccess
+                | LoopbackResponseMode::RepairThenSuccess
+                | LoopbackResponseMode::RepairThenUpgradeFailure
                 | LoopbackResponseMode::DirectContextWindowExceeded
                 | LoopbackResponseMode::SemanticThenClose
                 | LoopbackResponseMode::CompactErrorWithEmbeddedItem
@@ -1269,7 +1308,7 @@ fn compact_large_fixed_material_reaches_canonical_context_rejection_once() {
     );
 }
 
-fn test_config(base_url: String) -> responses::ResponsesConfig {
+pub(crate) fn test_config(base_url: String) -> responses::ResponsesConfig {
     responses::ResponsesConfig {
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: responses::ResponsesMode::Standard,
@@ -1307,6 +1346,247 @@ fn test_prompt_payload<'a>(
         share_user_cache_key: false,
         debug_provider_requests: false,
     }
+}
+
+/// Production finite attempts expose exact send/repair counts and private
+/// correlation without changing the scheduler's single dispatch notification or
+/// creating additional provider requests.
+#[test]
+fn cache_diagnostics_ordinary_success_and_repair_preserve_transport_work() {
+    for (mode, dispatches, upgrades, success, repair) in [
+        (LoopbackResponseMode::OrdinarySuccess, 1, 1, true, false),
+        (LoopbackResponseMode::RepairThenSuccess, 2, 2, true, true),
+        (
+            LoopbackResponseMode::RepairThenUpgradeFailure,
+            1,
+            2,
+            false,
+            true,
+        ),
+        (LoopbackResponseMode::Upgrade426, 0, 1, false, false),
+        (
+            LoopbackResponseMode::DirectContextWindowExceeded,
+            1,
+            1,
+            false,
+            false,
+        ),
+        (LoopbackResponseMode::SemanticThenClose, 1, 1, false, false),
+    ] {
+        let server = spawn_loopback_server(mode);
+        let mut config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        config.inner.api_key = "CACHE_CAPTURE_CREDENTIAL_CANARY".to_owned();
+        config.inner.account_id = Some("CACHE_CAPTURE_ACCOUNT_CANARY".to_owned());
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("cache-session").expect("session identity");
+        let agent = tau_proto::AgentId::parse("cache-agent").expect("agent identity");
+        let context = tau_proto::PromptContext::default();
+        let mut request = test_prompt_payload(&session, &agent, &context);
+        request.debug_provider_requests = true;
+        let mut notifications = 0;
+        let (outcome, rows) = cache_capture_tests::capture(|| {
+            runtime.run_attempt_numbered(
+                "cache-prompt",
+                LogicalAttempt::new(3),
+                &config,
+                &request,
+                &mut NeverAbort,
+                &mut |update| {
+                    if matches!(update, StreamUpdate::Dispatched(_)) {
+                        notifications += 1;
+                    }
+                },
+            )
+        });
+        assert_eq!(rows.len(), dispatches + 1);
+        let end = rows.last().expect("attempt end");
+        assert_eq!(end["record_kind"], "attempt_end");
+        assert_eq!(end["logical_attempt"], 3);
+        assert!(end["harness_provider_attempt"].is_null());
+        assert_eq!(end["dispatch_count"], dispatches);
+        assert_eq!(end["repair_used"], repair);
+        assert_eq!(
+            end["semantic_progress"],
+            matches!(mode, LoopbackResponseMode::SemanticThenClose)
+        );
+        let failure_kind = match mode {
+            LoopbackResponseMode::Upgrade426 | LoopbackResponseMode::RepairThenUpgradeFailure => {
+                Some(tau_proto::ProviderFailureKind::RequestRejected)
+            }
+            LoopbackResponseMode::DirectContextWindowExceeded => {
+                Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            }
+            _ => None,
+        };
+        assert_eq!(
+            end["failure_class"],
+            serde_json::to_value(failure_kind).expect("typed failure kind")
+        );
+        assert_eq!(
+            end["outcome"],
+            if success {
+                "success"
+            } else if dispatches == 0 {
+                "pre_dispatch_failure"
+            } else {
+                "error"
+            }
+        );
+        assert!(end["reported_eligibility"].is_null());
+        assert_eq!(notifications, usize::from(dispatches > 0));
+        assert_eq!(
+            server
+                .counts()
+                .ws_upgrade_requests
+                .load(std::sync::atomic::Ordering::SeqCst),
+            upgrades
+        );
+        assert_eq!(
+            server
+                .counts()
+                .http_post_requests
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        for (index, row) in rows[..dispatches].iter().enumerate() {
+            assert_eq!(row["attempt_id"], end["attempt_id"]);
+            assert_eq!(row["producer_run_id"], end["producer_run_id"]);
+            assert_eq!(row["wire_dispatch_index"], index + 1);
+            assert_eq!(row["repair_used"], index > 0);
+            assert!(
+                row["request_bytes"]
+                    .as_u64()
+                    .expect("observed request size")
+                    > 0
+            );
+        }
+        if success {
+            let AttemptOutcome::Finished(result) = outcome else {
+                panic!("successful fixture")
+            };
+            assert_eq!(
+                serde_json::to_value(result.debug_capture.attempt_id).expect("capture identity"),
+                end["attempt_id"]
+            );
+            assert_eq!(
+                result.debug_capture.wire_dispatch_index,
+                Some(dispatches as u64)
+            );
+            assert_eq!(end["reported_usage"]["read_tokens"], 60);
+            assert_eq!(end["attribution_status"], "unsupported_shape");
+            assert_eq!(end["capabilities"]["raw_attribution"], false);
+        }
+        if dispatches == 2 {
+            assert_eq!(rows[1]["repair_reason"], "stale_response");
+            assert_eq!(rows[1]["connection_state"], "replaced");
+            assert_eq!(rows[1]["request_form"], "repair_full");
+            assert_ne!(rows[0]["connection_epoch"], rows[1]["connection_epoch"]);
+        }
+        let text = serde_json::to_string(&rows).expect("scalar rows");
+        for secret in [
+            "PRIVATE_RESPONSE_ID",
+            "PRIVATE_ERROR",
+            config.inner.api_key.as_str(),
+            config.inner.base_url.as_str(),
+        ] {
+            assert!(
+                !text.contains(secret),
+                "metadata leaked private provider data"
+            );
+        }
+    }
+}
+
+/// Metadata opt-out is startup-frozen and never disables existing exact capture
+/// correlation; ephemeral requests have neither metadata nor new persisted IDs.
+#[test]
+fn cache_diagnostic_policy_is_frozen_and_respects_durability() {
+    for (durable, enabled) in [(true, false), (false, true)] {
+        let server = spawn_loopback_server(LoopbackResponseMode::OrdinarySuccess);
+        let config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let policy = if enabled {
+            CacheDiagnostics::Metadata
+        } else {
+            CacheDiagnostics::Off
+        };
+        runtime.initialize_cache_diagnostics(BTreeMap::from([(
+            config.inner.profile_namespace.clone(),
+            policy,
+        )]));
+        runtime.initialize_cache_diagnostics(BTreeMap::new());
+        let session = tau_proto::SessionId::parse("policy-session").expect("session identity");
+        let agent = tau_proto::AgentId::parse("policy-agent").expect("agent identity");
+        let context = tau_proto::PromptContext::default();
+        let mut request = test_prompt_payload(&session, &agent, &context);
+        request.debug_provider_requests = durable;
+        let (outcome, rows) = cache_capture_tests::capture(|| {
+            runtime.run_attempt(
+                "policy-prompt",
+                &config,
+                &request,
+                &mut NeverAbort,
+                &mut |_| {},
+            )
+        });
+        assert!(rows.is_empty());
+        let AttemptOutcome::Finished(result) = outcome else {
+            panic!("ordinary success")
+        };
+        assert_eq!(result.debug_capture.attempt_id.is_some(), durable);
+        assert_eq!(
+            server
+                .counts()
+                .ws_upgrade_requests
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+}
+
+/// Cancellation before connection setup emits one normal attempt exit with zero
+/// actual dispatches, not an imagined request at the pool preparation boundary.
+#[test]
+fn cache_diagnostics_pre_dispatch_cancel_is_zero() {
+    let config = ResolvedConfig {
+        inner: test_config("http://unused.invalid".to_owned()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session = tau_proto::SessionId::parse("cancel-session").expect("session identity");
+    let agent = tau_proto::AgentId::parse("cancel-agent").expect("agent identity");
+    let context = tau_proto::PromptContext::default();
+    let mut request = test_prompt_payload(&session, &agent, &context);
+    request.debug_provider_requests = true;
+    /// Local cancellation authority that prevents all provider egress.
+    struct Canceled;
+    impl TurnAbort for Canceled {
+        fn is_aborted(&mut self) -> bool {
+            true
+        }
+        fn register_waker(
+            &mut self,
+            _: Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn TurnAbortWaker> {
+            Box::new(NeverAbortWaker)
+        }
+    }
+    let (_, rows) = cache_capture_tests::capture(|| {
+        runtime.run_attempt(
+            "cancel-prompt",
+            &config,
+            &request,
+            &mut Canceled,
+            &mut |_| {},
+        )
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["outcome"], "canceled");
+    assert_eq!(rows[0]["dispatch_count"], 0);
+    assert!(rows[0]["successful_dispatch_index"].is_null());
 }
 
 /// Ensures the provider publishes the complete hardcoded ChatGPT model list

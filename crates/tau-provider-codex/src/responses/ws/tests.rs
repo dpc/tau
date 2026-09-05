@@ -4,6 +4,7 @@ use rustls::{crypto as path_rustls_crypto, pki_types as path_rustls_pki_types};
 use tungstenite::http as path_tungstenite_http;
 
 use crate::attempt_failure as path_crate_attempt_failure;
+use crate::cache_diagnostic::{CacheAttempt, tests as cache_capture_tests};
 use crate::common::OutputItemAccumulator;
 
 mod direct_target_canary;
@@ -570,11 +571,52 @@ fn websocket_response_callback_cancellation_preserves_capture_without_enqueue() 
         outbound_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
-    let capture = capture.expect("debug capture remains at its existing boundary");
+    let capture = capture.expect("unsent exact request evidence is retained");
     let metadata: serde_json::Value =
         serde_json::from_slice(capture.json()).expect("capture metadata");
     assert_eq!(metadata["logical_attempt"], 7);
-    assert_eq!(metadata["wire_dispatch_index"], 1);
+    assert!(metadata["wire_dispatch_index"].is_null());
+}
+
+/// The approved dispatch boundary observes attempted enqueue, not acceptance:
+/// a closed writer retains index one in scalar and exact request evidence.
+#[test]
+fn closed_writer_is_one_attempted_dispatch_without_acceptance() {
+    let (mut conn, _inbound_tx, outbound_rx) = test_ws_conn();
+    drop(outbound_rx);
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let mut request = fixture.payload();
+    request.debug_provider_requests = true;
+    let diagnostic =
+        Arc::new(CacheAttempt::new("closed-writer", &request, 1, true).expect("durable attempt"));
+    let mut correlation =
+        path_crate_attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(1));
+    correlation.diagnostic = Some(Arc::clone(&diagnostic));
+    let dispatch = correlation.next_dispatch();
+    let mut raw = None;
+    let (result, rows) = cache_capture_tests::capture(|| {
+        conn.run_response_with_capture_submit(
+            &config,
+            "closed-writer",
+            &request,
+            Some(dispatch),
+            None,
+            ResponseMode::Ordinary,
+            &mut NeverAbort,
+            &mut |_| {},
+            &mut |_| {},
+            |capture| raw = Some(capture),
+        )
+    });
+    assert!(result.is_err(), "writer cannot accept the request");
+    assert_eq!(diagnostic.dispatch_count(), 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["wire_dispatch_index"], 1);
+    let raw = raw.expect("exact attempted request capture");
+    let raw: serde_json::Value = serde_json::from_slice(raw.json()).expect("raw metadata");
+    assert_eq!(raw["wire_dispatch_index"], 1);
+    assert_eq!(raw["attempt_id"], rows[0]["attempt_id"]);
 }
 
 /// The production response path must submit correlated debug capture, publish
@@ -632,8 +674,8 @@ fn websocket_response_live_path_preserves_capture_enqueue_bytes_and_order() {
     events.borrow_mut().push("enqueue");
     assert_eq!(
         events.into_inner(),
-        ["capture", "dispatch", "enqueue"],
-        "capture policy and dispatch-before-enqueue ordering must not drift"
+        ["dispatch", "capture", "enqueue"],
+        "exact capture follows attempted enqueue; dispatch notification still precedes enqueue"
     );
 }
 
@@ -674,6 +716,7 @@ fn test_ws_conn() -> (WsConn, InboundSender, UnboundedReceiver<WsCommand>) {
     let writer_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
     (
         WsConn {
+            diagnostic_epoch: None,
             outbound_tx,
             inbound_rx,
             inbound_control,
@@ -1790,8 +1833,10 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
 
     let result = conn.run_envelope_with_timeouts(
         "ap-local-timeout",
-        envelope,
+        &envelope,
         EnvelopeExecution {
+            on_transport_dispatch: None,
+            after_transport_dispatch: None,
             recording_stream: None,
             evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
@@ -1894,8 +1939,10 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
         .expect("queue partial WS frame");
     let result = conn.run_envelope_with_timeouts(
         "ap-stalled-ws",
-        envelope,
+        &envelope,
         EnvelopeExecution {
+            on_transport_dispatch: None,
+            after_transport_dispatch: None,
             recording_stream: None,
             evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
@@ -1940,8 +1987,10 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
 
     let result = conn.run_envelope_with_timeouts(
         "<prewarm>",
-        envelope,
+        &envelope,
         EnvelopeExecution {
+            on_transport_dispatch: None,
+            after_transport_dispatch: None,
             recording_stream: None,
             evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
