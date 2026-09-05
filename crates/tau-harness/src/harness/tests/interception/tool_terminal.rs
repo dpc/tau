@@ -1787,6 +1787,34 @@ fn failed_result_then_disconnect_commits_fresh_disconnected_classification() {
     )));
 }
 
+/// A competing report cannot rewrite an exact terminal candidate until the
+/// semantic append using that candidate has actually been rejected.
+#[test]
+fn competing_terminal_cause_cannot_replace_unrejected_publication_owner() {
+    let call_id = ToolCallId::from("parked-terminal-owner");
+    let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
+    let cid = harness.tool_routing.tool_runtime.tool_agents[&call_id].clone();
+    let first = harness
+        .observe_tool_terminal(&cid, &call_id, tau_proto::ToolTerminalCause::Completed)
+        .expect("first terminal");
+    let competing = harness
+        .observe_tool_terminal(
+            &cid,
+            &call_id,
+            tau_proto::ToolTerminalCause::ProviderDisconnected,
+        )
+        .expect("existing terminal");
+
+    assert_eq!(competing, first);
+    let pending = &harness
+        .tool_routing
+        .tool_runtime
+        .pending_terminal_observations[&call_id];
+    assert_eq!(pending.observation_id, first);
+    assert_eq!(pending.cause, tau_proto::ToolTerminalCause::Completed);
+    assert!(!pending.append_rejected);
+}
+
 /// A competing cancellation after an append failure must receive a fresh
 /// terminal identity and retain the exact cancellation-request cause.
 #[test]

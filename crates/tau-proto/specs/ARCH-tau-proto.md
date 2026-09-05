@@ -148,9 +148,13 @@ Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry an
 optional `InternalPromptKind`. `context_size_alert` marks the existing fact at
 which that harness-owned alert reaches model context; it has specialized
 presentation. `background_tool_completion` identifies the harness lifecycle
-notice for a completed background tool so human UIs can suppress it without
-classifying prompt prose. The contract is
-[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
+prompt for a completed background tool so human UIs can suppress it without
+classifying prompt prose. The prompt may carry the registered untrusted-body
+`tau_background_result` preview while retaining internal lifecycle classification.
+The contracts are
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md)
+and
+[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
 Both prompt facts also carry required harness-stamped
 `PromptSubmissionSource` provenance while retaining raw accepted prompt text.
 They separately carry validated `trusted_internal_spans`; only those durable

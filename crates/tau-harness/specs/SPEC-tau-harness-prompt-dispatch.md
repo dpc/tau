@@ -240,9 +240,39 @@ created. This implements
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 
 Harness-generated active and passive background-tool completion prompts carry
-`internal_kind=background_tool_completion` when they reach model context. The
-tag changes only UI classification: activation, prompt delivery, wait
-suppression, retained-result consumption, and replay position remain unchanged.
+`internal_kind=background_tool_completion` when they reach model context. A
+completion with no winning installed wait queues a correlated
+`tau_background_result` transcript preview. The canonical background terminal
+remains the only payload and retrieval authority; previewing never consumes it.
+A matching wait can remove the preview only while the runtime pending-prompt queue
+still owns it. After transfer to ordinary prompt publication, interception,
+publication retry, commit, or provider observation may coexist with a wait result.
+The envelope family and typed transcript provenance follow
+[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md);
+the source declaration and terminal identities follow
+[SPEC-durable-tool-observation-correlation](../../../specs/SPEC-durable-tool-observation-correlation.md).
+
+Immediately before publication ownership transfer, the harness lazily renders and
+stores the exact generic-user envelope bytes from the exact retained completion
+generation. One tool-round prompt drain shares an 8 KiB final-body budget in queue
+order; passive previews folded before one real user prompt share another such
+budget; a standalone idle preview is a singleton group. The bound is per publication
+group, not per complete provider input, and historical committed previews are not
+recounted. Interception, deferred publication, retry, and the prompt-fact commit
+occur after that transfer. Only the later committed prompt fact owns transcript
+inclusion. Bodies that do not fit become deterministic summaries with explicit
+retrieval. Logical tool result does not imply process success: summaries for
+recognized shell tools use only the strict canonical-CBOR process projection, with
+explicit unavailable and not-applicable states.
+
+The tag changes UI classification and anchors the replay-derived exact-node
+provenance used by provider prompt assembly. Existing activation, wake,
+continuation, placeholder, owner routing, in-flight inference, and wait selection
+behavior remains unchanged. A prompt commit owns transcript inclusion rather than
+proof of provider observation. Committed previews replay at their original position;
+cold restore never synthesizes a preview from a terminal alone, and restored wait
+state may offer canonical output again. These exact preview and restart semantics
+were explicitly approved by the user on September 5, 2026.
 
 Prompt-injected notification admission remains separate from provider-trigger
 readiness. A natural user prompt, timer prompt, or tool continuation

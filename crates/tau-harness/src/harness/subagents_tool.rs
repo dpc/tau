@@ -10,6 +10,7 @@ use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 use path_crate_harness::start_coordinator::StartPhase;
 
 use crate::agent::DeliveryDeadlineKind;
+use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
 use crate::harness::SessionGeneration;
 use crate::{harness as path_crate_harness, runtime_dir as path_crate_runtime_dir};
 
@@ -608,6 +609,7 @@ impl Harness {
         &mut self,
         error: ToolBackgroundError,
         terminal: Option<tau_proto::ObservationId>,
+        outcome: BackgroundErrorOutcome,
     ) {
         let Some(owner) = self.wait_owner_for_call(&error.call_id) else {
             return;
@@ -616,9 +618,22 @@ impl Harness {
             .agent_runtime
             .subagents
             .wait_tracker
-            .record_background_error(error, owner, terminal);
+            .record_background_error(error, owner, terminal, outcome);
         self.synchronize_work_waits();
         self.publish_wait_replies(replies);
+    }
+
+    /// Render the preview for one exact retained completion terminal.
+    pub(crate) fn background_completion_preview_for(
+        &self,
+        call_id: &ToolCallId,
+        terminal: tau_proto::ObservationId,
+        budget: &mut BackgroundPreviewBudget,
+    ) -> Option<String> {
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .render_background_completion_preview(call_id, terminal, budget)
     }
 
     /// Record that runtime prompt policy would have queued a reserved plural

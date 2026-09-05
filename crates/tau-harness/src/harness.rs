@@ -80,6 +80,7 @@ use crate::agent::{
 };
 use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
+use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
 use crate::client_writer_lifecycle::{
     ClientWriterLifecycle, FINAL_UI_DISCONNECT_GRACE, STARTUP_DISCONNECT_GRACE,
 };
@@ -2027,6 +2028,29 @@ struct PendingTerminalObservation {
     observation_id: tau_proto::ObservationId,
     /// Runtime cause whose classification owns this candidate.
     cause: tau_proto::ToolTerminalCause,
+    /// Whether a semantic append using this candidate was rejected.
+    append_rejected: bool,
+}
+
+/// Exact background-terminal publication owner retained through semantic
+/// append and dependent prompt scheduling.
+#[derive(Clone, Copy)]
+struct PendingBackgroundCompletion {
+    /// Prompt policy selected by the accepted terminal report.
+    mode: BackgroundCompletionPromptMode,
+    /// Canonical terminal identity allocated for this exact report generation.
+    terminal: Option<tau_proto::ObservationId>,
+    /// Exact logical terminal family selected by typed runtime classification.
+    terminal_kind: PendingBackgroundTerminalKind,
+}
+
+/// Logical background terminal kind bound to one publication owner.
+#[derive(Clone, Copy)]
+enum PendingBackgroundTerminalKind {
+    /// Successful logical result.
+    Result,
+    /// Failed or cancelled logical result.
+    Error(BackgroundErrorOutcome),
 }
 
 /// One UI compaction waiting for a claimed wait cancellation to commit.

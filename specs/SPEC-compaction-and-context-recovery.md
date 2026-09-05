@@ -394,6 +394,9 @@ supersession path.
 Committed compaction replacement windows contain the provider items that the
 compacting request actually consumed. Replay does not reinterpret or rewrite
 those materialized items when a later release changes source-based presentation.
+Replacement text never inherits background-result envelope authority from copied
+bytes; only a retained suffix node whose committed source fact carried the typed
+background-completion kind keeps that replay-derived authority.
 Provider-authored opaque `Compaction` items are valid members of a nonempty,
 structurally closed standalone replacement window and retain their raw replay
 JSON. Every completed or durable opaque provider item carries required raw JSON

@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests;
 use std::borrow::Cow;
+use std::fmt;
 
 /// The model-context carrier in which a registered payload envelope appears.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +64,70 @@ impl RegisteredPayloadEnvelope {
         body.and_then(|body| body.strip_suffix(self.exact_close))
             .is_some_and(|body| !body.contains(self.exact_close))
     }
+
+    /// Render one attributed envelope while enforcing the registry's attribute
+    /// order.
+    pub fn render_attributed(
+        self,
+        attributes: &[(&str, String)],
+        body: &str,
+    ) -> Result<String, PayloadEnvelopeRenderError> {
+        let PayloadEnvelopeOpening::Attributed(opening) = self.opening else {
+            return Err(PayloadEnvelopeRenderError::FixedOpening);
+        };
+        let mut next_index = 0;
+        for (name, _) in attributes {
+            let Some(relative) = self.ordered_attributes[next_index..]
+                .iter()
+                .position(|expected| expected == name)
+            else {
+                return Err(PayloadEnvelopeRenderError::UnknownOrMisorderedAttribute(
+                    (*name).to_owned(),
+                ));
+            };
+            next_index += relative + 1;
+        }
+
+        let escaped_body = self.escape_body(body);
+        let mut output = String::new();
+        output.push_str(opening);
+        for (index, (name, value)) in attributes.iter().enumerate() {
+            if index != 0 {
+                output.push(' ');
+            }
+            output.push_str(name);
+            output.push_str("=\"");
+            output.push_str(&escape_payload_envelope_attribute(value));
+            output.push('"');
+        }
+        output.push('>');
+        output.push_str(&escaped_body);
+        output.push_str(self.exact_close);
+        Ok(output)
+    }
+}
+
+/// Why a registered attributed envelope could not be rendered.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PayloadEnvelopeRenderError {
+    /// The selected family has a fixed opening and accepts no attributes.
+    FixedOpening,
+    /// An attribute is unknown, duplicated, or appears out of registry order.
+    UnknownOrMisorderedAttribute(String),
+}
+
+impl fmt::Display for PayloadEnvelopeRenderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FixedOpening => formatter.write_str("payload envelope has a fixed opening"),
+            Self::UnknownOrMisorderedAttribute(name) => {
+                write!(
+                    formatter,
+                    "unknown or misordered payload attribute `{name}`"
+                )
+            }
+        }
+    }
 }
 
 /// Registered fieldless envelope for authenticated interactive user prompts.
@@ -117,6 +182,33 @@ pub const TAU_WEB_CONTENT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = Register
     carrier: PayloadEnvelopeCarrier::TypedToolResult,
 };
 
+/// Registered attributed envelope for a committed background-tool preview.
+pub const TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope =
+    RegisteredPayloadEnvelope {
+        name: "tau_background_result",
+        opening: PayloadEnvelopeOpening::Attributed("<tau_background_result "),
+        ordered_attributes: &[
+            "call_id",
+            "tool",
+            "tool_outcome",
+            "delivery",
+            "rendered_bytes",
+            "retrieval",
+            "process_outcome",
+            "process_source",
+            "process_success",
+            "termination_reason",
+            "exit_code",
+            "signal",
+            "timed_out",
+            "message_bytes",
+            "message_truncated",
+        ],
+        exact_close: "</tau_background_result>",
+        visible_close: "&lt;/tau_background_result&gt;",
+        carrier: PayloadEnvelopeCarrier::GenericUserText,
+    };
+
 /// Return every registered top-level model-facing payload-envelope family.
 #[must_use]
 pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelope] {
@@ -125,6 +217,7 @@ pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelo
         TAU_INTERNAL_PAYLOAD_ENVELOPE,
         MESSAGE_PAYLOAD_ENVELOPE,
         TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
+        TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
     ]
 }
 
@@ -158,4 +251,21 @@ pub fn escape_exact_sentinel_close<'a>(
     } else {
         Cow::Borrowed(body)
     }
+}
+
+/// Escape one validated dynamic XML-lite attribute value.
+#[must_use]
+pub fn escape_payload_envelope_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }

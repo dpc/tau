@@ -1320,12 +1320,20 @@ impl Harness {
                     self.record_wait_tool_call_ref(call_id.clone(), call_ref);
                 }
                 let terminal = state.terminal_observation;
+                let error_outcome = if matches!(
+                    state.terminal_cause,
+                    Some(tau_proto::ToolTerminalCause::Cancellation { .. })
+                ) {
+                    BackgroundErrorOutcome::Cancelled
+                } else {
+                    BackgroundErrorOutcome::Error
+                };
                 match state.completion {
                     Some(tau_core::BackgroundToolCompletion::Result(result)) => {
                         self.record_wait_background_result(result, terminal);
                     }
                     Some(tau_core::BackgroundToolCompletion::Error(error)) => {
-                        self.record_wait_background_error(error, terminal);
+                        self.record_wait_background_error(error, terminal, error_outcome);
                     }
                     None => {}
                 }
@@ -1404,14 +1412,16 @@ impl Harness {
                     .tool_runtime
                     .tool_agents
                     .insert(call.call_id.clone(), cid.clone());
-                if let Some(call_ref) = call_refs.get(&call.call_id).copied() {
+                let terminal = if let Some(call_ref) = call_refs.get(&call.call_id).copied() {
                     self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
                     self.observe_tool_terminal(
                         &cid,
                         &call.call_id,
                         tau_proto::ToolTerminalCause::RestartRepair,
-                    );
-                }
+                    )
+                } else {
+                    None
+                };
                 let error = ToolBackgroundError {
                     call_id: call.call_id.clone(),
                     tool_name: call.tool_name,
@@ -1424,10 +1434,16 @@ impl Harness {
                 };
                 self.tool_routing
                     .tool_runtime
-                    .pending_background_completion_modes
+                    .pending_background_completions
                     .insert(
                         call.call_id.clone(),
-                        BackgroundCompletionPromptMode::DoNotQueue,
+                        PendingBackgroundCompletion {
+                            mode: BackgroundCompletionPromptMode::DoNotQueue,
+                            terminal,
+                            terminal_kind: PendingBackgroundTerminalKind::Error(
+                                BackgroundErrorOutcome::Error,
+                            ),
+                        },
                     );
                 self.publish_terminal_background_error(
                     &cid,

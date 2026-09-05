@@ -1130,12 +1130,16 @@ impl Harness {
                 context: tau_proto::PromptContext::default(),
                 contains_payload_envelope_provenance_projection: false,
             });
-        let contains_payload_envelope_provenance_projection =
+        let mut contains_payload_envelope_provenance_projection =
             prompt_context.contains_payload_envelope_provenance_projection;
         let mut context = prompt_context.context;
         if let Some(initialization_block) =
             tree.and_then(crate::prompt::initialization_agents_context_block)
         {
+            contains_payload_envelope_provenance_projection |=
+                crate::prompt::context_block_contains_payload_envelope_provenance_projection(
+                    &initialization_block,
+                );
             context.blocks.insert(0, initialization_block);
         }
         if compaction_transaction.is_some() {
@@ -1416,7 +1420,17 @@ impl Harness {
                     conv.selected_prompt_context_head(),
                 )
             })
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || conv
+                .identity
+                .agent_id
+                .as_deref()
+                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+                .and_then(crate::prompt::initialization_agents_context_block)
+                .as_ref()
+                .is_some_and(
+                    crate::prompt::context_block_contains_payload_envelope_provenance_projection,
+                );
         match self.prepare_prompt_surface_for_dispatch_timed(
             &role_name,
             durable_agent_id.as_ref(),

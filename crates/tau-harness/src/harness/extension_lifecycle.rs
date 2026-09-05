@@ -1231,7 +1231,7 @@ impl Harness {
             .remove(call_id);
         self.tool_routing
             .tool_runtime
-            .pending_background_completion_modes
+            .pending_background_completions
             .remove(call_id);
         self.tool_routing
             .tool_runtime

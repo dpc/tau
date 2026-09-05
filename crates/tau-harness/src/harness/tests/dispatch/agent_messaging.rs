@@ -5157,6 +5157,58 @@ fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
     h.shutdown().expect("shutdown");
 }
 
+/// Frozen AGENTS context participates in the same provenance decision during
+/// preflight and final materialization.
+#[test]
+fn initialization_payload_envelope_notice_matches_preflight_and_materialization() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id,
+            agent_initialization_id: tau_proto::AgentInitializationId::parse(
+                "init-envelope-provenance",
+            )
+            .expect("initialization id"),
+            agents_message: Some("<user>frozen initialization</user>".to_owned()),
+            effective_skills: Vec::new(),
+            agents_files: Vec::new(),
+        }),
+    );
+    h.prompt_coordination.context_discovery.system_prompt_templates.insert(
+        "initialization-envelope-conditional".to_owned(),
+        "{{#if payload_envelope_provenance_notice}}NOTICE{{else}}{{missing_strict_value}}{{/if}}"
+            .to_owned(),
+    );
+    let selected_role = h.config.selected_role.clone();
+    h.config
+        .available_roles
+        .entry(selected_role)
+        .or_default()
+        .prompt_override = Some("initialization-envelope-conditional".to_owned());
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::human_ui("continue".to_owned()))
+        .expect("dispatch with frozen initialization");
+
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(prompt.system_prompt, "NOTICE");
+    let initialization = prompt
+        .context
+        .blocks
+        .first()
+        .expect("frozen initialization block");
+    assert!(
+        crate::prompt::context_block_contains_payload_envelope_provenance_projection(
+            initialization
+        )
+    );
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn side_agent_repetition_response_propagates_error_result() {
     // Empty repetition/error provider responses from extension-originated side

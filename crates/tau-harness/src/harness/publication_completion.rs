@@ -2466,14 +2466,26 @@ impl Harness {
             return;
         };
         if let Event::ToolBackgroundResult(result) = event {
-            let Some(mode) = self
+            let Some(pending) = self
                 .tool_routing
                 .tool_runtime
-                .pending_background_completion_modes
-                .remove(call_id)
+                .pending_background_completions
+                .get(call_id)
+                .copied()
             else {
                 return;
             };
+            if pending
+                .terminal
+                .is_some_and(|terminal| terminal != append_outcome.observation_id)
+                || !matches!(pending.terminal_kind, PendingBackgroundTerminalKind::Result)
+            {
+                return;
+            }
+            self.tool_routing
+                .tool_runtime
+                .pending_background_completions
+                .remove(call_id);
             self.finish_tool_call_runtime_state(call_id.as_str());
             self.publish_for_agent_from(
                 &cid,
@@ -2488,7 +2500,7 @@ impl Harness {
                 .tool_runtime
                 .self_compaction_results_without_progress
                 .contains(call_id);
-            self.finish_committed_background_completion(&cid, call_id, mode);
+            self.finish_committed_background_completion(&cid, call_id, pending.mode);
             if self_compaction_without_progress {
                 self.tool_routing
                     .tool_runtime
@@ -2499,17 +2511,39 @@ impl Harness {
             return;
         }
         if let Event::ToolBackgroundError(error) = event {
-            let Some(mode) = self
+            let Some(pending) = self
                 .tool_routing
                 .tool_runtime
-                .pending_background_completion_modes
-                .remove(call_id)
+                .pending_background_completions
+                .get(call_id)
+                .copied()
             else {
                 return;
             };
+            if pending
+                .terminal
+                .is_some_and(|terminal| terminal != append_outcome.observation_id)
+                || !matches!(
+                    pending.terminal_kind,
+                    PendingBackgroundTerminalKind::Error(_)
+                )
+            {
+                return;
+            }
+            self.tool_routing
+                .tool_runtime
+                .pending_background_completions
+                .remove(call_id);
             self.finish_tool_call_runtime_state(call_id.as_str());
-            self.record_wait_background_error(error.clone(), Some(append_outcome.observation_id));
-            self.finish_committed_background_completion(&cid, call_id, mode);
+            self.record_wait_background_error(
+                error.clone(),
+                Some(append_outcome.observation_id),
+                match pending.terminal_kind {
+                    PendingBackgroundTerminalKind::Error(outcome) => outcome,
+                    PendingBackgroundTerminalKind::Result => return,
+                },
+            );
+            self.finish_committed_background_completion(&cid, call_id, pending.mode);
             return;
         }
         self.tool_routing

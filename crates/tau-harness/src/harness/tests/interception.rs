@@ -4061,6 +4061,7 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
 ) {
     let mut removed_tag = tagged.clone();
     let mut rewritten_text = tagged.clone();
+    let mut rewritten_spans = tagged.clone();
     let mut untagged = tagged.clone();
     match &mut removed_tag {
         Event::AgentPromptSubmitted(prompt) => prompt.internal_kind = None,
@@ -4070,6 +4071,17 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
     match &mut rewritten_text {
         Event::AgentPromptSubmitted(prompt) => prompt.text = "rewritten alert".to_owned(),
         Event::AgentPromptSteered(prompt) => prompt.text = "rewritten alert".to_owned(),
+        _ => unreachable!(),
+    }
+    match &mut rewritten_spans {
+        Event::AgentPromptSubmitted(prompt) => {
+            prompt.trusted_internal_spans =
+                vec![tau_proto::TrustedInternalSpan { start: 0, end: 1 }];
+        }
+        Event::AgentPromptSteered(prompt) => {
+            prompt.trusted_internal_spans =
+                vec![tau_proto::TrustedInternalSpan { start: 0, end: 1 }];
+        }
         _ => unreachable!(),
     }
     match &mut untagged {
@@ -4101,6 +4113,7 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
     for (original, replacement) in [
         (tagged.clone(), removed_tag),
         (tagged.clone(), rewritten_text),
+        (tagged.clone(), rewritten_spans),
         (untagged.clone(), forged_tag),
     ] {
         let tmp = TempDir::new().expect("tempdir");

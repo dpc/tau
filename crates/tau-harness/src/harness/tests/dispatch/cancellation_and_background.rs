@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use super::super::super::CancelTarget;
 use super::*;
 use crate::agent::PendingPromptSource;
+use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
 
 /// Background terminal events are harness-derived records. Extensions must not
 /// be able to inject them directly into an agent log.
@@ -160,7 +161,6 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
             .is_backgrounded(&"bg-update-running".into())
     );
     assert_eq!(h.tool_routing.tool_runtime.tool_turn.pending_len(), 0);
-
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-bg-result-drain"),
         Event::ToolResultReported(final_tool_result(
@@ -609,14 +609,23 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
         .submit_user_prompt(test_session_id("s1"), "continue after cancel".to_owned())
         .expect("submit follow-up user prompt");
     assert_eq!(submission, PromptSubmission::Dispatched);
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-            Event::AgentPromptSubmitted(submitted)
-            if submitted.text == completion_prompt
-                && submitted.message_class == tau_proto::PromptMessageClass::Internal
-                && submitted.internal_kind
-                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
-    )));
+    assert!(
+        event_log_contains_any_source(&h, |event| matches!(
+            event,
+                Event::AgentPromptSubmitted(submitted)
+                if submitted.text.starts_with(&format!(
+                        "<tau_background_result call_id=\"{}\"",
+                        call_id.as_str()
+                    ))
+                    && submitted.text.contains("tool_outcome=\"error\"")
+                    && submitted.message_class == tau_proto::PromptMessageClass::Internal
+                    && submitted.internal_kind
+                        == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+                    && submitted.trusted_internal_spans.is_empty()
+        )),
+        "events: {:?}",
+        event_log_events(&h)
+    );
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptSubmitted(submitted)
@@ -1119,9 +1128,13 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptSubmitted(submitted)
-            if submitted.text == background_completion_prompt(&"a-bg-idle".into())
+            if submitted.text.starts_with(
+                    "<tau_background_result call_id=\"a-bg-idle\""
+                )
+                && submitted.text.contains("tool_outcome=\"error\"")
                 && submitted.internal_kind
                     == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+                && submitted.trusted_internal_spans.is_empty()
     )));
 
     h.shutdown().expect("shutdown");
@@ -1891,6 +1904,207 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// Once preview publication takes ownership, a racing wait still receives the
+/// canonical completion and cannot retract the transferred preview.
+#[test]
+fn wait_after_preview_publication_transfer_can_duplicate_completion() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: ToolCallId = "bg-after-preview-transfer".into();
+    h.tool_routing
+        .tool_runtime
+        .background_completion_targets
+        .insert(call_id.clone(), cid.clone());
+    h.record_wait_tool_call_ref(
+        call_id.clone(),
+        tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([81; 16]),
+            item_index: 0,
+        },
+    );
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: call_id.clone(),
+            tool_name: ToolName::new("slow_after_transfer"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("canonical output".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::from_bytes([82; 16])),
+    );
+    h.queue_background_completion_prompt_without_advancing(&cid, &call_id);
+
+    let mut transferred = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_prompts
+        .drain(..)
+        .collect::<Vec<_>>();
+    h.materialize_background_completion_preview_group(&mut transferred);
+    assert_eq!(transferred.len(), 1);
+    assert!(
+        transferred[0]
+            .text
+            .starts_with("<tau_background_result call_id=\"bg-after-preview-transfer\"",)
+    );
+    assert!(transferred[0].text.contains("canonical output"));
+
+    let wait_call = wait_no_args_call("wait-after-preview-transfer");
+    h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
+        .expect("consume retained completion after transfer");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id == wait_call.id
+                && cbor_map_text(&result.result, "original_tool_call_id")
+                    == Some(call_id.as_str())
+                && cbor_map_text(&result.result, "output") == Some("canonical output")
+    )));
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .is_empty()
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Passive previews merged into one user dispatch share one cumulative body
+/// budget and retain those exact committed bytes in provider context.
+#[test]
+fn passive_preview_group_budget_survives_publication_and_provider_assembly() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    for (index, fill) in [(0_u8, 'a'), (1_u8, 'b')] {
+        let call_id = ToolCallId::from(format!("passive-budget-{index}"));
+        let call_ref = tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([90 + index; 16]),
+            item_index: 0,
+        };
+        let terminal = tau_proto::ObservationId::from_bytes([100 + index; 16]);
+        h.tool_routing
+            .tool_runtime
+            .background_completion_targets
+            .insert(call_id.clone(), cid.clone());
+        h.record_wait_tool_call_ref(call_id.clone(), call_ref);
+        h.record_wait_background_result(
+            tau_proto::ToolBackgroundResult {
+                call_id: call_id.clone(),
+                tool_name: ToolName::new("large_passive"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text(fill.to_string().repeat(5 * 1024)),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            },
+            Some(terminal),
+        );
+        h.queue_passive_background_completion_prompt_with_source(
+            &cid,
+            &call_id,
+            Some(terminal),
+            Some(call_ref),
+        );
+    }
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::human_ui("continue".to_owned()))
+        .expect("dispatch user prompt with passive previews");
+
+    let committed = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.internal_kind
+                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion) =>
+            {
+                Some(prompt.text)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(committed.len(), 2);
+    assert!(committed[0].contains("delivery=\"full\""));
+    assert!(committed[0].contains(&"a".repeat(5 * 1024)));
+    assert!(committed[1].contains("delivery=\"summary\""));
+    assert!(!committed[1].contains(&"b".repeat(5 * 1024)));
+    let delivered_body_bytes = committed
+        .iter()
+        .map(|text| {
+            text.split_once('>')
+                .and_then(|(_, body_and_close)| {
+                    body_and_close.strip_suffix("</tau_background_result>")
+                })
+                .expect("registered preview envelope")
+                .len()
+        })
+        .sum::<usize>();
+    assert!(
+        delivered_body_bytes
+            <= crate::background_completion_preview::BACKGROUND_PREVIEW_GROUP_BODY_BYTES
+    );
+
+    let request = read_nth_prompt_created(&h, 0);
+    let projected = request
+        .context
+        .flatten()
+        .into_iter()
+        .filter_map(|item| match item {
+            ContextItem::Message(message) => message.content.into_iter().find_map(|part| {
+                let ContentPart::Text { text } = part else {
+                    return None;
+                };
+                text.starts_with("<tau_background_result").then_some(text)
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected, committed);
+    h.shutdown().expect("shutdown");
+}
+
+/// A provider request containing only one committed background preview includes
+/// the registry-derived provenance rule and preserves generic-user bytes.
+#[test]
+fn preview_only_provider_request_carries_registry_provenance_rule() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let preview = "<tau_background_result call_id=\"preview-only\" tool=\"read\" \
+                   tool_outcome=\"result\" delivery=\"full\" rendered_bytes=\"4\" \
+                   retrieval=\"wait\">done</tau_background_result>";
+
+    let mut pending = PendingPrompt::activating_background_completion(preview.to_owned());
+    pending.trusted_internal_spans.clear();
+    h.dispatch_prompt_for_agent(&cid, pending)
+        .expect("dispatch preview-only prompt");
+
+    let request = read_nth_prompt_created(&h, 0);
+    assert!(
+        request.system_prompt.contains("`<tau_background_result>`"),
+        "{}",
+        request.system_prompt
+    );
+    let flattened = request.context.flatten();
+    assert_eq!(flattened.len(), 1);
+    let ContextItem::Message(message) = &flattened[0] else {
+        panic!("preview must remain a generic user-role message");
+    };
+    let [ContentPart::Text { text }] = message.content.as_slice() else {
+        panic!("preview must remain one generic text part");
+    };
+    assert_eq!(text, preview);
+    assert!(!text.contains("<tau_internal>"));
+    h.shutdown().expect("shutdown");
+}
+
 /// A harness-level plural wait publishes one ordered native aggregate and
 /// commits all source consumption together.
 #[test]
@@ -1955,6 +2169,7 @@ fn plural_wait_publishes_ordered_aggregate_and_durable_correlation() {
             originator: tau_proto::PromptOriginator::User,
         },
         Some(terminal_b),
+        BackgroundErrorOutcome::Error,
     );
 
     let wait_ref = tau_proto::ToolCallRef {
@@ -3669,7 +3884,7 @@ fn background_cancel_clears_actual_running_call() {
     h.prompt_coordination
         .prompt_runtime
         .agents
-        .insert(spid.clone(), cid);
+        .insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3730,6 +3945,13 @@ fn background_cancel_clears_actual_running_call() {
             .is_backgrounded(&"bg-exclusive-cancel-running".into())
     );
     assert_eq!(h.tool_routing.tool_runtime.tool_turn.pending_len(), 0);
+    h.tool_routing
+        .tool_runtime
+        .pending_cancellation_observations
+        .insert(
+            "bg-exclusive-cancel-running".into(),
+            tau_proto::ObservationId::from_bytes([79; 16]),
+        );
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-bg-cancel-drain"),
@@ -3791,8 +4013,101 @@ fn background_cancel_clears_actual_running_call() {
         Event::ToolBackgroundResult(result)
             if result.call_id.as_str() == "bg-exclusive-cancel-running"
     )));
+    let mut pending = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .pending_prompts
+        .iter()
+        .filter(|prompt| {
+            prompt
+                .background_completion
+                .as_ref()
+                .is_some_and(|completion| {
+                    completion.call_id.as_str() == "bg-exclusive-cancel-running"
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    h.materialize_background_completion_preview_group(&mut pending);
+    assert!(
+        pending.iter().any(|prompt| {
+            prompt
+                .text
+                .starts_with("<tau_background_result call_id=\"bg-exclusive-cancel-running\"")
+                && prompt.text.contains("tool_outcome=\"cancelled\"")
+                && prompt.trusted_internal_spans.is_empty()
+        }),
+        "pending: {pending:?}"
+    );
 
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let terminal = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records")
+        .into_iter()
+        .find_map(|record| {
+            matches!(
+                &record.event,
+                Event::ToolBackgroundError(error)
+                    if error.call_id.as_str() == "bg-exclusive-cancel-running"
+            )
+            .then_some(record.observation_id)
+        })
+        .expect("background cancellation terminal");
+    let session_id = h.session_runtime.current_session_id.clone();
     h.shutdown().expect("shutdown");
+    drop(h);
+    wait_for_session_unlock(&sp, session_id.as_str());
+    let mut reopened = echo_harness_with_start_reason(
+        session_id.as_str(),
+        &sp,
+        tau_proto::SessionStartReason::Resume,
+    )
+    .expect("cold reopen");
+    let reopened_cid = reopened
+        .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+        .expect("reopened agent");
+    let restored = reopened
+        .restored_background_tool_states_for_agent(&reopened_cid)
+        .into_iter()
+        .find(|state| state.placeholder.call_id.as_str() == "bg-exclusive-cancel-running")
+        .expect("restored cancelled background generation");
+    assert_eq!(restored.terminal_observation, Some(terminal));
+    assert!(matches!(
+        restored.terminal_cause,
+        Some(tau_proto::ToolTerminalCause::Cancellation { .. })
+    ));
+    let preview = reopened
+        .background_completion_preview_for(
+            &"bg-exclusive-cancel-running".into(),
+            terminal,
+            &mut BackgroundPreviewBudget::default(),
+        )
+        .expect("restored preview");
+    assert!(preview.contains("tool_outcome=\"cancelled\""));
+    assert!(!preview.contains("message_bytes="));
+
+    let wait_call = AgentToolCall {
+        call_ref: None,
+        id: "wait-restored-cancel".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text("bg-exclusive-cancel-running".to_owned()),
+        )]),
+    };
+    seed_tools_running(&mut reopened, &reopened_cid, vec![wait_call.id.clone()]);
+    reopened
+        .handle_wait_tool_call(&reopened_cid, &wait_call, ToolName::new("wait"))
+        .expect("consume restored cancellation");
+    assert!(event_log_contains_any_source(&reopened, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id == wait_call.id && error.message == "Tool cancelled"
+    )));
+    reopened.shutdown().expect("shutdown reopened harness");
 }
 
 /// A committed background placeholder closes the foreground round even though

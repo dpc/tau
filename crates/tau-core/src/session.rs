@@ -311,6 +311,11 @@ struct ProviderWindowIndex {
 struct AgentTreeIndexes {
     /// Materialized provider-context input nodes keyed by journal occurrence.
     context_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
+    /// Materialized assistant-response nodes keyed by journal occurrence.
+    assistant_response_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
+    /// Prompt nodes whose committed source event carried exact background
+    /// completion provenance.
+    background_completion_prompt_nodes: HashSet<NodeId>,
     /// Logical active provider-window positions and boundary anchors.
     provider_window: ProviderWindowIndex,
     /// Replay-derived compaction-chain observability facts.
@@ -350,6 +355,9 @@ struct PendingInferenceInput {
     virtual_predecessor_seq: Option<PersistedAgentEventSeq>,
     /// Exact typed entry to materialize once the barrier closes.
     entry: Box<AgentEntry>,
+    /// Whether the committed source event authorizes one background-result
+    /// envelope.
+    background_completion_prompt: bool,
 }
 
 /// One committed context input waiting behind an open provider tool round.
@@ -359,6 +367,9 @@ struct PendingToolContextInput {
     durable_event_seq: PersistedAgentEventSeq,
     /// Exact typed entry to materialize after the aggregate tool result.
     entry: Box<AgentEntry>,
+    /// Whether the committed source event authorizes one background-result
+    /// envelope.
+    background_completion_prompt: bool,
 }
 
 impl From<PendingInferenceInput> for PendingToolContextInput {
@@ -366,6 +377,7 @@ impl From<PendingInferenceInput> for PendingToolContextInput {
         Self {
             durable_event_seq: input.durable_event_seq,
             entry: input.entry,
+            background_completion_prompt: input.background_completion_prompt,
         }
     }
 }
@@ -415,6 +427,8 @@ pub struct BackgroundToolCallState {
     pub call_ref: Option<tau_proto::ToolCallRef>,
     /// Canonical persisted completion occurrence, when complete.
     pub terminal_observation: Option<tau_proto::ObservationId>,
+    /// Durable classification attached to that exact terminal occurrence.
+    pub terminal_cause: Option<tau_proto::ToolTerminalCause>,
 }
 
 // `NodeId` lives on the wire (tree-folding events carry their own
@@ -1865,8 +1879,40 @@ impl AgentTree {
         head: Option<NodeId>,
         events: &[PersistedAgentEvent],
     ) -> Vec<BackgroundToolCallState> {
-        let branch_call_ids = self.tool_call_ids_from_branch(head);
-        if branch_call_ids.is_empty() {
+        let branch_nodes = self
+            .branch_node_ids_from(head)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut branch_calls = HashMap::new();
+        for entry in events {
+            let Event::ProviderResponseFinished(response) = &entry.event else {
+                continue;
+            };
+            if !self
+                .indexes
+                .assistant_response_nodes_by_event_seq
+                .get(&entry.seq)
+                .copied()
+                .is_some_and(|node| branch_nodes.contains(&node))
+            {
+                continue;
+            }
+            for (item_index, item) in response.output_items.iter().enumerate() {
+                let ContextItem::ToolCall(call) = item else {
+                    continue;
+                };
+                if let Ok(item_index) = u32::try_from(item_index) {
+                    branch_calls.insert(
+                        tau_proto::ToolCallRef {
+                            declaration: entry.observation_id,
+                            item_index,
+                        },
+                        call.call_id.clone(),
+                    );
+                }
+            }
+        }
+        if branch_calls.is_empty() {
             return Vec::new();
         }
 
@@ -1875,8 +1921,9 @@ impl AgentTree {
         let mut completion_order_seen = HashSet::new();
         let mut states = HashMap::new();
         let mut completions = HashMap::new();
-        let mut call_refs = HashMap::new();
-        let mut terminal_observations = HashMap::new();
+        let mut latest_declarations = HashMap::new();
+        let mut active_background = HashMap::new();
+        let mut terminal_causes = HashMap::new();
         for entry in events {
             match &entry.event {
                 Event::ProviderResponseFinished(response) => {
@@ -1884,32 +1931,36 @@ impl AgentTree {
                         let ContextItem::ToolCall(call) = item else {
                             continue;
                         };
-                        if !branch_call_ids.contains(&call.call_id) {
-                            continue;
-                        }
                         if let Ok(item_index) = u32::try_from(item_index) {
-                            call_refs.insert(
-                                call.call_id.clone(),
-                                tau_proto::ToolCallRef {
-                                    declaration: entry.observation_id,
-                                    item_index,
-                                },
-                            );
+                            let call_ref = tau_proto::ToolCallRef {
+                                declaration: entry.observation_id,
+                                item_index,
+                            };
+                            if branch_calls.get(&call_ref) == Some(&call.call_id) {
+                                latest_declarations.insert(call.call_id.clone(), call_ref);
+                            }
                         }
                     }
                 }
                 Event::ProviderToolResult(result) => {
-                    if result.kind != ToolResultKind::BackgroundPlaceholder
-                        || !branch_call_ids.contains(&result.call_id)
-                    {
+                    if result.kind != ToolResultKind::BackgroundPlaceholder {
                         continue;
                     }
-                    if states.contains_key(&result.call_id) {
+                    let Some(call_ref) = latest_declarations.get(&result.call_id).copied() else {
+                        continue;
+                    };
+                    if states.contains_key(&call_ref) {
                         continue;
                     }
-                    placeholder_order.push(result.call_id.clone());
+                    active_background.insert(result.call_id.clone(), call_ref);
+                    placeholder_order.push(call_ref);
+                    let (completion, terminal_observation) = completions
+                        .remove(&call_ref)
+                        .map_or((None, None), |(completion, terminal)| {
+                            (Some(completion), Some(terminal))
+                        });
                     states.insert(
-                        result.call_id.clone(),
+                        call_ref,
                         BackgroundToolCallState {
                             placeholder: BackgroundToolPlaceholder {
                                 call_id: result.call_id.clone(),
@@ -1917,40 +1968,43 @@ impl AgentTree {
                                 tool_type: result.tool_type,
                                 originator: result.originator.clone(),
                             },
-                            completion: completions.get(&result.call_id).cloned(),
-                            call_ref: call_refs.get(&result.call_id).copied(),
-                            terminal_observation: terminal_observations
-                                .get(&result.call_id)
-                                .copied(),
+                            completion,
+                            call_ref: Some(call_ref),
+                            terminal_observation,
+                            terminal_cause: None,
                         },
                     );
                 }
+                Event::AgentToolTerminalClassified(classified) => {
+                    terminal_causes.insert(
+                        (classified.call, classified.terminal),
+                        classified.cause.clone(),
+                    );
+                }
                 Event::ToolBackgroundResult(result) => {
-                    if !branch_call_ids.contains(&result.call_id) {
+                    let Some(call_ref) = active_background.get(&result.call_id).copied() else {
                         continue;
-                    }
+                    };
                     let completion = BackgroundToolCompletion::Result(result.clone());
-                    terminal_observations.insert(result.call_id.clone(), entry.observation_id);
-                    completions.insert(result.call_id.clone(), completion.clone());
-                    if completion_order_seen.insert(result.call_id.clone()) {
-                        completion_order.push(result.call_id.clone());
+                    completions.insert(call_ref, (completion.clone(), entry.observation_id));
+                    if completion_order_seen.insert(call_ref) {
+                        completion_order.push(call_ref);
                     }
-                    if let Some(state) = states.get_mut(&result.call_id) {
+                    if let Some(state) = states.get_mut(&call_ref) {
                         state.completion = Some(completion);
                         state.terminal_observation = Some(entry.observation_id);
                     }
                 }
                 Event::ToolBackgroundError(error) => {
-                    if !branch_call_ids.contains(&error.call_id) {
+                    let Some(call_ref) = active_background.get(&error.call_id).copied() else {
                         continue;
-                    }
+                    };
                     let completion = BackgroundToolCompletion::Error(error.clone());
-                    terminal_observations.insert(error.call_id.clone(), entry.observation_id);
-                    completions.insert(error.call_id.clone(), completion.clone());
-                    if completion_order_seen.insert(error.call_id.clone()) {
-                        completion_order.push(error.call_id.clone());
+                    completions.insert(call_ref, (completion.clone(), entry.observation_id));
+                    if completion_order_seen.insert(call_ref) {
+                        completion_order.push(call_ref);
                     }
-                    if let Some(state) = states.get_mut(&error.call_id) {
+                    if let Some(state) = states.get_mut(&call_ref) {
                         state.completion = Some(completion);
                         state.terminal_observation = Some(entry.observation_id);
                     }
@@ -1958,15 +2012,22 @@ impl AgentTree {
                 _ => {}
             }
         }
+        for state in states.values_mut() {
+            state.terminal_cause = state.call_ref.and_then(|call| {
+                state
+                    .terminal_observation
+                    .and_then(|terminal| terminal_causes.get(&(call, terminal)).cloned())
+            });
+        }
 
         let mut ordered = Vec::new();
-        for call_id in completion_order {
-            if let Some(state) = states.remove(&call_id) {
+        for call_ref in completion_order {
+            if let Some(state) = states.remove(&call_ref) {
                 ordered.push(state);
             }
         }
-        for call_id in placeholder_order {
-            if let Some(state) = states.remove(&call_id) {
+        for call_ref in placeholder_order {
+            if let Some(state) = states.remove(&call_ref) {
                 ordered.push(state);
             }
         }
@@ -2226,6 +2287,7 @@ impl AgentTree {
         parent: Option<NodeId>,
         durable_event_seq: PersistedAgentEventSeq,
         entry: AgentEntry,
+        background_completion_prompt: bool,
     ) -> NodeId {
         let node = self.append_node_at(parent, entry);
         assert!(
@@ -2235,6 +2297,12 @@ impl AgentTree {
                 .is_none(),
             "context occurrence materialized more than once"
         );
+        if background_completion_prompt {
+            assert!(
+                self.indexes.background_completion_prompt_nodes.insert(node),
+                "background completion prompt node indexed more than once"
+            );
+        }
         node
     }
 
@@ -2248,6 +2316,15 @@ impl AgentTree {
             .context_nodes_by_event_seq
             .get(&durable_event_seq)
             .copied()
+    }
+
+    /// Return whether this exact materialized node came from a committed
+    /// background-completion prompt event.
+    #[must_use]
+    pub fn node_has_background_completion_prompt_provenance(&self, node_id: NodeId) -> bool {
+        self.indexes
+            .background_completion_prompt_nodes
+            .contains(&node_id)
     }
 
     /// Return whether an unresolved marked owner holds an activating prompt
@@ -3171,6 +3248,8 @@ impl AgentTree {
                     prompt.inference_activation,
                 ),
                 durable_event_seq,
+                prompt.internal_kind
+                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
             ),
             Event::AgentUserMessageInjected(injected) => self.record_context_entry(
                 parent,
@@ -3181,6 +3260,7 @@ impl AgentTree {
                     injected.inference_activation,
                 ),
                 durable_event_seq,
+                false,
             ),
             Event::AgentPromptSteered(steered) => self.record_context_entry(
                 parent,
@@ -3191,6 +3271,8 @@ impl AgentTree {
                     steered.inference_activation,
                 ),
                 durable_event_seq,
+                steered.internal_kind
+                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
             ),
             Event::AgentCompactionTriggered(triggered) => Some(self.append_node_at(
                 parent,
@@ -3209,12 +3291,16 @@ impl AgentTree {
             )),
             Event::AgentMessageSent(message) => self
                 .agent_message_entry_from_sent(message, durable_event_seq)
-                .and_then(|entry| self.record_context_entry(parent, entry, durable_event_seq)),
+                .and_then(|entry| {
+                    self.record_context_entry(parent, entry, durable_event_seq, false)
+                }),
             Event::AgentMessageReceived(message) => self
                 .agent_message_entry_from_received(message, durable_event_seq)
-                .and_then(|entry| self.record_context_entry(parent, entry, durable_event_seq)),
+                .and_then(|entry| {
+                    self.record_context_entry(parent, entry, durable_event_seq, false)
+                }),
             Event::ProviderResponseFinished(response) => {
-                Some(self.apply_provider_response_finished(parent, response))
+                Some(self.apply_provider_response_finished(parent, durable_event_seq, response))
             }
             Event::AgentPromptTerminated(terminated) => {
                 self.close_terminated_inference(&terminated.agent_prompt_id)
@@ -3285,11 +3371,13 @@ impl AgentTree {
         parent: Option<NodeId>,
         entry: AgentEntry,
         durable_event_seq: PersistedAgentEventSeq,
+        background_completion_prompt: bool,
     ) -> Option<NodeId> {
         if self.open_tool_round_applies_to(parent) {
             self.pending_context_inputs.push(PendingToolContextInput {
                 durable_event_seq,
                 entry: Box::new(entry),
+                background_completion_prompt,
             });
             return None;
         }
@@ -3308,10 +3396,16 @@ impl AgentTree {
                 accepted_real_parent: parent,
                 virtual_predecessor_seq,
                 entry: Box::new(entry),
+                background_completion_prompt,
             });
             return None;
         }
-        Some(self.append_context_node_at(parent, durable_event_seq, entry))
+        Some(self.append_context_node_at(
+            parent,
+            durable_event_seq,
+            entry,
+            background_completion_prompt,
+        ))
     }
 
     /// Fold one valid committed message fact behind tool adjacency when needed.
@@ -3328,6 +3422,7 @@ impl AgentTree {
                 durable_event_seq,
             },
             durable_event_seq,
+            false,
         )
     }
 
@@ -3373,6 +3468,7 @@ impl AgentTree {
     fn apply_provider_response_finished(
         &mut self,
         parent: Option<NodeId>,
+        durable_event_seq: PersistedAgentEventSeq,
         response: &tau_proto::ProviderResponseFinished,
     ) -> NodeId {
         let selected_head = self.head;
@@ -3384,6 +3480,13 @@ impl AgentTree {
                 output_items: response.output_items.clone(),
                 usage: response.usage.clone(),
             },
+        );
+        assert!(
+            self.indexes
+                .assistant_response_nodes_by_event_seq
+                .insert(durable_event_seq, node_id)
+                .is_none(),
+            "assistant response occurrence materialized more than once"
         );
         let call_order = self.provider_response_tool_call_order(&response.output_items);
         let mut owned = self.take_pending_inference_inputs(&response.agent_prompt_id);
@@ -3425,7 +3528,12 @@ impl AgentTree {
     ) -> NodeId {
         inputs.sort_by_key(|input| input.durable_event_seq.get());
         for input in inputs.drain(..) {
-            head = self.append_context_node_at(Some(head), input.durable_event_seq, *input.entry);
+            head = self.append_context_node_at(
+                Some(head),
+                input.durable_event_seq,
+                *input.entry,
+                input.background_completion_prompt,
+            );
         }
         head
     }
@@ -3445,7 +3553,12 @@ impl AgentTree {
                 .virtual_predecessor_seq
                 .and_then(|seq| materialized.get(&seq).copied())
                 .or(input.accepted_real_parent);
-            let node = self.append_context_node_at(parent, input.durable_event_seq, *input.entry);
+            let node = self.append_context_node_at(
+                parent,
+                input.durable_event_seq,
+                *input.entry,
+                input.background_completion_prompt,
+            );
             materialized.insert(input.durable_event_seq, node);
             if advances_selected {
                 selected_seq = Some(input.durable_event_seq);
@@ -6347,7 +6460,12 @@ impl AgentTree {
         let mut pending = std::mem::take(&mut self.pending_context_inputs);
         pending.sort_by_key(|input| input.durable_event_seq.get());
         for input in pending {
-            head = self.append_context_node_at(Some(head), input.durable_event_seq, *input.entry);
+            head = self.append_context_node_at(
+                Some(head),
+                input.durable_event_seq,
+                *input.entry,
+                input.background_completion_prompt,
+            );
         }
         if !round_is_selected {
             self.head = selected_head;

@@ -1277,7 +1277,10 @@ pub(crate) struct AssembledPromptContext {
 fn is_payload_envelope_provenance_projection(text: &str) -> bool {
     tau_proto::registered_payload_envelopes()
         .iter()
-        .filter(|family| family.name != tau_proto::TAU_INTERNAL_HEADER_NAME)
+        .filter(|family| {
+            family.name != tau_proto::TAU_INTERNAL_HEADER_NAME
+                && family.name != tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.name
+        })
         .any(|family| family.matches_whole(text))
         || [
             ("<message>", MESSAGE_CLOSE),
@@ -1308,6 +1311,19 @@ fn context_items_contain_payload_envelope_provenance_projection(items: &[Context
     })
 }
 
+pub(crate) fn context_block_contains_payload_envelope_provenance_projection(
+    block: &tau_proto::ContextBlock,
+) -> bool {
+    match block {
+        tau_proto::ContextBlock::UserInput(input) => {
+            context_items_contain_payload_envelope_provenance_projection(&input.items)
+        }
+        tau_proto::ContextBlock::AssistantResponse(_) | tau_proto::ContextBlock::ToolResults(_) => {
+            false
+        }
+    }
+}
+
 fn tool_results_contain_payload_envelope_provenance_projection(
     items: &[tau_proto::ToolResultItem],
 ) -> bool {
@@ -1328,7 +1344,7 @@ pub(crate) fn active_prompt_context_contains_payload_envelope_provenance_project
         .replacement
         .is_some_and(context_items_contain_payload_envelope_provenance_projection);
 
-    for (_, entry) in active_window.transcript {
+    for (node_id, entry) in active_window.transcript {
         #[cfg(test)]
         PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT
             .set(PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT.get().saturating_add(1));
@@ -1345,8 +1361,11 @@ pub(crate) fn active_prompt_context_contains_payload_envelope_provenance_project
                 submission_source,
                 ..
             } => {
-                contains_projection |= submission_source.as_ref()
-                    == Some(&tau_proto::PromptSubmissionSource::HumanUi)
+                contains_projection |= tree
+                    .node_has_background_completion_prompt_provenance(node_id)
+                    && is_canonical_background_completion_prompt(items, submission_source.as_ref())
+                    || submission_source.as_ref()
+                        == Some(&tau_proto::PromptSubmissionSource::HumanUi)
                     || items.iter().any(|item| {
                         matches!(
                             item,
@@ -1469,7 +1488,9 @@ pub(crate) fn initialization_agents_context_block(
             items: vec![ContextItem::Message(tau_proto::MessageItem {
                 role: tau_proto::ContextRole::User,
                 content: vec![tau_proto::ContentPart::Text {
-                    text: agents_message.clone(),
+                    text: tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE
+                        .escape_body(agents_message)
+                        .into_owned(),
                 }],
                 phase: None,
                 responses_raw_json: None,
@@ -1519,7 +1540,7 @@ fn assemble_prompt_context_window(
             context_items_contain_payload_envelope_provenance_projection(replacement_window);
         blocks.push(tau_proto::ContextBlock::UserInput(
             tau_proto::UserInputBlock {
-                items: replacement_window.to_vec(),
+                items: project_compaction_replacement_items(replacement_window),
             },
         ));
     }
@@ -1549,7 +1570,7 @@ fn assemble_prompt_context_window(
                     );
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
-                        items: replacement_window.clone(),
+                        items: project_compaction_replacement_items(replacement_window),
                     },
                 ));
             }
@@ -1565,8 +1586,12 @@ fn assemble_prompt_context_window(
                 submission_source,
                 ..
             } => {
-                contains_payload_envelope_provenance_projection |= submission_source.as_ref()
-                    == Some(&tau_proto::PromptSubmissionSource::HumanUi)
+                let background_completion_prompt = tree
+                    .node_has_background_completion_prompt_provenance(node_id)
+                    && is_canonical_background_completion_prompt(items, submission_source.as_ref());
+                contains_payload_envelope_provenance_projection |= background_completion_prompt
+                    || submission_source.as_ref()
+                        == Some(&tau_proto::PromptSubmissionSource::HumanUi)
                     || items.iter().any(|item| {
                         matches!(
                             item,
@@ -1579,7 +1604,11 @@ fn assemble_prompt_context_window(
                     });
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
-                        items: project_user_prompt_items(items, submission_source.as_ref()),
+                        items: project_user_prompt_items(
+                            items,
+                            submission_source.as_ref(),
+                            background_completion_prompt,
+                        ),
                     },
                 ));
             }
@@ -1944,6 +1973,7 @@ fn measurement_block_count(blocks: &[tau_proto::ContextBlock]) -> usize {
 fn project_user_prompt_items(
     items: &[ContextItem],
     submission_source: Option<&tau_proto::PromptSubmissionSource>,
+    background_completion_prompt: bool,
 ) -> Vec<ContextItem> {
     let mut projected = items.to_vec();
     let human_ui = submission_source == Some(&tau_proto::PromptSubmissionSource::HumanUi);
@@ -1960,8 +1990,13 @@ fn project_user_prompt_items(
                     tau_proto::ContentPart::UrlCitation { .. }
                     | tau_proto::ContentPart::CitationMetadataInvalid => {}
                     tau_proto::ContentPart::Text { text } => {
+                        if background_completion_prompt {
+                            continue;
+                        }
+                        let body =
+                            tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.escape_body(text);
                         let body = tau_proto::escape_exact_sentinel_close(
-                            text,
+                            &body,
                             crate::internal_envelope::TAU_INTERNAL_CLOSE,
                             crate::internal_envelope::TAU_INTERNAL_CLOSE_VISIBLE,
                         );
@@ -1977,6 +2012,42 @@ fn project_user_prompt_items(
         }
     }
     projected
+}
+
+fn project_compaction_replacement_items(items: &[ContextItem]) -> Vec<ContextItem> {
+    let mut projected = items.to_vec();
+    for item in &mut projected {
+        if let ContextItem::Message(message) = item {
+            for part in &mut message.content {
+                if let tau_proto::ContentPart::Text { text } = part {
+                    *text = tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE
+                        .escape_body(text)
+                        .into_owned();
+                }
+            }
+        }
+    }
+    projected
+}
+
+fn is_canonical_background_completion_prompt(
+    items: &[ContextItem],
+    submission_source: Option<&tau_proto::PromptSubmissionSource>,
+) -> bool {
+    submission_source == Some(&tau_proto::PromptSubmissionSource::HarnessInternal)
+        && matches!(
+            items,
+            [ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::User,
+                content,
+                phase: None,
+                responses_raw_json: None,
+            })] if matches!(
+                content.as_slice(),
+                [tau_proto::ContentPart::Text { text }]
+                    if tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.matches_whole(text)
+            )
+        )
 }
 
 /// Project durable tool terminals without treating producer-controlled text as

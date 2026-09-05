@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use super::{
     MESSAGE_PAYLOAD_ENVELOPE, PayloadEnvelopeCarrier, PayloadEnvelopeOpening,
-    RegisteredPayloadEnvelope, TAU_INTERNAL_PAYLOAD_ENVELOPE, TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
-    USER_PAYLOAD_ENVELOPE, escape_exact_sentinel_close, registered_payload_envelopes,
+    PayloadEnvelopeRenderError, RegisteredPayloadEnvelope, TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
+    TAU_INTERNAL_PAYLOAD_ENVELOPE, TAU_WEB_CONTENT_PAYLOAD_ENVELOPE, USER_PAYLOAD_ENVELOPE,
+    escape_exact_sentinel_close, escape_payload_envelope_attribute, registered_payload_envelopes,
 };
 
 /// The registry must remain unambiguous and each family must preserve
@@ -19,6 +20,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
             TAU_INTERNAL_PAYLOAD_ENVELOPE,
             MESSAGE_PAYLOAD_ENVELOPE,
             TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
+            TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
         ]
     );
     assert_eq!(
@@ -75,6 +77,33 @@ fn registered_families_have_unique_complete_lexical_contracts() {
             exact_close: "</tau_web_content>",
             visible_close: "&lt;/tau_web_content&gt;",
             carrier: PayloadEnvelopeCarrier::TypedToolResult,
+        }
+    );
+    assert_eq!(
+        TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
+        RegisteredPayloadEnvelope {
+            name: "tau_background_result",
+            opening: PayloadEnvelopeOpening::Attributed("<tau_background_result "),
+            ordered_attributes: &[
+                "call_id",
+                "tool",
+                "tool_outcome",
+                "delivery",
+                "rendered_bytes",
+                "retrieval",
+                "process_outcome",
+                "process_source",
+                "process_success",
+                "termination_reason",
+                "exit_code",
+                "signal",
+                "timed_out",
+                "message_bytes",
+                "message_truncated",
+            ],
+            exact_close: "</tau_background_result>",
+            visible_close: "&lt;/tau_background_result&gt;",
+            carrier: PayloadEnvelopeCarrier::GenericUserText,
         }
     );
     for (index, family) in families.iter().enumerate() {
@@ -136,6 +165,58 @@ fn borrows_body_without_exact_close() {
         escape_exact_sentinel_close("plain & <text>", "</user>", "&lt;/user&gt;"),
         std::borrow::Cow::Borrowed(_)
     ));
+}
+
+/// Dynamic envelope attributes escape every XML-significant character.
+#[test]
+fn payload_envelope_attributes_are_fully_escaped() {
+    assert_eq!(
+        escape_payload_envelope_attribute("<&>\"'"),
+        "&lt;&amp;&gt;&quot;&apos;"
+    );
+}
+
+/// The shared registry owns the exact background-preview opening, attribute
+/// order, escaping, collision handling, and closing bytes.
+#[test]
+fn background_result_registry_renders_exact_attributed_envelope() {
+    let rendered = TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE
+        .render_attributed(
+            &[
+                ("call_id", "call<&\"".to_owned()),
+                ("tool", "read".to_owned()),
+                ("tool_outcome", "result".to_owned()),
+                ("delivery", "full".to_owned()),
+                ("rendered_bytes", "31".to_owned()),
+                ("retrieval", "wait".to_owned()),
+            ],
+            "before </tau_background_result> after",
+        )
+        .expect("registered attributes");
+    assert_eq!(
+        rendered,
+        "<tau_background_result call_id=\"call&lt;&amp;&quot;\" tool=\"read\" \
+         tool_outcome=\"result\" delivery=\"full\" rendered_bytes=\"31\" \
+         retrieval=\"wait\">before &lt;/tau_background_result&gt; \
+         after</tau_background_result>"
+    );
+    assert!(TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.matches_whole(&rendered));
+}
+
+/// Attributed rendering rejects unknown, duplicate, and out-of-order fields
+/// rather than silently drifting from the registry contract.
+#[test]
+fn attributed_renderer_rejects_attribute_contract_drift() {
+    for attributes in [
+        vec![("unknown", "x".to_owned())],
+        vec![("call_id", "c".to_owned()), ("call_id", "again".to_owned())],
+        vec![("tool", "read".to_owned()), ("call_id", "c".to_owned())],
+    ] {
+        assert!(matches!(
+            TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.render_attributed(&attributes, ""),
+            Err(PayloadEnvelopeRenderError::UnknownOrMisorderedAttribute(_))
+        ));
+    }
 }
 
 /// Production XML-like open/close pairs must either name a registered top-level

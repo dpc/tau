@@ -64,6 +64,15 @@ assembly may then apply the source-specific presentation required by
 UI/history/navigation continue to consume canonical facts rather than that late
 provider projection.
 
+`AgentTreeIndexes` also records the exact materialized nodes whose committed source
+prompt fact carried `internal_kind=background_tool_completion`. The bit follows the
+durable event sequence through both marked-inference and open-tool-round deferred
+queues and enters the index atomically with eventual node materialization. Full
+journal-prefix replay and snapshots rebuild it without a dispatch-time journal scan;
+tree clones carry it with the other replay-derived indexes. Compaction replacement
+items never acquire the bit, retained suffix nodes preserve it, and dropping the tree
+drops the index, so a stale or foreign `NodeId` cannot confer authority.
+
 A durable session keeps ephemeral-agent loads and matching unloads in a separate
 process-local, independently sequenced overlay. Late same-daemon replay first
 validates and folds the durable snapshot, then validates and composes the

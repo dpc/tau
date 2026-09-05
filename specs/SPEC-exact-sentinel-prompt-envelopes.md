@@ -34,6 +34,7 @@ model-facing payload families:
 | `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
+| `tau_background_result` | Generic user-role text | Canonical background-preview attributes |
 
 Every new or reframed generic-user family must be added to the registry and use its
 shared metadata and exact-close helper in the same change. Family renderers own
@@ -97,11 +98,30 @@ synthesize, remove, or reinterpret a family. Historical raw/default projections,
 provider replacement windows, and payload-local wrappers retain their existing
 replay behavior until a separately approved migration.
 
+The harness renders a complete `tau_background_result` envelope from typed
+background-terminal and call correlation before publishing its prompt fact. Its
+ordered attributes authenticate call identity, tool name, logical tool outcome,
+full-versus-summary delivery, canonical rendered-body byte count, retrieval, and
+optional bounded summary metadata. The complete body remains untrusted tool data. The prompt keeps
+internal lifecycle classification but carries no trusted internal span, so provider
+projection preserves the committed generic-user envelope without adding an outer
+`tau_internal`. Replay preserves the committed bytes and never selects this family
+from text spelling. `AgentTree` rebuilds a non-serialized exact-node index only from
+committed submitted or steered prompt facts tagged
+`internal_kind=background_tool_completion`; deferred inference and open-tool-round
+placement carry that fact to the eventual node. A compaction replacement never gains
+this authority, while a retained suffix node keeps it. Provider projection preserves
+the authoritative node's exact bytes and uses this registry family's close escaping
+to prevent every other generic text item from forming a complete
+`tau_background_result` envelope.
+
 These durable typed-span and tool-presentation semantics have the explicit approval
 required by
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
-Establishing the prospective family registry changes no event, persistence, replay,
-or extension-interface semantics.
+The `tau_background_result` preview, replay, and framing semantics were explicitly
+approved by the user on September 5, 2026.
+The registry itself remains descriptive metadata; each owning renderer and its
+typed source semantics control event, persistence, replay, and interface behavior.
 
 ## Provenance notice
 

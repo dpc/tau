@@ -4887,6 +4887,205 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
     ));
 }
 
+/// Background-preview provenance follows its exact durable occurrence through
+/// deferred inference placement and rebuilds identically on cold replay.
+#[test]
+fn deferred_background_preview_provenance_matches_live_and_cold_replay() {
+    let agent_id = agent_id();
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-preview-owner").expect("test prompt id");
+    let record = |seq, event, fold_semantics| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: if seq == 0 {
+            AgentEventParent::Root
+        } else {
+            AgentEventParent::Under(NodeId::new(0))
+        },
+        fold_semantics,
+        recorded_at: tau_proto::UnixMicros::new(seq),
+    };
+    let preview_text = "<tau_background_result call_id=\"deferred\" tool=\"read\" \
+                        tool_outcome=\"result\" delivery=\"full\" rendered_bytes=\"4\" \
+                        retrieval=\"wait\">done</tau_background_result>";
+    let initial = Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        agent_id: agent_id.clone(),
+        text: "H".to_owned(),
+        inference_activation: true,
+        message_class: Default::default(),
+    });
+    let checkpoint =
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id.clone(),
+            through: AgentHead::Node(NodeId::new(0)),
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Root),
+            output_length_continuation: None,
+        });
+    let preview = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        self_compaction_terminal: None,
+        agent_id: agent_id.clone(),
+        text: preview_text.to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
+        inference_activation: true,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        ctx_id: None,
+    });
+    let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+    response.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    response.output_items = vec![ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text {
+            text: "R".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    })];
+    let records = vec![
+        record(0, initial, AgentJournalFoldSemantics::Legacy),
+        record(
+            1,
+            checkpoint,
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        ),
+        record(2, preview, AgentJournalFoldSemantics::Legacy),
+        record(
+            3,
+            Event::ProviderResponseFinished(response),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+    ];
+
+    let mut live = AgentTree::from_events(agent_id.clone(), &[]);
+    for record in &records {
+        live.apply_persisted_record(record)
+            .expect("live deferred preview fold");
+    }
+    let replay =
+        AgentTree::try_from_events(agent_id, &records).expect("cold deferred preview fold");
+    assert_eq!(live, replay);
+    let preview_node = live
+        .node_for_durable_event_seq(PersistedAgentEventSeq::new(2))
+        .expect("deferred preview node");
+    assert!(live.node_has_background_completion_prompt_provenance(preview_node));
+    assert_eq!(
+        live.node(preview_node)
+            .and_then(|node| match &node.entry {
+                AgentEntry::UserInput { items, .. } => items.first(),
+                _ => None,
+            })
+            .and_then(|item| match item {
+                ContextItem::Message(message) => message.content.first(),
+                _ => None,
+            }),
+        Some(&ContentPart::Text {
+            text: preview_text.to_owned(),
+        })
+    );
+}
+
+/// Background-preview provenance also follows an input parked behind an open
+/// provider tool round until the aggregate terminal materializes it.
+#[test]
+fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
+    let agent_id = agent_id();
+    let call_id = ToolCallId::from("preview-after-tool");
+    let preview_text = "<tau_background_result call_id=\"deferred-tool\" tool=\"read\" \
+                        tool_outcome=\"result\" delivery=\"full\" rendered_bytes=\"4\" \
+                        retrieval=\"wait\">done</tau_background_result>";
+    let records = vec![
+        PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0; 16]),
+            seq: PersistedAgentEventSeq::new(0),
+            source: None,
+            event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "H".to_owned(),
+                inference_activation: true,
+                message_class: Default::default(),
+            }),
+            parent: AgentEventParent::Root,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::new(0),
+        },
+        PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([1; 16]),
+            seq: PersistedAgentEventSeq::new(1),
+            source: None,
+            event: Event::ProviderResponseFinished(tool_calling_response(
+                &agent_id,
+                "ap-preview-tool-round",
+                vec![call_id.clone()],
+            )),
+            parent: AgentEventParent::Under(NodeId::new(0)),
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::new(1),
+        },
+        PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([2; 16]),
+            seq: PersistedAgentEventSeq::new(2),
+            source: None,
+            event: Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                self_compaction_terminal: None,
+                agent_id: agent_id.clone(),
+                text: preview_text.to_owned(),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::Internal,
+                internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
+                inference_activation: true,
+                submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+                ctx_id: None,
+            }),
+            parent: AgentEventParent::Under(NodeId::new(1)),
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::new(2),
+        },
+        PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([3; 16]),
+            seq: PersistedAgentEventSeq::new(3),
+            source: None,
+            event: Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
+                call_id,
+                tool_name: ToolName::new("tool"),
+                tool_type: ToolType::Function,
+                result: tau_proto::CborValue::Text("done".to_owned()),
+                provider_content: Vec::new(),
+                kind: ToolResultKind::Final,
+                display: None,
+                originator: PromptOriginator::User,
+            }),
+            parent: AgentEventParent::Under(NodeId::new(1)),
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::new(3),
+        },
+    ];
+
+    let tree = AgentTree::try_from_events(agent_id, &records).expect("tool-round preview fold");
+    let preview_node = tree
+        .node_for_durable_event_seq(PersistedAgentEventSeq::new(2))
+        .expect("tool-round deferred preview node");
+    assert!(tree.node_has_background_completion_prompt_provenance(preview_node));
+    assert!(matches!(
+        tree.node(preview_node).map(|node| &node.entry),
+        Some(AgentEntry::UserInput { items, .. })
+            if matches!(
+                items.as_slice(),
+                [ContextItem::Message(message)]
+                    if matches!(
+                        message.content.as_slice(),
+                        [ContentPart::Text { text }] if text == preview_text
+                    )
+            )
+    ));
+}
+
 /// Standalone compaction preserves the exact V1 post-response suffix and never
 /// places deferred input inside an open provider tool round.
 #[test]
@@ -5649,6 +5848,234 @@ fn v1_terminal_fallback_restores_selected_queue_not_global_last_node() {
     );
     assert_eq!(global_last, Some(NodeId::new(3)));
     assert_eq!(tree.head(), Some(NodeId::new(2)));
+}
+
+/// Background restoration binds terminal cause to both the declaration
+/// occurrence and terminal observation, rejecting reused-generation aliases.
+#[test]
+fn background_terminal_cause_restore_requires_exact_call_and_terminal() {
+    let agent_id = agent_id();
+    let call_id = ToolCallId::from("restored-cancel");
+    let response = Event::ProviderResponseFinished(tool_calling_response(
+        &agent_id,
+        "ap-restored-cancel",
+        vec![call_id.clone()],
+    ));
+    let placeholder = Event::ProviderToolResult(tau_proto::ToolResult {
+        presentation: Default::default(),
+        call_id: call_id.clone(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+        result: tau_proto::CborValue::Null,
+        provider_content: Vec::new(),
+        kind: ToolResultKind::BackgroundPlaceholder,
+        display: None,
+        originator: PromptOriginator::User,
+    });
+    let terminal = tau_proto::ObservationId::from_bytes([204; 16]);
+    let error = Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+        call_id: call_id.clone(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+        message: "cancelled".to_owned(),
+        details: None,
+        display: None,
+        originator: PromptOriginator::User,
+    });
+    let declaration = tau_proto::ObservationId::from_bytes([201; 16]);
+    let call_ref = tau_proto::ToolCallRef {
+        declaration,
+        item_index: 0,
+    };
+    let record = |seq: u64, observation_id, event| PersistedAgentEvent {
+        observation_id,
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: AgentJournalFoldSemantics::Legacy,
+        recorded_at: tau_proto::UnixMicros::new(seq),
+    };
+    let base = vec![
+        record(0, declaration, response.clone()),
+        record(
+            1,
+            tau_proto::ObservationId::from_bytes([202; 16]),
+            placeholder.clone(),
+        ),
+    ];
+    let classified = |call| {
+        Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+            call,
+            terminal,
+            cause: tau_proto::ToolTerminalCause::Cancellation {
+                request: tau_proto::ObservationId::from_bytes([203; 16]),
+            },
+        })
+    };
+    let states = |classification| {
+        let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
+        let Event::ProviderResponseFinished(response) = &response else {
+            unreachable!()
+        };
+        let node = tree.append_context_node_at(
+            None,
+            PersistedAgentEventSeq::new(0),
+            AgentEntry::AssistantResponse {
+                provider_response_id: None,
+                backend: None,
+                output_items: response.output_items.clone(),
+                usage: None,
+            },
+            false,
+        );
+        tree.indexes
+            .assistant_response_nodes_by_event_seq
+            .insert(PersistedAgentEventSeq::new(0), node);
+        let mut events = base.clone();
+        events.push(record(
+            2,
+            tau_proto::ObservationId::from_bytes([205; 16]),
+            classification,
+        ));
+        events.push(record(3, terminal, error.clone()));
+        tree.background_tool_calls_from(tree.head(), &events)
+    };
+
+    let matching = states(classified(call_ref));
+    assert!(matches!(
+        matching.as_slice(),
+        [BackgroundToolCallState {
+            terminal_cause: Some(tau_proto::ToolTerminalCause::Cancellation { .. }),
+            ..
+        }]
+    ));
+    let wrong_call = states(classified(tau_proto::ToolCallRef {
+        declaration: tau_proto::ObservationId::from_bytes([209; 16]),
+        item_index: 0,
+    }));
+    assert!(matches!(
+        wrong_call.as_slice(),
+        [BackgroundToolCallState {
+            terminal_cause: None,
+            ..
+        }]
+    ));
+
+    let first_declaration = tau_proto::ObservationId::from_bytes([211; 16]);
+    let second_declaration = tau_proto::ObservationId::from_bytes([215; 16]);
+    let first_terminal = tau_proto::ObservationId::from_bytes([214; 16]);
+    let second_terminal = tau_proto::ObservationId::from_bytes([218; 16]);
+    let first_response = Event::ProviderResponseFinished(tool_calling_response(
+        &agent_id,
+        "ap-restored-generation-one",
+        vec![call_id.clone()],
+    ));
+    let second_response = Event::ProviderResponseFinished(tool_calling_response(
+        &agent_id,
+        "ap-restored-generation-two",
+        vec![call_id.clone()],
+    ));
+    let first_result = Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+        call_id: call_id.clone(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+        result: tau_proto::CborValue::Text("first".to_owned()),
+        display: None,
+        originator: PromptOriginator::User,
+    });
+    let records = vec![
+        record(0, first_declaration, first_response),
+        record(
+            1,
+            tau_proto::ObservationId::from_bytes([212; 16]),
+            placeholder.clone(),
+        ),
+        record(
+            2,
+            tau_proto::ObservationId::from_bytes([213; 16]),
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: tau_proto::ToolCallRef {
+                    declaration: first_declaration,
+                    item_index: 0,
+                },
+                terminal: first_terminal,
+                cause: tau_proto::ToolTerminalCause::Completed,
+            }),
+        ),
+        record(3, first_terminal, first_result),
+        record(4, second_declaration, second_response),
+        record(
+            5,
+            tau_proto::ObservationId::from_bytes([216; 16]),
+            placeholder,
+        ),
+        record(
+            6,
+            tau_proto::ObservationId::from_bytes([217; 16]),
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call: tau_proto::ToolCallRef {
+                    declaration: second_declaration,
+                    item_index: 0,
+                },
+                terminal: second_terminal,
+                cause: tau_proto::ToolTerminalCause::Cancellation {
+                    request: tau_proto::ObservationId::from_bytes([219; 16]),
+                },
+            }),
+        ),
+        record(7, second_terminal, error),
+    ];
+    let mut reused_tree = AgentTree::from_events(agent_id, &[]);
+    let first = reused_tree.append_context_node_at(
+        None,
+        PersistedAgentEventSeq::new(0),
+        AgentEntry::AssistantResponse {
+            provider_response_id: None,
+            backend: None,
+            output_items: match &records[0].event {
+                Event::ProviderResponseFinished(response) => response.output_items.clone(),
+                _ => unreachable!(),
+            },
+            usage: None,
+        },
+        false,
+    );
+    reused_tree
+        .indexes
+        .assistant_response_nodes_by_event_seq
+        .insert(PersistedAgentEventSeq::new(0), first);
+    let second = reused_tree.append_context_node_at(
+        Some(first),
+        PersistedAgentEventSeq::new(4),
+        AgentEntry::AssistantResponse {
+            provider_response_id: None,
+            backend: None,
+            output_items: match &records[4].event {
+                Event::ProviderResponseFinished(response) => response.output_items.clone(),
+                _ => unreachable!(),
+            },
+            usage: None,
+        },
+        false,
+    );
+    reused_tree
+        .indexes
+        .assistant_response_nodes_by_event_seq
+        .insert(PersistedAgentEventSeq::new(4), second);
+    let reused = reused_tree.background_tool_calls_from(reused_tree.head(), &records);
+    assert_eq!(reused.len(), 2);
+    assert_eq!(
+        reused[1].call_ref,
+        Some(tau_proto::ToolCallRef {
+            declaration: second_declaration,
+            item_index: 0,
+        })
+    );
+    assert!(matches!(
+        reused[1].terminal_cause,
+        Some(tau_proto::ToolTerminalCause::Cancellation { .. })
+    ));
 }
 
 fn tool_calling_response(

@@ -105,6 +105,14 @@ thread_local! {
     };
 }
 
+/// Exact source authority and runtime preview for one queued completion prompt.
+struct BackgroundCompletionPromptSource {
+    /// Canonical terminal observation that owns the preview.
+    terminal: Option<tau_proto::ObservationId>,
+    /// Provider declaration occurrence that owns the preview.
+    call: Option<tau_proto::ToolCallRef>,
+}
+
 /// Runtime-only ownership and coordination state for tool calls in the active
 /// session.
 ///
@@ -131,9 +139,9 @@ pub(crate) struct ToolRuntimeState {
     /// Calls whose committed terminal clears runtime state without advancing a
     /// turn.
     pub(super) post_commit_runtime_only_tool_terminals: HashSet<ToolCallId>,
-    /// Prompt policy retained until each background terminal commits.
-    pub(super) pending_background_completion_modes:
-        HashMap<ToolCallId, BackgroundCompletionPromptMode>,
+    /// Exact prompt policy and typed outcome retained until each background
+    /// terminal commits.
+    pub(super) pending_background_completions: HashMap<ToolCallId, PendingBackgroundCompletion>,
     /// First accepted cancellation observation for each live target.
     pub(super) pending_cancellation_observations: HashMap<ToolCallId, tau_proto::ObservationId>,
     /// Ownerless calls admitted from committed configured-peer requests.
@@ -535,11 +543,23 @@ impl Harness {
             self.finish_harness_owned_tool_tracking(&call_id);
             return;
         }
-        self.observe_tool_terminal(&cid, &call_id, tau_proto::ToolTerminalCause::Completed);
+        let terminal =
+            self.observe_tool_terminal(&cid, &call_id, tau_proto::ToolTerminalCause::Completed);
+        let pending = PendingBackgroundCompletion {
+            mode: completion_prompt_mode,
+            terminal,
+            terminal_kind: PendingBackgroundTerminalKind::Result,
+        };
         self.tool_routing
             .tool_runtime
-            .pending_background_completion_modes
-            .insert(call_id, completion_prompt_mode);
+            .pending_background_completions
+            .entry(call_id)
+            .and_modify(|current| {
+                if current.terminal != terminal {
+                    *current = pending;
+                }
+            })
+            .or_insert(pending);
         self.publish_for_agent_from(
             &cid,
             Some(source_id),
@@ -641,15 +661,31 @@ impl Harness {
             // Settle ownerless runtime/wait state without creating transcript or
             // background-completion-prompt ownership.
             self.publish_event(source, Event::ToolBackgroundError(background.clone()));
-            self.record_wait_background_error(background, None);
+            self.record_wait_background_error(background, None, BackgroundErrorOutcome::Error);
             self.finish_harness_owned_tool_tracking(&call_id);
             return;
         }
-        self.observe_tool_terminal(&cid, &call_id, cause);
+        let error_outcome = if matches!(cause, tau_proto::ToolTerminalCause::Cancellation { .. }) {
+            BackgroundErrorOutcome::Cancelled
+        } else {
+            BackgroundErrorOutcome::Error
+        };
+        let terminal = self.observe_tool_terminal(&cid, &call_id, cause);
+        let pending = PendingBackgroundCompletion {
+            mode: completion_prompt_mode,
+            terminal,
+            terminal_kind: PendingBackgroundTerminalKind::Error(error_outcome),
+        };
         self.tool_routing
             .tool_runtime
-            .pending_background_completion_modes
-            .insert(call_id, completion_prompt_mode);
+            .pending_background_completions
+            .entry(call_id)
+            .and_modify(|current| {
+                if current.terminal != terminal {
+                    *current = pending;
+                }
+            })
+            .or_insert(pending);
         self.publish_for_agent_from(&cid, source, Event::ToolBackgroundError(background));
     }
 
@@ -693,7 +729,7 @@ impl Harness {
                 self.drain_pending_tool_invocations_or_report();
             }
             BackgroundCompletionPromptMode::QueueOnly => {
-                self.queue_background_completion_prompt_without_advancing(cid, call_id);
+                self.queue_background_completion_prompt_inner(cid, call_id, false);
             }
             BackgroundCompletionPromptMode::QueuePassive => {
                 self.queue_passive_background_completion_prompt(cid, call_id);
@@ -711,6 +747,7 @@ impl Harness {
         self.queue_background_completion_prompt_inner(cid, call_id, true);
     }
 
+    #[cfg(test)]
     pub(super) fn queue_background_completion_prompt_without_advancing(
         &mut self,
         cid: &AgentId,
@@ -724,9 +761,12 @@ impl Harness {
         cid: &AgentId,
         call_id: &ToolCallId,
     ) {
-        self.queue_background_completion_prompt_inner_with(cid, call_id, false, |prompt| {
-            PendingPrompt::passive_background_completion(prompt)
-        });
+        self.queue_background_completion_prompt_inner_with(
+            cid,
+            call_id,
+            false,
+            PendingPrompt::passive_background_completion,
+        );
     }
 
     pub(super) fn queue_background_completion_prompt_inner(
@@ -754,8 +794,10 @@ impl Harness {
             cid,
             call_id,
             advance_queue,
-            self.wait_tool_terminal_observation(call_id),
-            self.wait_tool_call_ref(call_id),
+            BackgroundCompletionPromptSource {
+                terminal: self.wait_tool_terminal_observation(call_id),
+                call: self.wait_tool_call_ref(call_id),
+            },
             make_prompt,
         );
     }
@@ -771,8 +813,10 @@ impl Harness {
             cid,
             call_id,
             true,
-            source_terminal,
-            source_call,
+            BackgroundCompletionPromptSource {
+                terminal: source_terminal,
+                call: source_call,
+            },
             PendingPrompt::activating_background_completion,
         );
     }
@@ -789,8 +833,10 @@ impl Harness {
             cid,
             call_id,
             false,
-            source_terminal,
-            source_call,
+            BackgroundCompletionPromptSource {
+                terminal: source_terminal,
+                call: source_call,
+            },
             PendingPrompt::passive_background_completion,
         );
     }
@@ -800,8 +846,7 @@ impl Harness {
         cid: &AgentId,
         call_id: &ToolCallId,
         advance_queue: bool,
-        source_terminal: Option<tau_proto::ObservationId>,
-        source_call: Option<tau_proto::ToolCallRef>,
+        source: BackgroundCompletionPromptSource,
         make_prompt: impl FnOnce(String) -> PendingPrompt,
     ) {
         if self
@@ -815,8 +860,8 @@ impl Harness {
         let prompt = background_completion_prompt(call_id);
         let correlation = BackgroundCompletionCorrelation {
             call_id: call_id.clone(),
-            source_call,
-            source_terminal,
+            source_call: source.call,
+            source_terminal: source.terminal,
         };
         let activation = tau_proto::ObservationId::random();
         let queued = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
@@ -850,8 +895,8 @@ impl Harness {
                 cid,
                 activation,
                 tau_proto::ActivationKind::BackgroundCompletion,
-                source_terminal,
-                source_call,
+                source.terminal,
+                source.call,
             );
             self.activate_waits_for(cid, activation);
         }
@@ -1426,8 +1471,35 @@ impl Harness {
         if pending.is_empty() {
             return false;
         }
+        self.materialize_background_completion_preview_group(&mut pending);
         self.publish_prompts_as_steered(cid, pending, completion);
         true
+    }
+
+    /// Materialize one exact preview-publication group before ownership
+    /// transfer.
+    pub(super) fn materialize_background_completion_preview_group(
+        &self,
+        prompts: &mut [PendingPrompt],
+    ) {
+        let mut budget = BackgroundPreviewBudget::default();
+        for prompt in prompts {
+            let Some(correlation) = prompt.background_completion.as_ref() else {
+                continue;
+            };
+            let Some(source_terminal) = correlation.source_terminal else {
+                continue;
+            };
+            let Some(text) = self.background_completion_preview_for(
+                &correlation.call_id,
+                source_terminal,
+                &mut budget,
+            ) else {
+                continue;
+            };
+            prompt.text = text;
+            prompt.trusted_internal_spans.clear();
+        }
     }
 
     #[cfg(test)]

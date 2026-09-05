@@ -46,6 +46,11 @@ An undelivered background-completion notice retains the same exact call and
 terminal pair. If a provider-visible call ID is reused, each generation keeps a
 distinct notice identity; the harness neither deduplicates nor removes one
 generation's notice through another generation's display ID.
+The notice's runtime-only canonical preview is not output ownership or wait
+consumption. A wait removes it only before pending-prompt ownership transfers to
+ordinary publication. The subsequently committed prompt fact owns exact transcript
+bytes but does not prove provider observation; replay never consumes source output,
+and cold restore does not synthesize a missing preview from the terminal.
 When UI manual compaction preempts the sole installed harness-owned wait, its
 canonical null-output cancellation produces
 `agent.tool_wait_settled` with outcome `Cancelled`. Because no

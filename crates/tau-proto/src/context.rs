@@ -5,8 +5,11 @@
 
 mod arc_bytes;
 mod url_citation;
-use std::collections::BTreeMap;
-use std::fmt::{self, Write as _};
+#[cfg(test)]
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use serde::ser::Error as _;
@@ -516,55 +519,39 @@ impl ToolResponse {
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();
-        for header in &self.headers {
-            out.push_str(&sanitize_provider_header_text(&header.key));
-            out.push_str(": ");
-            out.push_str(&sanitize_provider_header_text(&header.value));
-            out.push('\n');
-        }
-        if !self.headers.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&sanitize_provider_body_text(&self.body));
+        self.write_rendered(&mut out)
+            .expect("writing a tool response to String cannot fail");
         out
     }
 
-    fn from_cbor_map(entries: &[(CborValue, CborValue)]) -> Self {
-        let has_output = entries.iter().any(|(key, _)| {
-            matches!(key, CborValue::Text(key) if key == "output" || key == "line-numbered content")
-        });
-        let raw = CborValue::Map(entries.to_vec());
-        let mut headers = Vec::new();
-        let mut body_parts = Vec::new();
-        for (key, value) in entries {
-            let key = cbor_tool_response_text(key);
-            if has_output && key == "data" {
-                continue;
-            }
-            let value = cbor_tool_response_text(value);
-            if key == "output" || key == "line-numbered content" {
-                body_parts.push(value);
-            } else if value.contains('\n') {
-                let key = sanitize_provider_header_text(&key);
-                body_parts.push(format!("{key}:\n{value}"));
-            } else {
-                headers.push(ToolResponseHeader { key, value });
-            }
+    fn write_rendered(&self, out: &mut impl fmt::Write) -> fmt::Result {
+        for header in &self.headers {
+            write_sanitized_provider_text(&header.key, ProviderTextMode::Header, out)?;
+            out.write_str(": ")?;
+            write_sanitized_provider_text(&header.value, ProviderTextMode::Header, out)?;
+            out.write_char('\n')?;
         }
+        if !self.headers.is_empty() {
+            out.write_char('\n')?;
+        }
+        write_sanitized_provider_text(&self.body, ProviderTextMode::Body, out)
+    }
+
+    fn from_cbor_map(entries: &[(CborValue, CborValue)]) -> Self {
+        let raw = CborValue::Map(entries.to_vec());
+        let mut projection = MaterializedMapProjection::default();
+        visit_cbor_tool_response_map(entries, None, &mut projection)
+            .expect("materialized map projection cannot fail");
         Self {
             raw,
-            headers,
-            body: body_parts.join("\n"),
+            headers: projection.headers,
+            body: projection.body,
         }
     }
 }
 
 fn sanitize_provider_header_text(input: &str) -> String {
     sanitize_provider_text(input, ProviderTextMode::Header)
-}
-
-fn sanitize_provider_body_text(input: &str) -> String {
-    sanitize_provider_text(input, ProviderTextMode::Body)
 }
 
 #[derive(Clone, Copy)]
@@ -575,23 +562,33 @@ enum ProviderTextMode {
 
 fn sanitize_provider_text(input: &str, mode: ProviderTextMode) -> String {
     let mut output = String::new();
+    write_sanitized_provider_text(input, mode, &mut output)
+        .expect("writing sanitized provider text to String cannot fail");
+    output
+}
+
+fn write_sanitized_provider_text(
+    input: &str,
+    mode: ProviderTextMode,
+    output: &mut dyn fmt::Write,
+) -> fmt::Result {
     for ch in input.chars() {
         match ch {
-            '\n' if matches!(mode, ProviderTextMode::Body) => output.push('\n'),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            '\0' => output.push_str("\\0"),
-            '\u{1b}' => output.push_str("\\x1b"),
-            '\u{2028}' => output.push_str("\\u{2028}"),
-            '\u{2029}' => output.push_str("\\u{2029}"),
+            '\n' if matches!(mode, ProviderTextMode::Body) => output.write_char('\n')?,
+            '\n' => output.write_str("\\n")?,
+            '\r' => output.write_str("\\r")?,
+            '\t' => output.write_str("\\t")?,
+            '\0' => output.write_str("\\0")?,
+            '\u{1b}' => output.write_str("\\x1b")?,
+            '\u{2028}' => output.write_str("\\u{2028}")?,
+            '\u{2029}' => output.write_str("\\u{2029}")?,
             ch if is_provider_unsafe_control(ch) => {
-                write!(output, "\\u{{{:x}}}", ch as u32).expect("writing to String cannot fail");
+                write!(output, "\\u{{{:x}}}", ch as u32)?;
             }
-            ch => output.push(ch),
+            ch => output.write_char(ch)?,
         }
     }
-    output
+    Ok(())
 }
 
 fn is_provider_unsafe_control(ch: char) -> bool {
@@ -599,37 +596,1138 @@ fn is_provider_unsafe_control(ch: char) -> bool {
 }
 
 fn cbor_tool_response_text(value: &CborValue) -> String {
-    match value {
-        CborValue::Null => String::new(),
-        CborValue::Bool(b) => b.to_string(),
-        CborValue::Integer(i) => {
-            let n: i128 = (*i).into();
-            n.to_string()
+    let mut output = String::new();
+    write_provider_tool_result_text(value, ProviderToolResultStatus::Success, &mut output)
+        .expect("writing CBOR tool response text to String cannot fail");
+    output
+}
+
+/// Borrowed terminal status for rendering or measuring canonical
+/// provider-facing text directly from raw CBOR.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderToolResultStatus<'a> {
+    /// The tool returned successfully.
+    Success,
+    /// The tool failed with the supplied message.
+    Error {
+        /// Producer-supplied error message.
+        message: &'a str,
+    },
+    /// The tool was cancelled with the supplied reason.
+    Cancelled {
+        /// Producer-supplied cancellation reason.
+        reason: &'a str,
+    },
+}
+
+/// Exact size of canonical provider-facing tool-result text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderToolResultTextMeasurement {
+    /// UTF-8 bytes in the complete rendered text before outer-envelope
+    /// escaping.
+    pub rendered_bytes: usize,
+}
+
+/// Measure canonical provider-facing tool text in linear time without
+/// materializing it or retaining source-sized rendering state.
+#[must_use]
+pub fn measure_provider_tool_result_text(
+    value: &CborValue,
+    status: ProviderToolResultStatus<'_>,
+) -> ProviderToolResultTextMeasurement {
+    let mut cache = None;
+    ProviderToolResultTextMeasurement {
+        rendered_bytes: provider_tool_result_text_shape(value, status, &mut cache).raw_bytes,
+    }
+}
+
+/// Stream the same canonical provider-facing text as
+/// [`ToolResultItem::render_provider_text`] directly from raw CBOR.
+///
+/// Classification is cached once per rendered CBOR node, so nested maps remain
+/// linear rather than recursively rescanning their descendants. Callers that
+/// need a hard memory bound should measure first and invoke this renderer only
+/// when the measured output fits that bound.
+pub fn write_provider_tool_result_text(
+    value: &CborValue,
+    status: ProviderToolResultStatus<'_>,
+    output: &mut impl fmt::Write,
+) -> fmt::Result {
+    let mut cache = Some(HashMap::new());
+    let _ = provider_tool_result_text_cached_shape(value, status, &mut cache);
+    write_provider_tool_result_text_with_cache(
+        value,
+        status,
+        cache.as_ref().expect("provider text cache enabled"),
+        output,
+    )
+}
+
+/// Stream the canonical single-line provider rendering of one tool-result
+/// header value.
+///
+/// Callers that need only a bounded prefix can provide a bounded
+/// [`fmt::Write`] sink without allocating the complete sanitized value.
+pub fn write_provider_tool_header_text(input: &str, output: &mut impl fmt::Write) -> fmt::Result {
+    write_sanitized_provider_text(input, ProviderTextMode::Header, output)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ProviderTextShape {
+    /// Bytes in the raw canonical rendering.
+    raw_bytes: usize,
+    /// Bytes after applying header sanitization.
+    header_bytes: usize,
+    /// Bytes after applying body sanitization.
+    body_bytes: usize,
+    /// Literal newlines in the raw canonical rendering.
+    newlines: usize,
+    /// Literal newlines at the end of the raw canonical rendering.
+    trailing_newlines: usize,
+    /// Whether the raw canonical rendering contains any non-newline byte.
+    has_non_newline: bool,
+    /// Bounded exact-key signature of the raw canonical rendering.
+    raw_key: ProviderKeySignature,
+    /// Bounded exact-key signature after header sanitization.
+    header_key: ProviderKeySignature,
+    /// Bounded exact-key signature after body sanitization.
+    body_key: ProviderKeySignature,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PROVIDER_TEXT_SHAPE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROVIDER_TEXT_SHAPE_CACHE_INSERTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_provider_text_shape_visits() {
+    PROVIDER_TEXT_SHAPE_VISITS.with(|visits| visits.set(0));
+    PROVIDER_TEXT_SHAPE_CACHE_INSERTIONS.with(|insertions| insertions.set(0));
+}
+
+#[cfg(test)]
+fn provider_text_shape_visits() -> usize {
+    PROVIDER_TEXT_SHAPE_VISITS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn provider_text_shape_cache_insertions() -> usize {
+    PROVIDER_TEXT_SHAPE_CACHE_INSERTIONS.with(Cell::get)
+}
+
+impl ProviderTextShape {
+    fn literal(text: &str) -> Self {
+        let mut shape = Self::default();
+        shape
+            .raw_key
+            .write_str(text)
+            .expect("bounded key signature cannot fail");
+        write_sanitized_provider_text(text, ProviderTextMode::Header, &mut shape.header_key)
+            .expect("bounded key signature cannot fail");
+        write_sanitized_provider_text(text, ProviderTextMode::Body, &mut shape.body_key)
+            .expect("bounded key signature cannot fail");
+        for character in text.chars() {
+            let bytes = character.len_utf8();
+            shape.raw_bytes = shape.raw_bytes.saturating_add(bytes);
+            shape.header_bytes =
+                shape
+                    .header_bytes
+                    .saturating_add(sanitized_provider_character_bytes(
+                        character,
+                        ProviderTextMode::Header,
+                    ));
+            shape.body_bytes = shape
+                .body_bytes
+                .saturating_add(sanitized_provider_character_bytes(
+                    character,
+                    ProviderTextMode::Body,
+                ));
+            if character == '\n' {
+                shape.newlines = shape.newlines.saturating_add(1);
+                shape.trailing_newlines = shape.trailing_newlines.saturating_add(1);
+            } else {
+                shape.trailing_newlines = 0;
+                shape.has_non_newline = true;
+            }
         }
-        CborValue::Float(f) => f.to_string(),
-        CborValue::Text(s) => s.clone(),
-        CborValue::Bytes(b) => format!("<{} bytes>", b.len()),
-        CborValue::Array(arr) => {
-            let separator = if arr.iter().any(|value| matches!(value, CborValue::Map(_))) {
+        shape
+    }
+
+    fn append(&mut self, suffix: Self) {
+        self.raw_bytes = self.raw_bytes.saturating_add(suffix.raw_bytes);
+        self.header_bytes = self.header_bytes.saturating_add(suffix.header_bytes);
+        self.body_bytes = self.body_bytes.saturating_add(suffix.body_bytes);
+        self.newlines = self.newlines.saturating_add(suffix.newlines);
+        self.trailing_newlines = if suffix.has_non_newline {
+            suffix.trailing_newlines
+        } else {
+            self.trailing_newlines
+                .saturating_add(suffix.trailing_newlines)
+        };
+        self.has_non_newline |= suffix.has_non_newline;
+        self.raw_key.append(suffix.raw_key);
+        self.header_key.append(suffix.header_key);
+        self.body_key.append(suffix.body_key);
+    }
+
+    fn sanitized(self, mode: ProviderTextMode) -> Self {
+        let (raw_bytes, raw_key) = match mode {
+            ProviderTextMode::Header => (self.header_bytes, self.header_key),
+            ProviderTextMode::Body => (self.body_bytes, self.body_key),
+        };
+        if matches!(mode, ProviderTextMode::Header) {
+            return Self {
+                raw_bytes,
+                header_bytes: raw_bytes,
+                body_bytes: raw_bytes,
+                newlines: 0,
+                trailing_newlines: 0,
+                has_non_newline: raw_bytes != 0,
+                raw_key,
+                header_key: raw_key,
+                body_key: raw_key,
+            };
+        }
+        Self {
+            raw_bytes,
+            header_bytes: raw_bytes.saturating_add(self.newlines),
+            body_bytes: raw_bytes,
+            newlines: self.newlines,
+            trailing_newlines: self.trailing_newlines,
+            has_non_newline: self.has_non_newline,
+            raw_key,
+            header_key: self
+                .body_key
+                .sanitized_newlines(ProviderTextMode::Header, self.newlines),
+            body_key: raw_key,
+        }
+    }
+
+    fn trim_trailing_newlines(mut self) -> Self {
+        self.raw_bytes = self.raw_bytes.saturating_sub(self.trailing_newlines);
+        self.header_bytes = self
+            .header_bytes
+            .saturating_sub(self.trailing_newlines.saturating_mul(2));
+        self.body_bytes = self.body_bytes.saturating_sub(self.trailing_newlines);
+        self.newlines = self.newlines.saturating_sub(self.trailing_newlines);
+        self.raw_key.trim_suffix(self.trailing_newlines);
+        self.header_key
+            .trim_suffix(self.trailing_newlines.saturating_mul(2));
+        self.body_key.trim_suffix(self.trailing_newlines);
+        self.trailing_newlines = 0;
+        self
+    }
+
+    fn has_newline(self) -> bool {
+        self.newlines != 0
+    }
+}
+
+const PROVIDER_KEY_SIGNATURE_BYTES: usize = "line-numbered content".len();
+
+/// Bounded prefix plus exact length for recognizing the only rendered map keys
+/// with provider projection semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProviderKeySignature {
+    /// Retained prefix bytes, capped at the longest semantic key.
+    bytes: [u8; PROVIDER_KEY_SIGNATURE_BYTES],
+    /// Complete canonical rendered byte length, including discarded suffix.
+    total_bytes: usize,
+}
+
+impl Default for ProviderKeySignature {
+    fn default() -> Self {
+        Self {
+            bytes: [0; PROVIDER_KEY_SIGNATURE_BYTES],
+            total_bytes: 0,
+        }
+    }
+}
+
+impl ProviderKeySignature {
+    fn append(&mut self, suffix: Self) {
+        let retained = self.total_bytes.min(PROVIDER_KEY_SIGNATURE_BYTES);
+        let available = PROVIDER_KEY_SIGNATURE_BYTES.saturating_sub(retained);
+        let copied = suffix.total_bytes.min(available);
+        self.bytes[retained..retained + copied].copy_from_slice(&suffix.bytes[..copied]);
+        self.total_bytes = self.total_bytes.saturating_add(suffix.total_bytes);
+    }
+
+    fn trim_suffix(&mut self, bytes: usize) {
+        self.total_bytes = self.total_bytes.saturating_sub(bytes);
+    }
+
+    fn kind(self) -> CborMapKeyKind {
+        let bytes = &self.bytes[..self.total_bytes.min(PROVIDER_KEY_SIGNATURE_BYTES)];
+        match bytes {
+            b"data" if self.total_bytes == 4 => CborMapKeyKind::Data,
+            b"output" if self.total_bytes == 6 => CborMapKeyKind::Output,
+            b"line-numbered content" if self.total_bytes == PROVIDER_KEY_SIGNATURE_BYTES => {
+                CborMapKeyKind::LineNumberedContent
+            }
+            _ => CborMapKeyKind::Other,
+        }
+    }
+
+    fn sanitized_newlines(self, mode: ProviderTextMode, newlines: usize) -> Self {
+        if newlines == 0 || matches!(mode, ProviderTextMode::Body) {
+            return self;
+        }
+        // Any header-sanitized newline introduces `\`, which cannot occur in a
+        // recognized semantic key.
+        Self {
+            bytes: self.bytes,
+            total_bytes: self.total_bytes.saturating_add(newlines),
+        }
+    }
+}
+
+impl fmt::Write for ProviderKeySignature {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let retained = self.total_bytes.min(PROVIDER_KEY_SIGNATURE_BYTES);
+        let available = PROVIDER_KEY_SIGNATURE_BYTES.saturating_sub(retained);
+        let copied = text.len().min(available);
+        self.bytes[retained..retained + copied].copy_from_slice(&text.as_bytes()[..copied]);
+        self.total_bytes = self.total_bytes.saturating_add(text.len());
+        Ok(())
+    }
+}
+
+fn sanitized_provider_character_bytes(character: char, mode: ProviderTextMode) -> usize {
+    match character {
+        '\n' if matches!(mode, ProviderTextMode::Body) => 1,
+        '\n' | '\r' | '\t' | '\0' => 2,
+        '\u{1b}' => 4,
+        '\u{2028}' | '\u{2029}' => 8,
+        character if is_provider_unsafe_control(character) => {
+            4 + format!("{:x}", character as u32).len()
+        }
+        character => character.len_utf8(),
+    }
+}
+
+fn provider_tool_result_text_shape(
+    value: &CborValue,
+    status: ProviderToolResultStatus<'_>,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    match status {
+        ProviderToolResultStatus::Success => cbor_tool_response_shape(value, None, cache),
+        ProviderToolResultStatus::Error { message } => {
+            cbor_tool_response_shape(value, Some(("error", message)), cache)
+        }
+        ProviderToolResultStatus::Cancelled { reason } => {
+            let mut shape =
+                ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
+            shape.append(ProviderTextShape::literal(": "));
+            shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
+            shape.append(ProviderTextShape::literal("\n\n"));
+            shape
+        }
+    }
+}
+
+fn provider_tool_result_text_cached_shape(
+    value: &CborValue,
+    status: ProviderToolResultStatus<'_>,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    match status {
+        ProviderToolResultStatus::Success => cbor_tool_response_cached_shape(value, None, cache),
+        ProviderToolResultStatus::Error { message } => {
+            cbor_tool_response_cached_shape(value, Some(("error", message)), cache)
+        }
+        ProviderToolResultStatus::Cancelled { reason } => {
+            let mut shape =
+                ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
+            shape.append(ProviderTextShape::literal(": "));
+            shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
+            shape.append(ProviderTextShape::literal("\n\n"));
+            shape
+        }
+    }
+}
+
+fn cbor_tool_response_shape(
+    value: &CborValue,
+    prefix_header: Option<(&str, &str)>,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    let CborValue::Map(entries) = value else {
+        let mut shape = ProviderTextShape::default();
+        if let Some((key, value)) = prefix_header {
+            shape.append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
+            shape.append(ProviderTextShape::literal(": "));
+            shape.append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
+            shape.append(ProviderTextShape::literal("\n\n"));
+        }
+        shape.append(cbor_tool_response_text_shape(value, cache).sanitized(ProviderTextMode::Body));
+        return shape;
+    };
+    cbor_tool_response_map_shape(entries, prefix_header, cache)
+}
+
+fn cbor_tool_response_cached_shape(
+    value: &CborValue,
+    prefix_header: Option<(&str, &str)>,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    let CborValue::Map(entries) = value else {
+        let mut shape = ProviderTextShape::default();
+        if let Some((key, value)) = prefix_header {
+            shape.append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
+            shape.append(ProviderTextShape::literal(": "));
+            shape.append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
+            shape.append(ProviderTextShape::literal("\n\n"));
+        }
+        shape.append(
+            cbor_tool_response_text_cached_shape(value, cache).sanitized(ProviderTextMode::Body),
+        );
+        return shape;
+    };
+    cbor_tool_response_map_cached_shape(entries, prefix_header, cache)
+}
+
+fn cbor_tool_response_map_cached_shape(
+    entries: &[(CborValue, CborValue)],
+    prefix_header: Option<(&str, &str)>,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    let mut projection = ShapeMapProjection {
+        cache,
+        rendered: ProviderTextShape::default(),
+    };
+    visit_cbor_tool_response_map(entries, prefix_header, &mut projection)
+        .expect("shape projection cannot fail");
+    projection.rendered
+}
+
+fn cbor_tool_response_map_shape(
+    entries: &[(CborValue, CborValue)],
+    prefix_header: Option<(&str, &str)>,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    let mut without_output = MapShapeAccumulator::new(prefix_header);
+    let mut with_output = MapShapeAccumulator::new(prefix_header);
+    let mut has_output = false;
+    for (key, value) in entries {
+        let key_shape = cbor_tool_response_text_shape(key, cache);
+        let value_shape = cbor_tool_response_text_shape(value, cache);
+        let key_kind = key_shape.raw_key.kind();
+        has_output |= matches!(
+            key_kind,
+            CborMapKeyKind::Output | CborMapKeyKind::LineNumberedContent
+        );
+        without_output.push(
+            classify_map_entry(false, key_kind, value_shape.has_newline()),
+            key_shape,
+            value_shape,
+        );
+        with_output.push(
+            classify_map_entry(true, key_kind, value_shape.has_newline()),
+            key_shape,
+            value_shape,
+        );
+    }
+    if has_output {
+        with_output.finish()
+    } else {
+        without_output.finish()
+    }
+}
+
+/// Constant-state shape accumulator for one candidate map projection.
+struct MapShapeAccumulator {
+    /// Canonical header-region shape.
+    headers: ProviderTextShape,
+    /// Canonical body-region shape.
+    body: ProviderTextShape,
+    /// Whether at least one header was selected.
+    wrote_header: bool,
+    /// Whether at least one body entry was selected.
+    wrote_body: bool,
+}
+
+impl MapShapeAccumulator {
+    fn new(prefix_header: Option<(&str, &str)>) -> Self {
+        let mut accumulator = Self {
+            headers: ProviderTextShape::default(),
+            body: ProviderTextShape::default(),
+            wrote_header: false,
+            wrote_body: false,
+        };
+        if let Some((key, value)) = prefix_header {
+            accumulator
+                .headers
+                .append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
+            accumulator.headers.append(ProviderTextShape::literal(": "));
+            accumulator
+                .headers
+                .append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
+            accumulator.headers.append(ProviderTextShape::literal("\n"));
+            accumulator.wrote_header = true;
+        }
+        accumulator
+    }
+
+    fn push(
+        &mut self,
+        projection: MapEntryProjection,
+        key: ProviderTextShape,
+        value: ProviderTextShape,
+    ) {
+        match projection {
+            MapEntryProjection::Suppressed => {}
+            MapEntryProjection::Header => {
+                self.headers.append(key.sanitized(ProviderTextMode::Header));
+                self.headers.append(ProviderTextShape::literal(": "));
+                self.headers
+                    .append(value.sanitized(ProviderTextMode::Header));
+                self.headers.append(ProviderTextShape::literal("\n"));
+                self.wrote_header = true;
+            }
+            MapEntryProjection::Body { label } => {
+                if self.wrote_body {
+                    self.body.append(ProviderTextShape::literal("\n"));
+                }
+                if label {
+                    self.body.append(key.sanitized(ProviderTextMode::Header));
+                    self.body.append(ProviderTextShape::literal(":\n"));
+                }
+                self.body.append(value.sanitized(ProviderTextMode::Body));
+                self.wrote_body = true;
+            }
+        }
+    }
+
+    fn finish(mut self) -> ProviderTextShape {
+        if self.wrote_header {
+            self.headers.append(ProviderTextShape::literal("\n"));
+        }
+        self.headers.append(self.body);
+        self.headers
+    }
+}
+
+fn cbor_tool_response_text_shape(
+    value: &CborValue,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    let key = value as *const CborValue as usize;
+    if let Some(shape) = cache.as_ref().and_then(|cache| cache.get(&key)).copied() {
+        return shape;
+    }
+    #[cfg(test)]
+    PROVIDER_TEXT_SHAPE_VISITS.with(|visits| visits.set(visits.get().saturating_add(1)));
+    let shape = match value {
+        CborValue::Null => ProviderTextShape::default(),
+        CborValue::Bool(value) => ProviderTextShape::literal(if *value { "true" } else { "false" }),
+        CborValue::Integer(value) => {
+            let value: i128 = (*value).into();
+            ProviderTextShape::literal(&value.to_string())
+        }
+        CborValue::Float(value) => ProviderTextShape::literal(&value.to_string()),
+        CborValue::Text(value) => ProviderTextShape::literal(value),
+        CborValue::Bytes(value) => ProviderTextShape::literal(&format!("<{} bytes>", value.len())),
+        CborValue::Array(values) => {
+            let separator = if values
+                .iter()
+                .any(|value| matches!(value, CborValue::Map(_)))
+            {
                 "\n\n"
             } else {
                 "\n"
             };
-            arr.iter()
-                .map(|item| {
-                    let text = cbor_tool_response_text(item);
-                    if matches!(item, CborValue::Map(_)) {
-                        text.trim_end_matches('\n').to_owned()
-                    } else {
-                        text
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(separator)
+            let mut shape = ProviderTextShape::default();
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    shape.append(ProviderTextShape::literal(separator));
+                }
+                let child = cbor_tool_response_text_shape(value, cache);
+                shape.append(if matches!(value, CborValue::Map(_)) {
+                    child.trim_trailing_newlines()
+                } else {
+                    child
+                });
+            }
+            shape
         }
-        CborValue::Map(entries) => ToolResponse::from_cbor_map(entries).render(),
-        CborValue::Tag(_, inner) => cbor_tool_response_text(inner),
-        _ => String::new(),
+        CborValue::Map(entries) => cbor_tool_response_map_shape(entries, None, cache),
+        CborValue::Tag(_, inner) => cbor_tool_response_text_shape(inner, cache),
+        _ => ProviderTextShape::default(),
+    };
+    if let Some(cache) = cache.as_mut() {
+        #[cfg(test)]
+        PROVIDER_TEXT_SHAPE_CACHE_INSERTIONS
+            .with(|insertions| insertions.set(insertions.get().saturating_add(1)));
+        cache.insert(key, shape);
+    }
+    shape
+}
+
+fn cbor_tool_response_text_cached_shape(
+    value: &CborValue,
+    cache: &mut Option<HashMap<usize, ProviderTextShape>>,
+) -> ProviderTextShape {
+    let key = value as *const CborValue as usize;
+    if let Some(shape) = cache.as_ref().and_then(|cache| cache.get(&key)).copied() {
+        return shape;
+    }
+    let shape = match value {
+        CborValue::Null => ProviderTextShape::default(),
+        CborValue::Bool(value) => ProviderTextShape::literal(if *value { "true" } else { "false" }),
+        CborValue::Integer(value) => {
+            let value: i128 = (*value).into();
+            ProviderTextShape::literal(&value.to_string())
+        }
+        CborValue::Float(value) => ProviderTextShape::literal(&value.to_string()),
+        CborValue::Text(value) => ProviderTextShape::literal(value),
+        CborValue::Bytes(value) => ProviderTextShape::literal(&format!("<{} bytes>", value.len())),
+        CborValue::Array(values) => {
+            let separator = if values
+                .iter()
+                .any(|value| matches!(value, CborValue::Map(_)))
+            {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            let mut shape = ProviderTextShape::default();
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    shape.append(ProviderTextShape::literal(separator));
+                }
+                let child = cbor_tool_response_text_cached_shape(value, cache);
+                shape.append(if matches!(value, CborValue::Map(_)) {
+                    child.trim_trailing_newlines()
+                } else {
+                    child
+                });
+            }
+            shape
+        }
+        CborValue::Map(entries) => cbor_tool_response_map_cached_shape(entries, None, cache),
+        CborValue::Tag(_, inner) => cbor_tool_response_text_cached_shape(inner, cache),
+        _ => ProviderTextShape::default(),
+    };
+    if let Some(cache) = cache.as_mut() {
+        cache.insert(key, shape);
+    }
+    shape
+}
+
+/// Semantic classification of a canonically rendered CBOR map key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CborMapKeyKind {
+    /// Exact rendered key `data`.
+    Data,
+    /// Exact rendered key `output`.
+    Output,
+    /// Exact rendered key `line-numbered content`.
+    LineNumberedContent,
+    /// Every other rendered key.
+    Other,
+}
+
+/// Provider projection selected for one canonical map entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MapEntryProjection {
+    /// Omit redundant raw data when a rendered output field exists.
+    Suppressed,
+    /// Render as one sanitized single-line header.
+    Header,
+    /// Render as body text, optionally preceded by a sanitized key label.
+    Body {
+        /// Whether to emit `<key>:\n` before the value.
+        label: bool,
+    },
+}
+
+/// Consumer operations for the shared map projection traversal.
+trait CborMapProjectionOps {
+    /// Classify one canonically rendered key.
+    fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind;
+    /// Report whether one canonically rendered value contains a newline.
+    fn value_has_newline(&mut self, value: &CborValue) -> bool;
+    /// Emit the optional status prefix as the first header.
+    fn prefix_header(&mut self, key: &str, value: &str) -> fmt::Result;
+    /// Emit one ordinary header entry.
+    fn header(&mut self, key: &CborValue, value: &CborValue) -> fmt::Result;
+    /// Emit the separator between non-empty header and body regions.
+    fn header_body_separator(&mut self) -> fmt::Result;
+    /// Emit one body entry and its canonical inter-entry separator.
+    fn body(
+        &mut self,
+        key: &CborValue,
+        value: &CborValue,
+        label: bool,
+        separator_before: bool,
+    ) -> fmt::Result;
+}
+
+/// Traverse one map in canonical provider order: all headers, one region
+/// separator, then all body entries with their exact inter-entry separators.
+fn visit_cbor_tool_response_map(
+    entries: &[(CborValue, CborValue)],
+    prefix_header: Option<(&str, &str)>,
+    ops: &mut impl CborMapProjectionOps,
+) -> fmt::Result {
+    let has_output = entries.iter().any(|(key, _)| {
+        matches!(
+            ops.key_kind(key),
+            CborMapKeyKind::Output | CborMapKeyKind::LineNumberedContent
+        )
+    });
+    let mut wrote_header = false;
+    if let Some((key, value)) = prefix_header {
+        ops.prefix_header(key, value)?;
+        wrote_header = true;
+    }
+    for (key, value) in entries {
+        let key_kind = ops.key_kind(key);
+        if classify_map_entry(has_output, key_kind, false) == MapEntryProjection::Suppressed {
+            continue;
+        }
+        if classify_map_entry(has_output, key_kind, ops.value_has_newline(value))
+            == MapEntryProjection::Header
+        {
+            ops.header(key, value)?;
+            wrote_header = true;
+        }
+    }
+    if wrote_header {
+        ops.header_body_separator()?;
+    }
+    let mut wrote_body = false;
+    for (key, value) in entries {
+        let key_kind = ops.key_kind(key);
+        if classify_map_entry(has_output, key_kind, false) == MapEntryProjection::Suppressed {
+            continue;
+        }
+        if let MapEntryProjection::Body { label } =
+            classify_map_entry(has_output, key_kind, ops.value_has_newline(value))
+        {
+            ops.body(key, value, label, wrote_body)?;
+            wrote_body = true;
+        }
+    }
+    Ok(())
+}
+
+fn cbor_map_key_kind_from_text(text: &str) -> CborMapKeyKind {
+    match text {
+        "data" => CborMapKeyKind::Data,
+        "output" => CborMapKeyKind::Output,
+        "line-numbered content" => CborMapKeyKind::LineNumberedContent,
+        _ => CborMapKeyKind::Other,
+    }
+}
+
+fn classify_map_entry(
+    has_output: bool,
+    key: CborMapKeyKind,
+    value_has_newline: bool,
+) -> MapEntryProjection {
+    if has_output && key == CborMapKeyKind::Data {
+        MapEntryProjection::Suppressed
+    } else if matches!(
+        key,
+        CborMapKeyKind::Output | CborMapKeyKind::LineNumberedContent
+    ) {
+        MapEntryProjection::Body { label: false }
+    } else if value_has_newline {
+        MapEntryProjection::Body { label: true }
+    } else {
+        MapEntryProjection::Header
+    }
+}
+
+/// Materialized [`ToolResponse`] consumer for the shared map traversal.
+#[derive(Default)]
+struct MaterializedMapProjection {
+    /// Canonical header entries.
+    headers: Vec<ToolResponseHeader>,
+    /// Canonical body text.
+    body: String,
+    /// Per-node canonical text cache used by classification and emission.
+    rendered_text: HashMap<usize, String>,
+}
+
+impl MaterializedMapProjection {
+    fn rendered(&mut self, value: &CborValue) -> String {
+        let key = value as *const CborValue as usize;
+        if let Some(rendered) = self.rendered_text.get(&key) {
+            return rendered.clone();
+        }
+        let rendered = cbor_tool_response_text(value);
+        self.rendered_text.insert(key, rendered.clone());
+        rendered
+    }
+}
+
+impl CborMapProjectionOps for MaterializedMapProjection {
+    fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind {
+        cbor_map_key_kind_from_text(&cbor_tool_response_text(key))
+    }
+
+    fn value_has_newline(&mut self, value: &CborValue) -> bool {
+        self.rendered(value).contains('\n')
+    }
+
+    fn prefix_header(&mut self, key: &str, value: &str) -> fmt::Result {
+        self.headers.push(ToolResponseHeader {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        });
+        Ok(())
+    }
+
+    fn header(&mut self, key: &CborValue, value: &CborValue) -> fmt::Result {
+        let key = self.rendered(key);
+        let value = self.rendered(value);
+        self.headers.push(ToolResponseHeader { key, value });
+        Ok(())
+    }
+
+    fn header_body_separator(&mut self) -> fmt::Result {
+        Ok(())
+    }
+
+    fn body(
+        &mut self,
+        key: &CborValue,
+        value: &CborValue,
+        label: bool,
+        separator_before: bool,
+    ) -> fmt::Result {
+        if separator_before {
+            self.body.push('\n');
+        }
+        if label {
+            let key = sanitize_provider_header_text(&self.rendered(key));
+            self.body.push_str(&key);
+            self.body.push_str(":\n");
+        }
+        let value = self.rendered(value);
+        self.body.push_str(&value);
+        Ok(())
+    }
+}
+
+/// Byte-shape consumer for the shared map traversal.
+struct ShapeMapProjection<'a> {
+    /// Optional per-node shape cache.
+    cache: &'a mut Option<HashMap<usize, ProviderTextShape>>,
+    /// Accumulated exact rendered shape.
+    rendered: ProviderTextShape,
+}
+
+impl CborMapProjectionOps for ShapeMapProjection<'_> {
+    fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind {
+        let mut no_cache = None;
+        cbor_tool_response_text_shape(key, &mut no_cache)
+            .raw_key
+            .kind()
+    }
+
+    fn value_has_newline(&mut self, value: &CborValue) -> bool {
+        cbor_tool_response_text_cached_shape(value, self.cache).has_newline()
+    }
+
+    fn prefix_header(&mut self, key: &str, value: &str) -> fmt::Result {
+        self.rendered
+            .append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
+        self.rendered.append(ProviderTextShape::literal(": "));
+        self.rendered
+            .append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
+        self.rendered.append(ProviderTextShape::literal("\n"));
+        Ok(())
+    }
+
+    fn header(&mut self, key: &CborValue, value: &CborValue) -> fmt::Result {
+        self.rendered.append(
+            cbor_tool_response_text_cached_shape(key, self.cache)
+                .sanitized(ProviderTextMode::Header),
+        );
+        self.rendered.append(ProviderTextShape::literal(": "));
+        self.rendered.append(
+            cbor_tool_response_text_cached_shape(value, self.cache)
+                .sanitized(ProviderTextMode::Header),
+        );
+        self.rendered.append(ProviderTextShape::literal("\n"));
+        Ok(())
+    }
+
+    fn header_body_separator(&mut self) -> fmt::Result {
+        self.rendered.append(ProviderTextShape::literal("\n"));
+        Ok(())
+    }
+
+    fn body(
+        &mut self,
+        key: &CborValue,
+        value: &CborValue,
+        label: bool,
+        separator_before: bool,
+    ) -> fmt::Result {
+        if separator_before {
+            self.rendered.append(ProviderTextShape::literal("\n"));
+        }
+        if label {
+            self.rendered.append(
+                cbor_tool_response_text_cached_shape(key, self.cache)
+                    .sanitized(ProviderTextMode::Header),
+            );
+            self.rendered.append(ProviderTextShape::literal(":\n"));
+        }
+        self.rendered.append(
+            cbor_tool_response_text_cached_shape(value, self.cache)
+                .sanitized(ProviderTextMode::Body),
+        );
+        Ok(())
+    }
+}
+
+fn cached_provider_text_shape(
+    value: &CborValue,
+    cache: &HashMap<usize, ProviderTextShape>,
+) -> ProviderTextShape {
+    cache
+        .get(&(value as *const CborValue as usize))
+        .copied()
+        .expect("rendered CBOR node must have one cached shape")
+}
+
+fn write_provider_tool_result_text_with_cache(
+    value: &CborValue,
+    status: ProviderToolResultStatus<'_>,
+    cache: &HashMap<usize, ProviderTextShape>,
+    output: &mut dyn fmt::Write,
+) -> fmt::Result {
+    match status {
+        ProviderToolResultStatus::Success => write_cbor_tool_response(value, None, cache, output),
+        ProviderToolResultStatus::Error { message } => {
+            write_cbor_tool_response(value, Some(("error", message)), cache, output)
+        }
+        ProviderToolResultStatus::Cancelled { reason } => {
+            write_sanitized_provider_text("cancelled", ProviderTextMode::Header, output)?;
+            output.write_str(": ")?;
+            write_sanitized_provider_text(reason, ProviderTextMode::Header, output)?;
+            output.write_str("\n\n")
+        }
+    }
+}
+
+fn write_cbor_tool_response(
+    value: &CborValue,
+    prefix_header: Option<(&str, &str)>,
+    cache: &HashMap<usize, ProviderTextShape>,
+    output: &mut dyn fmt::Write,
+) -> fmt::Result {
+    let CborValue::Map(entries) = value else {
+        if let Some((key, value)) = prefix_header {
+            write_sanitized_provider_text(key, ProviderTextMode::Header, output)?;
+            output.write_str(": ")?;
+            write_sanitized_provider_text(value, ProviderTextMode::Header, output)?;
+            output.write_str("\n\n")?;
+        }
+        return write_sanitized_cbor_tool_response_text(
+            value,
+            ProviderTextMode::Body,
+            cache,
+            output,
+        );
+    };
+    write_cbor_tool_response_map(entries, prefix_header, cache, output)
+}
+
+fn write_cbor_tool_response_map(
+    entries: &[(CborValue, CborValue)],
+    prefix_header: Option<(&str, &str)>,
+    cache: &HashMap<usize, ProviderTextShape>,
+    output: &mut dyn fmt::Write,
+) -> fmt::Result {
+    let mut projection = StreamingMapProjection { cache, output };
+    visit_cbor_tool_response_map(entries, prefix_header, &mut projection)
+}
+
+/// Streaming text consumer for the shared map traversal.
+struct StreamingMapProjection<'a> {
+    /// Complete per-node shape cache built before streaming.
+    cache: &'a HashMap<usize, ProviderTextShape>,
+    /// Downstream canonical text sink.
+    output: &'a mut dyn fmt::Write,
+}
+
+impl CborMapProjectionOps for StreamingMapProjection<'_> {
+    fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind {
+        let mut no_cache = None;
+        cbor_tool_response_text_shape(key, &mut no_cache)
+            .raw_key
+            .kind()
+    }
+
+    fn value_has_newline(&mut self, value: &CborValue) -> bool {
+        cached_provider_text_shape(value, self.cache).has_newline()
+    }
+
+    fn prefix_header(&mut self, key: &str, value: &str) -> fmt::Result {
+        write_sanitized_provider_text(key, ProviderTextMode::Header, self.output)?;
+        self.output.write_str(": ")?;
+        write_sanitized_provider_text(value, ProviderTextMode::Header, self.output)?;
+        self.output.write_char('\n')
+    }
+
+    fn header(&mut self, key: &CborValue, value: &CborValue) -> fmt::Result {
+        write_sanitized_cbor_tool_response_text(
+            key,
+            ProviderTextMode::Header,
+            self.cache,
+            self.output,
+        )?;
+        self.output.write_str(": ")?;
+        write_sanitized_cbor_tool_response_text(
+            value,
+            ProviderTextMode::Header,
+            self.cache,
+            self.output,
+        )?;
+        self.output.write_char('\n')
+    }
+
+    fn header_body_separator(&mut self) -> fmt::Result {
+        self.output.write_char('\n')
+    }
+
+    fn body(
+        &mut self,
+        key: &CborValue,
+        value: &CborValue,
+        label: bool,
+        separator_before: bool,
+    ) -> fmt::Result {
+        if separator_before {
+            self.output.write_char('\n')?;
+        }
+        if label {
+            write_sanitized_cbor_tool_response_text(
+                key,
+                ProviderTextMode::Header,
+                self.cache,
+                self.output,
+            )?;
+            self.output.write_str(":\n")?;
+        }
+        write_sanitized_cbor_tool_response_text(
+            value,
+            ProviderTextMode::Body,
+            self.cache,
+            self.output,
+        )
+    }
+}
+
+fn write_sanitized_cbor_tool_response_text(
+    value: &CborValue,
+    mode: ProviderTextMode,
+    cache: &HashMap<usize, ProviderTextShape>,
+    output: &mut dyn fmt::Write,
+) -> fmt::Result {
+    let mut sanitizer = ProviderTextSanitizer { mode, output };
+    write_cbor_tool_response_text(value, cache, &mut sanitizer)
+}
+
+/// Adapter that sanitizes each rendered CBOR chunk for one provider text mode.
+struct ProviderTextSanitizer<'a> {
+    /// Header or body escaping rules applied to every chunk.
+    mode: ProviderTextMode,
+    /// Downstream canonical text sink.
+    output: &'a mut dyn fmt::Write,
+}
+
+impl fmt::Write for ProviderTextSanitizer<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        write_sanitized_provider_text(text, self.mode, self.output)
+    }
+}
+
+fn write_cbor_tool_response_text(
+    value: &CborValue,
+    cache: &HashMap<usize, ProviderTextShape>,
+    output: &mut dyn fmt::Write,
+) -> fmt::Result {
+    match value {
+        CborValue::Null => Ok(()),
+        CborValue::Bool(value) => write!(output, "{value}"),
+        CborValue::Integer(value) => {
+            let value: i128 = (*value).into();
+            write!(output, "{value}")
+        }
+        CborValue::Float(value) => write!(output, "{value}"),
+        CborValue::Text(value) => output.write_str(value),
+        CborValue::Bytes(value) => write!(output, "<{} bytes>", value.len()),
+        CborValue::Array(values) => {
+            let separator = if values
+                .iter()
+                .any(|value| matches!(value, CborValue::Map(_)))
+            {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.write_str(separator)?;
+                }
+                if matches!(value, CborValue::Map(_)) {
+                    let mut trimmed = TrailingNewlineTrimmer::new(output);
+                    write_cbor_tool_response_text(value, cache, &mut trimmed)?;
+                } else {
+                    write_cbor_tool_response_text(value, cache, output)?;
+                }
+            }
+            Ok(())
+        }
+        CborValue::Map(entries) => write_cbor_tool_response_map(entries, None, cache, output),
+        CborValue::Tag(_, inner) => write_cbor_tool_response_text(inner, cache, output),
+        _ => Ok(()),
+    }
+}
+
+/// Sink that delays literal newlines so array map items can discard only their
+/// trailing newline run without buffering the complete item.
+struct TrailingNewlineTrimmer<'a> {
+    /// Downstream canonical text sink.
+    output: &'a mut dyn fmt::Write,
+    /// Delayed trailing newline count.
+    trailing_newlines: usize,
+}
+
+impl<'a> TrailingNewlineTrimmer<'a> {
+    fn new(output: &'a mut dyn fmt::Write) -> Self {
+        Self {
+            output,
+            trailing_newlines: 0,
+        }
+    }
+}
+
+impl fmt::Write for TrailingNewlineTrimmer<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        for character in text.chars() {
+            if character == '\n' {
+                self.trailing_newlines = self.trailing_newlines.saturating_add(1);
+                continue;
+            }
+            for _ in 0..self.trailing_newlines {
+                self.output.write_char('\n')?;
+            }
+            self.trailing_newlines = 0;
+            self.output.write_char(character)?;
+        }
+        Ok(())
     }
 }
 

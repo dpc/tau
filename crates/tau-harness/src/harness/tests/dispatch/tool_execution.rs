@@ -6810,6 +6810,7 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
             PendingTerminalObservation {
                 observation_id: observation,
                 cause: tau_proto::ToolTerminalCause::Completed,
+                append_rejected: false,
             },
         );
     harness

@@ -1162,6 +1162,7 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
         (Event::AgentPromptSubmitted(original), Event::AgentPromptSubmitted(replacement)) => {
             original.agent_id != replacement.agent_id
                 || original.inference_activation != replacement.inference_activation
+                || original.trusted_internal_spans != replacement.trusted_internal_spans
                 || original.message_class != replacement.message_class
                 || original.internal_kind != replacement.internal_kind
                 || (matches!(
@@ -1185,6 +1186,7 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
         (Event::AgentPromptSteered(original), Event::AgentPromptSteered(replacement)) => {
             original.agent_id != replacement.agent_id
                 || original.inference_activation != replacement.inference_activation
+                || original.trusted_internal_spans != replacement.trusted_internal_spans
                 || original.submission_source != replacement.submission_source
                 || original.message_class != replacement.message_class
                 || original.internal_kind != replacement.internal_kind

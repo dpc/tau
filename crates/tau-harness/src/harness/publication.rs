@@ -417,7 +417,7 @@ impl Harness {
             .tool_runtime
             .pending_terminal_observations
             .get(call_id)
-            .filter(|terminal| terminal.cause == cause)
+            .filter(|terminal| terminal.cause == cause || !terminal.append_rejected)
         {
             return Some(terminal.observation_id);
         }
@@ -431,6 +431,7 @@ impl Harness {
                 PendingTerminalObservation {
                     observation_id: terminal,
                     cause: cause.clone(),
+                    append_rejected: false,
                 },
             );
         self.append_best_effort_observation(
@@ -695,7 +696,7 @@ impl Harness {
         error: ToolBackgroundError,
     ) {
         self.publish_for_agent_from(cid, source, Event::ToolBackgroundError(error.clone()));
-        self.record_wait_background_error(error, None);
+        self.record_wait_background_error(error, None, BackgroundErrorOutcome::Error);
     }
 
     /// Like [`publish_for_agent`] but lets the caller record source metadata on
@@ -2403,6 +2404,15 @@ impl Harness {
         let append_outcome = match append_result {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
+                if let Some(call_id) = canonical_tool_terminal_call_id(&event)
+                    && let Some(pending) = self
+                        .tool_routing
+                        .tool_runtime
+                        .pending_terminal_observations
+                        .get_mut(call_id)
+                {
+                    pending.append_rejected = true;
+                }
                 let capacity_full = matches!(
                     &error,
                     HarnessError::AgentStore(tau_core::AgentStoreError::Persistence(

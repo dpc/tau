@@ -5983,6 +5983,7 @@ fn manual_compaction_rejects_already_terminalizing_wait() {
             crate::harness::PendingTerminalObservation {
                 observation_id: tau_proto::ObservationId::random(),
                 cause: tau_proto::ToolTerminalCause::LifecycleTeardown,
+                append_rejected: false,
             },
         );
 

@@ -1,6 +1,7 @@
 use tau_config::settings::WaitTimeoutMinutes;
 
 use super::*;
+use crate::background_completion_preview::BackgroundPreviewBudget;
 use crate::harness::subagents_tool::wait_tool_spec;
 
 fn conv(id: &str) -> AgentId {
@@ -364,6 +365,7 @@ fn compaction_claim_cancellation_unsuppresses_errored_exact_source() {
                 background_error(target.as_str(), "source failed", None),
                 owner,
                 observation(),
+                BackgroundErrorOutcome::Error,
             )
             .is_empty()
     );
@@ -1824,7 +1826,8 @@ fn no_arg_wait_returns_background_error_with_original_id_details() {
             .record_background_error(
                 background_error("bg-fail", "boom", Some(details)),
                 owner.clone(),
-                observation()
+                observation(),
+                BackgroundErrorOutcome::Error,
             )
             .is_empty()
     );
@@ -2428,6 +2431,7 @@ fn wait_all_complete_results_are_ordered_typed_and_commit_atomically() {
         ),
         owner.clone(),
         Some(terminal_b),
+        BackgroundErrorOutcome::Error,
     );
 
     let start = start_wait_all(&mut tracker, &owner, "wait-all", &["b", "a"]);
@@ -3084,6 +3088,69 @@ fn wait_all_reuse_then_interruption_restores_old_generation() {
             .map(|(_, value)| value),
         Some(&CborValue::Text("old generation".to_owned()))
     );
+    assert_eq!(
+        tracker.call_ref(&ToolCallId::from("reused")),
+        Some(call_ref(9, 0))
+    );
+    assert_eq!(
+        tracker.calls.get(&ToolCallId::from("reused")),
+        Some(&WaitCallState::Pending)
+    );
+}
+
+/// Reused display IDs cannot rewrite a released old generation's typed
+/// cancellation outcome during plural-wait rollback.
+#[test]
+fn wait_all_reuse_then_interruption_preserves_old_cancellation_preview() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
+    track_call(&mut tracker, &owner, "other", call_ref(2, 0));
+    tracker.record_tool_result(
+        &background_placeholder("reused"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.record_tool_result(
+        &background_placeholder("other"),
+        owner.clone(),
+        observation(),
+    );
+    let old_terminal = tau_proto::ObservationId::from_bytes([72; 16]);
+    tracker.record_background_error(
+        background_error("reused", "producer wording is not authority", None),
+        owner.clone(),
+        Some(old_terminal),
+        BackgroundErrorOutcome::Cancelled,
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["reused", "other"])
+            .reply
+            .is_none()
+    );
+    tracker.record_exact_all_notice_suppressed(
+        &ToolCallId::from("wait-all"),
+        &ToolCallId::from("reused"),
+        true,
+    );
+
+    tracker.reset_call_ref("reused".into(), call_ref(9, 0));
+    tracker.record_tool_invoke("reused".into(), slow_tool_name(), owner.clone());
+    let interruption =
+        tracker.activate_waits_for(&owner, observation().expect("activation observation"));
+    assert_eq!(interruption.len(), 1);
+
+    let mut budget = BackgroundPreviewBudget::default();
+    let preview = tracker
+        .render_background_completion_preview(
+            &ToolCallId::from("reused"),
+            old_terminal,
+            &mut budget,
+        )
+        .expect("released generation preview");
+    assert!(preview.contains("tool_outcome=\"cancelled\""), "{preview}");
+    assert!(!preview.contains("tool_outcome=\"error\""), "{preview}");
     assert_eq!(
         tracker.call_ref(&ToolCallId::from("reused")),
         Some(call_ref(9, 0))
