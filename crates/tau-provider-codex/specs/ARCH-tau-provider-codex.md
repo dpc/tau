@@ -158,12 +158,10 @@ and previous-response chaining retain the selected mode; there is no mode fallba
 
 Both modes suppress legacy inline `context_management` for GPT-5.6 and advertise
 standalone compaction. V2 success requires `response.completed` and exactly one
-opaque provider compaction item. Tau constructs the replacement from retained
-real user/hook and eligible agent-message input, preserving order and metadata,
-then appends that provider item. Agent messages above 40,000 UTF-8 bytes are
-omitted. A newest-first 256,000-byte text budget retains complete groups and
-middle-truncates at most one boundary message; images and audio in retained
-messages do not consume this budget. Invalid output installs nothing. Raw
+opaque provider compaction item. Tau installs exactly that validated item as
+the replacement window and copies no input item from the compacted prefix. The
+harness-owned post-cut suffix remains exact and ordered, including facts
+accepted while compaction runs. Invalid output installs nothing. Raw
 provider sidecars remain intact through durable replacement and cold replay.
 The runtime retains compaction-specific rejection only for the exact resolved
 credential/account identity. It serializes the first request for each fresh

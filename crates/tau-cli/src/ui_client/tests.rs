@@ -32,6 +32,7 @@ fn chat_subscription_includes_manual_compaction_lifecycle() {
         EventName::AGENT_STANDALONE_COMPACTION_STARTED,
         EventName::AGENT_STANDALONE_COMPACTION_FAILED,
         EventName::AGENT_COMPACTED,
+        EventName::AGENT_INFERENCE_DISPATCH_STARTED,
     ] {
         let selector = EventSelector::Exact(event);
         assert!(subscription.historical_selectors.contains(&selector));

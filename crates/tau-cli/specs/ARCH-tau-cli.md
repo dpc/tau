@@ -141,13 +141,16 @@ rows; it never merges a different self request, an `agent_compact` request, or
 another standalone compaction. The presentation-only correlation moves with the
 owning detached transcript so a reconstructed late tool start can adopt its
 known lifecycle state during attach.
-Successful standalone lifecycle rows render durable boundary measurements as
-`compact #before → #after (retained%) ok`. Estimated chips carry a leading `~`;
-one-sided measurements retain the arrow and show `?` for the missing side, while
-fully absent measurements degrade to `compact ok`. A zero before count suppresses
-the ratio. The literal `ok` remains the final visible token. Provider stream
-content remains private, and live, late-attach, and cold-replay rendering all use
-the same canonical boundary fields.
+Successful standalone lifecycle rows initially render the compact request input
+as `compact #before → ? ok`. The generated compact-item token count is not a
+resulting-context measurement and is never presented as the after-size. If the
+transaction owns a first continuation and its terminal reports exact provider
+input usage, the same stable row becomes
+`compact #before → #after (retained%) ok`. Missing continuation usage remains
+`?`; unrelated later prompts cannot repaint the row. A zero before count
+suppresses the ratio, and fully absent measurements degrade to `compact ok`.
+Provider stream content remains private, and detachable per-agent correlation
+makes live, late-attach, and cold-replay rendering identical.
 
 Prompt completion may read the local filesystem and query `git` for tracked and
 unignored files. These operations should stay bounded and best-effort: failures

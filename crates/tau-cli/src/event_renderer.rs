@@ -1359,6 +1359,18 @@ struct SelfCompactionTool {
     status: Option<(CompactionStatus, String)>,
 }
 
+/// Stable transcript row retained while the first post-compaction request size
+/// is still unknown.
+#[derive(Clone)]
+struct CompletedCompactionPresentation {
+    /// History block repainted when exact continuation usage arrives.
+    block_id: Option<tau_cli_term::BlockId>,
+    /// Compact request input usage shown on the left side of the reduction.
+    original_input_tokens: Option<tau_proto::TokenCount>,
+    /// Self-compaction tool row, or `None` for an independent compaction row.
+    self_tool_call_id: Option<tau_proto::ToolCallId>,
+}
+
 /// In-flight state for a user `!`/`!!` shell block.
 struct ShellBlockState {
     block_id: tau_cli_term::BlockId,
@@ -1550,10 +1562,7 @@ fn update_compaction_status(
         )),
         ProviderResponseCompactionStatus::Completed => Some((
             CompactionStatus::Success,
-            EventRenderer::compaction_success_status(
-                compaction.original_input_tokens,
-                compaction.compaction_output_tokens,
-            ),
+            EventRenderer::compaction_success_status(compaction.original_input_tokens),
         )),
     }
 }
@@ -3372,45 +3381,39 @@ impl EventRenderer {
             .unwrap_or_else(|| tau_proto::PROGRESS_INDICATOR_TEXT.to_owned())
     }
 
-    fn compaction_success_status(
-        original_input_tokens: Option<u64>,
-        compaction_output_tokens: Option<u64>,
-    ) -> String {
-        match (original_input_tokens, compaction_output_tokens) {
-            (Some(original), Some(compacted)) => format!(
-                "{} ok: {}",
-                Self::compaction_token_chip(original),
-                Self::compaction_token_chip(compacted)
-            ),
-            (Some(original), None) => format!("{} ok", Self::compaction_token_chip(original)),
-            (None, Some(compacted)) => format!("ok: {}", Self::compaction_token_chip(compacted)),
-            (None, None) => "ok".to_owned(),
-        }
+    fn compaction_success_status(original_input_tokens: Option<u64>) -> String {
+        original_input_tokens.map_or_else(
+            || "ok".to_owned(),
+            |original| format!("{} → ? ok", Self::compaction_token_chip(original)),
+        )
     }
 
-    /// Formats one successful standalone compaction terminal from durable
-    /// metrics.
+    /// Formats one successful standalone compaction from its request input and
+    /// the exact first transaction-owned continuation input, when available.
     pub(crate) fn standalone_compaction_success_status(
         original: Option<tau_proto::TokenCount>,
-        output: Option<tau_proto::TokenCount>,
+        after: Option<tau_proto::TokenCount>,
     ) -> String {
-        match (original, output) {
-            (Some(original), Some(output)) => format!(
-                "{} in / {} out ok",
-                Self::compaction_token_chip(original.get()),
-                Self::compaction_token_chip(output.get()),
-            ),
-            (Some(original), None) => {
+        match (original, after) {
+            (Some(original), Some(after)) if original.get() != 0 => {
+                let retained = (u128::from(after.get()) * 100 + u128::from(original.get()) / 2)
+                    / u128::from(original.get());
                 format!(
-                    "{} in / ? out ok",
-                    Self::compaction_token_chip(original.get())
+                    "{} → {} ({retained}%) ok",
+                    Self::compaction_token_chip(original.get()),
+                    Self::compaction_token_chip(after.get()),
                 )
             }
-            (None, Some(output)) => {
-                format!(
-                    "? in / {} out ok",
-                    Self::compaction_token_chip(output.get())
-                )
+            (Some(original), Some(after)) => format!(
+                "{} → {} ok",
+                Self::compaction_token_chip(original.get()),
+                Self::compaction_token_chip(after.get()),
+            ),
+            (Some(original), None) => {
+                format!("{} → ? ok", Self::compaction_token_chip(original.get()))
+            }
+            (None, Some(after)) => {
+                format!("? → {} ok", Self::compaction_token_chip(after.get()))
             }
             (None, None) => "ok".to_owned(),
         }
@@ -6104,6 +6107,9 @@ impl EventRenderer {
             Event::AgentCompacted(compacted) => {
                 EventAgentIdResolution::Agent(compacted.agent_id.clone())
             }
+            Event::AgentInferenceDispatchStarted(started) => {
+                EventAgentIdResolution::Agent(started.agent_id.clone())
+            }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 EventAgentIdResolution::Agent(changed.agent_id.clone())
             }
@@ -7685,6 +7691,7 @@ impl EventRenderer {
                 true
             }
             Event::ProviderResponseFinished(finished) => {
+                self.finish_compaction_continuation_measurement(finished);
                 self.handle_provider_response_finished(
                     finished,
                     prepared
@@ -7696,6 +7703,89 @@ impl EventRenderer {
             }
             _ => false,
         }
+    }
+
+    /// Consumes the first inference owned by one completed compaction and
+    /// repaints its stable history row from exact provider input usage.
+    fn finish_compaction_continuation_measurement(
+        &mut self,
+        finished: &tau_proto::ProviderResponseFinished,
+    ) {
+        let Some(transaction_id) = self
+            .transcript
+            .runtime
+            .compaction_continuation_prompts
+            .remove(&finished.agent_prompt_id)
+        else {
+            return;
+        };
+        let Some(presentation) = self
+            .transcript
+            .runtime
+            .completed_compactions
+            .remove(&transaction_id)
+        else {
+            return;
+        };
+        let Some(after) = finished
+            .usage
+            .as_ref()
+            .map(|usage| tau_proto::TokenCount::new(usage.prompt_sent_tokens))
+        else {
+            return;
+        };
+        let status = Self::standalone_compaction_success_status(
+            presentation.original_input_tokens,
+            Some(after),
+        );
+        if let Some(call_id) = presentation.self_tool_call_id.as_ref() {
+            self.update_self_compaction_tool_status(
+                call_id,
+                CompactionStatus::Success,
+                status.clone(),
+            );
+        }
+        let Some(block_id) = presentation.block_id else {
+            return;
+        };
+        if presentation.self_tool_call_id.is_none() {
+            self.resources.handle.set_block(
+                block_id,
+                render_compaction_block(&self.resources.theme, &status, CompactionStatus::Success),
+            );
+            self.resources.handle.redraw();
+            return;
+        }
+        let Some(entry_index) = self
+            .transcript
+            .history
+            .tool_history
+            .iter()
+            .position(|entry| entry.block_id == block_id)
+        else {
+            return;
+        };
+        let time_suffixes = self
+            .transcript
+            .history
+            .tool_history
+            .get(entry_index)
+            .expect("known tool history index")
+            .display
+            .suffixes
+            .iter()
+            .filter(|suffix| matches!(suffix.status, crate::tool_render::ToolStatus::Time))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut display = render_tool_use_state(
+            "compact",
+            &Self::self_compaction_tool_use_state(CompactionStatus::Success, status),
+        );
+        display.suffixes.extend(time_suffixes);
+        let block = self.render_tool_history_block(&display);
+        self.resources.handle.set_block(block_id, block);
+        self.transcript.history.tool_history[entry_index].display = display;
+        self.resources.handle.redraw();
     }
 
     fn handle_provider_prompt_submitted(&mut self, submitted: &tau_proto::ProviderPromptSubmitted) {
@@ -8200,6 +8290,18 @@ impl EventRenderer {
         state.live_display = Some(display);
         state.started_at = Some(Instant::now());
         state.recorded_started_at = Some(recorded_at);
+        let history_block_id = state.history_block_id;
+        for presentation in self
+            .transcript
+            .runtime
+            .completed_compactions
+            .values_mut()
+            .filter(|presentation| {
+                presentation.self_tool_call_id.as_ref() == Some(&started.call_id)
+            })
+        {
+            presentation.block_id = history_block_id;
+        }
         if let Some(timer) = &self.activity.tool_timer {
             timer.tool_started(&started.call_id);
         }
@@ -8597,11 +8699,32 @@ impl EventRenderer {
         else {
             return;
         };
+        for presentation in self
+            .transcript
+            .runtime
+            .completed_compactions
+            .values_mut()
+            .filter(|presentation| presentation.self_tool_call_id.as_ref() == Some(call_id))
+        {
+            presentation.block_id = prior.history_block_id;
+        }
         let is_blocker = prior.is_blocker || is_blocker_tool_name(tool_name.as_str());
         let diff = (!is_blocker)
             .then(|| Self::tool_result_diff(descriptor))
             .flatten();
-        let mut display = if is_blocker {
+        let mut display = if let Some((status, status_text)) = self
+            .transcript
+            .runtime
+            .self_compaction_tools
+            .get(call_id)
+            .and_then(|tool| tool.status.clone())
+            .filter(|(status, _)| matches!(status, CompactionStatus::Success))
+        {
+            render_tool_use_state(
+                "compact",
+                &Self::self_compaction_tool_use_state(status, status_text),
+            )
+        } else if is_blocker {
             render_tool_use_state(tool_name, &synthesize_fallback_display(tool_name, None))
         } else {
             Self::tool_result_display(tool_name, descriptor, diff.as_ref())
@@ -9483,12 +9606,68 @@ impl EventRenderer {
                 if let Some(prompt_id) = prompt_id {
                     let status = Self::standalone_compaction_success_status(
                         compacted.original_input_tokens,
-                        compacted.compaction_output_tokens,
+                        None,
                     );
-                    self.complete_standalone_compaction_prompt(
-                        &prompt_id,
-                        Some((&status, CompactionStatus::Success)),
-                    );
+                    let self_tool_call_id = self.self_compaction_tool_for_prompt(&prompt_id);
+                    let block_id = if let Some(call_id) = self_tool_call_id.as_ref() {
+                        let block_id = self
+                            .transcript
+                            .runtime
+                            .tool_calls
+                            .get(call_id)
+                            .and_then(|state| state.history_block_id);
+                        self.complete_standalone_compaction_prompt(
+                            &prompt_id,
+                            Some((&status, CompactionStatus::Success)),
+                        );
+                        block_id
+                    } else {
+                        self.complete_standalone_compaction_prompt(&prompt_id, None);
+                        let block_id = self.resources.handle.print_output(
+                            "standalone-compaction-terminal",
+                            render_compaction_block(
+                                &self.resources.theme,
+                                &status,
+                                CompactionStatus::Success,
+                            ),
+                        );
+                        self.resources.handle.redraw();
+                        Some(block_id)
+                    };
+                    if let Some(transaction_id) = compacted.transaction_id.as_ref() {
+                        self.transcript.runtime.completed_compactions.insert(
+                            transaction_id.clone(),
+                            CompletedCompactionPresentation {
+                                block_id,
+                                original_input_tokens: compacted.original_input_tokens,
+                                self_tool_call_id,
+                            },
+                        );
+                    }
+                }
+                true
+            }
+            Event::AgentInferenceDispatchStarted(started) => {
+                if matches!(
+                    started.operation,
+                    Some(tau_proto::PromptOperation::Inference)
+                ) && let Some(transaction_id) = started.transaction_id.as_ref()
+                    && self
+                        .transcript
+                        .runtime
+                        .completed_compactions
+                        .contains_key(transaction_id)
+                    && !self
+                        .transcript
+                        .runtime
+                        .compaction_continuation_prompts
+                        .values()
+                        .any(|known| known == transaction_id)
+                {
+                    self.transcript
+                        .runtime
+                        .compaction_continuation_prompts
+                        .insert(started.agent_prompt_id.clone(), transaction_id.clone());
                 }
                 true
             }

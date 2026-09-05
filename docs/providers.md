@@ -1223,8 +1223,10 @@ Standard mode publishes and requests parallel direct tool calls; Lite
 compatibility publishes its one-call limit. Neither mode emits legacy inline
 context management. Manual and threshold-driven compaction use a fresh ordinary
 Responses WebSocket request with the full window and a final
-`compaction_trigger`. Tau retains the approved recent input subset and appends
-the single opaque provider compaction item as one standalone boundary. A
+`compaction_trigger`. A successful response installs only the one validated
+opaque provider compaction item; Tau does not copy items from the compacted
+prefix back into the replacement. The harness preserves the exact ordered
+post-cut suffix, including facts accepted while compaction runs. A
 route/account rejection removes capability for that credential generation;
 rotation permits one fresh serialized probe.
 After setup, ChatGPT/Codex inference uses WebSocket exclusively with a separate

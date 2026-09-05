@@ -15,10 +15,8 @@ use std::sync as path_std_sync;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-mod compact_v2;
 mod decoded_event;
 use attempt_context::{AttemptOperation, ProviderAttemptContext, RetryFailureInput};
-use compact_v2::build_v2_compacted_window;
 use responses::pool as path_responses_pool;
 use responses::ws::ResponseMode;
 use tau_proto::{
@@ -1260,10 +1258,7 @@ impl CodexRuntime {
                 backend_reached,
             };
         };
-        let output = build_v2_compacted_window(
-            request.context,
-            vec![tau_proto::ContextItem::Compaction(compaction_item)],
-        );
+        let output = vec![tau_proto::ContextItem::Compaction(compaction_item)];
         if abort.is_aborted() {
             if let Some(trace) = private_trace.take() {
                 trace.finish(private_trace::Outcome::Canceled);

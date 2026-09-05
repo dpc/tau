@@ -193,7 +193,9 @@ replay. The ChatGPT
 OAuth/Codex route is a separate private Responses backend whose inference is
 WebSocket-only; it never falls back to HTTP/SSE, though OAuth and quota remain
 HTTPS operations. Standalone GPT-5.6 compaction uses a fresh ordinary Responses
-WebSocket request with full input and a final compaction trigger. All of these routes share one
+WebSocket request with full input and a final compaction trigger, then replaces
+that prefix with exactly the validated opaque provider compaction item while
+the harness preserves the ordered post-cut suffix. All of these routes share one
 startup-snapshotted proxy, `NO_PROXY`, platform-TLS, and optional additive-CA
 policy.
 

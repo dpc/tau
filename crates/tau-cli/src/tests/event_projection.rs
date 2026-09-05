@@ -1463,7 +1463,7 @@ fn standalone_compaction_replay_retires_private_progress() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact #226.2k in / #4.5k out ok"));
+    assert!(vt.screen_contains(100, "compact #226.2k → ? ok"));
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!vt.screen_contains(100, "synthetic checkpoint"));
     assert!(!vt.screen_contains(100, "◆"));

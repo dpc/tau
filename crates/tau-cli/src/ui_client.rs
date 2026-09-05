@@ -295,6 +295,7 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::AGENT_STANDALONE_COMPACTION_STARTED),
         EventSelector::Exact(E::AGENT_STANDALONE_COMPACTION_FAILED),
         EventSelector::Exact(E::AGENT_COMPACTED),
+        EventSelector::Exact(E::AGENT_INFERENCE_DISPATCH_STARTED),
         EventSelector::Exact(E::AGENT_PROMPT_STARTED),
         EventSelector::Exact(E::AGENT_PROMPT_TERMINATED),
         EventSelector::Exact(E::AGENT_PROMPT_FAILED),

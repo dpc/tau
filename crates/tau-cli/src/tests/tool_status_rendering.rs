@@ -2570,10 +2570,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     }));
     sync(&handle);
     let compacted = vt.screen_text(100).join("\n");
-    assert!(
-        compacted.contains("#226.2k in / #4.5k out 0s ok"),
-        "{compacted}"
-    );
+    assert!(compacted.contains("#226.2k → ? 0s ok"), "{compacted}");
     assert!(!compacted.contains("complete"), "{compacted}");
 
     renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
@@ -2587,9 +2584,133 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     sync(&handle);
 
     let completed = vt.screen_text(100).join("\n");
-    assert!(completed.contains("ok"), "{completed}");
+    assert!(completed.contains("#226.2k → ? 0s ok"), "{completed}");
     assert!(!completed.contains("complete"), "{completed}");
     assert!(!completed.contains("Compacting…"), "{completed}");
+
+    renderer.handle(&Event::AgentInferenceDispatchStarted(
+        compaction_continuation_started("main", "ct-self", "ap-after-self"),
+    ));
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage("ap-after-self", "main", 80_189, 0, 100, "continued"),
+    ));
+    sync(&handle);
+
+    let measured = vt.screen_text(100).join("\n");
+    assert!(
+        measured.contains("#226.2k → #80.1k (35%) ok 0s"),
+        "{measured}"
+    );
+    assert!(!measured.contains("#4.5k"), "{measured}");
+}
+
+/// The standalone row must remain unknown until the exact transaction-owned
+/// continuation finishes, then repaint without using generated-item usage.
+#[test]
+fn standalone_compaction_repaints_from_owned_continuation_usage_only() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent(agent_id("main"));
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        standalone_compaction_started("ct-measure", "ap-compact"),
+    ));
+    renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        original_input_tokens: Some(tau_proto::TokenCount::new(130_772)),
+        compaction_output_tokens: Some(tau_proto::TokenCount::new(2_549)),
+        agent_id: agent_id("main"),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse("ct-measure")
+                .expect("known-safe compaction transaction id"),
+        ),
+        cut: Some(tau_proto::AgentHead::Root),
+        suffix_end: Some(tau_proto::AgentHead::Root),
+        compact_prompt_id: Some(test_agent_prompt_id("ap-compact")),
+        model: Some("test/model".parse().expect("model id")),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: Vec::new(),
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage("unrelated", "main", 9_999, 0, 1, "unrelated"),
+    ));
+    sync(&handle);
+
+    let unknown = vt.screen_text(100).join("\n");
+    assert!(unknown.contains("compact #130.7k → ? ok"), "{unknown}");
+    assert!(!unknown.contains("#2.5k"), "{unknown}");
+    assert!(!unknown.contains("#9.9k"), "{unknown}");
+
+    renderer.handle(&Event::AgentInferenceDispatchStarted(
+        compaction_continuation_started("main", "ct-measure", "ap-continuation"),
+    ));
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage("ap-continuation", "main", 80_189, 11_392, 100, "continued"),
+    ));
+    sync(&handle);
+
+    let measured = vt.screen_text(100).join("\n");
+    assert!(
+        measured.contains("compact #130.7k → #80.1k (61%) ok"),
+        "{measured}"
+    );
+}
+
+/// Hidden-agent compaction accounting must fold inside that detachable
+/// transcript and reconstruct the same measured row when selected later.
+#[test]
+fn hidden_compaction_continuation_repaints_owning_detached_transcript() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent(agent_id("main"));
+    let mut started = standalone_compaction_started("ct-hidden", "ap-hidden-compact");
+    started.agent_id = agent_id("worker");
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(started));
+    renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        original_input_tokens: Some(tau_proto::TokenCount::new(100_158)),
+        compaction_output_tokens: Some(tau_proto::TokenCount::new(2_243)),
+        agent_id: agent_id("worker"),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse("ct-hidden")
+                .expect("known-safe compaction transaction id"),
+        ),
+        cut: Some(tau_proto::AgentHead::Root),
+        suffix_end: Some(tau_proto::AgentHead::Root),
+        compact_prompt_id: Some(test_agent_prompt_id("ap-hidden-compact")),
+        model: Some("test/model".parse().expect("model id")),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: Vec::new(),
+    }));
+    renderer.handle(&Event::AgentInferenceDispatchStarted(
+        compaction_continuation_started("worker", "ct-hidden", "ap-hidden-after"),
+    ));
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage(
+            "ap-hidden-after",
+            "worker",
+            79_766,
+            0,
+            100,
+            "hidden continuation",
+        ),
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "compact #100.1k"));
+
+    renderer.switch_agent(agent_id("worker"));
+    sync(&handle);
+    let attached = vt.screen_text(100).join("\n");
+    assert!(
+        attached.contains("compact #100.1k → #79.7k (80%) ok"),
+        "{attached}"
+    );
+    assert!(!attached.contains("#2.2k"), "{attached}");
 }
 
 /// Provider-prompt fallback must clear activity on terminal without removing
@@ -3569,8 +3690,8 @@ fn late_self_compaction_tool_start_adopts_retained_lifecycle_status() {
     assert_eq!(text.matches("Compacting…").count(), 1, "{text}");
 }
 
-/// Compaction terminals must keep input and provider output accounting distinct
-/// and degrade without presenting output usage as retained input.
+/// Compaction terminals must report actual request-to-continuation reduction,
+/// retain unknown measurements honestly, and avoid overflow in the ratio.
 #[test]
 fn compaction_success_status_formats_exact_and_partial_measurements() {
     let exact = |tokens| tau_proto::TokenCount::new(tokens);
@@ -3580,30 +3701,30 @@ fn compaction_success_status_formats_exact_and_partial_measurements() {
             Some(exact(226_200)),
             Some(exact(4_500)),
         ),
-        "#226.2k in / #4.5k out ok"
+        "#226.2k → #4.5k (2%) ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(12_000)), None),
-        "#12k in / ? out ok"
+        "#12k → ? ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(None, Some(exact(4_500))),
-        "? in / #4.5k out ok"
+        "? → #4.5k ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(0)), Some(exact(1))),
-        "#0 in / #1 out ok"
+        "#0 → #1 ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(3)), Some(exact(2))),
-        "#3 in / #2 out ok"
+        "#3 → #2 (67%) ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(
             Some(exact(u64::MAX)),
             Some(exact(u64::MAX)),
         ),
-        "#18446744073709.5m in / #18446744073709.5m out ok"
+        "#18446744073709.5m → #18446744073709.5m (100%) ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(None, None),

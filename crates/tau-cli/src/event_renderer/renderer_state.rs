@@ -211,6 +211,12 @@ pub(super) struct TranscriptRuntimeState {
     /// Standalone compaction prompt correlations.
     pub(super) standalone_compaction_transactions:
         HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,
+    /// Completed compaction rows awaiting exact continuation request usage.
+    pub(super) completed_compactions:
+        HashMap<tau_proto::CompactionTransactionId, CompletedCompactionPresentation>,
+    /// First inference prompts owned by completed compaction transactions.
+    pub(super) compaction_continuation_prompts:
+        HashMap<tau_proto::AgentPromptId, tau_proto::CompactionTransactionId>,
     /// Self-compaction tool correlations.
     pub(super) self_compaction_tools: HashMap<tau_proto::ToolCallId, SelfCompactionTool>,
     /// Last unclassified local user echo.

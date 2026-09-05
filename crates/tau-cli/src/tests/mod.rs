@@ -504,6 +504,28 @@ fn self_compaction_started(
     }
 }
 
+/// Builds the durable first-inference checkpoint owned by one successful
+/// compaction transaction.
+fn compaction_continuation_started(
+    agent_id_value: &str,
+    transaction_id: &str,
+    agent_prompt_id: &str,
+) -> tau_proto::AgentInferenceDispatchStarted {
+    tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(agent_id_value),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse(transaction_id)
+                .expect("known-safe compaction transaction id"),
+        ),
+        agent_prompt_id: test_agent_prompt_id(agent_prompt_id),
+        through: tau_proto::AgentHead::Root,
+        model: Some("test/model".parse().expect("model id")),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(tau_proto::AgentHead::Root),
+        output_length_continuation: None,
+    }
+}
+
 /// Builds a fresh bound danger snapshot for selected-agent quota wiring tests.
 fn danger_quota_event(model: &tau_proto::ModelId) -> Event {
     let now = super::event_renderer::unix_time_millis();

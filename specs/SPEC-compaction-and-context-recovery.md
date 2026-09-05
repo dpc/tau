@@ -20,6 +20,11 @@ semantics for ticket `8ds8`, satisfying the same gate.
 The user separately approved synthetic local-summary provenance and exact
 reserved-envelope rejection semantics for ticket `8qm2`, satisfying the same
 gate.
+The user separately approved replacing ChatGPT-v2's adapter-local copied-prefix
+policy with exactly the one validated provider compaction item while leaving
+the harness-owned post-cut suffix unchanged. The user also approved reporting
+actual context reduction only from the transaction-owned first continuation's
+provider input usage. These exact semantics satisfy the same gate.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
@@ -402,7 +407,12 @@ open, duplicate, or otherwise incomplete tool rounds remain invalid. A standalon
 terminal commits a replacement only on `EndTurn` with neither provider error nor
 typed failure; error and typed failure take precedence as provider failures.
 The canonical `agent.compacted` boundary may carry provider-reported compact
-request input and output token counts. These content-free display/accounting
+request input and output token counts. The output count measures generation of
+the compact item, not the resulting context, and remains accounting/debug data
+rather than a user-facing after-size. The exact after-size exists only when the
+transaction-owned first continuation reports `prompt_sent_tokens`; until then,
+the UI reports it as unknown. A missing continuation or missing usage remains
+unknown, and unrelated later prompts cannot supply it. These content-free
 fields never become scheduling authority; absent provider usage remains absent.
 Legacy `compacted_input_tokens` decodes as the provider output count, while new
 records encode `compaction_output_tokens`. Because the fields live on the
@@ -419,20 +429,15 @@ provider-visible input. See
 and
 [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
 
-ChatGPT v2 is the scoped exception to provider-output-only replacement. It
-sends the full provider-visible input plus a final `compaction_trigger`, accepts
-exactly one provider compaction item followed by `response.completed`, and
-constructs the replacement from approved retained input plus that item last.
-Retention preserves order and metadata for real user/hook messages and
-non-final agent messages no larger than 40,000 UTF-8 bytes. It applies a
-newest-first contiguous 256,000-byte aggregate text budget, keeps complete
-groups, and middle-truncates at most one boundary message with a byte-labeled
-marker.
-Images and audio inside retained messages remain uncharged by this retention
-budget. All other input items are omitted. Invalid output or failed validation
-installs nothing.
-Outside the explicitly scoped ChatGPT-v2 and Tau-owned cache-aligned summary
-exceptions, a standalone provider request is stateless and its
+ChatGPT v2 sends the full provider-visible compacted prefix plus a final
+`compaction_trigger`, accepts exactly one provider compaction item followed by
+`response.completed`, and installs exactly that validated opaque item as the
+replacement window. It copies no item from the compacted prefix. The existing
+harness cut remains the sole owner of the exact ordered suffix, including facts
+accepted while compaction runs. Invalid output or failed validation installs
+nothing.
+Outside the Tau-owned cache-aligned summary exception, a standalone provider
+request is stateless and its
 ordered provider output remains the canonical replacement window without
 pruning or reinterpretation. The default Tau-owned local compactor transforms one bounded assistant final text into exactly one synthetic user-role checkpoint message with no wrapper or supplement.
 

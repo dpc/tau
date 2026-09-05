@@ -308,8 +308,11 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   compact prompt id, provider-qualified model, and standalone operation as one
   all-present group matching the durable start. Legacy records have all six
   absent and remain hard boundaries. Optional compact-request input/output token
-  counts are provider-reported display/accounting only; absent fields preserve
-  older journal semantics, and legacy estimate provenance grants no authority.
+  counts are provider-reported accounting only. The output count measures compact
+  item generation, not resulting context; UIs may learn the exact after-size only
+  from the transaction-owned first continuation's provider input usage. Absent
+  fields preserve older journal semantics, and legacy estimate provenance grants
+  no authority.
   Connection ids are intentionally not
   durable. Either form invalidates any previous-response chain.
 - **`agent.display_name_set`** — Durable fact that changes an agent's

@@ -2773,7 +2773,8 @@ fn render_provider_compaction_item_when_response_finishes() {
     renderer.handle(&Event::ProviderResponseFinished(finished));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "compact #226.2k ok: #4.5k"));
+    assert!(vt.screen_contains(80, "compact #226.2k → ? ok"));
+    assert!(!vt.screen_contains(80, "#4.5k"));
     assert!(!vt.screen_contains(80, "compacted"));
 }
 
@@ -4393,7 +4394,8 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact #226.2k in / #4.5k out ok"));
+    assert!(vt.screen_contains(100, "compact #226.2k → ? ok"));
+    assert!(!vt.screen_contains(100, "#4.5k"));
     assert!(!vt.screen_contains(100, "compact complete"));
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!vt.screen_contains(100, "private compactor answer"));

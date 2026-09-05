@@ -592,10 +592,7 @@ impl EventRenderer {
                 ContextItem::Compaction(_) => Some(FinishedContextProjection::Compaction(
                     render_compaction_block(
                         &self.resources.theme,
-                        Self::compaction_success_status(
-                            finished.compaction_original_input_tokens,
-                            finished.compaction_output_tokens,
-                        ),
+                        Self::compaction_success_status(finished.compaction_original_input_tokens),
                         CompactionStatus::Success,
                     ),
                 )),

@@ -909,6 +909,63 @@ fn compact_trigger_context() -> tau_proto::PromptContext {
     }
 }
 
+/// Builds varied closed history before the final compaction trigger so the
+/// production success path proves it copies no compacted-prefix item.
+fn compact_mixed_prefix_context() -> tau_proto::PromptContext {
+    let call_id = tau_proto::ToolCallId::from("call-before-compaction");
+    tau_proto::PromptContext {
+        blocks: vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![
+                    tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                        role: tau_proto::ContextRole::User,
+                        content: vec![tau_proto::ContentPart::Text {
+                            text: "ordinary user input".to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    }),
+                    tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                        role: tau_proto::ContextRole::User,
+                        content: vec![tau_proto::ContentPart::HarnessInternalText {
+                            text: "<tau_internal>Watched agent worker is working</tau_internal>"
+                                .to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    }),
+                ],
+            }),
+            tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+                    call_id: call_id.clone(),
+                    name: tau_proto::ToolName::new("status"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: tau_proto::CborValue::Map(Vec::new()),
+                    raw_arguments_json: Some("{}".to_owned()),
+                    responses_envelope: None,
+                })],
+                usage: None,
+            }),
+            tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+                items: vec![tau_proto::ToolResultItem {
+                    presentation: Default::default(),
+                    call_id,
+                    tool_type: tau_proto::ToolType::Function,
+                    status: tau_proto::ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
+                    provider_content: Vec::new(),
+                }],
+            }),
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            }),
+        ],
+    }
+}
+
 /// A retryable transport failure before any compact item remains eligible for
 /// the outer logical-request scheduler after the one transparent repair.
 #[test]
@@ -1029,7 +1086,7 @@ fn compact_exact_success_returns_one_item() {
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::parse("session-compact-exact-success").expect("session");
     let agent_id = tau_proto::AgentId::parse("agent-compact-exact-success").expect("agent");
-    let context = compact_trigger_context();
+    let context = compact_mixed_prefix_context();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
 
     let trace_output = TraceWriter::default();
