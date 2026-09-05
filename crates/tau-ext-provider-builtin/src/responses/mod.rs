@@ -33,6 +33,12 @@ thread_local! {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponsesProvider {
+    /// Startup-frozen scalar diagnostics, independent of exact capture policy.
+    #[serde(
+        default,
+        skip_serializing_if = "tau_provider::cache_diagnostic::CacheDiagnostics::is_metadata"
+    )]
+    pub cache_diagnostics: tau_provider::cache_diagnostic::CacheDiagnostics,
     /// Base URL without `/responses`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
@@ -327,11 +333,13 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     let mut backend_reached = false;
     let outcome =
         forward_debug_capture_policy(debug_provider_requests, |debug_provider_requests| {
-            tau_provider_responses::run_attempt_with_debug(
+            tau_provider_responses::run_attempt_with_diagnostics(
                 effective_prompt,
                 &config,
                 &model,
                 debug_provider_requests,
+                provider.cache_diagnostics,
+                Some(provider_attempt),
                 &mut |update| match update {
                     tau_provider_responses::AttemptUpdate::Dispatched(dispatched_at) => {
                         backend_reached = true;

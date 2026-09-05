@@ -3,6 +3,7 @@
 //! This intentionally does not share the private ChatGPT/Codex WebSocket
 //! implementation. It sends a complete typed transcript on every turn.
 
+mod cache_diagnostic;
 mod deadlines;
 mod debug_capture;
 mod decoded_event;
@@ -10,6 +11,7 @@ mod websocket;
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,7 @@ use tau_proto::{
     ProviderStopReason, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind,
     ResponsesToolCallEnvelope, ToolCallItem, ToolChoice, ToolDefinition, ToolType,
 };
+use tau_provider::cache_diagnostic::CacheDiagnostics;
 use tau_provider::retry_policy::{RetryClass, RetryDecision, classify_error_code};
 use tau_provider::{
     StreamRepetition, StreamRepetitionGuard, StreamRepetitionKey,
@@ -666,15 +669,54 @@ pub fn run_attempt_with_debug(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
-    run_attempt_with_capture_and_updates(
+    run_attempt_with_diagnostics(
         prompt,
         config,
         model,
-        DebugCapture::new(debug_capture_enabled(prompt, debug_provider_requests)),
+        debug_provider_requests,
+        CacheDiagnostics::Off,
+        None,
         on_update,
         is_canceled,
         network,
     )
+}
+
+/// Run a finite attempt with independent metadata selection and owner-supplied
+/// correlation. Neither selection changes exact capture timing or dispatch.
+#[allow(clippy::too_many_arguments)]
+pub fn run_attempt_with_diagnostics(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    cache_diagnostics: CacheDiagnostics,
+    provider_attempt: Option<tau_proto::ProviderAttempt>,
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
+    let mut capture = DebugCapture::new(debug_capture_enabled(prompt, debug_provider_requests));
+    capture.cache = cache_diagnostic::CacheAttempt::new(
+        prompt,
+        debug_provider_requests,
+        cache_diagnostics,
+        provider_attempt,
+    )
+    .map(Arc::new);
+    let outcome = run_attempt_with_capture_and_updates(
+        prompt,
+        config,
+        model,
+        capture.clone(),
+        on_update,
+        is_canceled,
+        network,
+    );
+    if let Some(cache) = &capture.cache {
+        cache.finish(config, &outcome);
+    }
+    outcome
 }
 
 /// Apply the ordinary durable-session debug-capture policy.
@@ -1837,6 +1879,9 @@ impl State {
                     .get("id")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
+                if let Some(cache) = &self.debug_capture.cache {
+                    cache.record_usage(response.get("usage"));
+                }
                 let usage = parse_usage(response.get("usage"));
                 let mut replacement = None;
                 if let Some(output) = response.get("output") {
@@ -2075,6 +2120,7 @@ async fn stream_sse(
     let serialization_started = private_trace::started(private_trace);
     let serialized =
         serde_json::to_string(body).map_err(|_| (Error::Json, State::default().progress()))?;
+    let request_bytes = serialized.len();
     if let (Some(trace), Some(started)) = (private_trace.as_mut(), serialization_started) {
         trace.serialization_finished(started, serialized.len());
     }
@@ -2103,6 +2149,9 @@ async fn stream_sse(
         trace.record_dispatch();
     }
     on_update(AttemptUpdate::Dispatched(Instant::now()));
+    if let Some(cache) = &debug_capture.cache {
+        cache.dispatch(prompt, config, model, body, request_bytes);
+    }
     let response = loop {
         tokio::select! {
             response = &mut send => break response.map_err(|error| {

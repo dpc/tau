@@ -210,7 +210,8 @@ sensitive: provider error bodies can reflect prompt, account, or service-interna
 data even after configured credentials are removed. Configurable diagnostic
 retention defaults to thirty days; disabling cleanup can retain them
 indefinitely.
-Default-on Codex inference and native standalone-compaction scalar cache diagnostics use the same
+Default-on Codex and public Responses inference, and native Codex
+standalone-compaction scalar cache diagnostics use the same
 private opaque path and retention. Metadata has an independent startup-frozen
 profile opt-out and is forced off with existing nonpersistable capture policy;
 Existing exact captures remain default-on for durable activity; successful raw

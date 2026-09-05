@@ -42,6 +42,8 @@ thread_local! {
 /// attempt.
 #[derive(Clone)]
 pub(super) struct DebugCapture {
+    /// Scalar-only correlation, independent of raw event retention.
+    pub(super) cache: Option<Arc<super::cache_diagnostic::CacheAttempt>>,
     /// Whether the extension permitted private capture for this durable prompt.
     enabled: bool,
     /// Shared bounded response events retained by the transport parser.
@@ -116,6 +118,7 @@ impl DebugCapture {
     /// Construct capture state with the selected submission sink.
     fn with_sink(enabled: bool, sink: CaptureSink) -> Self {
         Self {
+            cache: None,
             enabled,
             events: Arc::default(),
             sink,
@@ -258,12 +261,13 @@ impl DebugCapture {
                     return;
                 };
                 sanitize_capture_value(&mut value, &config.api_key);
+                self.insert_correlation(&mut value, config.transport, class);
                 match serialize_capped(&value, MAX_CAPTURE_BYTES) {
                     Ok(sanitized) => sanitized,
-                    Err(CapExceeded) => truncation_record(),
+                    Err(CapExceeded) => self.correlated_truncation(config, class),
                 }
             }
-            Err(CapExceeded) => truncation_record(),
+            Err(CapExceeded) => self.correlated_truncation(config, class),
         };
         (self.sink)(Capture::new(
             prompt.session_id.clone(),
@@ -271,6 +275,35 @@ impl DebugCapture {
             class,
             serialized,
         ));
+    }
+
+    /// Preserve correlation even when an exact payload exceeds its existing
+    /// ceiling. Request correlation never asserts an actual dispatch.
+    fn correlated_truncation(&self, config: &AttemptConfig, class: CaptureClass) -> Vec<u8> {
+        if self.cache.is_none() {
+            return truncation_record();
+        }
+        let mut value: Value =
+            serde_json::from_slice(&truncation_record()).expect("fixed truncation record");
+        sanitize_capture_value(&mut value, &config.api_key);
+        self.insert_correlation(&mut value, config.transport, class);
+        serialize_capped(&value, MAX_CAPTURE_BYTES).expect("bounded scalar truncation")
+    }
+
+    /// Add locally generated correlation after payload sanitization.
+    /// Coincidental overlap with a short credential must not rewrite these
+    /// IDs or field names.
+    fn insert_correlation(&self, value: &mut Value, transport: Transport, class: CaptureClass) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        value["attempt_id"] = serde_json::json!(cache.id);
+        value["wire_dispatch_index"] =
+            serde_json::json!(if class == Self::request_class(transport) {
+                None
+            } else {
+                cache.dispatch_index()
+            });
     }
 
     /// Return the capture class for the request side of a configured transport.

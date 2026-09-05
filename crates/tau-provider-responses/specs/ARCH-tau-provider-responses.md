@@ -73,6 +73,25 @@ failures produce bounded error metadata. Cancellation produces no error capture,
 though a request capture remains when cancellation arrives after that request's
 send boundary. Standalone local compaction follows the same durable-session diagnostic policy as ordinary inference; disabled diagnostics submit nothing.
 
+Ordinary durable inference also has independent startup-frozen scalar cache
+diagnostics, defaulting to metadata. These reuse the shared bounded private
+capture writer, not logs or journals. Every finite invocation has a random
+capture-local attempt identity, including when metadata is opted out. Exact
+requests retain a null actual wire-dispatch index at their unchanged submission
+point; cancellation can still prevent dispatch afterwards. Only the diagnostic
+dispatch row establishes actual index one. Later exact responses and failures
+may carry that index. Local-summary standalone compaction is excluded from this
+scalar adapter without changing its existing exact captures.
+
+The scalar attempt end follows the backend's existing finite outcome. It
+preserves allowlisted raw usage counters from parsed terminal JSON before
+canonical normalization, including when later output validation fails. Other
+failure paths may have no usage evidence. The extension supplies its typed
+provider attempt locally; no independent logical ordinal is invented. Each
+invocation observes at most one attempted send, full replay and no local repair
+or connection reuse. Capture loss never changes execution or proves exhaustive
+history, provider receipt, billing, residency or cache eligibility.
+
 Response snapshots retain at most 512 KiB and 4,096 raw event JSON values.
 Serialization writes through a strict 1 MiB ceiling and replaces an oversized
 record with content-free truncation metadata without first materializing the

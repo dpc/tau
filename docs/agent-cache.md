@@ -83,10 +83,11 @@ does not alter capture, retention, inference, retry, refresh, or compaction poli
 
 ## Private runtime metadata
 
-ChatGPT/Codex ordinary inference and native standalone compaction produce bounded scalar captures in the
+ChatGPT/Codex and public Responses ordinary inference, and native Codex standalone
+compaction, produce bounded scalar captures in the
 existing owner-private session `debug/provider-requests/<instance>/` directory,
 using the `cache-diagnostic.json.zst` filename class. Set
-`"cache_diagnostics": "off"` in a ChatGPT provider profile to disable only these
+`"cache_diagnostics": "off"` in a ChatGPT or public Responses provider profile to disable only these
 metadata records, or `"metadata"` (the default) to enable them. Restart after
 changing this startup-frozen setting. Ephemeral/memory-only activity remains
 excluded under the existing capture permission; no filesystem probing infers
@@ -99,6 +100,9 @@ has a random 128-bit `producer_run_id`; each finite inference or compaction atte
 separate random `attempt_id`. Exact inference request/response/failure captures
 carry that attempt identity and the actual dispatch index where one exists.
 An unsent exact request retained after cancellation has a null wire index.
+Public Responses exact requests always retain null at their unchanged capture
+point before the final cancellation check; only their diagnostic dispatch row
+establishes actual index one. Later exact responses/failures can carry one.
 These identities never affect provider routing or upstream request bodies.
 Native compaction uses `operation: "standalone_compaction"` and its existing
 finite compact-attempt ordinal. Its exact requests and retry-failure captures
@@ -117,12 +121,17 @@ repair while leaving the dispatch count at one. Typed socket epochs, reuse,
 anchor-validation and repair facts describe only branches the backend observed.
 No endpoint, credential, cache-key literal, provider response ID, previous-response
 ID, error prose or raw payload enters scalar records.
+Public Responses uses a fresh finite full-replay invocation with at most one
+dispatch and no local repair or connection reuse. Its logical-attempt ordinal is
+unavailable; its harness provider attempt comes directly from the extension.
+Its scalar coverage excludes local-summary standalone compaction while keeping
+that operation's original exact captures.
 
 Raw provider input/read/write/output counters remain separate from normalized
 canonical accounting. Missing counters, exact eligibility, model revision and
 unavailable chain counts stay null. There is no established per-item attribution
 parser yet: `raw_attribution` is false, the attribution array stays empty, and
-present usage is labeled `unsupported_shape` for attribution. Other adapters,
+present usage is labeled `unsupported_shape` for attribution. Chat Completions,
 prewarm and cache refresh do not implement this capture
 adapter. The inspector reports those capabilities as unavailable rather than
 inventing inference ordinals or complete coverage.

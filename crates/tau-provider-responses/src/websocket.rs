@@ -393,6 +393,9 @@ pub(super) async fn stream(
         return Err((Error::Canceled, State::default().progress()));
     }
     on_update(AttemptUpdate::Dispatched(Instant::now()));
+    if let Some(cache) = &debug_capture.cache {
+        cache.dispatch(prompt, config, model, body, serialized.len());
+    }
     if let Some(trace) = private_trace.as_mut() {
         trace.record_dispatch();
     }

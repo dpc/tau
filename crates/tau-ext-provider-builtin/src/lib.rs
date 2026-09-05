@@ -1136,6 +1136,7 @@ fn cmd_add_responses(
         extension_instance,
         &name,
         &BuiltinProviderProfile::Responses(ResponsesProvider {
+            cache_diagnostics: Default::default(),
             base_url,
             api_key,
             models,

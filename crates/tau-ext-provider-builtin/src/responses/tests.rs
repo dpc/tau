@@ -668,6 +668,7 @@ fn backend_metadata_matches_profile_transport() {
 #[test]
 fn profile_publishes_default_responses_efforts() {
     let provider = ResponsesProvider {
+        cache_diagnostics: Default::default(),
         base_url: "https://example.test/v1".to_owned(),
         api_key: String::new(),
         models: vec![ResponsesModel {
@@ -715,6 +716,26 @@ fn profile_publishes_default_responses_efforts() {
     assert!(!models[0].supports_compaction);
     assert!(models[0].supports_standalone_compaction);
     assert_eq!(models[0].standalone_compaction_threshold, None);
+}
+
+/// Startup profile selection is closed and defaults to scalar metadata without
+/// changing the separate durable-session exact capture policy.
+#[test]
+fn responses_cache_diagnostics_profile_defaults_on_and_accepts_only_closed_modes() {
+    use tau_provider::cache_diagnostic::CacheDiagnostics;
+    let default: ResponsesProvider = serde_json::from_str("{}").expect("default profile");
+    assert_eq!(default.cache_diagnostics, CacheDiagnostics::Metadata);
+    assert!(
+        serde_json::to_value(default)
+            .expect("serialize profile")
+            .get("cache_diagnostics")
+            .is_none()
+    );
+    let off: ResponsesProvider =
+        serde_json::from_str(r#"{"cache_diagnostics":"off"}"#).expect("metadata opt-out");
+    assert_eq!(off.cache_diagnostics, CacheDiagnostics::Off);
+    assert!(serde_json::from_str::<ResponsesProvider>(r#"{"cache_diagnostics":"raw"}"#).is_err());
+    assert!(serde_json::from_str::<ResponsesProvider>(r#"{"cache_diagnostics":false}"#).is_err());
 }
 
 /// Context-window token typing must retain the Responses profile bytes, zero

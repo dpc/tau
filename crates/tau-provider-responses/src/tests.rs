@@ -14,6 +14,8 @@ use tungstenite::protocol::frame::coding::{Data as WebSocketData, OpCode};
 
 use super::*;
 
+mod cache_diagnostics;
+
 /// In-memory trace writer for production transport assertions.
 #[derive(Clone, Default)]
 struct TraceWriter(Arc<Mutex<Vec<u8>>>);

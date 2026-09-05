@@ -367,15 +367,20 @@ same neutral unknown state.
 
 ## Runtime behavior
 
-ChatGPT profiles support startup-frozen `cache_diagnostics: off|metadata`.
-Metadata defaults on for durable ordinary Codex inference and native standalone compaction, and uses the existing
+ChatGPT and public Responses profiles support startup-frozen `cache_diagnostics: off|metadata`.
+Metadata defaults on for durable ordinary Codex/public Responses inference and native Codex standalone compaction, and uses the existing
 private opaque capture directory and thirty-day diagnostic retention. Exact
 request/response captures remain independently default-on for durable activity;
 setting metadata off does not disable them. Ephemeral/memory-only activity
 remains excluded. Scalar records correlate actual dispatches and finite attempts
 and retain bounded raw usage and typed repair/socket facts, not bodies, routes,
 credentials or provider IDs. Successful raw compact responses remain unretained;
-that operation reports `exact_response=false`. Per-item attribution, other adapters
+that operation reports `exact_response=false`. Public Responses records one
+full-replay dispatch at most, with no local repair or connection reuse. Its exact
+request retains a null dispatch index before the final cancellation check; the
+diagnostic dispatch row alone establishes index one. Public local-summary
+compaction keeps its exact captures but has no scalar coverage.
+Per-item attribution, other adapters
 and cache refresh remain unsupported. `tau agent/session cache`
 recognizes the new files but does not yet join or analyze their scalar records;
 it reports that analysis as unavailable. See `docs/agent-cache.md`.

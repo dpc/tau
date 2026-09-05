@@ -1931,6 +1931,22 @@ fn cache_report_projects_only_canonical_facts_and_preserves_unknowns() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON row"))
         .collect::<Vec<_>>();
+    let header = rows
+        .iter()
+        .find(|row| row["record_kind"] == "header")
+        .expect("report header");
+    assert_eq!(
+        header["derived"]["cache_diagnostic_support"],
+        serde_json::json!({
+            "codex_inference": "metadata",
+            "public_responses_inference": "metadata",
+            "other_adapters": "unavailable",
+            "codex_standalone_compaction": "metadata",
+            "other_standalone_compaction": "unavailable",
+            "cache_refresh": "unavailable",
+            "raw_attribution": "unavailable"
+        })
+    );
     let responses = rows
         .iter()
         .filter(|row| row["record_kind"] == "canonical_response")
