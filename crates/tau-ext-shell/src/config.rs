@@ -12,7 +12,8 @@ use std::time::Duration;
 
 #[cfg(test)]
 use shell_allowlist::{
-    MAX_SHELL_ALLOWLIST_COMPILE_BYTES, MAX_SHELL_ALLOWLIST_PATTERN_BYTES, MAX_SHELL_ALLOWLIST_RULES,
+    MAX_SHELL_ALLOWLIST_COMPILE_BYTES, MAX_SHELL_ALLOWLIST_DESCRIPTION_BYTES,
+    MAX_SHELL_ALLOWLIST_PATTERN_BYTES, MAX_SHELL_ALLOWLIST_RULES,
 };
 use shell_allowlist::{ShellAllowRule, deserialize_shell_allowlist};
 

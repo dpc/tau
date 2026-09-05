@@ -510,15 +510,19 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
 /// tests.
 fn send_shell_regex_allowlist_config(
     writer: &mut EventWriter<BufWriter<UnixStream>>,
-    rules: Vec<(&str, &str)>,
+    rules: Vec<(&str, &str, Option<&str>)>,
 ) {
     let rules = rules
         .into_iter()
-        .map(|(workdir, command_regex)| {
-            cbor_map(vec![
+        .map(|(workdir, command_regex, description)| {
+            let mut fields = vec![
                 ("workdir", CborValue::Text(workdir.to_owned())),
                 ("command_regex", CborValue::Text(command_regex.to_owned())),
-            ])
+            ];
+            if let Some(description) = description {
+                fields.push(("description", CborValue::Text(description.to_owned())));
+            }
+            cbor_map(fields)
         })
         .collect();
     writer

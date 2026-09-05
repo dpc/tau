@@ -75,6 +75,36 @@ fn allowlist_prompt_lists_typed_selector_pairs() {
     );
 }
 
+/// Ensures optional rule descriptions use the same JSON-safe presentation on
+/// denials and brace-safe presentation in the model prompt.
+#[test]
+fn allowlist_description_renders_safely_on_both_surfaces() {
+    let workdir = TempDir::new().expect("workdir");
+    let description = "Use \"jj log\"\\only.\n\t\u{1f} {{literal}} café";
+    let config: ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [{
+            "workdir": workdir.path().display().to_string(),
+            "command_regex": "jj log",
+            "description": description
+        }]
+    }))
+    .expect("parse described allowlist");
+
+    let prompt = config
+        .allowlist_prompt_fragment()
+        .expect("enabled allowlist has a prompt fragment");
+    assert!(prompt.contains(
+        r#"description: "Use \"jj log\"\\only.\n\t\u001f \u007b\u007bliteral\u007d\u007d café""#
+    ));
+    assert!(!prompt.contains("{{literal}}"));
+
+    let error = config
+        .authorize("denied-command-sentinel", workdir.path())
+        .expect_err("command must be denied");
+    assert!(error.contains(r#"description: "Use \"jj log\"\\only.\n\t\u001f {{literal}} café""#));
+    assert!(!error.contains("denied-command-sentinel"));
+}
+
 /// Ensures an explicit empty allowlist states the total command denial instead
 /// of making an enabled guardrail appear unrestricted.
 #[test]
@@ -123,6 +153,38 @@ fn allowlist_prompt_sorts_and_deduplicates_selector_pairs() {
     assert!(
         prompt.find("command_glob: \"a\"").expect("glob selector")
             < prompt.find("command_regex: \"z\"").expect("regex selector")
+    );
+}
+
+/// Ensures prompt de-duplication compares the complete rendered rule while
+/// denial diagnostics retain authored order and duplicates.
+#[test]
+fn allowlist_description_participates_in_prompt_identity_only() {
+    let workdir = TempDir::new().expect("workdir");
+    let workdir_text = workdir.path().display().to_string();
+    let config: ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [
+            { "workdir": workdir_text, "command": "jj *", "description": "first" },
+            { "workdir": workdir_text, "command": "jj *", "description": "second" },
+            { "workdir": workdir_text, "command": "jj *", "description": "first" }
+        ]
+    }))
+    .expect("parse duplicate described rules");
+
+    let prompt = config
+        .allowlist_prompt_fragment()
+        .expect("enabled allowlist has a prompt fragment");
+    assert_eq!(prompt.matches(r#"description: "first""#).count(), 1);
+    assert_eq!(prompt.matches(r#"description: "second""#).count(), 1);
+
+    let error = config
+        .authorize("denied", workdir.path())
+        .expect_err("command must be denied");
+    assert_eq!(error.matches(r#"description: "first""#).count(), 2);
+    assert_eq!(error.matches(r#"description: "second""#).count(), 1);
+    assert!(
+        error.find(r#"description: "first""#).expect("first")
+            < error.find(r#"description: "second""#).expect("second")
     );
 }
 
@@ -431,6 +493,20 @@ fn command_matcher_choice_and_resource_bounds_fail_configuration() {
     serde_json::from_value::<ShellConfig>(serde_json::json!({ "allowlist": at_rule_limit }))
         .expect("exact rule-count limit must be accepted");
 
+    for description in [
+        "x".repeat(MAX_SHELL_ALLOWLIST_DESCRIPTION_BYTES),
+        "é".repeat(MAX_SHELL_ALLOWLIST_DESCRIPTION_BYTES / 2),
+    ] {
+        serde_json::from_value::<ShellConfig>(serde_json::json!({
+            "allowlist": [{
+                "workdir": "/tmp/**",
+                "command": "*",
+                "description": description
+            }]
+        }))
+        .expect("exact authored-description limit must be accepted");
+    }
+
     let mut too_many_rules = (0..MAX_SHELL_ALLOWLIST_RULES)
         .map(|_| serde_json::json!({ "workdir": "/tmp/**", "command": "*" }))
         .collect::<Vec<_>>();
@@ -515,6 +591,19 @@ fn command_matcher_choice_and_resource_bounds_fail_configuration() {
                 }]
             }),
             "shell allowlist command regex compilation must not exceed 262144 bytes",
+        ),
+        (
+            serde_json::json!({
+                "allowlist": [{
+                    "workdir": "/tmp/**",
+                    "command": "*",
+                    "description": format!(
+                        "{}é",
+                        "x".repeat(MAX_SHELL_ALLOWLIST_DESCRIPTION_BYTES - 1)
+                    )
+                }]
+            }),
+            "shell allowlist description must not exceed 1024 authored UTF-8 bytes",
         ),
         (
             serde_json::json!({ "allowlist": too_many_rules }),

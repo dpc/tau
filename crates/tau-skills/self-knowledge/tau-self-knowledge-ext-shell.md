@@ -190,15 +190,18 @@ add `^...$`. Inline case-insensitive regex flags are rejected. Workdir matching
 uses the canonical absolute effective cwd, with `*` confined to one component and
 `**` crossing components. Globs treat separators and newlines as ordinary
 characters. The allowlist accepts at most 32 rules, 2,048 authored UTF-8 bytes per
-pattern, and 262,144 compiled bytes per glob or regex matcher. It does not inspect
-shell syntax, wrapper argv, environment, `PATH`, or resolved executables. Denial
-errors show the typed configured command matcher/workdir pairs, so patterns must
-not contain secrets. The fixed `rg` subprocess behind `grep` and unrelated
+pattern, and 262,144 compiled bytes per glob or regex matcher. A rule may include
+an optional `description` of at most 1,024 authored UTF-8 bytes. This trusted
+operator prose is model-visible and appears in denial diagnostics, so it must not
+contain secrets; it does not affect matching. It does not inspect
+shell syntax, wrapper argv, environment, `PATH`, or resolved executables. Generated
+denial errors show the typed configured command matcher/workdir pairs and optional
+descriptions, but never the submitted denied command. The fixed `rg` subprocess behind `grep` and unrelated
 subprocess systems are not covered.
 
 When the allowlist is present, the shell prompt also identifies command
 enforcement and lists typed `command_glob`/`command_regex` plus `workdir`
-selector pairs. Both selectors in one pair must match. This presentation sorts
-and de-duplicates matching entries without changing enforcement; an empty list
+selector pairs and optional descriptions. Both selectors in one pair must match.
+This presentation sorts and de-duplicates complete entries without changing enforcement; an empty list
 states `none (all shell commands are denied)`. Selector strings use JSON
 escaping, including brace escapes, so glob syntax remains literal prompt text.

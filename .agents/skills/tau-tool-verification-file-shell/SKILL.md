@@ -29,7 +29,13 @@ rule requires exactly one matcher: `command` retains the globset glob grammar,
 while `command_regex` uses a case-sensitive Rust regex with implicit absolute
 whole-string anchors. Confirm that denial through `shell`, `shell_command`, `!`,
 and `!!` shows the typed configured matcher (`command_glob` or `command_regex`)
-with its paired workdir and does not execute the command. An absent allowlist
+with its paired workdir and does not execute the command. If a rule has an optional
+`description`, verify the prompt and all four denial surfaces show its exact
+JSON-escaped trusted prose; prompt braces must additionally render as `\u007b` and
+`\u007d`. Use a unique denied-command sentinel and verify generated `ToolError.message`
+and `!`/`!!` denial output never contain it. Descriptions are limited to 1,024
+authored UTF-8 bytes, do not affect matching, and must not contain secrets because
+prompts and denials disclose them. An absent allowlist
 remains unrestricted; an empty list denies all. Treat this as a best-effort
 guardrail, not a sandbox test.
 

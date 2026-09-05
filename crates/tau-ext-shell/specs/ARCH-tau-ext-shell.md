@@ -141,16 +141,22 @@ matching pair allows execution. Both match the whole raw command case-sensitivel
 regexes receive implicit absolute anchors, including across newlines. Workdir `*`
 stays within one path component while `**` crosses components; command globs retain
 globset grammar and treat separators and newlines as ordinary characters.
+Each rule may include an exact operator-authored `description` of at most 1,024
+UTF-8 bytes. Descriptions are presentation-only and do not affect matching.
 Authorization uses bounded matcher compilation and occurs before VCR replay and
 process spawn. It does not inspect the configured shell/wrapper, environment,
 `PATH`, shell expansion, or resolved executables. Denials disclose each typed
-command matcher with its paired workdir so an agent can choose a permitted command.
+command matcher with its paired workdir and optional description so an agent can
+choose a permitted command. Generated denial text never includes the submitted
+denied command. Descriptions are model-visible and appear in denial diagnostics,
+so operators must not put secrets in them.
 Fixed internal subprocesses such as the `rg` used by `grep` do not participate.
 
 When the allowlist is present, the shell-owned prompt fragment also declares
 that enforcement is enabled and lists the effective typed command/workdir
-selector pairs. The list sorts and de-duplicates presentation entries but does
-not alter authored-rule matching. It says `none (all shell commands are denied)`
+selector pairs and optional descriptions. The list sorts and de-duplicates complete
+presentation entries but does not alter authored-rule matching. Equal selectors with
+different descriptions therefore remain distinct. It says `none (all shell commands are denied)`
 for an explicit empty allowlist. Omission leaves the existing workdir fragment
 unchanged. Selector strings use JSON escaping, including brace escapes, so
 authored glob syntax remains literal prompt content.

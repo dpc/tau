@@ -62,7 +62,10 @@ boundaries plus bad characters, whitespace, newlines, options, arguments, and sh
 operators. Configuration coverage rejects invalid, both, neither, case-insensitive,
 and resource-bounded matchers. Integration tests cover generic `shell`, ChatGPT
 `shell_command`, and both user context modes, including typed-pair disclosure and
-proof that denial does not spawn. VCR coverage requires authorization before replay.
+proof that denial does not spawn. Description coverage locks the 1,024-byte UTF-8
+boundary, exact omission, JSON/control/Unicode and prompt-brace escaping, complete-entry
+prompt de-duplication, authored denial ordering, prompt republication, and generated
+model/user denial privacy. VCR coverage requires authorization before replay.
 
 ## Processes, locking, and scheduling
 

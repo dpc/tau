@@ -256,10 +256,12 @@ extensions:
         allowlist:
           - workdir: /srv/project/**
             command: cargo *
+            description: Run cargo with the approved read-only arguments.
           - workdir: /srv/project
             command: jj status
           - workdir: /srv/project/**
             command_regex: 'jj (?:log|show [a-z]{6,32})'
+            description: Use jj log or jj show followed by a change ID.
 ```
 
 Omitting `allowlist` preserves unrestricted execution; `allowlist: []` denies
@@ -279,20 +281,25 @@ rejects look-around and backreferences. Each allowlist has at most 32 rules, eac
 workdir or command pattern has at most 2,048 authored UTF-8 bytes, and each
 compiled glob or regex matcher has a 262,144-byte bound. Configuration rejects
 invalid patterns, both/neither matcher fields, and each limit with a stable error.
+Each rule may also have a `description` of at most 1,024 authored UTF-8 bytes.
+Tau retains this trusted operator text exactly and shows it in model guidance and
+denial diagnostics; it never changes authorization. Descriptions are disclosed,
+so do not put secrets in them.
 
 The same rules cover model `shell`, ChatGPT-facing `shell_command`, and user
 `!`/`!!` before VCR replay or process spawn. A denial shows the configured
-typed command matcher and workdir pair so the agent can choose a permitted
-invocation. Do not place secrets in a glob or regex: denials deliberately disclose
-the configured patterns. Matching
+typed command matcher and workdir pair, plus its optional description, so the
+agent can choose a permitted invocation. Generated denial text never includes
+the submitted denied command. Do not place secrets in a pattern or description:
+denials deliberately disclose the configured text. Matching
 does not inspect shell syntax, the configured shell or wrapper prefix,
 environment, `PATH`, or resolved executables; fixed internal subprocesses such
 as `grep`'s `rg` are excluded. This is a best-effort guardrail, not a sandbox or
 security boundary.
 
 When `allowlist` is present, core-shell also adds its effective typed
-`command_glob`/`command_regex` and `workdir` selector pairs to the model's
-system prompt. The prompt sorts and de-duplicates equivalent presentation
+`command_glob`/`command_regex` and `workdir` selector pairs plus optional
+descriptions to the model's system prompt. The prompt sorts and de-duplicates complete presentation
 entries, but enforcement still evaluates the authored rules as configured.
 Both selectors in one displayed pair must match. An explicit empty list renders
 `none (all shell commands are denied)`; omission leaves the existing shell

@@ -384,6 +384,7 @@ fn model_shell_surfaces_enforce_allowlist_before_spawn() {
         vec![(
             workdir.path().to_str().expect("UTF-8 workdir"),
             r"printf allowed",
+            Some("Use the permitted printf form."),
         )],
     );
     let Event::ExtPromptFragmentPublish(_) = reader
@@ -424,7 +425,16 @@ fn model_shell_surfaces_enforce_allowlist_before_spawn() {
         };
         assert!(error.message.contains("denied by configured allowlist"));
         assert!(error.message.contains(r#"command_regex: "printf allowed""#));
+        assert!(
+            error
+                .message
+                .contains(r#"description: "Use the permitted printf form.""#)
+        );
         assert!(error.message.contains("workdir:"));
+        assert!(
+            !error.message.contains(&sentinel.display().to_string()),
+            "generated model denial must not echo the denied command"
+        );
         assert!(!sentinel.exists(), "denied command must not spawn");
     }
 }
@@ -443,6 +453,7 @@ fn user_shell_context_modes_enforce_the_same_allowlist() {
         vec![(
             workdir.path().to_str().expect("UTF-8 workdir"),
             r"printf allowed",
+            Some("Use the permitted printf form."),
         )],
     );
     writer
@@ -474,6 +485,15 @@ fn user_shell_context_modes_enforce_the_same_allowlist() {
             finished
                 .output
                 .contains(r#"command_regex: "printf allowed""#)
+        );
+        assert!(
+            finished
+                .output
+                .contains(r#"description: "Use the permitted printf form.""#)
+        );
+        assert!(
+            !finished.output.contains(&sentinel.display().to_string()),
+            "generated user-shell denial must not echo the denied command"
         );
         assert_eq!(finished.exit_code, None);
         assert!(!sentinel.exists(), "denied user command must not spawn");

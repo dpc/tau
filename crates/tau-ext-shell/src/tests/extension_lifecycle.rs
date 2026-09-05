@@ -1438,6 +1438,7 @@ fn configured_allowlist_publishes_effective_prompt_fragment() {
         vec![(
             workdir.path().to_str().expect("UTF-8 workdir"),
             r"printf allowed",
+            Some("Run only the documented printf form."),
         )],
     );
 
@@ -1453,9 +1454,31 @@ fn configured_allowlist_publishes_effective_prompt_fragment() {
     assert!(template.contains("### Shell command allowlist"));
     assert!(template.contains("canonical effective workdir must both match one selector pair"));
     assert!(template.contains(&format!(
-        r#"command_regex: "printf allowed"; workdir: "{}""#,
+        r#"command_regex: "printf allowed"; workdir: "{}"; description: "Run only the documented printf form.""#,
         workdir.path().display()
     )));
+
+    send_shell_regex_allowlist_config(
+        &mut writer,
+        vec![(
+            workdir.path().to_str().expect("UTF-8 workdir"),
+            r"printf allowed",
+            Some("Updated operator guidance."),
+        )],
+    );
+    let Event::ExtPromptFragmentPublish(reconfigured) = reader
+        .read_event()
+        .expect("read description-only prompt update")
+        .expect("description-only prompt update")
+    else {
+        panic!("expected description-only prompt fragment republication");
+    };
+    assert!(
+        reconfigured
+            .fragment
+            .template
+            .contains(r#"description: "Updated operator guidance.""#)
+    );
 
     writer
         .write_frame(&disconnect_frame(None))

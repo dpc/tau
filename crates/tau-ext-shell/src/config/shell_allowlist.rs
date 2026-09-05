@@ -17,6 +17,8 @@ use serde::de::Error as _;
 pub(super) const MAX_SHELL_ALLOWLIST_RULES: usize = 32;
 /// Maximum UTF-8 byte length of one authored glob or regular expression.
 pub(super) const MAX_SHELL_ALLOWLIST_PATTERN_BYTES: usize = 2 * 1024;
+/// Maximum UTF-8 byte length of one authored rule description.
+pub(super) const MAX_SHELL_ALLOWLIST_DESCRIPTION_BYTES: usize = 1024;
 /// Maximum compiled NFA size for one glob or regular-expression matcher.
 pub(super) const MAX_SHELL_ALLOWLIST_COMPILE_BYTES: usize = 256 * 1024;
 
@@ -80,6 +82,8 @@ pub(super) struct ShellAllowRule {
     /// Compiled raw shell-language command matcher retained with its authored
     /// type for matching and denial diagnostics.
     command_matcher: ShellCommandMatcher,
+    /// Optional authored operator guidance retained exactly for presentation.
+    description: Option<String>,
 }
 
 impl ShellAllowRule {
@@ -100,6 +104,11 @@ impl ShellAllowRule {
             "\n- {}: {command}\n  workdir: {workdir}",
             self.command_matcher.field_name()
         );
+        if let Some(description) = &self.description {
+            let description = serde_json::to_string(description)
+                .expect("serializing a string to JSON cannot fail");
+            let _ = write!(message, "\n  description: {description}");
+        }
     }
 
     /// Renders the typed command and workdir selectors as one compact,
@@ -108,10 +117,15 @@ impl ShellAllowRule {
     pub(super) fn prompt_selector(&self) -> String {
         let command = prompt_json_string(self.command_matcher.pattern());
         let workdir = prompt_json_string(&self.workdir);
-        format!(
+        let mut selector = format!(
             "{}: {command}; workdir: {workdir}",
             self.command_matcher.field_name()
-        )
+        );
+        if let Some(description) = &self.description {
+            let description = prompt_json_string(description);
+            let _ = write!(selector, "; description: {description}");
+        }
+        selector
     }
 }
 
@@ -134,6 +148,8 @@ struct RawShellAllowRule {
     command: Option<String>,
     /// Optional raw shell-language command regular expression.
     command_regex: Option<String>,
+    /// Optional operator-authored guidance for using this rule.
+    description: Option<String>,
 }
 
 /// One compiled raw shell-language command matcher and its authored pattern.
@@ -185,6 +201,15 @@ impl TryFrom<RawShellAllowRule> for ShellAllowRule {
 
     /// Validates one authored rule and compiles bounded matchers.
     fn try_from(raw: RawShellAllowRule) -> Result<Self, Self::Error> {
+        if raw
+            .description
+            .as_ref()
+            .is_some_and(|description| MAX_SHELL_ALLOWLIST_DESCRIPTION_BYTES < description.len())
+        {
+            return Err(format!(
+                "shell allowlist description must not exceed {MAX_SHELL_ALLOWLIST_DESCRIPTION_BYTES} authored UTF-8 bytes"
+            ));
+        }
         if !Path::new(&raw.workdir).is_absolute() {
             return Err("shell allowlist workdir glob must be absolute".to_owned());
         }
@@ -216,6 +241,7 @@ impl TryFrom<RawShellAllowRule> for ShellAllowRule {
             workdir: raw.workdir,
             workdir_matcher,
             command_matcher,
+            description: raw.description,
         })
     }
 }
