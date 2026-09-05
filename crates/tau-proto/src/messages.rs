@@ -920,6 +920,76 @@ pub struct SessionAgentListResult {
     pub result: SessionAgentListResultPayload,
 }
 
+/// Directed operator request to unload one saved agent from the current
+/// session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UnloadSessionAgent {
+    /// Caller-generated correlation id.
+    pub request_id: String,
+    /// Exact currently bound session expected by the caller.
+    pub session_id: SessionId,
+    /// Saved agent whose current membership should end.
+    pub agent_id: AgentId,
+}
+
+/// Stable terminal outcome for one saved-agent unload request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnloadSessionAgentOutcome {
+    /// The unload committed and the live route was retired.
+    Unloaded,
+    /// The request named a different session.
+    StaleSession,
+    /// The authoritative membership projection is unavailable.
+    MembershipUnavailable,
+    /// The agent has never belonged to this session.
+    AgentNotFound,
+    /// The known agent is ephemeral and unsupported by this command.
+    UnsupportedEphemeral,
+    /// The saved agent was already absent from current membership.
+    AlreadyUnloaded,
+    /// Another operator request already owns this unload.
+    AlreadyUnloading,
+    /// Current membership has no matching usable live runtime.
+    AgentUnavailable,
+    /// Accepted work prevents non-destructive unload.
+    AgentBusy,
+    /// Semantic publication rejected and the live runtime was restored.
+    TransitionRejected,
+}
+
+impl UnloadSessionAgentOutcome {
+    /// Returns the stable snake-case wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unloaded => "unloaded",
+            Self::StaleSession => "stale_session",
+            Self::MembershipUnavailable => "membership_unavailable",
+            Self::AgentNotFound => "agent_not_found",
+            Self::UnsupportedEphemeral => "unsupported_ephemeral",
+            Self::AlreadyUnloaded => "already_unloaded",
+            Self::AlreadyUnloading => "already_unloading",
+            Self::AgentUnavailable => "agent_unavailable",
+            Self::AgentBusy => "agent_busy",
+            Self::TransitionRejected => "transition_rejected",
+        }
+    }
+}
+
+/// Directed response to [`UnloadSessionAgent`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UnloadSessionAgentResult {
+    /// Correlation id copied from the request.
+    pub request_id: String,
+    /// Session id copied from the request.
+    pub session_id: SessionId,
+    /// Agent id copied from the request.
+    pub agent_id: AgentId,
+    /// Stable terminal request outcome.
+    pub outcome: UnloadSessionAgentOutcome,
+}
+
 /// Success or whole-request failure for one agent-roster snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -1396,6 +1466,7 @@ pub enum HarnessInputMessage {
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
     GetCurrentSession(GetCurrentSession),
     GetSessionAgentList(GetSessionAgentList),
+    UnloadSessionAgent(UnloadSessionAgent),
     UiDebugEventStatsRequest(UiDebugEventStatsRequest),
     UiShutdownRequest(UiShutdownRequest),
     UiTreeRequest(UiTreeRequest),
@@ -1446,6 +1517,7 @@ pub enum HarnessOutputMessage {
     RenderedToolDefinitionsResult(Box<RenderedToolDefinitionsResult>),
     CurrentSessionResult(CurrentSessionResult),
     SessionAgentListResult(Box<SessionAgentListResult>),
+    UnloadSessionAgentResult(UnloadSessionAgentResult),
     ExtensionDataResult(Box<ExtensionDataResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult),

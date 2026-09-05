@@ -21,6 +21,13 @@ journal handles nor persistence capabilities. Read-only inspection constructors
 cannot acquire live mutation authority. This does not change the documented
 cooperative local-extension threat model.
 
+The `tau agent unload` control RPC is restricted to an authenticated attached
+same-user socket UI. Its request and result are directed, transient,
+non-broadcast, non-intercepted, and non-journaled control messages; configured
+extensions receive only the ordinary committed `session.agent_unloaded` fact.
+Admission rejects any target with accepted work, and the command preserves agent
+transcripts and session history rather than editing or deleting durable state.
+
 The disabled-by-default `std-rostra` extension is a trusted same-user
 executable, but every synchronized Rostra field is untrusted external content.
 Rostra signatures authenticate an author key, not instructions or Tau

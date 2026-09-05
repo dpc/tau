@@ -1760,6 +1760,7 @@ impl Harness {
             | HarnessInputMessage::GetRenderedToolDefinitions(_)
             | HarnessInputMessage::GetCurrentSession(_)
             | HarnessInputMessage::GetSessionAgentList(_)
+            | HarnessInputMessage::UnloadSessionAgent(_)
             | HarnessInputMessage::UiDebugEventStatsRequest(_)
             | HarnessInputMessage::UiShutdownRequest(_)
             | HarnessInputMessage::UiTreeRequest(_)

@@ -524,6 +524,11 @@ CLI revalidates the chosen agent against the same category with a second
 snapshot and uses the existing local selection transition. Picker cancellation
 and failure do not retarget the prompt draft. This eligibility projection follows
 [SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
+`tau agent unload <session-id> <agent-id>` is a one-shot attached-socket
+operator command for saved agents. Committed and already-unloaded outcomes
+succeed; typed rejections fail. A timeout, EOF, disconnect, or malformed result
+after request transmission is indeterminate and reports
+`outcome unknown; retry safely`.
 The provider setup CLI owns credential-free per-instance settings publication
 and harness-layout secret initialization. Exact target selection and
 secret-first/settings-last ordering follow

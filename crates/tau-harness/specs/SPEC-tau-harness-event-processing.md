@@ -17,6 +17,16 @@ Changes to event persistence, sequencing authority, replay, or logging behavior
 are subject to
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
+## Operator saved-agent unload
+
+Saved-agent unload preflight atomically installs a runtime-only reservation and
+terminating barrier. The existing immutable `session.agent_unloaded` then
+resolves through ordinary publication and may remain parked in interception
+while the reservation rejects new work. Semantic rejection restores the prior
+live admission state. Successful semantic admission performs the existing
+global provider-cache refresh invalidation, then synchronous membership and
+route retirement, before the harness sends `unloaded`.
+
 ## Event sequencing, interception, and persistence
 
 [SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md)

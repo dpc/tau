@@ -212,6 +212,64 @@ pub(super) fn spawn_daemon(
     spawn_daemon_inner(fixture, socket, status, None)
 }
 
+/// Spawns a deterministic daemon with an exact session id and client budget.
+pub(super) fn spawn_daemon_for_cli_unload(
+    fixture: &DeterministicFixture,
+    socket: &Path,
+) -> DaemonGuard {
+    spawn_daemon_inner_with_cli_override(
+        fixture,
+        socket,
+        tau_harness::SessionLaunchStatus::New,
+        "tau-zulip-bot",
+        2,
+    )
+}
+
+fn spawn_daemon_inner_with_cli_override(
+    fixture: &DeterministicFixture,
+    socket: &Path,
+    status: tau_harness::SessionLaunchStatus,
+    session_id: &str,
+    max_clients: usize,
+) -> DaemonGuard {
+    fixture.mark_daemon_started();
+    let stderr_path = fixture.root().join("daemon-cli-unload.stderr");
+    let stderr = path_std_fs::File::create(&stderr_path).expect("create daemon stderr");
+    let child = Command::new(HARNESS_DAEMON)
+        .env_clear()
+        .env("HOME", fixture.root().join("home"))
+        .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
+        .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))
+        .env("XDG_CACHE_HOME", fixture.root().join("xdg-cache"))
+        .env("XDG_RUNTIME_DIR", fixture.runtime_dir())
+        .env("LANG", "C.UTF-8")
+        .env("TAU_E2E_SESSION_ID", session_id)
+        .env("TAU_E2E_MAX_CLIENTS", max_clients.to_string())
+        .env("TAU_E2E_RUNTIME_CLAIM", "1")
+        .process_group(0)
+        .arg(socket)
+        .arg(fixture.harness_state_dir())
+        .arg(fixture.root().join("config"))
+        .arg(fixture.root().join("state"))
+        .arg(status_label(status))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("spawn deterministic daemon");
+    let pidfd = open_pidfd(child.id()).expect("open deterministic daemon pidfd");
+    let pgid = path_nix_unistd::Pid::from_raw(child.id().try_into().expect("daemon pid fits i32"));
+    DaemonGuard {
+        child: Some(child),
+        completed: false,
+        stderr_path,
+        pgid,
+        pidfd,
+        socket_path: socket.to_path_buf(),
+    }
+}
+
 /// Closed durable cut supported by the deterministic output-length daemon.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum OutputLengthCrashCut {
@@ -453,6 +511,32 @@ pub(super) fn create_agent(
             session_id: "deterministic-e2e-session"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
+            role: "deterministic-e2e".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(prompt.to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some(ctx_id.to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )))?;
+    Ok(())
+}
+
+/// Creates one durable agent in an explicitly named deterministic session.
+pub(super) fn create_agent_in_session(
+    peer: &mut SocketPeer,
+    session_id: &str,
+    ctx_id: &str,
+    prompt: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+        tau_proto::UiCreateAgent {
+            request_id: "deterministic-daemon-create".to_owned(),
+            literal: false,
+            session_id: session_id.parse()?,
             role: "deterministic-e2e".to_owned(),
             model_override: None,
             metadata: Vec::new(),

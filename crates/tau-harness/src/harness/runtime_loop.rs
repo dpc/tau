@@ -782,6 +782,10 @@ impl Harness {
         &mut self,
         reason: tau_proto::ProviderCacheRefreshCancelReason,
     ) {
+        #[cfg(test)]
+        {
+            self.provider_runtime.cache_refresh_clear_count += 1;
+        }
         self.provider_runtime
             .cache_refresh_tool_window_calls
             .clear();

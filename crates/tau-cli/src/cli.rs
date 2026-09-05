@@ -328,9 +328,25 @@ fn parse_canonical_directory(value: &str) -> Result<PathBuf, String> {
 pub enum AgentCommand {
     /// List agents known to a running session.
     List(AgentListArgs),
+    /// Unload one idle saved agent without deleting its transcript or session
+    /// history.
+    ///
+    /// Only durable agents are supported. After the request is sent, timeout or
+    /// disconnect is indeterminate; retrying the same session and agent is
+    /// safe.
+    Unload(AgentUnloadArgs),
     /// Project a validated durable agent snapshot (defaults to compact TOON
     /// lite).
     Trace(AgentTraceArgs),
+}
+
+/// Options for `tau agent unload`.
+#[derive(Args, Clone)]
+pub struct AgentUnloadArgs {
+    /// Running session to mutate.
+    pub session_id: SessionId,
+    /// Saved agent to unload.
+    pub agent_id: tau_proto::AgentId,
 }
 
 /// Options for `tau agent trace`.

@@ -7,6 +7,19 @@ runtime routing and navigation classification, UI roster projection, and
 extension-owned state, so no component-local owner can describe their shared
 lifecycle and recovery invariants coherently.
 
+## Non-destructive saved-agent unload
+
+Operator unload supports durable members only and preserves both the agent
+transcript and complete session membership history. A known durable historical
+member that is already absent is an idempotent success. Unload rejects accepted
+target-owned prompt, provider, tool, wait, compaction, startup, accounting, or
+publication work; membership-scoped ambient state such as timers and navigation
+is retired only after the unload commits.
+The centralized operator-unload classifier is the auditable owner of this
+no-discard rule. Every future target-owned state that ordinary teardown would
+cancel, fail, suppress, clear, or discard must extend that classifier and its
+focused rejection coverage.
+
 Durable session state uses explicit lifecycle preparation. `Resume` requires a
 valid manifest, existing lock, and both strict existing journals. `New` creates
 missing state; valid same-id history is sequence-continued without rehydrating

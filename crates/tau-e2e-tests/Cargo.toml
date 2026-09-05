@@ -30,6 +30,7 @@ nix = { version = "0.29", default-features = false, features = [
 rustix-v1 = { workspace = true, features = ["event", "process"] }
 serde.workspace = true
 serde_json.workspace = true
+tau-cli.workspace = true
 tau-client.workspace = true
 tau-config.workspace = true
 tau-core = { workspace = true, features = ["test-legacy-writer"] }

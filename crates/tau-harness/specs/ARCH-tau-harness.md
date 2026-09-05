@@ -1,5 +1,12 @@
 # ARCH-tau-harness: tau-harness architecture
 
+The attached-socket operator path can unload one saved agent without deleting
+history. The harness classifies only committed in-memory membership, rejects
+targets with accepted work, reserves the exact runtime by marking it
+terminating, and publishes the ordinary `session.agent_unloaded` fact. Semantic
+admission failure rolls the reservation back; commit retires the route before
+the directed success result.
+
 Tau evaluates diagnostic logging and `tracing` sink I/O under
 [ARCH-logging-io-analysis](../../../specs/ARCH-logging-io-analysis.md),
 not as functional protocol, lifecycle, or publication I/O. This exception does

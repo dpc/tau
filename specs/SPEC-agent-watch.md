@@ -31,6 +31,9 @@ body is exactly empty. The fact activates as an isolated watch notification.
 Replay reconstructs transcript context from it but never recreates watch topology
 or fans it out again. Expected one-shot completion, explicit cancellation, preview
 cleanup, and failed auto-start cleanup prune without a lifecycle fact. The harness
+also treats an admitted operator saved-agent unload as expected retirement, so it
+never synthesizes `UnexpectedUnload` for that transition.
+The harness
 installs a runtime barrier for the complete surviving-watcher set before publishing
 any lifecycle fact. Interception may park a fact; pruning waits until every delivery
 has either committed or failed persistence/validation. A failed delivery produces a

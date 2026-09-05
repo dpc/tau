@@ -530,6 +530,9 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
         HarnessOutputMessage::SessionAgentListResult(_) => {
             "message.session_agent_list_result".to_owned()
         }
+        HarnessOutputMessage::UnloadSessionAgentResult(_) => {
+            "message.unload_session_agent_result".to_owned()
+        }
         HarnessOutputMessage::ExtensionDataResult(_) => "message.extension_data_result".to_owned(),
         HarnessOutputMessage::ExternalAgentMessageResult(_) => {
             "message.external_agent_message_result".to_owned()
@@ -562,6 +565,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
         HarnessInputMessage::GetCurrentSession(_) => "get_current_session",
         HarnessInputMessage::GetSessionAgentList(_) => "get_session_agent_list",
+        HarnessInputMessage::UnloadSessionAgent(_) => "unload_session_agent",
         HarnessInputMessage::UiDebugEventStatsRequest(_) => "ui_debug_event_stats_request",
         HarnessInputMessage::UiShutdownRequest(_) => "ui_shutdown_request",
         HarnessInputMessage::UiTreeRequest(_) => "ui_tree_request",

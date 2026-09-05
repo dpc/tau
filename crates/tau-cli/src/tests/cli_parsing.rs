@@ -774,6 +774,23 @@ fn list_agents_command_parses_filters() {
     ));
 }
 
+/// The one-shot unload command requires exact session and agent identifiers.
+#[test]
+fn unload_agent_command_parses_target() {
+    // ast-grep-ignore: limit-rust-symbol-path-depth
+    let cli = crate::cli::Cli::try_parse_from(["tau", "agent", "unload", "session-1", "agent-1"])
+        .expect("valid unload command");
+    assert!(matches!(
+        cli.command,
+        Some(crate::cli::Command::Agent {
+            command: crate::cli::AgentCommand::Unload(crate::cli::AgentUnloadArgs {
+                ref session_id,
+                ref agent_id,
+            }),
+        }) if session_id.as_str() == "session-1" && agent_id.as_str() == "agent-1"
+    ));
+}
+
 /// Agent trace defaults select the compact TOON lite overview and the ordinary
 /// state-directory journal root.
 #[test]

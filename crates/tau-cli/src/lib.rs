@@ -42,6 +42,7 @@ mod ui_commands;
 mod ui_events;
 mod ui_logging;
 mod ui_prompt;
+mod unload_agent;
 mod watch_activity;
 
 use std::sync::{Mutex, MutexGuard};
@@ -906,6 +907,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             DispatchCommand::Other(cli::Command::Agent { command }) => {
                 let command_name = match command {
                     cli::AgentCommand::List(_) => "agent list",
+                    cli::AgentCommand::Unload(_) => "agent unload",
                     cli::AgentCommand::Trace(_) => "agent trace",
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
@@ -1096,6 +1098,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "agent list")?;
                 list_agents::run(&args)
+            }
+            DispatchCommand::Other(cli::Command::Agent {
+                command: cli::AgentCommand::Unload(args),
+            }) => {
+                reject_harness_config_overrides(&harness_config_overrides, "agent unload")?;
+                unload_agent::run(&args)
             }
             DispatchCommand::Other(cli::Command::Agent {
                 command: cli::AgentCommand::Trace(args),

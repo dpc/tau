@@ -325,3 +325,20 @@ fn root_help_documents_short_role_option() {
 
     assert!(help.contains("-r, --role <ROLE>"));
 }
+
+/// Agent-unload help states its durable-only, non-destructive, indeterminate
+/// boundary.
+#[test]
+fn agent_unload_help_documents_operator_safety_contract() {
+    let mut command = Cli::command();
+    let unload = command
+        .find_subcommand_mut("agent")
+        .expect("agent command")
+        .find_subcommand_mut("unload")
+        .expect("unload command");
+    let help = unload.render_long_help().to_string();
+    assert!(help.contains("Only durable agents are supported"));
+    assert!(help.contains("without deleting its transcript or session history"));
+    assert!(help.contains("indeterminate"));
+    assert!(help.contains("retrying the same session and agent is safe"));
+}

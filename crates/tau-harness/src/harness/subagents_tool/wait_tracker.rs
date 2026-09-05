@@ -767,7 +767,6 @@ impl WaitTracker {
     }
 
     /// Report whether an agent owns an installed activating-input waiter.
-    #[cfg(test)]
     pub(super) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {
         self.input_waiters.contains_key(owner)
     }

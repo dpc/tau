@@ -1388,6 +1388,40 @@ fn registration_order_comparisons() -> usize {
 }
 
 impl Harness {
+    /// Returns whether interception or its FIFO retains target-owned accepted
+    /// work.
+    pub(super) fn has_agent_owned_publication(
+        &self,
+        cid: &AgentId,
+        agent_id: &tau_proto::AgentId,
+    ) -> bool {
+        let targets_agent = |event: &Event, sync: Option<&ConversationHeadSync>| {
+            sync.is_some_and(|sync| &sync.cid == cid)
+                || matches!(
+                    event,
+                    Event::AgentMessageReceived(received)
+                        if &received.recipient_id == agent_id
+                )
+        };
+        self.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| targets_agent(&pending.event, pending.sync_head_for.as_ref()))
+            || self
+                .runtime_io
+                .publication
+                .deferred
+                .iter()
+                .any(|pending| targets_agent(&pending.event, pending.sync_head_for.as_ref()))
+            || self
+                .runtime_io
+                .publication
+                .idle_dispatches
+                .iter()
+                .any(|dispatch| &dispatch.cid == cid)
+    }
+
     fn is_synchronized_agent_checkpoint_or_completion(
         event: &Event,
         sync: Option<&ConversationHeadSync>,

@@ -5854,6 +5854,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
+ "tau-cli",
  "tau-client",
  "tau-config",
  "tau-core",

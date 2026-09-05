@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
@@ -24,6 +25,7 @@ use daemon_support::*;
 const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DUMMY_TOOL: &str = env!("CARGO_BIN_EXE_tau-e2e-test-dummy");
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
+const E2E_CLI: &str = env!("CARGO_BIN_EXE_tau-e2e-cli");
 const SHELL_PROBE: &str = env!("CARGO_BIN_EXE_tau-e2e-shell-probe");
 const RESTORE_NOTICE: &str = concat!(
     "Previous session was interrupted and restored. Less than 1 minute has passed ",
@@ -31,6 +33,69 @@ const RESTORE_NOTICE: &str = concat!(
     "Session-scoped tool and extension state may also have changed; inspect current tool state ",
     "and recreate timers or other session-scoped setup if still needed."
 );
+
+/// The exact incident command unloads an idle saved agent through the
+/// deterministic daemon.
+#[test]
+fn deterministic_exact_saved_agent_unload_command() -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "cli-unload",
+        vec![ScenarioLaneV2 {
+            ctx_id: "seed".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "seed idle agent".to_owned(),
+                response: "idle".to_owned(),
+            }],
+        }],
+    );
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_exact_saved_agent_unload_command",
+        &scenario,
+        FAKE_PROVIDER,
+    )?;
+    let config_path = fixture.config_dir().join("harness.yaml");
+    let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    config["agents"]["id_template"] = serde_json::json!("zulip-bot-ngMK");
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
+    let socket = fixture
+        .runtime_dir()
+        .join("tau/harnesses/sockets")
+        .join(blake3::hash(b"tau-zulip-bot").to_hex().to_string())
+        .with_extension("sock");
+    let daemon = spawn_daemon_for_cli_unload(&fixture, &socket);
+    let mut ui = connect_ui(&socket)?;
+    create_agent_in_session(&mut ui, "tau-zulip-bot", "seed", "seed idle agent")?;
+    loop {
+        if matches!(
+            recv_event(&mut ui)?,
+            Event::ProviderResponseFinished(finished)
+                if finished.agent_id.as_str() == "zulip-bot-ngMK"
+        ) {
+            break;
+        }
+    }
+    disconnect_ui(&mut ui)?;
+    drop(ui);
+    let output = Command::new(E2E_CLI)
+        .env_clear()
+        .env("HOME", fixture.root().join("home"))
+        .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
+        .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))
+        .env("XDG_CACHE_HOME", fixture.root().join("xdg-cache"))
+        .env("XDG_RUNTIME_DIR", fixture.runtime_dir())
+        .env("LANG", "C.UTF-8")
+        .args(["agent", "unload", "tau-zulip-bot", "zulip-bot-ngMK"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "exact unload failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    daemon.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
 
 /// Proves the supervised provider sees exactly one replay-safe output-limit
 /// successor whose request retains the source reasoning and internal

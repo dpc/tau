@@ -134,6 +134,9 @@ impl Harness {
                     roster_ever_loaded: HashSet::new(),
                     roster_durable_ever_loaded: HashSet::new(),
                     roster_valid: true,
+                    pending_operator_unloads: HashMap::new(),
+                    #[cfg(test)]
+                    unload_result_after_retirement: false,
                     navigation_modes: HashMap::new(),
                     stopped_ids: HashSet::new(),
                     restored_unavailable: HashMap::new(),

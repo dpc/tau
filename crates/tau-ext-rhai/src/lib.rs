@@ -613,6 +613,7 @@ fn handle_harness_message(
         | HarnessOutputMessage::RenderedToolDefinitionsResult(_)
         | HarnessOutputMessage::CurrentSessionResult(_)
         | HarnessOutputMessage::SessionAgentListResult(_)
+        | HarnessOutputMessage::UnloadSessionAgentResult(_)
         | HarnessOutputMessage::ExtensionDataResult(_)
         | HarnessOutputMessage::ExternalAgentMessageResult(_)
         | HarnessOutputMessage::ExternalAgentMessageAuthResult(_)

@@ -3,6 +3,7 @@
 //!
 //! Watch fanout remains a separate authority from registry membership.
 
+use super::operator_agent_unload::PendingOperatorUnload;
 use super::start_coordinator::{
     MAX_START_QUERY_ID_BYTES, StartCoordinator, StartPhase, StartPhaseOwner,
 };
@@ -54,6 +55,12 @@ pub(crate) struct AgentRegistryState {
     pub(super) pending_start_requests: VecDeque<PendingStartAgentRequest>,
     /// Bounded runtime owner for accepted multi-event startup obligations.
     pub(super) start_coordinator: StartCoordinator,
+    /// Operator unloads reserved between admission and semantic completion.
+    pub(super) pending_operator_unloads: HashMap<AgentId, PendingOperatorUnload>,
+    /// Whether the latest successful unload result observed fully retired
+    /// routing.
+    #[cfg(test)]
+    pub(super) unload_result_after_retirement: bool,
 }
 
 pub(super) fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRuntimeState {

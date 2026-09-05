@@ -2491,6 +2491,11 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             session_id: test_session_id("s1"),
             scope: SessionAgentListScope::History,
         }),
+        HarnessInputMessage::UnloadSessionAgent(UnloadSessionAgent {
+            request_id: "agent-unload-1".to_owned(),
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("agent-1"),
+        }),
         HarnessInputMessage::UiShutdownRequest(UiShutdownRequest {}),
         HarnessInputMessage::UiTreeRequest(UiTreeRequest {
             session_id: test_session_id("s1"),
@@ -2636,6 +2641,12 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                 }],
             },
         })),
+        HarnessOutputMessage::UnloadSessionAgentResult(UnloadSessionAgentResult {
+            request_id: "agent-unload-1".to_owned(),
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("agent-1"),
+            outcome: UnloadSessionAgentOutcome::AgentBusy,
+        }),
         HarnessOutputMessage::ExtensionDataResult(Box::new(ExtensionDataResult {
             request_id: "ext-data-1".to_owned(),
             result: ExtensionDataResultPayload::Ok {
@@ -3277,6 +3288,59 @@ fn representative_directional_messages_round_trip_through_cbor() {
         let decoded = decode_harness_output_from_slice(&encoded).expect("output should decode");
         assert_eq!(decoded, message);
     }
+}
+
+/// Saved-agent unload control messages and every terminal outcome keep exact
+/// wire spellings.
+#[test]
+fn saved_agent_unload_wire_contract_is_exact() {
+    let request = HarnessInputMessage::UnloadSessionAgent(UnloadSessionAgent {
+        request_id: "request-1".to_owned(),
+        session_id: test_session_id("session-1"),
+        agent_id: agent_id("agent-1"),
+    });
+    assert_eq!(
+        serde_json::to_value(&request).expect("serialize request"),
+        serde_json::json!({
+            "message": "unload_session_agent",
+            "payload": {
+                "request_id": "request-1",
+                "session_id": "session-1",
+                "agent_id": "agent-1"
+            }
+        })
+    );
+    let outcomes = [
+        UnloadSessionAgentOutcome::Unloaded,
+        UnloadSessionAgentOutcome::StaleSession,
+        UnloadSessionAgentOutcome::MembershipUnavailable,
+        UnloadSessionAgentOutcome::AgentNotFound,
+        UnloadSessionAgentOutcome::UnsupportedEphemeral,
+        UnloadSessionAgentOutcome::AlreadyUnloaded,
+        UnloadSessionAgentOutcome::AlreadyUnloading,
+        UnloadSessionAgentOutcome::AgentUnavailable,
+        UnloadSessionAgentOutcome::AgentBusy,
+        UnloadSessionAgentOutcome::TransitionRejected,
+    ];
+    for outcome in outcomes {
+        let response = HarnessOutputMessage::UnloadSessionAgentResult(UnloadSessionAgentResult {
+            request_id: "request-1".to_owned(),
+            session_id: test_session_id("session-1"),
+            agent_id: agent_id("agent-1"),
+            outcome,
+        });
+        let value = serde_json::to_value(&response).expect("serialize response");
+        assert_eq!(value["message"], "unload_session_agent_result");
+        assert_eq!(value["payload"]["outcome"], outcome.as_str());
+        let decoded: HarnessOutputMessage =
+            serde_json::from_value(value).expect("decode exact response");
+        assert_eq!(decoded, response);
+    }
+    let decoded: HarnessInputMessage = serde_json::from_value(
+        serde_json::to_value(request.clone()).expect("serialize exact request"),
+    )
+    .expect("decode exact request");
+    assert_eq!(decoded, request);
 }
 
 /// Pre-materialization prompt failures are live runtime terminals and must

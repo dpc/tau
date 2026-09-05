@@ -32,6 +32,9 @@ pub(crate) struct ProviderRuntimeState {
         HashMap<tau_proto::ProviderName, VecDeque<tau_proto::ProviderQuotaEpoch>>,
     /// Provider connection owning each in-flight prompt request.
     pub(super) pending_prompts: HashMap<AgentPromptId, tau_proto::ConnectionId>,
+    /// Number of global cache-refresh invalidations in focused lifecycle tests.
+    #[cfg(test)]
+    pub(super) cache_refresh_clear_count: usize,
 }
 
 impl ProviderRuntimeState {
@@ -49,6 +52,8 @@ impl ProviderRuntimeState {
             quota_tombstones: HashMap::new(),
             quota_retired_epochs: HashMap::new(),
             pending_prompts: HashMap::new(),
+            #[cfg(test)]
+            cache_refresh_clear_count: 0,
         }
     }
 }

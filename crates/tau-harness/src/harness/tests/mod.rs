@@ -83,6 +83,7 @@ enum TestMessage {
     RenderedToolDefinitionsResult(Box<tau_proto::RenderedToolDefinitionsResult>),
     CurrentSessionResult(tau_proto::CurrentSessionResult),
     SessionAgentListResult(Box<tau_proto::SessionAgentListResult>),
+    UnloadSessionAgentResult(tau_proto::UnloadSessionAgentResult),
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
@@ -148,6 +149,9 @@ impl TestProtocolItem {
             HarnessOutputMessage::SessionAgentListResult(message) => {
                 Self::Message(TestMessage::SessionAgentListResult(message))
             }
+            HarnessOutputMessage::UnloadSessionAgentResult(message) => {
+                Self::Message(TestMessage::UnloadSessionAgentResult(message))
+            }
             HarnessOutputMessage::ExtensionDataResult(message) => {
                 Self::Message(TestMessage::ExtensionDataResult(message))
             }
@@ -207,6 +211,7 @@ impl TestMessage {
             | Self::RenderedToolDefinitionsResult(_)
             | Self::CurrentSessionResult(_)
             | Self::SessionAgentListResult(_)
+            | Self::UnloadSessionAgentResult(_)
             | Self::ExtensionDataResult(_)
             | Self::ExternalAgentMessageResult(_)
             | Self::ExternalAgentMessageAuthResult(_)
@@ -2435,6 +2440,7 @@ fn draft_event(text: &str) -> Event {
 
 mod action;
 mod agent_list;
+mod agent_unload;
 mod agent_watch_wait;
 mod dedup;
 mod dispatch;

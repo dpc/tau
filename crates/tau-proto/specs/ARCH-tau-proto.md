@@ -75,6 +75,11 @@ event persistence or the harness-extension interface require the explicit
 confirmation mandated by
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
+Saved-agent operator unload uses dedicated `UnloadSessionAgent` and
+`UnloadSessionAgentResult` control messages. They are directed and transient,
+not generic events; the only extension-visible or durable semantic transition
+remains `session.agent_unloaded`.
+
 Detailed turn activity is a required transient field in complete
 `agent.stats_updated` snapshots and an optional field in live roster entries.
 Tool declarations classify active calls through the reserved

@@ -1087,9 +1087,8 @@ impl Harness {
             .wait_claimed_for_manual_compaction(owner, call_id)
     }
 
-    #[cfg(test)]
     /// Reports whether one agent owns an installed input waiter.
-    pub(crate) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {
+    pub(super) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {
         self.agent_runtime
             .subagents
             .wait_tracker

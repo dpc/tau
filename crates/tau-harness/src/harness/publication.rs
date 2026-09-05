@@ -2404,6 +2404,12 @@ impl Harness {
         let append_outcome = match append_result {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
+                let rejected_operator_unload = matches!(&event, Event::SessionAgentUnloaded(unloaded)
+                        if self.agent_runtime.agent_registry.pending_operator_unloads
+                            .contains_key(&unloaded.agent_id));
+                if let Event::SessionAgentUnloaded(unloaded) = &event {
+                    self.reject_pending_operator_unload(unloaded);
+                }
                 if let Some(call_id) = canonical_tool_terminal_call_id(&event)
                     && let Some(pending) = self
                         .tool_routing
@@ -2458,6 +2464,7 @@ impl Harness {
                             .contains(&unloaded.agent_id)
                 );
                 if !rejected_failed_start_unload
+                    && !rejected_operator_unload
                     && semantic_event_router::session_membership_id_for_event(&event).is_some_and(
                         |session_id| session_id == self.session_runtime.current_session_id,
                     )
@@ -2520,6 +2527,15 @@ impl Harness {
                 return;
             }
         };
+        if let Event::SessionAgentUnloaded(unloaded) = &event
+            && self
+                .agent_runtime
+                .agent_registry
+                .pending_operator_unloads
+                .contains_key(&unloaded.agent_id)
+        {
+            self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::AgentUnloaded);
+        }
         let seq = self.runtime_io.event_log.reserve_seq();
         #[cfg(test)]
         {

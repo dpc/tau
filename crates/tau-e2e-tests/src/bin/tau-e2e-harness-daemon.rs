@@ -66,6 +66,13 @@ struct DaemonArgs {
     test_dummy: bool,
     /// Optional fixture-only output-length persistence cut.
     output_length_cut: Option<(OutputLengthCommitCut, PathBuf)>,
+    /// Optional exact session identity selected by a focused CLI acceptance
+    /// test.
+    session_id: String,
+    /// Number of socket clients served before deterministic exit.
+    max_clients: usize,
+    /// Whether this focused daemon publishes normal session runtime discovery.
+    runtime_claim: bool,
 }
 
 /// Parses the closed deterministic-daemon command line before mutating process
@@ -129,6 +136,13 @@ fn parse_daemon_args() -> Result<DaemonArgs, Box<dyn std::error::Error>> {
         provider_mode,
         test_dummy,
         output_length_cut,
+        session_id: std::env::var("TAU_E2E_SESSION_ID")
+            .unwrap_or_else(|_| provider_mode.session_id().to_owned()),
+        max_clients: std::env::var("TAU_E2E_MAX_CLIENTS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1),
+        runtime_claim: std::env::var_os("TAU_E2E_RUNTIME_CLAIM").is_some(),
     })
 }
 
@@ -194,6 +208,9 @@ fn launch_daemon(args: DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
         provider_mode,
         test_dummy,
         output_length_cut: _,
+        session_id,
+        max_clients,
+        runtime_claim,
     } = args;
     let status = match status.to_str() {
         Some("new") => tau_harness::SessionLaunchStatus::New,
@@ -210,12 +227,28 @@ fn launch_daemon(args: DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_current_dir(&cwd)?;
         allowed_extensions.insert(tau_proto::ExtensionName::parse("core-shell")?);
     }
+    let parsed_session_id: tau_proto::SessionId = session_id.parse()?;
+    let mut claim = runtime_claim
+        .then(|| {
+            tau_harness::runtime_dir::claim_session(
+                &std::env::current_dir()?.canonicalize()?,
+                &parsed_session_id,
+            )
+        })
+        .transpose()?;
+    if let Some(claim) = claim.as_mut() {
+        if claim.socket_path().as_os_str() != socket.as_os_str() {
+            return Err("runtime claim socket differs from requested daemon socket".into());
+        }
+        claim.reclaim_stale_socket()?;
+        claim.publish(false)?;
+    }
     tau_harness::run_daemon_with_internal_tools(
         PathBuf::from(socket),
         PathBuf::from(harness_state),
-        provider_mode.session_id(),
+        &session_id,
         tau_harness::ServeOptions::builder()
-            .max_clients(1usize)
+            .max_clients(max_clients)
             .session_status(status)
             .dirs(tau_config::settings::TauDirs {
                 config_dir: Some(PathBuf::from(config_dir)),
@@ -226,5 +259,8 @@ fn launch_daemon(args: DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
             .build(),
         tau_harness_tools::builtin_handlers(),
     )?;
+    if let Some(claim) = claim {
+        claim.retire()?;
+    }
     Ok(())
 }

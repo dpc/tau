@@ -4068,6 +4068,13 @@ impl Harness {
         if let Event::SessionAgentUnloaded(unloaded) = event
             && unloaded.session_id == self.session_runtime.current_session_id
         {
+            self.clear_agent_runtime_indicators_for_agent(&unloaded.agent_id);
+            self.peer_messaging
+                .peer_input_rate
+                .remove(&unloaded.agent_id);
+            self.peer_messaging
+                .uncommitted_peer_auto_starts
+                .remove(&unloaded.agent_id);
             let reason = self
                 .agent_runtime
                 .agent_watch
@@ -4147,6 +4154,9 @@ impl Harness {
                 .remove(&cid);
             self.agent_runtime.agent_registry.agents.remove(&cid);
             self.cancel_agent_synchronized_publications(&cid);
+        }
+        if let Event::SessionAgentUnloaded(unloaded) = event {
+            self.finish_pending_operator_unload(unloaded);
         }
         if let Event::StartAgentResult(result) = event {
             self.notify_watchers_about_start_agent_result(result);

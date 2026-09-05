@@ -6,6 +6,16 @@ Session-facing event contracts span protocol DTOs, serde names, `EventName`
 constants, harness routing and persistence, and multiple client projections, so
 no one implementation area can describe their shared wire and lifecycle invariants.
 
+## Saved-agent unload control
+
+An authenticated attached socket UI may request one saved-agent unload with a
+directed, transient, non-broadcast, non-intercepted, and non-journaled RPC and
+result. Its typed result distinguishes stale or unavailable membership, unknown
+and ephemeral agents, already-unloaded or concurrently unloading targets, busy
+or unavailable live agents, semantic rejection, and committed unload. The
+canonical membership fact remains the existing durable
+`session.agent_unloaded`; the RPC adds no event family.
+
 ## Event names and routing
 
 `Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.

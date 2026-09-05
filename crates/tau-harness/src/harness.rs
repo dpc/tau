@@ -1424,6 +1424,7 @@ mod extension_activation;
 mod extension_lifecycle;
 mod harness_config_state;
 mod notification_delivery;
+mod operator_agent_unload;
 mod ordinary_no_tool_terminal_reducer;
 mod output_length_continuation_reducer;
 mod peer_messaging;
@@ -2998,6 +2999,12 @@ impl Harness {
             HarnessInputMessage::GetSessionAgentList(request) => {
                 if self.is_ui_client(client_id) {
                     self.send_session_agent_list_result(client_id, request);
+                }
+                Ok(ClientMessageDisposition::Continue)
+            }
+            HarnessInputMessage::UnloadSessionAgent(request) => {
+                if self.is_attached_socket_ui(client_id) {
+                    self.handle_unload_session_agent(client_id, request);
                 }
                 Ok(ClientMessageDisposition::Continue)
             }
