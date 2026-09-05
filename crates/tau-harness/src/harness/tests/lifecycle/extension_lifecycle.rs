@@ -8342,3 +8342,43 @@ fn introduction_notice_is_enabled_directed_and_process_local() {
         replayable_notices_before
     );
 }
+
+/// Ensures onboarding directs a user to provider setup when no accepted model
+/// routes remain after the provider's canonical replacement declaration.
+#[test]
+fn introduction_notice_guides_setup_without_accepted_provider_models() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let provider_id = h
+        .extension_connection_id("provider")
+        .expect("echo provider")
+        .to_owned();
+    h.handle_extension_event(
+        &provider_id,
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared { models: Vec::new() },
+        )),
+    )
+    .expect("withdraw provider models");
+    assert!(h.provider_runtime.model_info.is_empty());
+
+    let (server_end, client_end) = UnixStream::pair().expect("pair");
+    let client_id = h.accept_client(server_end).expect("accept client");
+    h.send_introduction_notice_to_initial_client(Some(&client_id));
+
+    let mut reader = HarnessOutputReader::new(BufReader::new(client_end));
+    let message = reader
+        .read_message()
+        .expect("read introduction")
+        .expect("introduction frame");
+    let HarnessOutputMessage::Deliver(delivery) = message else {
+        panic!("expected delivery frame");
+    };
+    let Event::HarnessNotice(notice) = delivery.event() else {
+        panic!("expected harness notice");
+    };
+    assert_eq!(
+        notice.message,
+        "Welcome to Tau! No usable LLM provider is available. Run `tau provider add`, then restart Tau."
+    );
+}

@@ -1780,7 +1780,8 @@ impl Harness {
     }
 
     /// Sends the process-local onboarding hint only to the spawning interactive
-    /// UI.
+    /// UI, directing setup when no accepted provider model routes are
+    /// available.
     pub(crate) fn send_introduction_notice_to_initial_client(
         &mut self,
         initial_client_id: Option<&tau_proto::ConnectionId>,
@@ -1792,12 +1793,17 @@ impl Harness {
         }) else {
             return;
         };
+        let message = if self.provider_runtime.model_info.is_empty() {
+            "Welcome to Tau! No usable LLM provider is available. Run `tau provider add`, then restart Tau."
+        } else {
+            "Welcome to Tau! Ask your model to introduce you to Tau."
+        };
         self.send_direct_harness_notice(
             client_id,
             tau_proto::notice_kind::HARNESS_INTRODUCTION,
             tau_proto::NoticeLevel::Info,
             tau_proto::NoticePurpose::Diagnostic,
-            "Welcome to Tau! Ask your model to introduce you to Tau.".to_owned(),
+            message.to_owned(),
         );
     }
 
