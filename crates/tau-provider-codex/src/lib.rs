@@ -1496,6 +1496,7 @@ fn model_info(
     mode: responses::ResponsesMode,
 ) -> ProviderModelInfo {
     let prices = estimated_api_prices(model);
+    let publishes_explicit_cache_prices = model == "gpt-6-astra";
     ProviderModelInfo {
         id: ModelId::new(provider.clone(), ModelName::new(model)),
         display_name: None,
@@ -1552,8 +1553,11 @@ fn model_info(
         standalone_compaction_prefix_budget: None,
         cache_policy: Some(private_response_chain_cache_policy()),
         est_uncached_input_cost_1m_usd: Some(prices.uncached_input),
-        est_cached_input_cost_1m_usd: None,
-        est_cache_write_input_cost_1m_usd: None,
+        est_cached_input_cost_1m_usd: publishes_explicit_cache_prices
+            .then_some(prices.cached_input),
+        est_cache_write_input_cost_1m_usd: publishes_explicit_cache_prices
+            .then_some(prices.cache_write_input)
+            .flatten(),
         est_output_cost_1m_usd: Some(prices.output),
         est_cache_storage_cost_1m_token_hour_usd: None,
     }
@@ -1593,6 +1597,7 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
     use tau_proto::{EstimatedApiCostRates, EstimatedUsdPerMillion as Price};
 
     let (uncached, cached, output) = match model {
+        "gpt-6-astra" => (10_000_000, 1_000_000, 50_000_000),
         "gpt-5.6-sol" | "gpt-5.5" => (5_000_000, 500_000, 30_000_000),
         "gpt-5.6-terra" => (2_000_000, 200_000, 12_000_000),
         "gpt-5.6-luna" => (200_000, 20_000, 1_200_000),
@@ -1604,9 +1609,13 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
     EstimatedApiCostRates {
         uncached_input: Price::from_micro_usd(uncached),
         cached_input: Price::from_micro_usd(cached),
-        cache_write_input: model
-            .starts_with("gpt-5.6")
-            .then(|| Price::from_micro_usd(uncached.saturating_mul(5) / 4)),
+        cache_write_input: if model == "gpt-6-astra" {
+            Some(Price::from_micro_usd(12_500_000))
+        } else {
+            model
+                .starts_with("gpt-5.6")
+                .then(|| Price::from_micro_usd(uncached.saturating_mul(5) / 4))
+        },
         output: Price::from_micro_usd(output),
         storage_per_million_token_hour: None,
     }

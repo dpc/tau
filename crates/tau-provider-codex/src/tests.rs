@@ -419,6 +419,47 @@ fn chatgpt_models_publish_basic_non_cache_prices() {
     assert_eq!(mini.output.as_micro_usd(), 4_500_000);
 }
 
+/// Astra aliases publish all standard short-context equivalent API rates, and
+/// those rates independently price ordinary input, cache reads, cache writes,
+/// and output.
+#[test]
+fn astra_aliases_publish_and_calculate_all_standard_prices() {
+    for provider in ["chatgpt", "work-chatgpt"] {
+        let model = models_for_provider(&ProviderName::new(provider))
+            .into_iter()
+            .find(|model| model.id.model.as_str() == "gpt-6-astra")
+            .expect("Astra model");
+        let rates = model.estimated_api_cost_rates();
+
+        assert_eq!(rates.uncached_input.as_micro_usd(), 10_000_000);
+        assert_eq!(rates.cached_input.as_micro_usd(), 1_000_000);
+        assert_eq!(
+            rates
+                .cache_write_input
+                .expect("published cache-write price")
+                .as_micro_usd(),
+            12_500_000
+        );
+        assert_eq!(rates.output.as_micro_usd(), 50_000_000);
+
+        let usage = tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 3_000_000,
+            prompt_cached_tokens: 1_000_000,
+            cache: Some(Box::new(tau_proto::ProviderCacheUsage {
+                read_tokens: Some(1_000_000),
+                write_tokens: Some(1_000_000),
+                ..tau_proto::ProviderCacheUsage::default()
+            })),
+            response_received_tokens: 1_000_000,
+            ..tau_proto::ProviderTokenUsage::default()
+        };
+        assert_eq!(
+            tau_proto::EstimatedApiCost::for_usage(&usage, rates).as_picodollars(),
+            73_500_000_000_000
+        );
+    }
+}
+
 /// Proves the private route publishes only its conservative response-chain
 /// capability and leaves undocumented TTL, quota, and privacy facts unknown.
 #[test]

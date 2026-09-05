@@ -17,8 +17,11 @@ routing snapshot excludes credentials, normalizes loopback ports and elapsed
 microseconds, and otherwise records complete published models, resolved
 controls, and ordered events emitted through the production Responses and Chat
 Completions seams.
-The September 4, 2026 user-approved `gpt-6-astra` catalog addition refreshes
-that routing snapshot with Astra's conservative fallback cost metadata. The
+The September 4, 2026 user-approved `gpt-6-astra` catalog addition refreshed
+that routing snapshot with Astra's initial conservative fallback cost metadata.
+The September 5, 2026 pricing correction replaces it with Astra's explicit
+standard short-context API-equivalent ordinary-input, cached-read, cache-write,
+and output rates while leaving private subscription billing unspecified. The
 September 5 mapping migration additionally records Astra's exact supported
 reasoning levels and changes the portable cut points published for affected
 models.

@@ -621,8 +621,10 @@
           ]
         }
       },
-      "est_output_cost_1m_usd": "30",
-      "est_uncached_input_cost_1m_usd": "5",
+      "est_cache_write_input_cost_1m_usd": "12.5",
+      "est_cached_input_cost_1m_usd": "1",
+      "est_output_cost_1m_usd": "50",
+      "est_uncached_input_cost_1m_usd": "10",
       "hosted_tool_capabilities": [
         {
           "access_modes": [

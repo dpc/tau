@@ -465,10 +465,14 @@ creates a new observation generation, and each generation authorizes at most one
 attempt; failure never creates a prompt retry. Keys, evidence, jitter, and
 lifecycle state are process-only and never journaled or restored.
 
-Hardcoded ChatGPT/Codex ordinary-input and output comparison prices come from OpenAI's provider-owned
-[API pricing table](https://developers.openai.com/api/docs/pricing). Configured
-compatible providers own their explicit values; refresh those profile fields from
-that provider's basic public pricing table. The built-in Chat Completions
+Hardcoded ChatGPT/Codex comparison prices come from OpenAI's provider-owned
+[API pricing table](https://developers.openai.com/api/docs/pricing). Astra
+publishes its standard short-context ordinary-input, cached-read, cache-write,
+and output rates. These are API-equivalent estimates, not private subscription
+billing; they exclude Astra's long-context and service-tier variants. Other
+private ChatGPT models continue to omit cache rates. Configured compatible
+providers own their explicit values; refresh those profile fields from that
+provider's basic public pricing table. The built-in Chat Completions
 provider ships default prices for known compatible model ids without explicit
 profile fields: `deepseek-v4-flash` uses DeepSeek's
 [standard API prices](https://api-docs.deepseek.com/quick_start/pricing)

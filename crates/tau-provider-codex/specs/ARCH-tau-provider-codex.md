@@ -189,7 +189,11 @@ effective input maximum.
 
 The same model metadata publishes fixed-point equivalent API prices from
 OpenAI's basic public pricing table. This estimate deliberately excludes tiers,
-cache writes, service variants, subscriptions, and private-route accounting.
+service variants, subscriptions, and private-route accounting. Most private
+models omit cache prices because public API prices do not establish private
+route billing. Astra deliberately publishes all four standard short-context
+API-equivalent rates, including cache reads and writes; its metadata cannot
+represent the separate long-context tier.
 
 ## Prompt-cache identity
 
