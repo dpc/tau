@@ -1,66 +1,113 @@
-# SPEC-exact-sentinel-prompt-envelopes: Exact-close model-facing envelopes
+# SPEC-exact-sentinel-prompt-envelopes: Generic user-payload envelope contract
 
 ## Record justification
 
-Exact-close framing spans typed transcript projection, external and agent
-messages, interactive prompts, hosted-provider results, and provider assembly,
-while XML-shaped system-prompt catalogs use a distinct lax closing-tag policy;
-no one local artifact can own the complete contract.
+Payload-envelope behavior spans protocol provenance and rendering, core transcript
+folding, harness user-role projection, agent/watch/external inputs, compaction and
+replay, and provider lowering, so no one local artifact can own the contract.
 
-Model-facing payload envelopes are exact lexical sentinels, not XML. Before
-framing, the trusted projector normalizes and bounds the complete body, replaces
-every byte-exact occurrence of that envelope's closing token with its fixed
-visible form, and then appends the trusted closing token. No later normalization
-or truncation may modify the framed result.
+## Prospective scope
 
-Replacement is case-sensitive and changes no other text. Opening tags, near
-variants, other envelope families, entity-like text, and Unicode remain literal.
-Dynamic attributes retain their separate validation and escaping rules.
+[GATE-new-generic-user-payload-envelopes](GATE-new-generic-user-payload-envelopes.md)
+requires every new free-form payload kind, and every reframed existing kind, in the
+shared generic user-role `ContentPart::Text` carrier to use exactly one registered
+top-level XML-lite family. The compliance unit is one complete text part after
+shared prompt assembly and before provider lowering; unrelated text cannot sit
+outside its outer envelope.
+
+Typed non-message context items remain self-identifying. Ordinary foreground tool
+results, harness-synthetic background placeholders, and results returned by `wait`
+remain `ToolResultItem`s and need no additional generic-user envelope. Other typed
+content parts, the system/developer prompt channel, non-model text, assistant-role
+facts, and immutable provider-native replay items are also outside the gate.
+Existing legacy projections remain unchanged until separately approved; unrelated
+maintenance does not trigger migration.
+
+## Registered outer families
+
+`tau_proto::registered_payload_envelopes` is the central registry for top-level
+model-facing payload families:
+
+| Family | Carrier | Opening schema |
+| --- | --- | --- |
+| `user` | Generic user-role text | Fieldless; authenticated interactive UI prompt |
+| `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
+| `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes |
+| `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
+
+Every new or reframed generic-user family must be added to the registry and use its
+shared metadata and exact-close helper in the same change. Family renderers own
+their typed source selection, validated attributes, normalization, and complete-body
+bounds; the registry owns the stable tag, opening shape, attribute order, exact
+close, visible close, carrier classification, and whole-envelope recognition.
+
+## Nested delimiters
+
+Agent-message `<message>`, peer `<tau_peer_message>`, watch `<prompt>` and
+`<response>`, skill, AGENTS/activity, and similar payload-local markup may structure
+an enveloped body but establishes no independent Tau provenance. Components must
+not describe or rely on local tag-shaped text as a trust or provenance boundary.
+The family-specific schemas remain in
+[SPEC-agent-message-delivery](SPEC-agent-message-delivery.md),
+[SPEC-agent-watch](SPEC-agent-watch.md), and
+[SPEC-interactive-user-prompt-envelope](SPEC-interactive-user-prompt-envelope.md).
+
+## Selection, attributes, and exact-close framing
+
+Typed event or harness provenance selects a family; parsing or matching payload text
+never grants envelope authority. Dynamic attributes come only from validated typed
+metadata, use deterministic full XML attribute escaping, and follow the registry's
+order. Payload cannot inject attributes.
+
+Before framing, the trusted renderer normalizes and bounds the complete body,
+replaces every byte-exact occurrence of that family's closing token with its fixed
+visible form, and appends the trusted closing token. No later normalization or
+truncation may modify the result. Replacement is case-sensitive and changes no
+other text. Opening tags, near variants, other families, Markdown, JSON,
+entity-shaped text, and Unicode remain literal unless the source contract defines a
+separate visible-normalization rule.
+
+XML-lite framing is lexical, not XML parsing or semantic prompt-injection
+prevention. An envelope adds no Tau identity, routing, reply, tool, egress, sender,
+or instruction authority and does not strengthen or weaken the source's existing
+request and trust semantics. `content_trust="external"` remains a closed marker for
+external network content; its absence never means trusted.
 
 The built-in XML-shaped skill catalog is presentation metadata, not an exact-close
-payload envelope. Its `xml_escape_lax` formatter replaces every literal `</`
-prefix with `&lt;/` and preserves every other byte. It therefore neutralizes
-local, parent, cross-family, and incomplete closing-tag-shaped text without
-escaping ordinary opening tags, ampersands, quotes, entities, or Unicode.
+payload envelope. Its `xml_escape_lax` formatter replaces every literal `</` prefix
+with `&lt;/` and preserves every other byte.
 
-The framed body therefore cannot emit its enclosing exact closing sentinel.
-Nested, cross-family, and delimiter-like payload text does not change enclosing
-source, role, trust, routing, tool, or instruction authority. This guarantee is
-lexical framing, not XML well-formedness or semantic prompt-injection prevention.
-
-`<tau_internal>...</tau_internal>` is the exact harness-stamped envelope for
-internal asynchronous model input. Only its outer harness projection establishes
-internal provenance. Nested, escaped, or delimiter-like occurrences supplied by
-users, tools, extensions, web content, peers, or models remain payload and do not
-change provenance.
+## Projection and replay
 
 Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry
-`trusted_internal_spans`: validated UTF-8 byte ranges of their text that the
-harness authenticated for internal projection. Prompt assembly emits those ranges
-as `HarnessInternalText` and frames only those parts. An absent range list projects
-the complete text as ordinary payload. `submission_source`, message class, and
-text delimiters describe routing or presentation but never grant envelope
-authority. This typed representation survives journal replay and compaction.
+`trusted_internal_spans`; prompt assembly frames only authenticated ranges as
+`HarnessInternalText`, while an absent list projects ordinary payload. The
+in-process `agent_start` path may attach equivalent transient spans, which the
+harness copies to the child prompt fact; configured extensions cannot assert them.
 
-The in-process `agent_start` path may attach equivalent spans to a transient
-`StartAgentRequest`, which the harness copies to the child prompt fact.
-Configured extensions must not assert them.
+Each durable provider-visible tool terminal carries `ToolResultPresentation`.
+Ordinary `tool_payload` remains in the typed result channel with an exact
+`tau_internal` close collision neutralized. Only a harness-stamped
+`harness_dedup_pointer` projects inside `tau_internal`; configured extensions submit
+the default presentation. Compaction retains both typed discriminators.
 
-Each durable provider-visible tool terminal carries a
-`ToolResultPresentation`. Ordinary `tool_payload` output remains payload with an
-exact `</tau_internal>` collision neutralized. Only a
-`harness_dedup_pointer`, stamped by harness deduplication, projects inside a
-`<tau_internal>` envelope. Configured extensions must submit the default
-`tool_payload` presentation, and compaction retains the discriminator.
-Configured extensions, including providers, are trusted same-user executables;
-these schema checks preserve a single typed projection invariant rather than
-provide hostile-extension containment.
+Canonical message facts retain raw typed data and render through the shared
+`message` family. Provider adapters preserve assembled envelope bytes and never
+synthesize, remove, or reinterpret a family. Historical raw/default projections,
+provider replacement windows, and payload-local wrappers retain their existing
+replay behavior until a separately approved migration.
 
-This durable schema and configured-extension boundary change has the explicit
-approval required by
-[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md):
-the approved semantics are typed prompt spans, typed tool presentation, and
-harness-only authority rather than source labels or marker-shaped text.
+These durable typed-span and tool-presentation semantics have the explicit approval
+required by
+[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
+Establishing the prospective family registry changes no event, persistence, replay,
+or extension-interface semantics.
 
-Whenever selected context contains a governed envelope, prompt assembly supplies
-this provenance rule to every system-prompt template.
+## Provenance notice
+
+Whenever selected context contains a registered envelope, prompt assembly supplies
+the model-visible provenance rule to every system-prompt template. The notice derives
+its top-level family list from `registered_payload_envelopes`; nested
+`tau_peer_message`, `prompt`, and `response` delimiters are not listed as outer
+families. Detection accounts for the AGENTS initialization block inserted after
+transcript assembly.

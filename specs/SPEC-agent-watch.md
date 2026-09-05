@@ -221,3 +221,5 @@ durable canonical response rather than promoting it to a final.
 The attempt is the canonical response's durable `provider_attempt`, not a
 continuation ordinal or a replay-time count. Cold restore reconstructs the
 snapshot without refanning a historical live occurrence.
+
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).

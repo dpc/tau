@@ -304,3 +304,5 @@ and blocker answers and provides agent-scoped `task_info`, `task_update`, and
 history, updates, and acknowledgements are
 process-memory-only and reset on extension restart.
 See [Configuring extensions: Tau Swarm](docs/extensions.md#tau-swarm).
+
+Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.

@@ -2798,6 +2798,10 @@ fn oversized_decoded_text_is_rejected() {
 /// every supported adapter/operation path.
 #[test]
 fn web_content_projection_uses_exact_closed_attributes_for_all_paths() {
+    assert_eq!(
+        tau_proto::TAU_WEB_CONTENT_PAYLOAD_ENVELOPE.ordered_attributes,
+        &["adapter", "operation", "content_trust"]
+    );
     for (adapter, operation, expected) in [
         (
             WebAdapter::Exa,
@@ -2850,9 +2854,17 @@ fn web_content_projection_uses_exact_closed_attributes_for_all_paths() {
             "<tau_web_content adapter=\"firecrawl\" operation=\"fetch\" content_trust=\"external\">provider claim</tau_web_content>",
         ),
     ] {
+        let projected = project_web_content(adapter, operation, "provider claim").expect("project");
+        assert_eq!(projected, expected);
+        let opening = projected.split_once('>').expect("opening sentinel").0;
+        let attributes = opening
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|field| field.split_once('=').map(|(name, _)| name))
+            .collect::<Vec<_>>();
         assert_eq!(
-            project_web_content(adapter, operation, "provider claim").expect("project"),
-            expected
+            attributes,
+            tau_proto::TAU_WEB_CONTENT_PAYLOAD_ENVELOPE.ordered_attributes
         );
     }
 }
@@ -2904,8 +2916,16 @@ fn web_content_projection_enforces_exact_final_size_boundary() {
 /// bound and an oversize result remains a clear ToolError.
 #[test]
 fn post_escape_oversize_result_is_rejected_without_truncation() {
-    let searcher =
-        StubSearcher::ok(WEB_CONTENT_CLOSE.repeat(TOOL_OUTPUT_MAX_BYTES / WEB_CONTENT_CLOSE.len()));
+    let searcher = StubSearcher::ok(
+        tau_proto::TAU_WEB_CONTENT_PAYLOAD_ENVELOPE
+            .exact_close
+            .repeat(
+                TOOL_OUTPUT_MAX_BYTES
+                    / tau_proto::TAU_WEB_CONTENT_PAYLOAD_ENVELOPE
+                        .exact_close
+                        .len(),
+            ),
+    );
     let event = dispatch_exa(
         ToolStarted {
             invocation_policy: tau_proto::ToolInvocationPolicy::default(),

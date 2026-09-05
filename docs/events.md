@@ -1129,3 +1129,5 @@ recipients and other start paths retain their existing navigation behavior.
   keeps the same logical attempt, counts no request, and finalizes only the
   previously absent usage, backend, and cost from the same live provider
   generation.
+
+Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.

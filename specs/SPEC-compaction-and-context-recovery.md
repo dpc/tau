@@ -579,3 +579,5 @@ output-length continuation; prose or tool output cannot. Standalone compaction
 preserves the incomplete terminal for accounting but never splices its partial
 window or retries it automatically. Unknown incomplete reasons remain provider
 failures.
+
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).

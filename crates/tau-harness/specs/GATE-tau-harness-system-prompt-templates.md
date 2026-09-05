@@ -11,3 +11,8 @@ is strictly transport-only may remain outside the template.
 
 The user wants custom templates to control the placement and wording of every
 dynamic value instead of being silently overridden by prompt string surgery.
+
+This separate system/developer channel remains outside
+[GATE-new-generic-user-payload-envelopes](../../../specs/GATE-new-generic-user-payload-envelopes.md);
+generic user-role payload framing follows
+[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).

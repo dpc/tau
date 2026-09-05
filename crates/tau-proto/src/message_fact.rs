@@ -12,8 +12,8 @@ mod tests;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, ContentPart, ContextRole, Event, MessageExtensionData, MessageItem,
-    escape_exact_sentinel_close, visible_escape_metadata,
+    AgentId, ContentPart, ContextRole, Event, MESSAGE_PAYLOAD_ENVELOPE, MessageExtensionData,
+    MessageItem, visible_escape_metadata,
 };
 
 const MESSAGE_ID_MAX_BYTES: usize = 256;
@@ -23,8 +23,6 @@ const DISPLAY_MAX_SCALARS: usize = 80;
 const REACTION_MAX_BYTES: usize = 128;
 const REACTION_MAX_SCALARS: usize = 64;
 const MESSAGE_TEXT_MAX_BYTES: usize = 131_072;
-const MESSAGE_CLOSE: &str = "</message>";
-const MESSAGE_CLOSE_VISIBLE: &str = "&lt;/message&gt;";
 
 /// Deterministic reason a committed message fact has no model projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -848,12 +846,8 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
             }
             output.push('>');
             let visible_body = visible_escape_metadata(text);
-            output.push_str(&escape_exact_sentinel_close(
-                &visible_body,
-                MESSAGE_CLOSE,
-                MESSAGE_CLOSE_VISIBLE,
-            ));
-            output.push_str(MESSAGE_CLOSE);
+            output.push_str(&MESSAGE_PAYLOAD_ENVELOPE.escape_body(&visible_body));
+            output.push_str(MESSAGE_PAYLOAD_ENVELOPE.exact_close);
         }
         None => output.push_str("/>"),
     }

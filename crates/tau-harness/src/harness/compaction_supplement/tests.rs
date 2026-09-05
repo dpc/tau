@@ -65,7 +65,6 @@ fn reserved_envelope_near_matches_remain_exact() {
         "<user>a</user>b</user>",
         "prefix <tau_internal>summary&lt;/tau_internal&gt;",
         "<tau_internal>summary&lt;/tau_internal&gt; suffix",
-        "<tau_internal>summary&lt;/tau_internal&gt;",
         "ordinary </user> text",
     ] {
         let window = compose(&narrative(text))

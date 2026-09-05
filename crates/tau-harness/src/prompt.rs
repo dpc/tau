@@ -93,8 +93,6 @@ pub(crate) const BUILT_IN_SYSTEM_TEMPLATE_NAME: &str = "built-in";
 const BUILT_IN_SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../prompts/system.hbs");
 const BIG_SYSTEM_TEMPLATE_NAME: &str = "big";
 const BIG_SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../prompts/big.hbs");
-const USER_CLOSE: &str = "</user>";
-const USER_CLOSE_VISIBLE: &str = "&lt;/user&gt;";
 const MESSAGE_CLOSE: &str = "</message>";
 const MESSAGE_CLOSE_VISIBLE: &str = "&lt;/message&gt;";
 const PEER_MESSAGE_CLOSE: &str = "</tau_peer_message>";
@@ -1277,16 +1275,18 @@ pub(crate) struct AssembledPromptContext {
 }
 
 fn is_payload_envelope_provenance_projection(text: &str) -> bool {
-    [
-        ("<user>", USER_CLOSE),
-        ("<message", MESSAGE_CLOSE),
-        ("<tau_peer_message", PEER_MESSAGE_CLOSE),
-        ("<response>", WATCH_RESPONSE_CLOSE),
-        ("<prompt>", WATCH_PROMPT_CLOSE),
-        ("<tau_web_content", "</tau_web_content>"),
-    ]
-    .into_iter()
-    .any(|(open, close)| text.ends_with(close) && text.starts_with(open))
+    tau_proto::registered_payload_envelopes()
+        .iter()
+        .filter(|family| family.name != tau_proto::TAU_INTERNAL_HEADER_NAME)
+        .any(|family| family.matches_whole(text))
+        || [
+            ("<message>", MESSAGE_CLOSE),
+            ("<tau_peer_message", PEER_MESSAGE_CLOSE),
+            ("<response>", WATCH_RESPONSE_CLOSE),
+            ("<prompt>", WATCH_PROMPT_CLOSE),
+        ]
+        .into_iter()
+        .any(|(open, close)| text.ends_with(close) && text.starts_with(open))
 }
 
 fn context_items_contain_payload_envelope_provenance_projection(items: &[ContextItem]) -> bool {
@@ -1966,11 +1966,7 @@ fn project_user_prompt_items(
                             crate::internal_envelope::TAU_INTERNAL_CLOSE_VISIBLE,
                         );
                         if human_ui {
-                            let body = tau_proto::escape_exact_sentinel_close(
-                                &body,
-                                USER_CLOSE,
-                                USER_CLOSE_VISIBLE,
-                            );
+                            let body = tau_proto::USER_PAYLOAD_ENVELOPE.escape_body(&body);
                             *text = format!("<user>{body}</user>");
                         } else {
                             *text = body.into_owned();

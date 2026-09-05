@@ -13,3 +13,5 @@
   admission, off-path compression/I/O, and explicit failure/shutdown semantics.
   Keep the grammar owner and test ownership in `docs/testing.md` synchronized.
   Capture changes require focused security and independent privacy review.
+
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

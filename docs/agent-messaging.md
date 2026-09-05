@@ -345,3 +345,5 @@ This classification requires a real restart/restored-agent cut; an ordinary
 final response remains live, and a never-known ID remains unknown.
 
 Tool arguments are schema-validated before dispatch. Unknown extra fields are rejected before any logical tool invocation is logged.
+
+Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.

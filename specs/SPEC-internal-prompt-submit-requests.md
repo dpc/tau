@@ -66,3 +66,5 @@ Harness-owned prompt facts keep their existing transcript classifications.
 The configured-local-extension boundary is documented in
 [`SECURITY.md`](../SECURITY.md). Unrelated authority-matrix rows remain outside
 this specification.
+
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).

@@ -2454,6 +2454,19 @@ use strict_compaction_provider::{
     validate_closed_tool_timeline,
 };
 
+/// The model-visible notice must list every registered outer family and must
+/// not promote payload-local peer/watch delimiters to top-level provenance.
+#[test]
+fn payload_envelope_notice_tracks_the_shared_outer_family_registry() {
+    let notice = super::payload_envelope_provenance_notice();
+    for family in tau_proto::registered_payload_envelopes() {
+        assert!(notice.contains(&format!("`<{}>`", family.name)));
+    }
+    for nested in ["tau_peer_message", "prompt", "response"] {
+        assert!(!notice.contains(&format!("`<{nested}>`")));
+    }
+}
+
 /// Harness-owned correlation producers preserve their complete maximum inputs
 /// within each validated identifier cap.
 #[test]

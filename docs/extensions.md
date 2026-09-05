@@ -460,3 +460,5 @@ README. Current configuration layering is recorded in
 [ARCH-tau-config](../crates/tau-config/specs/ARCH-tau-config.md); lifecycle,
 optional-startup, and protocol boundaries are specified in
 [SPEC-tau-harness-extension-lifecycle](../crates/tau-harness/specs/SPEC-tau-harness-extension-lifecycle.md).
+
+Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.

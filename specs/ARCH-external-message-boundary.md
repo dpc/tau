@@ -108,3 +108,5 @@ only to select bounded probe candidates. A live target RPC confirms the active
 session and effective receiver capability before a session is returned.
 Discovery never exposes socket paths, pids, full project roots, agent ids,
 prompts, tasks, models, tools, or provider state.
+
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).

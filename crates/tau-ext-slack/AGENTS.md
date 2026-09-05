@@ -13,3 +13,5 @@ changes, update the built-in `tau-self-knowledge-ext-slack` skill.
 
 - `SECURITY.md` — required reading for Slack-specific trust boundaries, secrets, replay/failure behavior, and review triggers.
 - [`testing.md`](testing.md) — hermetic Slack test boundaries and coverage.
+
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

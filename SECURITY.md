@@ -1493,3 +1493,5 @@ Tau-component identity, rather than executable argv resemblance, grants this
 authority. Source read/decoding failures preserve older records and fail or skip
 the provider according to its required policy. Memory-only startup forwards no
 built-in provider declaration values.
+
+Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.

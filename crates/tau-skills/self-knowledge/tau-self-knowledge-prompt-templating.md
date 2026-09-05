@@ -9,6 +9,14 @@ advertise: false
 
 # Tau prompt templating
 
+System-prompt templates and their dynamic inputs are separate from Tau's generic
+user-role transcript carrier. New or reframed free-form payloads in that carrier
+follow
+[`GATE-new-generic-user-payload-envelopes`](../../../specs/GATE-new-generic-user-payload-envelopes.md)
+and
+[`SPEC-exact-sentinel-prompt-envelopes`](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md);
+template authors must not invent local provenance wrappers for them.
+
 Tau renders prompt fragments and system prompt templates with Handlebars in strict mode. Unknown variables make that fragment/template fail to render, so prefer documented variables and guard optional data with stable fields like `cwd` or `working_directory.present`. A bad prompt fragment is skipped; a bad custom system prompt template falls back to Tau's built-in system template.
 
 Templates are plain prompt text, not HTML. Tau disables default HTML escaping so paths and shell snippets render exactly. Use `xml_escape` only when inserting text into XML-shaped prompt sections.

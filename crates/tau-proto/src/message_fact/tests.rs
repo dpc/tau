@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::{
     CborValue, EXTENSION_NAME_MAX_BYTES, Event, HarnessInputMessage, MessageExtensionData,
@@ -191,6 +193,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     ];
 
     let mut rendered = Vec::new();
+    let mut rendered_attributes = BTreeSet::new();
     for fact in &facts {
         let projection = project_message_fact(fact)
             .expect("message fact")
@@ -216,8 +219,42 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         assert!(text.contains("<hello>") || !matches!(fact, Event::MessageDelivered(_)));
         assert!(!text.contains('\u{202e}'));
         assert!(!text.contains("opaque sentinel"));
+        let opening = text
+            .split_once('>')
+            .map_or(text.as_str(), |(opening, _)| opening);
+        let mut previous = None;
+        for attribute in crate::MESSAGE_PAYLOAD_ENVELOPE.ordered_attributes {
+            if let Some(position) = opening.find(&format!(" {attribute}=")) {
+                assert!(
+                    previous.is_none_or(|previous| previous < position),
+                    "{attribute} was out of registered order in {opening}"
+                );
+                previous = Some(position);
+            }
+        }
+        for attribute in opening
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|field| field.split_once('=').map(|(name, _)| name))
+        {
+            rendered_attributes.insert(attribute.to_owned());
+            assert!(
+                crate::MESSAGE_PAYLOAD_ENVELOPE
+                    .ordered_attributes
+                    .contains(&attribute),
+                "unregistered message attribute {attribute}"
+            );
+        }
         rendered.push(text.clone());
     }
+    assert_eq!(
+        rendered_attributes,
+        crate::MESSAGE_PAYLOAD_ENVELOPE
+            .ordered_attributes
+            .iter()
+            .map(|attribute| (*attribute).to_owned())
+            .collect()
+    );
     assert_eq!(
         rendered,
         vec![

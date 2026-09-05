@@ -88,3 +88,5 @@ Every supervised extension inherits a mandatory outer Linux mount mask, while
 the trust model remains a configured same-UID executable boundary rather than a
 hostile-code sandbox. The cross-component contract is
 [SPEC-extension-secret-storage](SPEC-extension-secret-storage.md).
+
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).

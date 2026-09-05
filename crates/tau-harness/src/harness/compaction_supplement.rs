@@ -52,18 +52,24 @@ fn local_narrative(replacement_window: &[ContextItem]) -> Result<Option<&str>, (
 }
 
 fn is_reserved_whole_provenance_envelope(narrative: &str) -> bool {
-    [
-        ("<user>", "</user>"),
-        ("<message>", "</message>"),
-        ("<response>", "</response>"),
-        ("<prompt>", "</prompt>"),
-    ]
-    .into_iter()
-    .any(|(open, close)| canonical_fixed_envelope(narrative, open, close))
-        || narrative
-            .strip_prefix(crate::internal_envelope::TAU_INTERNAL_OPEN)
-            .and_then(|body| body.strip_suffix(tau_proto::TAU_INTERNAL_CLOSE))
-            .is_some_and(|body| !body.contains(tau_proto::TAU_INTERNAL_CLOSE))
+    tau_proto::registered_payload_envelopes()
+        .iter()
+        .any(|family| match family.opening {
+            tau_proto::PayloadEnvelopeOpening::Fixed(open) => {
+                canonical_fixed_envelope(narrative, open, family.exact_close)
+            }
+            tau_proto::PayloadEnvelopeOpening::Attributed(open) => {
+                canonical_attributed_envelope(narrative, open, family.exact_close)
+            }
+        })
+        || [
+            ("<user>", "</user>"),
+            ("<message>", "</message>"),
+            ("<response>", "</response>"),
+            ("<prompt>", "</prompt>"),
+        ]
+        .into_iter()
+        .any(|(open, close)| canonical_fixed_envelope(narrative, open, close))
         || [
             ("<message ", "</message>"),
             ("<tau_peer_message ", "</tau_peer_message>"),

@@ -19,3 +19,5 @@ Cwd metadata, remembered-cwd path resolution, and event sequencing rules are doc
 Protocol/UI/locking test coverage is documented in `testing.md`; read and update it when changing tool schemas, display state, directory-lock scheduling, or shell execution modes.
 
 Security and reliability boundaries are documented in `specs/ARCH-tau-ext-shell.md`, `specs/SPEC-tau-ext-shell-directory-locking.md`, and `specs/SPEC-tau-ext-shell-process-lifecycle.md`; read and update them when changing shell execution, filesystem mutation, directory-lock behavior, process lifecycle, output draining, or cancellation.
+
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

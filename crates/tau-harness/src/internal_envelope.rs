@@ -19,7 +19,7 @@ pub(crate) fn frame(body: &str) -> String {
 /// Neutralize the sole exact close token that could terminate a trusted
 /// envelope. Apply this to every untrusted provider-visible payload.
 pub(crate) fn escape_untrusted_close(body: &str) -> std::borrow::Cow<'_, str> {
-    tau_proto::escape_exact_sentinel_close(body, TAU_INTERNAL_CLOSE, TAU_INTERNAL_CLOSE_VISIBLE)
+    tau_proto::TAU_INTERNAL_PAYLOAD_ENVELOPE.escape_body(body)
 }
 
 /// Return the body of one exact internal envelope.

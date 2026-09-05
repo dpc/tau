@@ -108,8 +108,6 @@ const SUCCESS_BODY_MAX_BYTES: usize = 1024 * 1024;
 const TOOL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TRUNCATED_SUFFIX: &str = "… (truncated)";
 const REDACTED_COMPONENT: &str = "…";
-const WEB_CONTENT_CLOSE: &str = "</tau_web_content>";
-const WEB_CONTENT_CLOSE_VISIBLE: &str = "&lt;/tau_web_content&gt;";
 const HTTP_TOO_MANY_REQUESTS: u16 = 429;
 const RATE_LIMITED_ERROR: &str = "web service rate-limited the request; try again later.";
 const MAX_PROVIDER_ATTEMPTS: usize = 3;
@@ -1383,21 +1381,22 @@ fn project_web_content(
             body.push(character);
         }
     }
-    let body =
-        tau_proto::escape_exact_sentinel_close(&body, WEB_CONTENT_CLOSE, WEB_CONTENT_CLOSE_VISIBLE);
+    let family = tau_proto::TAU_WEB_CONTENT_PAYLOAD_ENVELOPE;
+    let body = family.escape_body(&body);
     let mut output = format!(
-        "<tau_web_content adapter=\"{}\" operation=\"{}\" content_trust=\"external\">",
+        "<{} adapter=\"{}\" operation=\"{}\" content_trust=\"external\">",
+        family.name,
         adapter.as_str(),
         operation.as_str()
     );
-    if TOOL_OUTPUT_MAX_BYTES < output.len() + body.len() + WEB_CONTENT_CLOSE.len() {
+    if TOOL_OUTPUT_MAX_BYTES < output.len() + body.len() + family.exact_close.len() {
         return Err(format!(
             "{} MCP projected web content exceeded {TOOL_OUTPUT_MAX_BYTES} bytes",
             adapter.as_str()
         ));
     }
     output.push_str(&body);
-    output.push_str(WEB_CONTENT_CLOSE);
+    output.push_str(family.exact_close);
     Ok(output)
 }
 

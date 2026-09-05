@@ -6,3 +6,5 @@ Read `specs/ARCH-tau-ext-utils.md` before changing timer restore, firing, or dis
 Timer state is intentionally active-only and reconstructed from replayed session
 execution facts; do not add a separate timer store without an explicit design
 change.
+
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

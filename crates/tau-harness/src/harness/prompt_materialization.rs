@@ -1801,16 +1801,15 @@ impl Harness {
                 |snapshot| &snapshot.skills,
             );
         let role_group = self.role_group_name_for_role(role_name);
+        let payload_envelope_provenance_notice = contains_payload_envelope_provenance_projection
+            .then(payload_envelope_provenance_notice);
         let template_context = match agent_id {
             Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
             None => RolePromptTemplateContext::for_role(role_name),
         }
         .with_role_group(&role_group)
         .with_session_cwd(&self.session_runtime.project_root)
-        .with_payload_envelope_provenance_notice(
-            contains_payload_envelope_provenance_projection
-                .then_some(PAYLOAD_ENVELOPE_PROVENANCE_NOTICE),
-        );
+        .with_payload_envelope_provenance_notice(payload_envelope_provenance_notice.as_deref());
         let agent_context = self
             .prompt_coordination
             .context_discovery
