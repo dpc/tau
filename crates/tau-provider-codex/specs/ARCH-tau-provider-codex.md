@@ -281,7 +281,7 @@ Request captures from that finite inference path carry the same
 `logical_attempt` and exact `wire_dispatch_index`. Unary compaction captures
 omit these fields rather than fabricating inference correlation.
 
-Ordinary inference now also owns a private version-0 `tau.cache_diagnostic`
+Ordinary inference and native standalone compaction own a private version-0 `tau.cache_diagnostic`
 adapter. Durable activity selects metadata by default, independently of the
 unchanged default-on exact captures; profile `cache_diagnostics: off` disables
 only scalar metadata. Each finite attempt shares a cryptographically random
@@ -297,8 +297,13 @@ provider request shape, retry or cancellation authority.
 Metadata contains only bounded allowlisted identities and scalar/closed facts.
 No per-item attribution schema is established: its capability is unavailable,
 and usage presence reports unsupported attribution shape without deriving an
-eligible ceiling. Compaction and prewarm/cache-refresh have no scalar adapter
-and do not borrow inference ordinals. The shared provider worker owns capacity,
+eligible ceiling. Native compaction uses its own existing finite-attempt ordinal
+and reports the final typed outcome after output validation and cancellation,
+including pre-dispatch admission failures. Its exact requests and retry-failure
+captures share the diagnostic identity. Successful raw compact responses remain
+unretained (`exact_response=false`); scalar usage is projected before the existing
+terminal event is dropped. Prewarm/cache-refresh has no scalar adapter and does
+not borrow inference ordinals. The shared provider worker owns capacity,
 process correlation and loss; the harness remains the opaque persistence owner.
 
 The retired unary compact HTTP path submitted one private

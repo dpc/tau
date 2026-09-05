@@ -1,6 +1,64 @@
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use super::*;
+use crate::attempt_failure::AttemptCaptureCorrelation;
+use crate::common::LlmError;
+
+/// A parsed provider success is not a successful compact operation when later
+/// validation or cancellation rejects it; raw usage remains reported evidence.
+#[test]
+fn compact_final_outcome_overrides_observed_terminal_success() {
+    let config = crate::tests::test_config("https://private.invalid".to_owned());
+    for canceled in [false, true] {
+        let attempt = Arc::new(CacheAttempt {
+            id: DiagnosticId::random().expect("attempt entropy"),
+            run_id: DiagnosticId::random().expect("process entropy"),
+            session_id: tau_proto::SessionId::parse("compact-final-session").expect("session"),
+            agent_id: tau_proto::AgentId::parse("compact-final-agent").expect("agent"),
+            prompt_id: tau_proto::AgentPromptId::parse("compact-final-prompt").expect("prompt"),
+            logical_attempt: 2,
+            operation: AttemptOperation::Compact,
+            enabled: true,
+            started: Instant::now(),
+            dispatched: AtomicU64::new(1),
+        });
+        let mut correlation = AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(2));
+        correlation.diagnostic = Some(Arc::clone(&attempt));
+        let outcome = if canceled {
+            crate::CompactOutcome::Canceled {
+                backend_reached: true,
+            }
+        } else {
+            crate::CompactOutcome::Terminal {
+                error: crate::CodexError(LlmError::InvalidResponse(
+                    "invalid compact output".to_owned(),
+                )),
+                backend_reached: true,
+            }
+        };
+        let evidence = CompactEvidence {
+            response: Some(response_fields(
+                &config,
+                Some(&json!({"response": {
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                    "output": [{"encrypted_content":"PRIVATE_OUTPUT"}]
+                }})),
+            )),
+            failure_kind: None,
+        };
+        let (_, rows) =
+            capture(|| attempt.finish_compact(&outcome, evidence, correlation.snapshot(), &config));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["outcome"],
+            if canceled { "canceled" } else { "error" }
+        );
+        assert!(rows[0]["successful_dispatch_index"].is_null());
+        assert_eq!(rows[0]["reported_usage"]["input_tokens"], 10);
+        assert!(!rows[0].to_string().contains("PRIVATE_OUTPUT"));
+    }
+}
 
 thread_local! {
     /// Enabled only by one scoped test; normal tests retain no metadata rows.

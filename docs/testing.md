@@ -587,6 +587,11 @@ admission/loss and in-flight budget tests live in
 `tau-provider::cache_diagnostic`; Codex ordinary success, repair with a second
 dispatch, replacement-upgrade failure, cancellation and immutable opt-out are
 covered by deterministic loopback tests in `tau-provider-codex`.
+Native compact coverage additionally pins admission rejection, final-outcome
+validation/cancellation, compact-attempt ordinals, and absent exact-response
+capability without retaining raw compact output. The closed-writer oracle
+asserts identical attempted-enqueue correlation in exact and scalar request
+captures for both inference and compaction.
 The shared opaque writer and retention tests exercise the new class without
 parsing it. Stage-1 inventory tests recognize it while preserving unavailable
 analysis rather than treating file counts as attempts.

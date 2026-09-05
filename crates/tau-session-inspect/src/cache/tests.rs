@@ -16,6 +16,7 @@ fn scalar_cache_capture_is_recognized_without_claiming_analysis() {
         br#"{
         "schema":"tau.cache_diagnostic","schema_version":0,"record_kind":"dispatch",
         "session_id":"session","agent_prompt_id":"prompt","record_seq":1,
+        "operation":"standalone_compaction",
         "producer_run_id":"0123456789abcdef0123456789abcdef",
         "attempt_id":"fedcba9876543210fedcba9876543210"
     }"#,

@@ -99,7 +99,7 @@ continuation. Cancellation and invalidation generations are rechecked at socket
 publication so stale work cannot reinstall credential-bearing transport state.
 # Provider VCR boundary
 
-Ordinary Codex inference has a private scalar cache-diagnostic adapter, selected
+Ordinary Codex inference and native standalone compaction have a private scalar cache-diagnostic adapter, selected
 by startup-frozen `cache_diagnostics: off|metadata`. Metadata defaults on only
 where existing durable capture policy permits it; exact captures keep their
 existing default-on behavior. Scalar records retain random capture-local

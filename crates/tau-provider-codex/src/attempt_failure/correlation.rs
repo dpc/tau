@@ -33,7 +33,7 @@ pub(crate) struct DispatchCorrelation {
     logical_attempt: LogicalAttempt,
     /// One-based upstream dispatch within that attempt.
     wire_dispatch_index: u64,
-    /// Private inference attempt; absent for unsupported operations.
+    /// Private finite attempt; absent for unsupported operations.
     pub(crate) diagnostic: Option<std::sync::Arc<crate::cache_diagnostic::CacheAttempt>>,
     /// Whether the backend spent its transparent repair budget.
     pub(crate) repair_used: bool,
@@ -77,7 +77,7 @@ pub(crate) struct AttemptCaptureCorrelation {
     response_bytes_received: u64,
     /// Sticky parser-accepted semantic progress across wire dispatches.
     semantic_progress: crate::SemanticProgress,
-    /// Capture-only correlation selected at ordinary inference entry.
+    /// Capture-only correlation selected at finite operation entry.
     pub(crate) diagnostic: Option<std::sync::Arc<crate::cache_diagnostic::CacheAttempt>>,
     /// Closed repair branch supplied by the transport owner.
     pub(crate) repair_reason: &'static str,

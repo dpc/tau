@@ -582,6 +582,12 @@ fn websocket_response_callback_cancellation_preserves_capture_without_enqueue() 
 /// a closed writer retains index one in scalar and exact request evidence.
 #[test]
 fn closed_writer_is_one_attempted_dispatch_without_acceptance() {
+    closed_writer_capture(false);
+    closed_writer_capture(true);
+}
+
+/// Both supported operation kinds use the identical attempted-enqueue boundary.
+fn closed_writer_capture(compact: bool) {
     let (mut conn, _inbound_tx, outbound_rx) = test_ws_conn();
     drop(outbound_rx);
     let config = test_responses_config();
@@ -589,7 +595,12 @@ fn closed_writer_is_one_attempted_dispatch_without_acceptance() {
     let mut request = fixture.payload();
     request.debug_provider_requests = true;
     let diagnostic =
-        Arc::new(CacheAttempt::new("closed-writer", &request, 1, true).expect("durable attempt"));
+        CacheAttempt::new("closed-writer", &request, 1, true).expect("durable attempt");
+    let diagnostic = Arc::new(if compact {
+        diagnostic.standalone_compaction()
+    } else {
+        diagnostic
+    });
     let mut correlation =
         path_crate_attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(1));
     correlation.diagnostic = Some(Arc::clone(&diagnostic));
@@ -602,7 +613,11 @@ fn closed_writer_is_one_attempted_dispatch_without_acceptance() {
             &request,
             Some(dispatch),
             None,
-            ResponseMode::Ordinary,
+            if compact {
+                ResponseMode::Compact
+            } else {
+                ResponseMode::Ordinary
+            },
             &mut NeverAbort,
             &mut |_| {},
             &mut |_| {},
@@ -617,6 +632,14 @@ fn closed_writer_is_one_attempted_dispatch_without_acceptance() {
     let raw: serde_json::Value = serde_json::from_slice(raw.json()).expect("raw metadata");
     assert_eq!(raw["wire_dispatch_index"], 1);
     assert_eq!(raw["attempt_id"], rows[0]["attempt_id"]);
+    assert_eq!(
+        rows[0]["operation"],
+        if compact {
+            "standalone_compaction"
+        } else {
+            "inference"
+        }
+    );
 }
 
 /// The production response path must submit correlated debug capture, publish

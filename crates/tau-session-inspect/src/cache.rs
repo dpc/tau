@@ -221,7 +221,8 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                 "cache_diagnostic_support": {
                     "codex_inference": "metadata",
                     "other_adapters": "unavailable",
-                    "standalone_compaction": "unavailable",
+                    "codex_standalone_compaction": "metadata",
+                    "other_standalone_compaction": "unavailable",
                     "cache_refresh": "unavailable",
                     "raw_attribution": "unavailable"
                 },

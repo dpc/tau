@@ -10,12 +10,12 @@ The harness does not own provider-specific LLM execution; provider extensions ar
 
 ## Prompt-cache prefix stability
 
-For ordinary ChatGPT/Codex inference, `cache_diagnostics: "metadata"` is the
+For ordinary ChatGPT/Codex inference and native standalone compaction, `cache_diagnostics: "metadata"` is the
 default in provider profiles; `"off"` disables only scalar cache observations
 after restart. Exact request/response capture remains default-on for durable
 activity. Scalar capture uses existing private storage and diagnostic retention
 and does not alter prompts, provider traffic, retries or accounting. Other
-adapters, compaction, prewarm/cache refresh and per-item attribution are not yet
+adapters, prewarm/cache refresh and per-item attribution are not yet
 supported. See [Private runtime metadata](agent-cache.md#private-runtime-metadata).
 
 Tau keeps each backend's provider-visible request meaning stable whenever only

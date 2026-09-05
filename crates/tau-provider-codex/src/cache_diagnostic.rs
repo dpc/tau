@@ -8,10 +8,12 @@ use serde_json::{Value, json};
 use tau_provider::cache_diagnostic::{DiagnosticId, Reservation};
 use tau_provider::debug_capture_writer::{ProviderDebugCapture, ProviderDebugCaptureClass};
 
+use crate::attempt_context::AttemptOperation;
+
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// Capture-local lifetime of one ordinary finite inference attempt.
+/// Capture-local lifetime of one finite inference or compaction attempt.
 pub(crate) struct CacheAttempt {
     /// Random identity shared with exact captures even when metadata is off.
     pub(crate) id: DiagnosticId,
@@ -25,6 +27,8 @@ pub(crate) struct CacheAttempt {
     prompt_id: tau_proto::AgentPromptId,
     /// Existing finite-attempt ordinal, not a harness retry counter.
     logical_attempt: u64,
+    /// Existing adapter operation; never inferred from prompt content.
+    operation: AttemptOperation,
     /// Metadata selection independent of existing exact captures.
     enabled: bool,
     /// Monotonic attempt entry observation.
@@ -58,10 +62,17 @@ impl CacheAttempt {
             agent_id: request.agent_id.clone(),
             prompt_id: tau_proto::AgentPromptId::parse(prompt_id).ok()?,
             logical_attempt,
+            operation: AttemptOperation::Inference,
             enabled,
             started: Instant::now(),
             dispatched: AtomicU64::new(0),
         })
+    }
+
+    /// Select native compaction without changing its existing attempt ordinal.
+    pub(crate) fn standalone_compaction(mut self) -> Self {
+        self.operation = AttemptOperation::Compact;
+        self
     }
 
     /// Return attempted dispatches, not checkout/lowering or accepted-send
@@ -78,13 +89,17 @@ impl CacheAttempt {
             "record_kind": kind, "producer_run_id": self.run_id,
             "record_seq": reservation.sequence(), "attempt_id": self.id,
             "session_id": self.session_id, "agent_id": self.agent_id,
-            "agent_prompt_id": self.prompt_id, "operation": "inference",
+            "agent_prompt_id": self.prompt_id, "operation": match self.operation {
+                AttemptOperation::Inference => "inference",
+                AttemptOperation::Compact => "standalone_compaction",
+            },
             "operation_id": self.prompt_id, "logical_attempt": self.logical_attempt,
             "harness_provider_attempt": null,
             "recorded_at_unix_micros": micros(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()),
             "elapsed_us_since_attempt_start": micros(self.started.elapsed()),
             "dropped_records_total": reservation.dropped_records_total(),
-            "capabilities": {"exact_request": true, "exact_response": true,
+            "capabilities": {"exact_request": true,
+                "exact_response": self.operation == AttemptOperation::Inference,
                 "raw_attribution": false, "chain_facts": true},
             "malformed_fields": [], "omitted_identity_fields": []
         })
@@ -117,12 +132,66 @@ impl CacheAttempt {
         if !self.enabled {
             return;
         }
+        let canceled = canceled || matches!(result, Err(crate::common::LlmError::Canceled));
+        let success = result.is_ok() && !canceled;
+        let event = result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.debug_capture.terminal_event.as_ref());
+        self.finish_projected(
+            response_fields(config, event),
+            result.as_ref().err().and_then(|e| e.failure_kind()),
+            snapshot,
+            success,
+            canceled,
+        );
+    }
+
+    /// Record final compact outcome after output validation and cancellation.
+    /// The response projection contains scalars only, never retained raw
+    /// output.
+    pub(crate) fn finish_compact(
+        &self,
+        outcome: &crate::CompactOutcome,
+        evidence: CompactEvidence,
+        snapshot: crate::attempt_failure::AttemptCaptureSnapshot,
+        config: &crate::responses::ResponsesConfig,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let failure = match outcome {
+            crate::CompactOutcome::Terminal { error, .. }
+            | crate::CompactOutcome::RouteUnavailable { error, .. } => error.0.failure_kind(),
+            _ => evidence.failure_kind,
+        };
+        self.finish_projected(
+            evidence
+                .response
+                .unwrap_or_else(|| response_fields(config, None)),
+            failure,
+            snapshot,
+            matches!(outcome, crate::CompactOutcome::Finished { .. }),
+            matches!(outcome, crate::CompactOutcome::Canceled { .. }),
+        );
+    }
+
+    /// Submit only a bounded projection; loss never changes the typed outcome.
+    fn finish_projected(
+        &self,
+        fields: Value,
+        failure_kind: Option<tau_proto::ProviderFailureKind>,
+        snapshot: crate::attempt_failure::AttemptCaptureSnapshot,
+        success: bool,
+        canceled: bool,
+    ) {
+        if !self.enabled {
+            return;
+        }
         let Some(reservation) = Reservation::acquire() else {
             return;
         };
         let count = self.dispatch_count();
-        let canceled = canceled || matches!(result, Err(crate::common::LlmError::Canceled));
-        let success = result.is_ok() && !canceled;
         let outcome = if canceled {
             "canceled"
         } else if success {
@@ -133,52 +202,17 @@ impl CacheAttempt {
             "error"
         };
         let mut record = self.common(&reservation, "attempt_end");
-        let event = result
-            .as_ref()
-            .ok()
-            .and_then(|r| r.debug_capture.terminal_event.as_ref());
-        let response = event.and_then(|e| e.get("response")).or(event);
-        let usage = response.and_then(|r| r.get("usage"));
-        let mut malformed = Vec::new();
-        let mut omitted = Vec::new();
-        let reported = reported_usage(usage, &mut malformed);
-        if response
-            .and_then(|r| r.get("model"))
-            .is_some_and(|v| !v.is_null() && !v.is_string())
-        {
-            malformed.push("actual_model");
-        }
-        let actual_model = identity(
-            response
-                .and_then(|r| r.get("model"))
-                .and_then(Value::as_str),
-            "actual_model",
-            config,
-            &mut omitted,
-        );
-        let tier = response.and_then(|r| r.get("service_tier"));
-        let actual_tier = tier
-            .and_then(Value::as_str)
-            .filter(|s| matches!(*s, "auto" | "default" | "flex" | "priority" | "scale"));
-        if tier.is_some_and(|v| !v.is_null()) && actual_tier.is_none() {
-            malformed.push("actual_service_tier");
-        }
+        merge(&mut record, fields);
         merge(
             &mut record,
             json!({
                 "dispatch_count": count, "successful_dispatch_index": success.then_some(count).filter(|n| *n > 0),
                 "outcome": outcome,
-            "failure_class": result.as_ref().err().and_then(|e| e.failure_kind()),
+                "failure_class": failure_kind,
                 "semantic_progress": snapshot.semantic_progress() == crate::SemanticProgress::Parsed,
                 "repair_used": snapshot.repair_used(),
                 "reconnect_count": u64::from(snapshot.repair_used()),
                 "chain_strip_count": null,
-                "actual_model": actual_model, "model_revision": null,
-                "actual_service_tier": actual_tier,
-                "reported_usage": reported, "reported_eligibility": null,
-                "attribution_status": if usage.is_some() { "unsupported_shape" } else { "absent" },
-                "attribution_total_check": "not_checkable", "attribution": [], "omitted_entries": 0,
-                "malformed_fields": malformed, "omitted_identity_fields": omitted
             }),
         );
         self.submit(record, reservation);
@@ -204,6 +238,75 @@ impl CacheAttempt {
             reservation,
         );
     }
+}
+
+/// Bounded observations retained until native compact output validation
+/// finishes.
+#[derive(Default)]
+pub(crate) struct CompactEvidence {
+    /// Closed scalar projection; the successful raw response remains
+    /// unretained.
+    response: Option<Value>,
+    /// Typed provider failure, not the scheduler's retry class.
+    failure_kind: Option<tau_proto::ProviderFailureKind>,
+}
+
+impl CompactEvidence {
+    /// Project already-parsed response facts before the existing result is
+    /// consumed.
+    pub(crate) fn observe(
+        &mut self,
+        config: &crate::responses::ResponsesConfig,
+        result: &Result<crate::StreamDispatchResult, crate::common::LlmError>,
+    ) {
+        self.failure_kind = result.as_ref().err().and_then(|e| e.failure_kind());
+        self.response = Some(response_fields(
+            config,
+            result
+                .as_ref()
+                .ok()
+                .and_then(|r| r.debug_capture.terminal_event.as_ref()),
+        ));
+    }
+}
+
+/// Extract established bounded response fields without copying raw provider
+/// data.
+fn response_fields(config: &crate::responses::ResponsesConfig, event: Option<&Value>) -> Value {
+    let response = event.and_then(|e| e.get("response")).or(event);
+    let usage = response.and_then(|r| r.get("usage"));
+    let mut malformed = Vec::new();
+    let mut omitted = Vec::new();
+    let reported = reported_usage(usage, &mut malformed);
+    if response
+        .and_then(|r| r.get("model"))
+        .is_some_and(|v| !v.is_null() && !v.is_string())
+    {
+        malformed.push("actual_model");
+    }
+    let actual_model = identity(
+        response
+            .and_then(|r| r.get("model"))
+            .and_then(Value::as_str),
+        "actual_model",
+        config,
+        &mut omitted,
+    );
+    let tier = response.and_then(|r| r.get("service_tier"));
+    let actual_tier = tier
+        .and_then(Value::as_str)
+        .filter(|s| matches!(*s, "auto" | "default" | "flex" | "priority" | "scale"));
+    if tier.is_some_and(|v| !v.is_null()) && actual_tier.is_none() {
+        malformed.push("actual_service_tier");
+    }
+    json!({
+        "actual_model": actual_model, "model_revision": null,
+        "actual_service_tier": actual_tier,
+        "reported_usage": reported, "reported_eligibility": null,
+        "attribution_status": if usage.is_some() { "unsupported_shape" } else { "absent" },
+        "attribution_total_check": "not_checkable", "attribution": [], "omitted_entries": 0,
+        "malformed_fields": malformed, "omitted_identity_fields": omitted
+    })
 }
 
 /// Prepared closed dispatch facts; constructed without prompt traversal.

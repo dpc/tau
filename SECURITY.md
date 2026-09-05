@@ -210,10 +210,11 @@ sensitive: provider error bodies can reflect prompt, account, or service-interna
 data even after configured credentials are removed. Configurable diagnostic
 retention defaults to thirty days; disabling cleanup can retain them
 indefinitely.
-Default-on Codex ordinary-inference scalar cache diagnostics use the same
+Default-on Codex inference and native standalone-compaction scalar cache diagnostics use the same
 private opaque path and retention. Metadata has an independent startup-frozen
 profile opt-out and is forced off with existing nonpersistable capture policy;
-exact request/response capture remains default-on for durable activity.
+Existing exact captures remain default-on for durable activity; successful raw
+compact responses remain unretained and advertise `exact_response=false`.
 Scalar records omit payloads, credentials, routes, cache keys, provider IDs and
 error prose, but retain bounded model identities and workload correlation, so
 they remain private rather than public-safe. The metadata budget reserves at

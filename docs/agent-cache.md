@@ -83,7 +83,7 @@ does not alter capture, retention, inference, retry, refresh, or compaction poli
 
 ## Private runtime metadata
 
-ChatGPT/Codex ordinary inference also produces bounded scalar captures in the
+ChatGPT/Codex ordinary inference and native standalone compaction produce bounded scalar captures in the
 existing owner-private session `debug/provider-requests/<instance>/` directory,
 using the `cache-diagnostic.json.zst` filename class. Set
 `"cache_diagnostics": "off"` in a ChatGPT provider profile to disable only these
@@ -95,11 +95,18 @@ durability.
 The capture payload uses `schema: "tau.cache_diagnostic"`, internal version `0`.
 Its build identity comes from the executable's existing source metadata
 (uninitialized library embeddings explicitly report `unknown`). Each process
-has a random 128-bit `producer_run_id`; each finite inference attempt has a
+has a random 128-bit `producer_run_id`; each finite inference or compaction attempt has a
 separate random `attempt_id`. Exact inference request/response/failure captures
 carry that attempt identity and the actual dispatch index where one exists.
 An unsent exact request retained after cancellation has a null wire index.
 These identities never affect provider routing or upstream request bodies.
+Native compaction uses `operation: "standalone_compaction"` and its existing
+finite compact-attempt ordinal. Its exact requests and retry-failure captures
+share that identity; successful raw compact responses remain unretained, so
+`exact_response` is false for this operation. Scalar usage comes from the parsed
+terminal event before it is dropped. The summary follows the final compact
+outcome after output validation and cancellation, including zero-dispatch
+admission failures; it does not authorize a retry after semantic compact output.
 
 `dispatch` records observe attempted enqueue of the final serialized envelope,
 including failed enqueue to a closed writer—not transport acceptance, successful
@@ -116,7 +123,7 @@ canonical accounting. Missing counters, exact eligibility, model revision and
 unavailable chain counts stay null. There is no established per-item attribution
 parser yet: `raw_attribution` is false, the attribution array stays empty, and
 present usage is labeled `unsupported_shape` for attribution. Other adapters,
-standalone compaction, prewarm and cache refresh do not implement this capture
+prewarm and cache refresh do not implement this capture
 adapter. The inspector reports those capabilities as unavailable rather than
 inventing inference ordinals or complete coverage.
 

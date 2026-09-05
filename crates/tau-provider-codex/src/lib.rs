@@ -1170,6 +1170,49 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
+        let metadata_enabled = self
+            .cache_diagnostics
+            .get_or_init(BTreeMap::new)
+            .get(&config.wire().profile_namespace)
+            .copied()
+            .unwrap_or_default()
+            == CacheDiagnostics::Metadata;
+        let diagnostic = cache_diagnostic::CacheAttempt::new(
+            agent_prompt_id,
+            request,
+            logical_attempt.get(),
+            metadata_enabled,
+        )
+        .map(cache_diagnostic::CacheAttempt::standalone_compaction)
+        .map(path_std_sync::Arc::new);
+        let mut attempt = ProviderAttemptContext::new(AttemptOperation::Compact, logical_attempt);
+        attempt.correlation().diagnostic = diagnostic.clone();
+        let mut evidence = cache_diagnostic::CompactEvidence::default();
+        let outcome = self.compact_observed(
+            agent_prompt_id,
+            config,
+            request,
+            abort,
+            &mut attempt,
+            (metadata_enabled && diagnostic.is_some()).then_some(&mut evidence),
+        );
+        if let Some(diagnostic) = diagnostic {
+            diagnostic.finish_compact(&outcome, evidence, attempt.snapshot(), config.wire());
+        }
+        outcome
+    }
+
+    /// Preserve native compact execution while observing its final finite
+    /// outcome.
+    fn compact_observed(
+        &self,
+        agent_prompt_id: &str,
+        config: &ResolvedConfig,
+        request: &Prompt<'_>,
+        abort: &mut impl TurnAbort,
+        attempt: &mut ProviderAttemptContext,
+        evidence: Option<&mut cache_diagnostic::CompactEvidence>,
+    ) -> CompactOutcome {
         let identity = config.inference_identity();
         let probe = match self.acquire_compact_probe(identity, abort) {
             CompactAdmissionResult::Probe(probe) => Some(probe),
@@ -1216,7 +1259,6 @@ impl CodexRuntime {
                 backend_reached: false,
             };
         }
-        let mut attempt = ProviderAttemptContext::new(AttemptOperation::Compact, logical_attempt);
         let mut backend_reached = false;
         let mut private_trace = private_trace::AttemptTrace::selected(
             private_trace::Backend::Codex,
@@ -1236,6 +1278,9 @@ impl CodexRuntime {
             },
             &mut private_trace,
         );
+        if let Some(evidence) = evidence {
+            evidence.observe(config.wire(), &compact_result);
+        }
         let (state, usage) = match compact_result {
             Ok(dispatch) => {
                 if let Some(probe) = probe {

@@ -574,6 +574,7 @@ enum LoopbackResponseMode {
     CompactErrorWithEmbeddedItem,
     CompactItemThenClose,
     CompactExactSuccess,
+    CompactRepairThenSuccess,
     CompactItemThenCloseThenSuccess,
 }
 
@@ -632,6 +633,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     | LoopbackResponseMode::CompactErrorWithEmbeddedItem
                     | LoopbackResponseMode::CompactItemThenClose
                     | LoopbackResponseMode::CompactExactSuccess
+                    | LoopbackResponseMode::CompactRepairThenSuccess
                     | LoopbackResponseMode::CompactItemThenCloseThenSuccess
             ) {
                 let Ok(mut socket) = tungstenite::accept(stream) else {
@@ -641,6 +643,17 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     .ws_upgrade_requests
                     .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
                 let _ = socket.read();
+                if matches!(mode, LoopbackResponseMode::CompactRepairThenSuccess)
+                    && request_index == 0
+                {
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({"type":"error","code":"previous_response_not_found",
+                            "message":"PRIVATE_COMPACT_ERROR"})
+                        .to_string()
+                        .into(),
+                    ));
+                    continue;
+                }
                 if matches!(
                     mode,
                     LoopbackResponseMode::OrdinarySuccess
@@ -729,6 +742,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 if matches!(
                     mode,
                     LoopbackResponseMode::CompactExactSuccess
+                        | LoopbackResponseMode::CompactRepairThenSuccess
                         | LoopbackResponseMode::CompactItemThenCloseThenSuccess
                 ) {
                     let _ = socket.send(tungstenite::Message::Text(
@@ -836,6 +850,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 | LoopbackResponseMode::CompactErrorWithEmbeddedItem
                 | LoopbackResponseMode::CompactItemThenClose
                 | LoopbackResponseMode::CompactExactSuccess
+                | LoopbackResponseMode::CompactRepairThenSuccess
                 | LoopbackResponseMode::CompactItemThenCloseThenSuccess => {
                     unreachable!("handled above")
                 }
@@ -1494,6 +1509,238 @@ fn cache_diagnostics_ordinary_success_and_repair_preserve_transport_work() {
             assert!(
                 !text.contains(secret),
                 "metadata leaked private provider data"
+            );
+        }
+    }
+}
+
+/// Native compaction summaries describe the final typed outcome and existing
+/// ordinal without adding dispatches, retaining raw output, or enabling retry
+/// after semantic compact progress.
+#[test]
+fn cache_diagnostics_compact_outcomes_preserve_dispatch_and_progress() {
+    for (mode, dispatches, success, progress, repair) in [
+        (LoopbackResponseMode::Upgrade426, 0, false, false, false),
+        (
+            LoopbackResponseMode::CompactExactSuccess,
+            1,
+            true,
+            true,
+            false,
+        ),
+        (
+            LoopbackResponseMode::CompactRepairThenSuccess,
+            2,
+            true,
+            true,
+            true,
+        ),
+        (
+            LoopbackResponseMode::RepairThenUpgradeFailure,
+            1,
+            false,
+            false,
+            true,
+        ),
+        (
+            LoopbackResponseMode::CompactErrorWithEmbeddedItem,
+            1,
+            false,
+            false,
+            false,
+        ),
+        (
+            LoopbackResponseMode::CompactItemThenClose,
+            1,
+            false,
+            true,
+            false,
+        ),
+        (
+            LoopbackResponseMode::DirectContextWindowExceeded,
+            1,
+            false,
+            false,
+            false,
+        ),
+    ] {
+        let server = spawn_loopback_server(mode);
+        let mut config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        config.inner.api_key = "PRIVATE_COMPACT_ACCESS_TOKEN".to_owned();
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("compact-cache-session").expect("session");
+        let agent = tau_proto::AgentId::parse("compact-cache-agent").expect("agent");
+        let context = compact_trigger_context();
+        let mut request = test_prompt_payload(&session, &agent, &context);
+        request.debug_provider_requests = true;
+        let (outcome, rows) = cache_capture_tests::capture(|| {
+            runtime.compact_numbered(
+                "compact-cache-prompt",
+                LogicalAttempt::new(4),
+                &config,
+                &request,
+                &mut NeverAbort,
+            )
+        });
+        assert_eq!(matches!(outcome, CompactOutcome::Finished { .. }), success);
+        assert_eq!(rows.len(), dispatches + 1);
+        let end = rows.last().expect("one attempt end");
+        assert_eq!(end["record_kind"], "attempt_end");
+        assert_eq!(end["operation"], "standalone_compaction");
+        assert_eq!(end["operation_id"], "compact-cache-prompt");
+        assert_eq!(end["logical_attempt"], 4);
+        assert!(end["harness_provider_attempt"].is_null());
+        assert_eq!(end["dispatch_count"], dispatches);
+        assert_eq!(end["repair_used"], repair);
+        assert_eq!(end["semantic_progress"], progress);
+        assert_eq!(end["capabilities"]["exact_request"], true);
+        assert_eq!(end["capabilities"]["exact_response"], false);
+        assert_eq!(end["capabilities"]["raw_attribution"], false);
+        assert_eq!(
+            end["outcome"],
+            if success {
+                "success"
+            } else if dispatches == 0 {
+                "pre_dispatch_failure"
+            } else {
+                "error"
+            }
+        );
+        assert_eq!(
+            end["successful_dispatch_index"],
+            if success {
+                serde_json::json!(dispatches)
+            } else {
+                serde_json::Value::Null
+            }
+        );
+        if success {
+            assert_eq!(end["reported_usage"]["input_tokens"], 3);
+            assert_eq!(end["reported_usage"]["output_tokens"], 1);
+            assert!(end["reported_usage"]["read_tokens"].is_null());
+            assert_eq!(end["attribution_status"], "unsupported_shape");
+        }
+        if matches!(mode, LoopbackResponseMode::DirectContextWindowExceeded) {
+            assert_eq!(
+                end["failure_class"],
+                serde_json::to_value(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+                    .expect("failure kind")
+            );
+        }
+        for (index, row) in rows[..dispatches].iter().enumerate() {
+            assert_eq!(row["operation"], "standalone_compaction");
+            assert_eq!(row["attempt_id"], end["attempt_id"]);
+            assert_eq!(row["wire_dispatch_index"], index + 1);
+            assert_eq!(row["previous_response_present"], false);
+        }
+        assert_eq!(
+            server
+                .counts()
+                .ws_upgrade_requests
+                .load(path_std_sync_atomic::Ordering::SeqCst),
+            if repair { 2 } else { 1 }
+        );
+        assert_eq!(
+            server
+                .counts()
+                .http_post_requests
+                .load(path_std_sync_atomic::Ordering::SeqCst),
+            0
+        );
+        let text = serde_json::to_string(&rows).expect("scalar rows");
+        for private in [
+            "opaque",
+            "cmp_committed",
+            "discard-me",
+            "PRIVATE_COMPACT_ERROR",
+            config.inner.api_key.as_str(),
+            config.inner.base_url.as_str(),
+        ] {
+            assert!(
+                !text.contains(private),
+                "metadata leaked private compact data"
+            );
+        }
+    }
+}
+
+/// Admission rejection and cancellation still produce zero-dispatch summaries;
+/// opted-out and ephemeral calls produce none without altering compact work.
+#[test]
+fn cache_diagnostics_compact_policy_and_local_exits() {
+    /// Fixed cancellation authority for before-admission coverage.
+    struct FixedAbort {
+        /// Whether this operation is already canceled.
+        canceled: bool,
+    }
+    impl TurnAbort for FixedAbort {
+        fn is_aborted(&mut self) -> bool {
+            self.canceled
+        }
+        fn register_waker(
+            &mut self,
+            _: Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn TurnAbortWaker> {
+            Box::new(NeverAbortWaker)
+        }
+    }
+    for (durable, enabled, canceled, unavailable) in [
+        (true, true, true, false),
+        (true, true, false, true),
+        (true, false, false, false),
+        (false, true, false, false),
+    ] {
+        let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
+        let config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        runtime.initialize_cache_diagnostics(BTreeMap::from([(
+            config.inner.profile_namespace.clone(),
+            if enabled {
+                CacheDiagnostics::Metadata
+            } else {
+                CacheDiagnostics::Off
+            },
+        )]));
+        if unavailable {
+            runtime.mark_compact_route_unavailable(config.inference_identity());
+        }
+        let session = tau_proto::SessionId::parse("compact-policy-session").expect("session");
+        let agent = tau_proto::AgentId::parse("compact-policy-agent").expect("agent");
+        let context = compact_trigger_context();
+        let mut request = test_prompt_payload(&session, &agent, &context);
+        request.debug_provider_requests = durable;
+        let (outcome, rows) = cache_capture_tests::capture(|| {
+            runtime.compact(
+                "compact-policy-prompt",
+                &config,
+                &request,
+                &mut FixedAbort { canceled },
+            )
+        });
+        if !durable || !enabled {
+            assert!(rows.is_empty());
+            assert!(matches!(outcome, CompactOutcome::Finished { .. }));
+        } else {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["dispatch_count"], 0);
+            assert_eq!(
+                rows[0]["outcome"],
+                if canceled {
+                    "canceled"
+                } else {
+                    "pre_dispatch_failure"
+                }
+            );
+            assert_eq!(
+                server
+                    .counts()
+                    .ws_upgrade_requests
+                    .load(path_std_sync_atomic::Ordering::SeqCst),
+                0
             );
         }
     }
