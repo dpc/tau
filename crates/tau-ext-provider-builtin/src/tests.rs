@@ -4335,6 +4335,7 @@ fn typed_worker_reports_match_wire_roundtrip_for_every_converted_variant() {
                     text: "typed update".to_owned(),
                     clear_response: false,
                     retry: None,
+                    native_tool: None,
                 }),
                 response_stats: Some(tau_proto::ProviderResponseStats {
                     current: tau_proto::ProviderResponseStatsSample {
@@ -4944,6 +4945,7 @@ fn chatgpt_connecting_update_is_sanitized() {
             text,
             clear_response: false,
             retry: None,
+                    native_tool: None,
         }) if text == "Connecting to provider…"
     ));
 }
@@ -5040,6 +5042,134 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
             },
             first_semantic_output_elapsed_micros: Some(0),
         })
+    );
+}
+
+/// Hosted search lifecycle transitions must bypass ordinary stream cadence and
+/// retain the provider call id in typed transient native-tool status.
+#[test]
+fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
+    let prompt = minimal_prompt();
+    let mut state = tau_provider_codex::test_stream_state();
+    let mut bytes = Vec::new();
+    let start = path_std_time::Instant::now();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
+        tau_provider_codex::test_set_web_search_active(&mut state, 0, "ws_1", true);
+        emitter.emit_at(&target, &state, &mut writer, start, false);
+        tau_provider_codex::test_set_web_search_active(&mut state, 0, "ws_1", false);
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            false,
+        );
+    }
+
+    let updates = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 2);
+    for (update, phase, status) in [
+        (
+            &updates[0],
+            tau_proto::ProviderNativeToolPhase::Started,
+            tau_proto::ToolUseStatus::InProgress,
+        ),
+        (
+            &updates[1],
+            tau_proto::ProviderNativeToolPhase::Completed,
+            tau_proto::ToolUseStatus::Success,
+        ),
+    ] {
+        let native = update
+            .status
+            .as_ref()
+            .and_then(|status| status.native_tool.as_ref())
+            .expect("typed native tool update");
+        assert_eq!(native.call_id, "ws_1");
+        assert_eq!(native.tool_name.as_str(), "web_search");
+        assert_eq!(native.phase, phase);
+        assert_eq!(native.display.status, status);
+    }
+}
+
+/// Overlapping hosted searches must publish each per-call transition even when
+/// the aggregate searching/not-searching state does not change.
+#[test]
+fn chatgpt_response_update_emitter_preserves_overlapping_native_searches() {
+    let prompt = minimal_prompt();
+    let mut state = tau_provider_codex::test_stream_state();
+    let mut bytes = Vec::new();
+    let start = path_std_time::Instant::now();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
+        for (index, call_id, active) in [
+            (0, "ws_a", true),
+            (1, "ws_b", true),
+            (0, "ws_a", false),
+            (1, "ws_b", false),
+        ] {
+            tau_provider_codex::test_set_web_search_active(&mut state, index, call_id, active);
+            emitter.emit_at(&target, &state, &mut writer, start, false);
+        }
+    }
+
+    let lifecycles = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => update
+                    .status
+                    .and_then(|status| status.native_tool)
+                    .map(|native| (native.call_id, native.phase)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycles,
+        vec![
+            (
+                "ws_a".to_owned(),
+                tau_proto::ProviderNativeToolPhase::Started
+            ),
+            (
+                "ws_b".to_owned(),
+                tau_proto::ProviderNativeToolPhase::Started
+            ),
+            (
+                "ws_a".to_owned(),
+                tau_proto::ProviderNativeToolPhase::Completed
+            ),
+            (
+                "ws_b".to_owned(),
+                tau_proto::ProviderNativeToolPhase::Completed
+            ),
+        ]
     );
 }
 

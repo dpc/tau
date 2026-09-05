@@ -994,6 +994,7 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
             text: "retrying".to_owned(),
             clear_response: true,
             retry: None,
+            native_tool: None,
         }),
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,

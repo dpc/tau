@@ -1370,13 +1370,21 @@ pub fn get_daemon_rendered_system_prompt(
     }
 }
 
+/// Effective ordinary tools, provider-hosted tools, and resolution warnings
+/// returned by daemon developer introspection.
+pub type DaemonRenderedToolDefinitions = (
+    Vec<tau_proto::ToolDefinition>,
+    Vec<tau_proto::HostedToolDefinition>,
+    Vec<String>,
+);
+
 /// Requests the effective provider-facing tool definitions for `role` from a
 /// running harness daemon.
 pub fn get_daemon_rendered_tool_definitions(
     socket_path: impl Into<PathBuf>,
     session_id: &tau_proto::SessionId,
     role: &str,
-) -> Result<Vec<tau_proto::ToolDefinition>, HarnessError> {
+) -> Result<DaemonRenderedToolDefinitions, HarnessError> {
     let request_id = next_render_request_id("tau-rendered-tools");
     let mut peer = connect_daemon_helper(socket_path, "tau-print-tools", session_id)?;
     peer.send(&HarnessInputMessage::GetRenderedToolDefinitions(
@@ -1408,11 +1416,12 @@ pub fn get_daemon_rendered_tool_definitions(
                     if let Some(error) = result.error {
                         return Err(HarnessError::Participant(error));
                     }
-                    return result.tools.ok_or_else(|| {
+                    let tools = result.tools.ok_or_else(|| {
                         HarnessError::Participant(
                             "daemon returned no rendered tool definitions".to_owned(),
                         )
-                    });
+                    })?;
+                    return Ok((tools, result.hosted_tools, result.warnings));
                 }
                 HarnessOutputMessage::Disconnect(d) => {
                     return Err(HarnessError::Participant(

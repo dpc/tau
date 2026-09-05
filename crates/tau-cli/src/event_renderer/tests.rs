@@ -645,6 +645,7 @@ fn response_update_activation_is_idempotent_across_routing_shapes() {
         text: "retrying".to_owned(),
         clear_response: false,
         retry: None,
+        native_tool: None,
     });
     live.handle(&status);
     let redraws_after_activation = live.redraw_request_count_for_test();

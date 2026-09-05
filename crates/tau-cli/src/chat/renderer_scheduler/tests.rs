@@ -299,6 +299,7 @@ fn status_and_compaction_are_hard_barriers() {
         text: "retrying".to_owned(),
         clear_response: true,
         retry: None,
+        native_tool: None,
     });
 
     let mut compaction = update(4, "prompt-1", "", None);

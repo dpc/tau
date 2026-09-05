@@ -31,6 +31,12 @@ normal bypass and is allowed immediately before the provider prompt closes. The 
 validates provider ownership and broadcasts these stats unchanged; UI clients render
 them directly from provider updates.
 
+Hosted Responses `web_search_call` added/done items bypass the ordinary sampling
+interval to publish typed transient provider-native started/completed status
+with the upstream call id and generic display state. Their completed upstream
+item remains an opaque replay sidecar; the native lifecycle does not become a
+Tau tool call or durable transcript fact.
+
 The response sampler also captures first semantic output against the backend's
 single finite-attempt dispatch instant before rate limiting. Assistant text,
 reasoning summary text, completed material opaque reasoning, tool names,

@@ -435,6 +435,7 @@ fn retry_banner_emits_status_not_message_delta() {
             text,
             clear_response: true,
             retry: None,
+                    native_tool: None,
         }) if text.contains("provider error")
     ));
 }
@@ -2332,6 +2333,7 @@ pub(crate) fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_
                     text: "discarding tentative output".to_owned(),
                     clear_response: true,
                     retry: None,
+                    native_tool: None,
                 }),
                 response_stats: None,
                 originator: originator.clone(),
@@ -2574,6 +2576,7 @@ fn canceled_oversized_worker_report_reaches_real_client_boundary_as_small_termin
                     text: "discarding tentative output".to_owned(),
                     clear_response: true,
                     retry: None,
+                    native_tool: None,
                 }),
                 response_stats: None,
                 originator: originator.clone(),

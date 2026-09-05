@@ -432,6 +432,12 @@ policy. Each owned preview runtime socket/discovery pair exists only while the
 child runs; the parent removes its exact pair after child reap, including handled
 forced-exit fallback.
 
+`print-tools` applies the same logical-web compilation as live prompt
+materialization. Provider-native entries are marked `execution:
+provider_native`; when exact model capability metadata is unavailable, the
+command keeps its provisional ordinary surface but emits an explicit warning
+that native replacement could not be resolved.
+
 Protocol-I/O debug counters are diagnostic metadata. They may reveal configured
 extension names, message/event names, activity rates, frame counts, and encoded
 byte sizes even when the requesting UI did not subscribe to the underlying

@@ -23,6 +23,12 @@ samples; absence means unsupported or not observed. The field remains transient
 and is not part of the finished response or replay contract.
 Fresh transport setup may emit a fixed content-free status with no retry facts;
 it must not expose endpoints, credentials, accounts, or raw transport errors.
+Status may also carry one typed provider-native tool lifecycle snapshot with
+the provider call id, provider-visible name, generic `ToolUseState`, and
+started/completed phase. The harness validates prompt ownership and republishes
+this only through transient `provider.response_updated`; it does not create Tau
+tool lifecycle facts, route execution, affect tool counters, or make the row
+available after cold restart.
 For ordinary inference, `provider.response_finished.output_items` remains the
 complete durable response and replay source. A successful standalone local
 summary instead consumes the private `LocalCompactionNarrative` report envelope

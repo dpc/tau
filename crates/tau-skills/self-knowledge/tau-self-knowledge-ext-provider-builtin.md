@@ -13,6 +13,10 @@ The harness selects it through each role's `agents.web_tools` policy and uses
 cached search by default. Lite never advertises hosted search. Hosted calls stay
 inside provider inference and never become Tau tool requests; an ambiguous
 transport retry may repeat billable search.
+During a hosted call, the terminal shows a transient `web_search (native)` row
+and retains its completed row for the current UI session. This presentation is
+not a Tau tool fact, does not affect tool counters, and cannot be reconstructed
+after a cold restart.
 
 ## Provider retries
 

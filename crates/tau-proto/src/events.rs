@@ -6021,7 +6021,7 @@ pub enum ProviderResponseCompactionStatus {
 }
 
 /// Provider-authored transient status text for an in-flight response.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseStatusUpdate {
     /// Human-readable status text to display while the provider continues work.
     pub text: String,
@@ -6033,6 +6033,33 @@ pub struct ProviderResponseStatusUpdate {
     /// here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<ProviderRetryStatus>,
+    /// Optional provider-native tool lifecycle rendered separately from
+    /// Tau-routed tool execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tool: Option<ProviderNativeToolStatusUpdate>,
+}
+
+/// Transient lifecycle phase for one provider-executed native tool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderNativeToolPhase {
+    /// The provider began executing the native tool.
+    Started,
+    /// The provider completed the native tool successfully.
+    Completed,
+}
+
+/// Typed transient presentation for one provider-executed native tool.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderNativeToolStatusUpdate {
+    /// Stable provider-owned call identity within the prompt.
+    pub call_id: String,
+    /// Provider-visible native tool name.
+    pub tool_name: ToolName,
+    /// Generic model-independent display descriptor.
+    pub display: ToolUseState,
+    /// Current lifecycle phase.
+    pub phase: ProviderNativeToolPhase,
 }
 
 /// The provider finished processing a prompt.

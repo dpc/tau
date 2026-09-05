@@ -330,6 +330,7 @@ fn user_status_clear_update(spid: &str) -> ProviderResponseUpdated {
             text: "retrying".to_owned(),
             clear_response: true,
             retry: None,
+            native_tool: None,
         }),
         response_stats: None,
         originator: PromptOriginator::User,

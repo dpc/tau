@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use base64::engine as path_base64_engine;
@@ -480,7 +480,11 @@ pub struct StreamState {
     pub(crate) output_items: Vec<OutputItemAccumulator>,
     /// Output indices with a provider-hosted web search in progress. This is
     /// transient display state and never enters replay payload accounting.
-    active_web_searches: std::collections::BTreeSet<usize>,
+    active_web_searches: std::collections::BTreeMap<usize, String>,
+    /// Latest hosted web-search lifecycle transition and its revision.
+    web_search_lifecycle: Option<(u64, String, bool)>,
+    /// Monotonic revision for hosted web-search lifecycle transitions.
+    web_search_lifecycle_revision: u64,
     /// Cumulative UTF-8 bytes across all assistant message slots.
     assistant_text_bytes: u64,
     /// Cumulative UTF-8 bytes across all non-visible tool input slots.
@@ -869,7 +873,9 @@ impl StreamState {
     pub(crate) fn new() -> Self {
         Self {
             output_items: Vec::new(),
-            active_web_searches: BTreeSet::new(),
+            active_web_searches: BTreeMap::new(),
+            web_search_lifecycle: None,
+            web_search_lifecycle_revision: 0,
             assistant_text_bytes: 0,
             non_visible_output_bytes: 0,
             semantic_output_items: 0,
@@ -1248,18 +1254,34 @@ impl StreamState {
         );
     }
 
-    pub(crate) fn set_web_search_active(&mut self, output_index: usize, active: bool) {
+    pub(crate) fn set_web_search_active(
+        &mut self,
+        output_index: usize,
+        call_id: String,
+        active: bool,
+    ) {
         if active {
-            self.active_web_searches.insert(output_index);
+            self.active_web_searches
+                .insert(output_index, call_id.clone());
         } else {
             self.active_web_searches.remove(&output_index);
         }
+        self.web_search_lifecycle_revision = self.web_search_lifecycle_revision.saturating_add(1);
+        self.web_search_lifecycle = Some((self.web_search_lifecycle_revision, call_id, active));
     }
 
     /// Whether at least one provider-hosted web search is currently active.
     #[must_use]
     pub fn web_search_active(&self) -> bool {
         !self.active_web_searches.is_empty()
+    }
+
+    /// Returns the latest hosted web-search lifecycle transition.
+    #[must_use]
+    pub fn web_search_lifecycle(&self) -> Option<(u64, &str, bool)> {
+        self.web_search_lifecycle
+            .as_ref()
+            .map(|(revision, call_id, active)| (*revision, call_id.as_str(), *active))
     }
 
     /// Appends displayable reasoning-summary text at the provider output index

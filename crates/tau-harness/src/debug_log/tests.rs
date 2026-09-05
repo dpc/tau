@@ -1238,6 +1238,7 @@ fn retry_debug_projection_excludes_provider_detail_canary() {
                 attempt: 2,
                 next_retry_delay_secs: 13,
             }),
+            native_tool: None,
         }),
         response_stats: None,
         originator: PromptOriginator::User,

@@ -664,10 +664,10 @@ fn previews_use_configured_default_role_unless_overridden() {
     assert_eq!(tool_names(&explicit_tools), ["grep"]);
 }
 
-/// Proves previews without Secret authority do not infer Codex tools from an
-/// unusable configured route, while preserving explicit role grants.
+/// Proves previews report exact-route uncertainty instead of inferring a
+/// provider-visible surface when configured Codex metadata is unavailable.
 #[test]
-fn print_tools_requires_usable_model_route_or_explicit_role_grants() {
+fn print_tools_requires_usable_exact_route_metadata() {
     let home = TempDir::new().expect("temporary home");
     let config_dir = home.path().join(".config/tau");
     let settings_dir = home.path().join(".state/tau/providers/provider-builtin");
@@ -715,8 +715,20 @@ fn print_tools_requires_usable_model_route_or_explicit_role_grants() {
     )
     .expect("write harness config");
 
+    let preview_tools = |role: &str| preview(&home, None, &["--role", role, "dev", "print-tools"]);
+    for role in ["codex-default", "codex-explicit"] {
+        let output = preview_tools(role);
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("provider-native replacement could not be resolved"),
+            "{:?}",
+            output.stderr
+        );
+    }
+
     let names = |role: &str| {
-        let output = preview(&home, None, &["--role", role, "dev", "print-tools"]);
+        let output = preview_tools(role);
         assert!(output.status.success(), "{:?}", output.stderr);
         let tools = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
             .expect("tool preview JSON");

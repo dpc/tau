@@ -2073,18 +2073,24 @@ fn apply_output_item_unknown(
         return false;
     }
     let hosted_web_search = item_type == "web_search_call";
+    let hosted_web_search_call_id = hosted_web_search.then(|| {
+        item["id"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("web-search-{output_index}"))
+    });
     match kind {
         OutputItemEventKind::Added => {
             state.reserve_output_item_at(output_index);
-            if hosted_web_search {
-                state.set_web_search_active(output_index, true);
+            if let Some(call_id) = hosted_web_search_call_id {
+                state.set_web_search_active(output_index, call_id, true);
             }
         }
         OutputItemEventKind::Done => {
             let item_json = raw_item_json.expect("completed opaque item raw JSON checked above");
             state.set_unknown_provider_item_at(output_index, item, item_json.to_owned());
-            if hosted_web_search {
-                state.set_web_search_active(output_index, false);
+            if let Some(call_id) = hosted_web_search_call_id {
+                state.set_web_search_active(output_index, call_id, false);
             }
         }
     }

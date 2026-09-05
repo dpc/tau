@@ -7762,6 +7762,7 @@ fn emit_retry_status(
                         due.checked_duration_since(now).unwrap_or(Duration::ZERO),
                     ),
                 }),
+                native_tool: None,
             }),
             response_stats: None,
             originator: job.prompt.originator.clone(),
@@ -8564,6 +8565,7 @@ fn emit_retry_banner<S: ProviderReportSink>(
                 text: banner,
                 clear_response: true,
                 retry: None,
+                native_tool: None,
             }),
             response_stats: None,
             originator: originator.clone(),
@@ -9057,6 +9059,7 @@ fn emit_chat_completions_partial_clear<S: ProviderReportSink>(
                 text: text.to_owned(),
                 clear_response: true,
                 retry: None,
+                native_tool: None,
             }),
             response_stats: None,
             originator: prompt.originator.clone(),
@@ -9468,6 +9471,7 @@ fn emit_chatgpt_connecting_update<S: ProviderReportSink>(
             text: "Connecting to provider…".to_owned(),
             clear_response: false,
             retry: None,
+            native_tool: None,
         }),
         response_stats: None,
         originator: originator.clone(),
@@ -9490,6 +9494,8 @@ struct RateLimitedResponseUpdateEmitter {
     first_semantic_output_elapsed: Option<Duration>,
     /// Last hosted-search activity state successfully published.
     web_search_active: Option<bool>,
+    /// Last hosted-search lifecycle revision successfully published.
+    web_search_lifecycle_revision: u64,
 }
 
 struct ResponseUpdateTarget<'a> {
@@ -9512,6 +9518,7 @@ impl RateLimitedResponseUpdateEmitter {
             emitted_non_empty_sample: false,
             first_semantic_output_elapsed: None,
             web_search_active: None,
+            web_search_lifecycle_revision: 0,
         }
     }
 
@@ -9569,8 +9576,37 @@ impl RateLimitedResponseUpdateEmitter {
         let response_stats = self.response_stats_at(state, now);
         let first_non_empty_sample =
             !self.emitted_non_empty_sample && response_stats.current.response_bytes_received > 0;
+        let native_tool = state
+            .web_search_lifecycle()
+            .and_then(|(revision, call_id, active)| {
+                (self.web_search_lifecycle_revision < revision).then(|| {
+                    tau_proto::ProviderNativeToolStatusUpdate {
+                        call_id: call_id.to_owned(),
+                        tool_name: tau_proto::ToolName::new("web_search"),
+                        display: tau_proto::ToolUseState {
+                            status: if active {
+                                tau_proto::ToolUseStatus::InProgress
+                            } else {
+                                tau_proto::ToolUseStatus::Success
+                            },
+                            status_text: if active {
+                                "pending".to_owned()
+                            } else {
+                                "ok".to_owned()
+                            },
+                            ..Default::default()
+                        },
+                        phase: if active {
+                            tau_proto::ProviderNativeToolPhase::Started
+                        } else {
+                            tau_proto::ProviderNativeToolPhase::Completed
+                        },
+                    }
+                })
+            });
         if !terminal_flush
             && !first_non_empty_sample
+            && native_tool.is_none()
             && self.last_update_emitted_at.map_or_else(
                 || {
                     response_stats.current.response_bytes_received == 0
@@ -9587,20 +9623,24 @@ impl RateLimitedResponseUpdateEmitter {
         } else {
             (self.web_search_active == Some(true)).then_some(false)
         };
-        if emit_chatgpt_stream_update(
-            target,
-            state,
-            &mut self.delta_emitter,
-            response_stats,
-            activity_transition.map(|active| ProviderResponseStatusUpdate {
-                text: if active {
+        let status = (activity_transition.is_some() || native_tool.is_some()).then(|| {
+            ProviderResponseStatusUpdate {
+                text: if state.web_search_active() {
                     "Searching web…".to_owned()
                 } else {
                     "Web search complete…".to_owned()
                 },
                 clear_response: false,
                 retry: None,
-            }),
+                native_tool: native_tool.clone(),
+            }
+        });
+        if emit_chatgpt_stream_update(
+            target,
+            state,
+            &mut self.delta_emitter,
+            response_stats,
+            status,
             writer,
         ) {
             self.last_stats_sample = response_stats.current;
@@ -9608,6 +9648,11 @@ impl RateLimitedResponseUpdateEmitter {
             self.emitted_non_empty_sample |= response_stats.current.response_bytes_received > 0;
             if let Some(active) = activity_transition {
                 self.web_search_active = Some(active);
+            }
+            if native_tool.is_some()
+                && let Some((revision, _, _)) = state.web_search_lifecycle()
+            {
+                self.web_search_lifecycle_revision = revision;
             }
         }
     }
@@ -9863,6 +9908,7 @@ fn emit_repetition_detected_update<S: ProviderReportSink>(
                 text,
                 clear_response: true,
                 retry: None,
+                native_tool: None,
             }),
             response_stats: None,
             originator: originator.clone(),

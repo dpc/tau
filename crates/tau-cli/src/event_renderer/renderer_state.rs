@@ -196,6 +196,9 @@ pub(super) struct TranscriptRuntimeState {
     pub(super) accepted_submission_block: Option<tau_cli_term::BlockId>,
     /// Tool-call lifecycle records.
     pub(super) tool_calls: HashMap<tau_proto::ToolCallId, ToolCallState>,
+    /// Transient provider-native tool rows keyed by prompt and provider call
+    /// id.
+    pub(super) native_tool_calls: HashMap<(tau_proto::AgentPromptId, String), ToolCallState>,
     /// User-shell lifecycle records keyed by their protocol identities.
     pub(super) shell_blocks: HashMap<tau_proto::ShellCommandId, ShellBlockState>,
     /// Persistent model status block.

@@ -96,7 +96,7 @@ fn hosted_web_search_collides(
 }
 
 /// Fully compiled provider-visible prompt surface.
-struct MaterializedPromptSurface {
+pub(super) struct MaterializedPromptSurface {
     /// Authorized and selected ordinary tool metadata.
     tool_specs: Vec<tau_proto::ToolSpec>,
     /// Provider-facing ordinary tool definitions.
@@ -107,6 +107,19 @@ struct MaterializedPromptSurface {
     invocation_policies: HashMap<ToolName, tau_proto::ToolInvocationPolicy>,
     /// Rendered system prompt based on the selected surface.
     system_prompt: String,
+}
+
+impl MaterializedPromptSurface {
+    /// Splits the provider-visible tool surface into ordinary and hosted
+    /// definitions for developer introspection.
+    pub(super) fn into_tool_surface(
+        self,
+    ) -> (
+        Vec<tau_proto::ToolDefinition>,
+        Vec<tau_proto::HostedToolDefinition>,
+    ) {
+        (self.tool_definitions, self.hosted_tools)
+    }
 }
 
 /// Reset the deterministic dispatch provider-sort work counter.
@@ -1599,6 +1612,33 @@ impl Harness {
         ))
     }
 
+    /// Returns the exact ordinary and hosted tool surface selected by live
+    /// dispatch for focused developer-preview parity tests.
+    #[cfg(test)]
+    pub(super) fn prepare_tool_surface_for_dispatch(
+        &self,
+        role_name: &str,
+        agent_id: &tau_proto::AgentId,
+        model: &ModelId,
+    ) -> Result<
+        (
+            Vec<tau_proto::ToolDefinition>,
+            Vec<tau_proto::HostedToolDefinition>,
+        ),
+        PromptSurfaceError,
+    > {
+        self.prepare_prompt_surface_for_dispatch_timed(
+            role_name,
+            Some(agent_id),
+            Some(agent_id),
+            model,
+            false,
+            false,
+            None,
+        )
+        .map(MaterializedPromptSurface::into_tool_surface)
+    }
+
     /// Timed form of prompt-surface preparation used only by live provider
     /// materialization.
     #[allow(clippy::too_many_arguments)]
@@ -1706,6 +1746,30 @@ impl Harness {
             invocation_policies,
             system_prompt: prompt,
         })
+    }
+
+    /// Resolves the same exact-route surface as live dispatch for a developer
+    /// preview, failing explicitly when route metadata is unavailable.
+    pub(super) fn prepare_prompt_surface_for_preview(
+        &self,
+        role_name: &str,
+        context_agent_id: &tau_proto::AgentId,
+        model: &ModelId,
+    ) -> Result<MaterializedPromptSurface, PromptSurfaceError> {
+        if !self.provider_runtime.model_info.contains_key(model) {
+            return Err(PromptSurfaceError::WebUnavailable(format!(
+                "cannot preview provider-visible tools for exact route `{model}`: model capability metadata is unavailable"
+            )));
+        }
+        self.prepare_prompt_surface_for_dispatch_timed(
+            role_name,
+            Some(context_agent_id),
+            Some(context_agent_id),
+            model,
+            false,
+            false,
+            None,
+        )
     }
 
     pub(super) fn try_build_system_prompt_for_role_and_agent(

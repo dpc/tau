@@ -2605,6 +2605,12 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                     parameters: Some(serde_json::json!({"type": "object"})),
                     format: None,
                 }]),
+                hosted_tools: vec![HostedToolDefinition::WebSearch {
+                    access: ProviderWebSearchAccess::Cached,
+                    context_size: None,
+                    allowed_domains: Vec::new(),
+                }],
+                warnings: Vec::new(),
                 error: None,
             },
         )),

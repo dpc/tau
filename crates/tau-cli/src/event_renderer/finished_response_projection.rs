@@ -389,6 +389,7 @@ impl EventRenderer {
     ) -> PromptState {
         // Drain the whole per-prompt state in one shot — every field tracked
         // through the stream is consumed here.
+        self.retire_provider_native_tools_for_prompt(&finished.agent_prompt_id);
         let prompt_state = self
             .transcript
             .runtime

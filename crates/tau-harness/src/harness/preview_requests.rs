@@ -5,6 +5,7 @@
 //! [ARCH-tau-harness](../../specs/ARCH-tau-harness.md) for the harness
 //! extension-data boundary.
 
+use super::prompt_materialization::{MaterializedPromptSurface, PromptSurfaceError};
 use super::*;
 
 /// A render request awaiting the normal per-agent context initialization path.
@@ -49,6 +50,14 @@ pub(super) struct PendingRenderedPreview {
 }
 
 const RENDERED_PREVIEW_CONTEXT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Ordinary tools, provider-hosted tools, and exact-resolution warnings for one
+/// developer preview.
+type RenderedToolPreview = (
+    Vec<ToolDefinition>,
+    Vec<tau_proto::HostedToolDefinition>,
+    Vec<String>,
+);
 
 impl Harness {
     pub(super) fn send_rendered_system_prompt_result(
@@ -148,22 +157,14 @@ impl Harness {
                 &self.config.available_roles,
                 &role,
             );
-            let specs = self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
-            if let Some(name) = duplicate_model_visible_tool_name(&specs) {
-                self.send_rendered_preview_error(
-                    request,
-                    format!(
-                        "effective tool surface contains duplicate model-visible name `{name}`"
-                    ),
-                );
-                continue;
-            }
             match request {
                 PendingRenderedPrompt::System {
                     connection_id,
                     request_id,
                     ..
                 } => {
+                    let specs =
+                        self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
                     let result = self
                         .build_system_prompt_for_role_preview_with_snapshot(
                             &role,
@@ -180,6 +181,8 @@ impl Harness {
                     enable_agents_md,
                     ..
                 } => {
+                    let specs =
+                        self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
                     let result = self
                         .build_system_prompt_for_role_preview_with_snapshot(
                             &role,
@@ -195,8 +198,36 @@ impl Harness {
                     request_id,
                     ..
                 } => {
-                    let tools = self.tool_definitions_from_specs(&specs);
-                    self.send_rendered_tools(&connection_id, request_id, Ok(tools));
+                    let result = if let Some(model) = model.as_ref() {
+                        self.prepare_prompt_surface_for_preview(&role, agent_id, model)
+                            .map(MaterializedPromptSurface::into_tool_surface)
+                            .map(|(tools, hosted_tools)| (tools, hosted_tools, Vec::new()))
+                            .map_err(|error| match error {
+                                PromptSurfaceError::DuplicateToolName(name) => format!(
+                                    "effective tool surface contains duplicate model-visible name `{name}`"
+                                ),
+                                PromptSurfaceError::Render(error) => {
+                                    format!("failed to render system prompt: {error}")
+                                }
+                                PromptSurfaceError::WebUnavailable(error) => error,
+                            })
+                    } else {
+                        let specs = self.gather_effective_tool_specs_for_role_model(&role, None);
+                        if let Some(name) = duplicate_model_visible_tool_name(&specs) {
+                            Err(format!(
+                                "effective tool surface contains duplicate model-visible name `{name}`"
+                            ))
+                        } else {
+                            Ok((
+                                self.tool_definitions_from_specs(&specs),
+                                Vec::new(),
+                                vec![format!(
+                                    "role `{role}` has no exact model capability metadata; provider-native replacement could not be resolved, so ordinary tool entries are provisional"
+                                )],
+                            ))
+                        }
+                    };
+                    self.send_rendered_tools(&connection_id, request_id, result);
                 }
             }
         }
@@ -295,10 +326,12 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
         request_id: String,
-        result: Result<Vec<ToolDefinition>, String>,
+        result: Result<RenderedToolPreview, String>,
     ) {
-        let (tools, error) =
-            result.map_or_else(|error| (None, Some(error)), |tools| (Some(tools), None));
+        let (tools, hosted_tools, warnings, error) = result.map_or_else(
+            |error| (None, Vec::new(), Vec::new(), Some(error)),
+            |(tools, hosted_tools, warnings)| (Some(tools), hosted_tools, warnings, None),
+        );
         let _ = self.runtime_io.bus.send_to(
             connection_id,
             None,
@@ -306,6 +339,8 @@ impl Harness {
                 tau_proto::RenderedToolDefinitionsResult {
                     request_id,
                     tools,
+                    hosted_tools,
+                    warnings,
                     error,
                 },
             )),

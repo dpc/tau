@@ -7,6 +7,11 @@ This record owns the non-local streaming-to-settled frame contract shared by pro
 Constrained by [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 
 Terminal streaming accumulates `provider.response_updated.deltas` per prompt and provider output index. If a UI sees a delta for an unknown in-flight prompt, it may create a live block with an ellipsis prefix to indicate missed earlier transient deltas; the final `provider.response_finished` replaces live content with complete durable output. Provider status updates are rendered as transient status text and do not enter assistant response accumulation.
+Typed provider-native tool status uses the generic `ToolUseState` renderer and
+labels the row `<name> (native)`, with the qualifier visually subdued. A started
+phase creates a live row and a completed phase settles it into current-session
+history. These rows are transient UI projection: they do not enter Tau tool
+state or counters and cannot be reconstructed after cold restart.
 
 At renderer dequeue, the CLI may fold a contiguous, already-admitted run of
 ordinary `provider.response_updated` facts for the same agent, prompt, and

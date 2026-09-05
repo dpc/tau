@@ -123,6 +123,18 @@ pub fn test_record_transport_response_bytes(state: &mut StreamState, bytes: usiz
     state.record_transport_response_bytes(bytes);
 }
 
+/// Records one synthetic hosted web-search lifecycle transition for cross-crate
+/// provider presentation tests.
+#[cfg(feature = "test-support")]
+pub fn test_set_web_search_active(
+    state: &mut StreamState,
+    output_index: usize,
+    call_id: &str,
+    active: bool,
+) {
+    state.set_web_search_active(output_index, call_id.to_owned(), active);
+}
+
 /// Startup-resolved ChatGPT credentials used by one backend configuration.
 ///
 /// This type intentionally has no `Debug` implementation so bearer material

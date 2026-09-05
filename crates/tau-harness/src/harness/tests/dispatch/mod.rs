@@ -15,7 +15,7 @@ use super::*;
 use crate::agent::{ActivationDispatchState, Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::{AgentPublishCompletion, DeferredActivationObligation};
 use crate::harness::prompt_materialization::{
-    dispatch_provider_sort_count, reset_dispatch_provider_sort_count,
+    PromptSurfaceError, dispatch_provider_sort_count, reset_dispatch_provider_sort_count,
 };
 use crate::harness::{
     BackgroundCompletionPromptMode, GatedFinalDisposition, HarnessCommand, PendingRenderedPreview,

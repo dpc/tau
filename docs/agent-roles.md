@@ -81,6 +81,13 @@ semantics, so running either diagnostic can have the same extension side effects
 as ordinary startup. This is fresh-agent parity, not a view of a restored or
 currently running agent.
 
+`tau dev print-tools` applies the same logical-web selection as a live prompt.
+When the exact route selects provider-hosted search, the JSON entry uses
+`"name": "web_search"` and `"execution": "provider_native"` rather than
+claiming that an ordinary Tau function is present. If exact model capability
+metadata is unavailable, the command prints its provisional ordinary surface
+and emits a warning that provider-native replacement could not be resolved.
+
 Templates also receive sparse, deterministic runtime capabilities:
 
 ```handlebars

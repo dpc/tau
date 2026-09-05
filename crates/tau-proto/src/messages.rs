@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, Event, EventSelector,
-    ExtensionName, InterceptionPriority, NoticeLevel, SessionId, ToolDefinition, ToolNamePrefix,
+    ExtensionName, HostedToolDefinition, InterceptionPriority, NoticeLevel, SessionId,
+    ToolDefinition, ToolNamePrefix,
 };
 
 // ---------------------------------------------------------------------------
@@ -659,12 +660,18 @@ pub struct GetRenderedToolDefinitions {
 pub struct RenderedToolDefinitionsResult {
     /// Request correlation id copied from the request.
     pub request_id: String,
-    /// Effective provider-facing tool definitions for the requested role.
-    /// Exactly one of `tools` and `error` should be present.
+    /// Effective ordinary provider-facing tool definitions for the requested
+    /// role. Exactly one of the tool surface and `error` should be present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
+    /// Effective provider-hosted tools for the requested role and exact route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_tools: Vec<HostedToolDefinition>,
+    /// Human-readable limitations on exact provider-visible resolution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// Human-readable failure when the role is unknown.
-    /// Exactly one of `tools` and `error` should be present.
+    /// Exactly one of the tool surface and `error` should be present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

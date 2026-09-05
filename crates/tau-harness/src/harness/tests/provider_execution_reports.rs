@@ -913,6 +913,82 @@ fn canceled_submitted_and_updated_reports_are_observation_only() {
     assert!(!events.contains(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED));
 }
 
+/// Typed provider-native tool status must survive owner validation only as a
+/// transient provider update and must not mutate Tau tool counters.
+#[test]
+fn native_tool_status_republishes_without_tau_tool_accounting() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let cid = ensure_test_user_agent(&mut harness);
+    let prompt_id = tau_proto::AgentPromptId::parse("native-tool-prompt").expect("prompt id");
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    harness
+        .provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id("provider"));
+    let before = {
+        let execution = &harness.agent_runtime.agent_registry.agents[&cid].execution;
+        (execution.tools_in_flight, execution.tools_total)
+    };
+
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseUpdatedReported(tau_proto::ProviderResponseUpdated {
+                agent_prompt_id: prompt_id,
+                agent_id: crate::parse_agent_id("spoofed"),
+                deltas: Vec::new(),
+                compaction: None,
+                status: Some(tau_proto::ProviderResponseStatusUpdate {
+                    text: "Searching web…".to_owned(),
+                    clear_response: false,
+                    retry: None,
+                    native_tool: Some(tau_proto::ProviderNativeToolStatusUpdate {
+                        call_id: "ws_1".to_owned(),
+                        tool_name: tau_proto::ToolName::new("web_search"),
+                        display: tau_proto::ToolUseState {
+                            status: tau_proto::ToolUseStatus::InProgress,
+                            ..Default::default()
+                        },
+                        phase: tau_proto::ProviderNativeToolPhase::Started,
+                    }),
+                }),
+                response_stats: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("native tool update report");
+
+    let canonical = committed_events(&harness)
+        .into_iter()
+        .find_map(|(_, event)| match event {
+            Event::ProviderResponseUpdated(update) => Some(update),
+            _ => None,
+        })
+        .expect("canonical transient update");
+    assert_eq!(
+        canonical
+            .status
+            .and_then(|status| status.native_tool)
+            .expect("native tool status")
+            .call_id,
+        "ws_1"
+    );
+    let after = &harness.agent_runtime.agent_registry.agents[&cid].execution;
+    assert_eq!(after.tools_in_flight, before.0);
+    assert_eq!(after.tools_total, before.1);
+}
+
 /// Raw update and terminal observations must remain independently available
 /// while canonical derivation consumes the original large payload allocations
 /// exactly once instead of cloning them at the report boundary.

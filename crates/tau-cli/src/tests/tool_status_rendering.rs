@@ -5143,6 +5143,7 @@ fn status_clear_response_removes_live_thinking_block() {
             text: "retrying".to_owned(),
             clear_response: true,
             retry: None,
+            native_tool: None,
         }),
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
@@ -5151,6 +5152,161 @@ fn status_clear_response_removes_live_thinking_block() {
 
     assert!(vt.screen_contains(80, "retrying"));
     assert!(!vt.screen_contains(80, "failed attempt thinking"));
+}
+
+/// Typed provider-native lifecycle must produce a generic live row and retain
+/// its completed row with a visibly distinct native qualifier.
+#[test]
+fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let update = |phase, status, status_text: &str| {
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: test_agent_prompt_id("sp-native"),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(tau_proto::ProviderResponseStatusUpdate {
+                text: status_text.to_owned(),
+                clear_response: false,
+                retry: None,
+                native_tool: Some(tau_proto::ProviderNativeToolStatusUpdate {
+                    call_id: "ws_1".to_owned(),
+                    tool_name: tau_proto::ToolName::new("web_search"),
+                    display: tau_proto::ToolUseState {
+                        status,
+                        status_text: if phase == tau_proto::ProviderNativeToolPhase::Started {
+                            String::new()
+                        } else {
+                            "ok".to_owned()
+                        },
+                        ..Default::default()
+                    },
+                    phase,
+                }),
+            }),
+            response_stats: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+
+    renderer.handle(&update(
+        tau_proto::ProviderNativeToolPhase::Started,
+        tau_proto::ToolUseStatus::InProgress,
+        "Searching web…",
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "web_search (native)"));
+
+    renderer.handle(&update(
+        tau_proto::ProviderNativeToolPhase::Completed,
+        tau_proto::ToolUseStatus::Success,
+        "Web search complete…",
+    ));
+    sync(&handle);
+    let screen = vt.screen_text(100);
+    assert!(
+        screen
+            .iter()
+            .any(|line| line.contains("web_search (native) ok")),
+        "{screen:?}"
+    );
+}
+
+/// The native qualifier uses the generic informational style rather than the
+/// primary tool-name color, keeping the execution distinction visually subdued.
+#[test]
+fn provider_native_tool_qualifier_uses_info_style() {
+    let display = crate::event_renderer::provider_native_tool_display(
+        &tau_proto::ProviderNativeToolStatusUpdate {
+            call_id: "ws_1".to_owned(),
+            tool_name: tau_proto::ToolName::new("web_search"),
+            display: tau_proto::ToolUseState::default(),
+            phase: tau_proto::ProviderNativeToolPhase::Started,
+        },
+    );
+    assert_eq!(display.leading_segments.len(), 1);
+    assert_eq!(display.leading_segments[0].text, "(native)");
+    assert!(matches!(
+        display.leading_segments[0].status,
+        ToolStatus::Info
+    ));
+}
+
+/// Provider finalization must remove an unfinished native live row rather than
+/// leaving it pinned or synthesizing a completed history entry.
+#[test]
+fn provider_finished_retires_unfinished_native_tool_row() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&native_tool_started_update("sp-native-finished"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "web_search (native)"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-native-finished",
+        Vec::new(),
+    )));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "web_search (native)"));
+}
+
+/// Prompt cancellation must remove an unfinished native live row even when no
+/// provider terminal or typed native completion arrives.
+#[test]
+fn prompt_termination_retires_unfinished_native_tool_row() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&native_tool_started_update("sp-native-terminated"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "web_search (native)"));
+
+    renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
+        automatic_compaction_decision: None,
+        agent_id: agent_id("main"),
+        agent_prompt_id: test_agent_prompt_id("sp-native-terminated"),
+        reason: AgentPromptTerminationReason::Canceled,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "web_search (native)"));
+}
+
+fn native_tool_started_update(prompt_id: &str) -> Event {
+    Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: test_agent_prompt_id(prompt_id),
+        agent_id: agent_id("main"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: Some(tau_proto::ProviderResponseStatusUpdate {
+            text: "Searching web…".to_owned(),
+            clear_response: false,
+            retry: None,
+            native_tool: Some(tau_proto::ProviderNativeToolStatusUpdate {
+                call_id: "ws_1".to_owned(),
+                tool_name: tau_proto::ToolName::new("web_search"),
+                display: tau_proto::ToolUseState {
+                    status: tau_proto::ToolUseStatus::InProgress,
+                    ..Default::default()
+                },
+                phase: tau_proto::ProviderNativeToolPhase::Started,
+            }),
+        }),
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
 }
 
 #[test]

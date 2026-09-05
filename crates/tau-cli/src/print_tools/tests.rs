@@ -46,3 +46,28 @@ fn model_visible_definition_preserves_complete_shape() {
         })
     );
 }
+
+/// Provider-hosted search must be explicitly marked native so a developer
+/// preview cannot be mistaken for an ordinary Tau-routed function tool.
+#[test]
+fn hosted_web_search_is_marked_provider_native() {
+    let rendered = serde_json::to_value(ProviderVisibleToolDefinition::Hosted(
+        ModelVisibleHostedToolDefinition::from(tau_proto::HostedToolDefinition::WebSearch {
+            access: tau_proto::ProviderWebSearchAccess::Cached,
+            context_size: Some(tau_proto::WebSearchContextSize::High),
+            allowed_domains: vec!["docs.rs".to_owned()],
+        }),
+    ))
+    .expect("serialize native hosted tool");
+
+    assert_eq!(
+        rendered,
+        serde_json::json!({
+            "name": "web_search",
+            "execution": "provider_native",
+            "access": "cached",
+            "context_size": "high",
+            "allowed_domains": ["docs.rs"]
+        })
+    );
+}

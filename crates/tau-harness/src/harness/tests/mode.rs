@@ -1403,8 +1403,11 @@ fn daemon_mode_renders_tool_definitions_for_requested_role() {
 
     wait_for_socket(&sock);
 
-    let tools = get_daemon_rendered_tool_definitions(&sock, &session_id("s1"), "engineer")
-        .expect("render tool definitions");
+    let (tools, hosted_tools, warnings) =
+        get_daemon_rendered_tool_definitions(&sock, &session_id("s1"), "engineer")
+            .expect("render tool definitions");
+    assert!(hosted_tools.is_empty());
+    assert!(warnings.is_empty());
     assert!(!tools.is_empty());
     let read_tool = tools
         .iter()

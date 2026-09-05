@@ -7,6 +7,14 @@ use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session,
 use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
 
+/// Ordinary tools, provider-hosted tools, and exact-resolution warnings from
+/// the preview harness.
+type RenderedToolPreview = (
+    Vec<tau_proto::ToolDefinition>,
+    Vec<tau_proto::HostedToolDefinition>,
+    Vec<String>,
+);
+
 /// One tool definition rendered exactly as a provider exposes it to the model.
 #[derive(serde::Serialize)]
 struct ModelVisibleToolDefinition {
@@ -23,6 +31,51 @@ struct ModelVisibleToolDefinition {
     /// Optional freeform/custom input format.
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<tau_proto::ToolFormat>,
+}
+
+/// One provider-hosted tool rendered separately from client-executed tools.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum ProviderVisibleToolDefinition {
+    /// Ordinary Function or Custom tool routed back through Tau.
+    Ordinary(ModelVisibleToolDefinition),
+    /// Tool executed directly by the exact model provider.
+    Hosted(ModelVisibleHostedToolDefinition),
+}
+
+/// One exact-route provider-native tool and its selected controls.
+#[derive(serde::Serialize)]
+struct ModelVisibleHostedToolDefinition {
+    /// Provider-visible name used by the hosted invocation.
+    name: tau_proto::ToolName,
+    /// Explicit execution boundary distinguishing native from Tau-routed tools.
+    execution: &'static str,
+    /// Hosted source access selected for provider-native web search.
+    access: tau_proto::ProviderWebSearchAccess,
+    /// Optional qualitative amount of provider-native search context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_size: Option<tau_proto::WebSearchContextSize>,
+    /// Optional provider-side domain restriction.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    allowed_domains: Vec<String>,
+}
+
+impl From<tau_proto::HostedToolDefinition> for ModelVisibleHostedToolDefinition {
+    fn from(definition: tau_proto::HostedToolDefinition) -> Self {
+        match definition {
+            tau_proto::HostedToolDefinition::WebSearch {
+                access,
+                context_size,
+                allowed_domains,
+            } => Self {
+                name: tau_proto::ToolName::new("web_search"),
+                execution: "provider_native",
+                access,
+                context_size,
+                allowed_domains,
+            },
+        }
+    }
 }
 
 impl From<tau_proto::ToolDefinition> for ModelVisibleToolDefinition {
@@ -70,9 +123,20 @@ pub(crate) fn run_print_tools(
 
     let result = get_rendered_tool_definitions(&mut daemon, role);
     daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
-    let tools = result?
+    let (ordinary_tools, hosted_tools, warnings) = result?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+    let tools = ordinary_tools
         .into_iter()
         .map(ModelVisibleToolDefinition::from)
+        .map(ProviderVisibleToolDefinition::Ordinary)
+        .chain(
+            hosted_tools
+                .into_iter()
+                .map(ModelVisibleHostedToolDefinition::from)
+                .map(ProviderVisibleToolDefinition::Hosted),
+        )
         .collect::<Vec<_>>();
 
     let mut stdout = std::io::stdout().lock();
@@ -87,7 +151,7 @@ pub(crate) fn run_print_tools(
 fn get_rendered_tool_definitions(
     daemon: &mut DaemonHandle,
     role: Option<&str>,
-) -> Result<Vec<tau_proto::ToolDefinition>, CliError> {
+) -> Result<RenderedToolPreview, CliError> {
     crate::render_request::request_rendered_value(
         daemon,
         "tau-print-tools",
@@ -102,16 +166,23 @@ fn get_rendered_tool_definitions(
             HarnessOutputMessage::RenderedToolDefinitionsResult(result)
                 if result.request_id == request_id =>
             {
-                let tools = if let Some(error) = result.error {
+                let tau_proto::RenderedToolDefinitionsResult {
+                    tools,
+                    hosted_tools,
+                    warnings,
+                    error,
+                    ..
+                } = *result;
+                let tools = if let Some(error) = error {
                     Err(CliError::Participant(error))
                 } else {
-                    result.tools.ok_or_else(|| {
+                    tools.ok_or_else(|| {
                         CliError::Participant(
                             "daemon returned no rendered tool definitions".to_owned(),
                         )
                     })
                 };
-                RenderResponse::Matched(tools)
+                RenderResponse::Matched(tools.map(|tools| (tools, hosted_tools, warnings)))
             }
             _ => RenderResponse::Ignore,
         },
