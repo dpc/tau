@@ -1852,7 +1852,8 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     let completion_prompt = background_completion_prompt(&call_id);
     assert_eq!(
         completion_prompt,
-        "Tool call `bg-any-after` completed. Its result is queued; use `wait` to consume it."
+        "Tool call `bg-any-after` completed. Its result is queued. Call `wait` to consume it when \
+         useful; otherwise, you can leave it queued."
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]

@@ -5599,7 +5599,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
         inference_activation: false,
         submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("worker"),
-        text: "<tau_internal>Tool call `bg` completed. Its result is queued; use `wait` to consume it.</tau_internal>".into(),
+        text: "<tau_internal>Tool call `bg` completed. Its result is queued. Call `wait` to consume it when useful; otherwise, you can leave it queued.</tau_internal>".into(),
         trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::Internal,
         internal_kind: None,

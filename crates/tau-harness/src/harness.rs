@@ -514,7 +514,10 @@ fn session_agent_list_message_fits(message: &HarnessOutputMessage) -> bool {
 }
 
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
-    format!("Tool call `{call_id}` completed. Its result is queued; use `wait` to consume it.")
+    format!(
+        "Tool call `{call_id}` completed. Its result is queued. Call `wait` to consume it when \
+         useful; otherwise, you can leave it queued."
+    )
 }
 
 /// Render the bounded typed self-compaction terminal as an internal model

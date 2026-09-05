@@ -2368,7 +2368,9 @@ fn typed_background_completion_prompts_are_always_hidden() {
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
         inference_activation: true,
         agent_id: agent_id("main"),
-        text: "Tool call `idle` completed. Its result is queued; use `wait` to consume it.".into(),
+        text: "Tool call `idle` completed. Its result is queued. Call `wait` to consume it when \
+               useful; otherwise, you can leave it queued."
+            .into(),
         trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
@@ -2384,8 +2386,10 @@ fn typed_background_completion_prompts_are_always_hidden() {
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-        text: "Tool call `steered` completed. Its result is queued; use `wait` to consume it."
-            .into(),
+        text:
+            "Tool call `steered` completed. Its result is queued. Call `wait` to consume it when \
+               useful; otherwise, you can leave it queued."
+                .into(),
         trusted_internal_spans: Vec::new(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,
@@ -2413,8 +2417,10 @@ fn typed_background_completion_prompts_are_always_hidden() {
         &Event::AgentPromptSubmitted(AgentPromptSubmitted {
             inference_activation: true,
             agent_id: agent_id("main"),
-            text: "Tool call `replayed` completed. Its result is queued; use `wait` to consume it."
-                .into(),
+            text:
+                "Tool call `replayed` completed. Its result is queued. Call `wait` to consume it \
+                   when useful; otherwise, you can leave it queued."
+                    .into(),
             trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
@@ -2446,7 +2452,8 @@ fn untyped_internal_prompt_matching_completion_prose_remains_visible() {
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-        text: "Tool call `same-prose` completed. Its result is queued; use `wait` to consume it."
+        text: "Tool call `same-prose` completed. Its result is queued. Call `wait` to consume it \
+               when useful; otherwise, you can leave it queued."
             .into(),
         trusted_internal_spans: Vec::new(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
