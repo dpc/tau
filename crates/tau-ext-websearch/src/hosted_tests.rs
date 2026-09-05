@@ -10,7 +10,7 @@ use std::time::Duration;
 use tau_proto::SecretValue;
 
 use super::hosted::{HostedAttempt, HostedClient, HostedConfig, HostedRequest, HttpHostedClient};
-use super::{WebAdapter, WebOperation};
+use super::{DEFAULT_YOU_ENDPOINT, WebAdapter, WebOperation};
 
 /// Loopback HTTP server that captures an exact provider request sequence.
 struct FixtureServer {
@@ -113,7 +113,8 @@ fn request_json(request: &str) -> serde_json::Value {
 
 fn config() -> HostedConfig {
     HostedConfig {
-        you_endpoint: None,
+        you_endpoint: DEFAULT_YOU_ENDPOINT.to_owned(),
+        you_api_key: None,
         brave_endpoint: None,
         brave_api_key: None,
         tavily_endpoint: None,
@@ -180,7 +181,7 @@ fn you_free_mcp_fixture_is_exact() {
     ]);
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
-        you_endpoint: Some(format!("{}mcp?profile=free", server.origin)),
+        you_endpoint: format!("{}mcp?profile=free", server.origin),
         ..config()
     });
     assert_eq!(
@@ -200,6 +201,12 @@ fn you_free_mcp_fixture_is_exact() {
     );
     let requests = server.finish_all();
     assert_eq!(requests.len(), 3);
+    for request in &requests {
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "request: {request}"
+        );
+    }
     assert!(requests[0].starts_with("POST /mcp?profile=free HTTP/1.1\r\n"));
     assert_eq!(
         request_json(&requests[0]),
@@ -243,6 +250,93 @@ fn you_free_mcp_fixture_is_exact() {
     assert!(requests[2].contains("mcp-session-id: you-session\r\n"));
 }
 
+/// Ensures authenticated You.com MCP calls use the documented bearer token on
+/// every request in the initialize, notification, and tool-call sequence.
+#[test]
+fn you_authenticated_mcp_fixture_sends_bearer_token() {
+    let server = FixtureServer::sequence(vec![
+        (
+            "200 OK".to_owned(),
+            "Mcp-Session-Id: you-session\r\n".to_owned(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"you","version":"1"}}}"#.to_owned(),
+        ),
+        ("202 Accepted".to_owned(), String::new(), String::new()),
+        (
+            "200 OK".to_owned(),
+            String::new(),
+            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"you result"}]}}"#.to_owned(),
+        ),
+    ]);
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        you_endpoint: format!("{}mcp", server.origin),
+        you_api_key: Some(fixture_secret("you-fixture-secret")),
+        ..config()
+    });
+    assert_eq!(
+        client
+            .call(
+                WebAdapter::You,
+                request(
+                    WebOperation::Search,
+                    "rust agents",
+                    7,
+                    "",
+                    &AtomicBool::new(false),
+                ),
+            )
+            .expect("authenticated You.com fixture"),
+        "you result"
+    );
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 3);
+    for request in requests {
+        assert!(
+            request.contains("authorization: Bearer you-fixture-secret\r\n"),
+            "request: {request}"
+        );
+    }
+}
+
+/// Ensures authenticated You.com JSON-RPC diagnostics cannot echo the
+/// configured bearer secret into a tool error.
+#[test]
+fn you_authenticated_mcp_errors_redact_bearer_token() {
+    let server = FixtureServer::sequence(vec![
+        (
+            "200 OK".to_owned(),
+            "Mcp-Session-Id: you-session\r\n".to_owned(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"you","version":"1"}}}"#.to_owned(),
+        ),
+        ("202 Accepted".to_owned(), String::new(), String::new()),
+        (
+            "200 OK".to_owned(),
+            String::new(),
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"rejected you-jsonrpc-secret"}}"#.to_owned(),
+        ),
+    ]);
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        you_endpoint: format!("{}mcp", server.origin),
+        you_api_key: Some(fixture_secret("you-jsonrpc-secret")),
+        ..config()
+    });
+    let error = client
+        .call(
+            WebAdapter::You,
+            request(
+                WebOperation::Search,
+                "rust agents",
+                7,
+                "",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect_err("authenticated You.com error");
+    server.finish_all();
+    assert!(!error.contains("you-jsonrpc-secret"), "error: {error}");
+}
+
 /// Prevents tool calls when the You.com initialization response does not
 /// negotiate the MCP tools capability.
 #[test]
@@ -253,7 +347,7 @@ fn you_mcp_requires_negotiated_tools_capability() {
     );
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
-        you_endpoint: Some(format!("{}mcp?profile=free", server.origin)),
+        you_endpoint: format!("{}mcp?profile=free", server.origin),
         ..config()
     });
     let error = client
@@ -291,7 +385,7 @@ fn you_mcp_cancellation_after_initialize_stops_later_requests() {
     );
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
-        you_endpoint: Some(format!("{}mcp?profile=free", server.origin)),
+        you_endpoint: format!("{}mcp?profile=free", server.origin),
         ..config()
     });
     let error = client

@@ -1197,6 +1197,12 @@ fn rest_failures_keep_stable_scheduler_categories() {
 #[test]
 fn optional_provider_configuration_resolves_secrets_and_capabilities() {
     let secrets = [
+        ("exa".to_owned(), tau_proto::SecretValue::new("exa-key")),
+        (
+            "parallel".to_owned(),
+            tau_proto::SecretValue::new("parallel-key"),
+        ),
+        ("you".to_owned(), tau_proto::SecretValue::new("you-key")),
         ("brave".to_owned(), tau_proto::SecretValue::new("brave-key")),
         (
             "tavily".to_owned(),
@@ -1212,6 +1218,9 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
     let config: ExtConfig = serde_json::from_value(serde_json::json!({
         "search_providers": ["brave", "tavily", "firecrawl"],
         "fetch_providers": ["tavily", "firecrawl"],
+        "exa_api_key_secret": "exa",
+        "parallel_api_key_secret": "parallel",
+        "you_api_key_secret": "you",
         "brave_api_key_secret": "brave",
         "tavily_api_key_secret": "tavily",
         "firecrawl_api_key_secret": "firecrawl"
@@ -1220,6 +1229,22 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
     let mut validated = config
         .validate(&secrets)
         .expect("validated credentialed config");
+    assert_eq!(
+        validated.exa_api_key.as_ref(),
+        Some(&tau_proto::SecretValue::new("exa-key"))
+    );
+    assert_eq!(
+        validated.parallel_api_key.as_ref(),
+        Some(&tau_proto::SecretValue::new("parallel-key"))
+    );
+    assert_eq!(
+        validated.hosted.you_api_key.as_ref(),
+        Some(&tau_proto::SecretValue::new("you-key"))
+    );
+    assert_eq!(
+        validated.hosted.you_endpoint,
+        DEFAULT_AUTHENTICATED_YOU_ENDPOINT
+    );
     assert_eq!(
         validated.hosted.brave_api_key.as_ref(),
         Some(&tau_proto::SecretValue::new("brave-key"))
@@ -1282,6 +1307,58 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
             "fetch provider {provider}: {error}"
         );
     }
+}
+
+/// Ensures every optional MCP credential field resolves only through Tau's
+/// named-secret channel and reports the exact missing reference.
+#[test]
+fn optional_mcp_credentials_reject_missing_secret_references() {
+    for field in [
+        "exa_api_key_secret",
+        "parallel_api_key_secret",
+        "you_api_key_secret",
+    ] {
+        let config: ExtConfig = serde_json::from_value(serde_json::json!({
+            (field): "missing",
+        }))
+        .expect("optional MCP credential config");
+        let Err(error) = config.validate(&BTreeMap::new()) else {
+            panic!("missing named secret unexpectedly validated");
+        };
+        assert!(
+            error.contains(&format!(
+                "`{field}` references unavailable secret `missing`"
+            )),
+            "{field}: {error}"
+        );
+    }
+}
+
+/// Ensures an explicit You.com endpoint remains authoritative when optional
+/// authentication is configured instead of being replaced by the built-in
+/// authenticated endpoint.
+#[test]
+fn you_api_key_preserves_explicit_endpoint_override() {
+    let secrets = [(
+        "you".to_owned(),
+        tau_proto::SecretValue::new("you-fixture-key"),
+    )]
+    .into_iter()
+    .collect();
+    let config: ExtConfig = serde_json::from_value(serde_json::json!({
+        "you_endpoint": "https://example.test/custom-mcp",
+        "you_api_key_secret": "you",
+    }))
+    .expect("You.com endpoint override config");
+    let validated = config.validate(&secrets).expect("validated You.com config");
+    assert_eq!(
+        validated.hosted.you_endpoint,
+        "https://example.test/custom-mcp"
+    );
+    assert_eq!(
+        validated.hosted.you_api_key.as_ref(),
+        Some(&tau_proto::SecretValue::new("you-fixture-key"))
+    );
 }
 
 /// Ensures deadline slices divide only the remaining total so unused time
@@ -3304,26 +3381,21 @@ fn parse_num_results_rejects_non_integer_float() {
     assert!(err.contains("integer"), "err: {err}");
 }
 
-/// Ensures stale Parallel credential config is rejected because the extension
-/// intentionally sends no auth header.
+/// Ensures API-key bytes cannot be placed directly in ordinary extension
+/// config.
 #[test]
-fn parallel_config_rejects_api_key_field() {
-    // Parallel runs against the unauthenticated Search MCP endpoint; keeping
-    // `deny_unknown_fields` catches stale configs that try to pass credentials.
+fn config_rejects_literal_api_key_field() {
     let err = serde_json::from_value::<ExtConfig>(serde_json::json!({
         "api_key": "secret"
     }))
-    .expect_err("api_key is not a supported Parallel config field");
+    .expect_err("literal api_key is not a supported config field");
     assert!(err.to_string().contains("api_key"), "err: {err}");
 }
 
 /// Ensures the fetch adapter sends Parallel's plural URL wire shape while the
-/// real MCP client retains its unauthenticated request headers.
+/// real MCP client omits optional authentication when no secret is configured.
 #[test]
 fn parallel_fetch_adapter_posts_urls_array_without_authorization_header() {
-    // Regression coverage for the Parallel.ai integration: the first-party
-    // extension intentionally uses the default unauthenticated MCP endpoint and
-    // must not invent API-key config or send Authorization headers.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
     let server = thread::spawn(move || {
@@ -3410,6 +3482,7 @@ fn exa_fetch_client_posts_urls_array() {
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
         let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+        let mut headers = Vec::new();
         let mut content_len = 0usize;
         loop {
             let mut line = String::new();
@@ -3422,6 +3495,7 @@ fn exa_fetch_client_posts_urls_array() {
             {
                 content_len = value.trim().parse().expect("content length");
             }
+            headers.push(line);
         }
         let mut body = vec![0; content_len];
         reader.read_exact(&mut body).expect("body");
@@ -3433,19 +3507,193 @@ fn exa_fetch_client_posts_urls_array() {
             response_body
         );
         path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
-        String::from_utf8(body).expect("utf8")
+        (headers, String::from_utf8(body).expect("utf8"))
     });
 
-    let result = HttpExaSearcher::new(endpoint)
-        .fetch("https://example.com/article")
-        .expect("fetch");
+    let client = HttpExaSearcher::new(endpoint);
+    client.set_api_key(Some(tau_proto::SecretValue::new("exa-fixture-secret")));
+    let result = client.fetch("https://example.com/article").expect("fetch");
     assert_eq!(result, "page");
-    let body: serde_json::Value =
-        serde_json::from_str(&server.join().expect("join")).expect("json body");
+    let (headers, body) = server.join().expect("join");
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.eq_ignore_ascii_case("x-api-key: exa-fixture-secret\r\n")),
+        "headers: {headers:?}"
+    );
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json body");
     assert_eq!(body["method"], "tools/call");
     assert_eq!(body["params"]["name"], EXA_REMOTE_FETCH_TOOL);
     assert_eq!(
         body["params"]["arguments"]["urls"],
         serde_json::json!(["https://example.com/article"])
+    );
+}
+
+/// Ensures anonymous Exa requests omit both supported authentication headers.
+#[test]
+fn exa_anonymous_client_omits_authentication_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+        let mut headers = Vec::new();
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read line");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_len = value.trim().parse().expect("content length");
+            }
+            headers.push(line);
+        }
+        let mut body = vec![0; content_len];
+        reader.read_exact(&mut body).expect("body");
+        let response_body =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        headers
+    });
+
+    assert_eq!(
+        HttpExaSearcher::new(endpoint)
+            .search("rust", 1)
+            .expect("anonymous Exa call"),
+        "ok"
+    );
+    let headers = server.join().expect("join");
+    assert!(
+        !headers.iter().any(|header| {
+            let header = header.to_ascii_lowercase();
+            header.starts_with("authorization:") || header.starts_with("x-api-key:")
+        }),
+        "headers: {headers:?}"
+    );
+}
+
+/// Ensures configured MCP secrets are removed from provider JSON-RPC errors
+/// before those diagnostics can become model-visible.
+#[test]
+fn authenticated_mcp_jsonrpc_errors_redact_credentials() {
+    fn server(secret: &'static str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+        let worker = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+            let mut content_len = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read line");
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_len = value.trim().parse().expect("content length");
+                }
+            }
+            let mut body = vec![0; content_len];
+            reader.read_exact(&mut body).expect("body");
+            let response_body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32000, "message": format!("rejected {secret}")},
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        });
+        (endpoint, worker)
+    }
+
+    let (endpoint, worker) = server("exa-jsonrpc-secret");
+    let exa = HttpExaSearcher::new(endpoint);
+    exa.set_api_key(Some(tau_proto::SecretValue::new("exa-jsonrpc-secret")));
+    let error = exa.search("rust", 1).expect_err("Exa JSON-RPC error");
+    worker.join().expect("join");
+    assert!(!error.contains("exa-jsonrpc-secret"), "error: {error}");
+
+    let (endpoint, worker) = server("parallel-jsonrpc-secret");
+    let parallel = HttpParallelClient::new(endpoint);
+    parallel.set_api_key(Some(tau_proto::SecretValue::new("parallel-jsonrpc-secret")));
+    let error = parallel
+        .call(
+            PARALLEL_REMOTE_SEARCH_TOOL,
+            serde_json::json!({"query": "rust"}),
+        )
+        .expect_err("Parallel JSON-RPC error");
+    worker.join().expect("join");
+    assert!(!error.contains("parallel-jsonrpc-secret"), "error: {error}");
+}
+
+/// Ensures optional Parallel credentials use the documented bearer header.
+#[test]
+fn parallel_client_sends_configured_bearer_token() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+        let mut headers = Vec::new();
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read line");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_len = value.trim().parse().expect("content length");
+            }
+            headers.push(line);
+        }
+        let mut body = vec![0; content_len];
+        reader.read_exact(&mut body).expect("body");
+        let response_body =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        headers
+    });
+
+    let client = HttpParallelClient::new(endpoint);
+    client.set_api_key(Some(tau_proto::SecretValue::new("parallel-fixture-secret")));
+    assert_eq!(
+        client
+            .call(
+                PARALLEL_REMOTE_SEARCH_TOOL,
+                serde_json::json!({"query": "rust"}),
+            )
+            .expect("Parallel call"),
+        "ok"
+    );
+    let headers = server.join().expect("join");
+    assert!(
+        headers.iter().any(|header| header
+            .eq_ignore_ascii_case("authorization: Bearer parallel-fixture-secret\r\n")),
+        "headers: {headers:?}"
     );
 }

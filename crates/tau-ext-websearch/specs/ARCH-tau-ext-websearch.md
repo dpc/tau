@@ -5,10 +5,12 @@ The extension adapts hosted MCP and REST web providers into Tau tools. Default
 model-visible `web_search` and `web_fetch` tools rotate independently through
 ordered provider pools and perform bounded sequential failover. Search defaults
 to Exa, Parallel, and anonymous You.com; fetch defaults to Exa and Parallel.
-Credentialed Brave search and Tavily/Firecrawl search/fetch adapters may be
-added explicitly. Provider-specific Exa and Parallel tools remain disabled by
-default for explicit role opt-in. An ordered list with one provider gives the
-default tool explicit single-provider behavior.
+Exa and Parallel may optionally authenticate without changing pool membership,
+and You.com may switch from its anonymous free profile to its authenticated MCP
+endpoint. Credentialed Brave search and Tavily/Firecrawl search/fetch adapters
+may be added explicitly. Provider-specific Exa and Parallel tools remain
+disabled by default for explicit role opt-in. An ordered list with one provider
+gives the default tool explicit single-provider behavior.
 
 Each operation's cursor belongs to the extension process, advances once for
 each admitted composite call, and is not persisted. Argument validation, busy

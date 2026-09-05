@@ -17,8 +17,10 @@ const YOU_SEARCH_TOOL: &str = "you-search";
 
 /// Runtime updates for the additional hosted providers.
 pub(super) struct HostedConfig {
-    /// Optional You.com MCP endpoint.
-    pub(super) you_endpoint: Option<String>,
+    /// You.com MCP endpoint.
+    pub(super) you_endpoint: String,
+    /// Optional You.com bearer token.
+    pub(super) you_api_key: Option<SecretValue>,
     /// Optional Brave search endpoint.
     pub(super) brave_endpoint: Option<String>,
     /// Optional Brave subscription token.
@@ -75,6 +77,8 @@ pub(super) struct HostedAttempt<'a> {
 struct RuntimeConfig {
     /// You.com MCP endpoint.
     you_endpoint: String,
+    /// Optional You.com bearer token.
+    you_api_key: Option<SecretValue>,
     /// Brave search endpoint.
     brave_endpoint: String,
     /// Brave subscription token.
@@ -93,6 +97,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             you_endpoint: DEFAULT_YOU_ENDPOINT.to_owned(),
+            you_api_key: None,
             brave_endpoint: DEFAULT_BRAVE_ENDPOINT.to_owned(),
             brave_api_key: None,
             tavily_endpoint: DEFAULT_TAVILY_ENDPOINT.to_owned(),
@@ -134,6 +139,7 @@ impl HostedClient for HttpHostedClient {
                 },
             ) => call_you(
                 &config.you_endpoint,
+                config.you_api_key.as_ref(),
                 query,
                 *count,
                 attempt.timeout,
@@ -183,9 +189,8 @@ impl HostedClient for HttpHostedClient {
             .config
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(endpoint) = config.you_endpoint {
-            current.you_endpoint = endpoint;
-        }
+        current.you_endpoint = config.you_endpoint;
+        current.you_api_key = config.you_api_key;
         if let Some(endpoint) = config.brave_endpoint {
             current.brave_endpoint = endpoint;
         }
@@ -211,6 +216,7 @@ fn required_key<'a>(
 
 fn call_you(
     endpoint: &str,
+    api_key: Option<&SecretValue>,
     query: &str,
     count: u32,
     timeout: Duration,
@@ -227,10 +233,16 @@ fn call_you(
             "clientInfo": {"name": "tau-ext-websearch", "version": env!("CARGO_PKG_VERSION")},
         },
     });
-    let (payload, session_id) =
-        post_you_mcp(endpoint, initialize, None, false, remaining(deadline)?)?;
+    let (payload, session_id) = post_you_mcp(
+        endpoint,
+        api_key,
+        initialize,
+        None,
+        false,
+        remaining(deadline)?,
+    )?;
     let initialized = parse_sse_or_json(&payload, "you")
-        .map_err(|error| sanitize_endpoint_error(&error, endpoint))?;
+        .map_err(|error| sanitize_optional_secret(&error, endpoint, api_key))?;
     let negotiated = initialized
         .pointer("/result/protocolVersion")
         .and_then(serde_json::Value::as_str)
@@ -252,6 +264,7 @@ fn call_you(
     check_cancelled(cancelled)?;
     post_you_mcp(
         endpoint,
+        api_key,
         serde_json::json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
@@ -272,14 +285,16 @@ fn call_you(
     });
     let (payload, _) = post_you_mcp(
         endpoint,
+        api_key,
         call,
         session_id.as_deref(),
         true,
         remaining(deadline)?,
     )?;
     let text = decode_mcp_text_result(&payload, "you")
-        .map_err(|error| sanitize_endpoint_error(&error, endpoint))?;
-    limit_tool_output(text, "you").map_err(|error| sanitize_endpoint_error(&error, endpoint))
+        .map_err(|error| sanitize_optional_secret(&error, endpoint, api_key))?;
+    limit_tool_output(text, "you")
+        .map_err(|error| sanitize_optional_secret(&error, endpoint, api_key))
 }
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
@@ -299,6 +314,7 @@ fn remaining(deadline: Instant) -> Result<Duration, String> {
 
 fn post_you_mcp(
     endpoint: &str,
+    api_key: Option<&SecretValue>,
     body: serde_json::Value,
     session_id: Option<&str>,
     negotiated: bool,
@@ -315,10 +331,16 @@ fn post_you_mcp(
     if let Some(session_id) = session_id {
         request = request.header("Mcp-Session-Id", session_id);
     }
+    if let Some(api_key) = api_key {
+        request = request.header(
+            "Authorization",
+            &format!("Bearer {}", api_key.expose_secret()),
+        );
+    }
     let mut response = request.send(body.to_string()).map_err(|error| {
         format!(
             "you MCP transport error: {}",
-            sanitize_endpoint_error(&error.to_string(), endpoint)
+            sanitize_optional_secret(&error.to_string(), endpoint, api_key)
         )
     })?;
     if response.status().as_u16() == HTTP_TOO_MANY_REQUESTS {
@@ -326,7 +348,11 @@ fn post_you_mcp(
     }
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = sanitize_endpoint_error(&read_capped(response.body_mut().as_reader()), endpoint);
+        let body = sanitize_optional_secret(
+            &read_capped(response.body_mut().as_reader()),
+            endpoint,
+            api_key,
+        );
         return Err(format!("you MCP returned HTTP {status}: {body}"));
     }
     let response_session = response
@@ -336,6 +362,14 @@ fn post_you_mcp(
         .map(str::to_owned);
     read_success_body(response.body_mut().as_reader(), "you")
         .map(|payload| (payload, response_session))
+}
+
+fn sanitize_optional_secret(message: &str, endpoint: &str, key: Option<&SecretValue>) -> String {
+    let message = key.map_or_else(
+        || message.to_owned(),
+        |key| message.replace(key.expose_secret(), "…"),
+    );
+    sanitize_endpoint_error(&message, endpoint)
 }
 
 fn call_brave(

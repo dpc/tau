@@ -42,14 +42,17 @@ post-filtering as an egress control.
 - `websearch_exa` / `websearch_exa_fetch` and
   `websearch_parallel_search` / `websearch_parallel_fetch` retain explicit
   provider paths. They are disabled by default.
-- Exa uses its anonymously accessible hosted MCP at
-  <https://mcp.exa.ai/mcp>. Parallel uses its anonymously accessible Search MCP
-  at <https://search.parallel.ai/mcp>. Both providers supply search and fetch.
-- You.com search uses the anonymous
+- Exa uses its hosted MCP at <https://mcp.exa.ai/mcp>. Parallel uses its Search
+  MCP at <https://search.parallel.ai/mcp>. Both are anonymously accessible,
+  support optional API-key authentication for higher limits, and supply search
+  and fetch.
+- You.com search defaults to the anonymous
   <https://api.you.com/mcp?profile=free> profile. Its documented limit is 100
-  searches per day; this profile does not support fetch. Each attempt performs
-  the required MCP initialization and carries any returned session id through
-  the initialized notification and search call.
+  searches per day; this profile does not support fetch. Configuring a You.com
+  key selects <https://api.you.com/mcp> by default and authenticates every MCP
+  handshake request. Each attempt performs the required MCP initialization and
+  carries any returned session id through the initialized notification and
+  search call.
 - Brave supports search. Tavily and Firecrawl support search and fetch. These
   adapters use named Tau secrets and are never enabled implicitly.
 
@@ -62,10 +65,6 @@ Hybrid search retains Exa's `query` and optional `num_results` input. Parallel
 receives the query and uses its own fixed result budget. Hybrid fetch accepts one
 `url`; both adapters convert it to the provider's `urls` array. Explicit
 Parallel tools retain their provider-specific pass-through arguments.
-
-No Parallel API key is supported yet: there is no `api_key` config, and the
-extension does not send an Authorization header.
-
 
 ## Configuration
 
@@ -80,15 +79,13 @@ to prevent its outbound HTTP calls:
 }
 ```
 
-Configure anonymous endpoints and ordered provider membership:
+Configure endpoints and ordered provider membership:
 
 ```json5
 {
   extensions: {
     "std-websearch": {
       config: {
-        // Backwards-compatible alias for exa_endpoint.
-        endpoint: "https://mcp.exa.ai/mcp?exaApiKey=sk-…",
         exa_endpoint: "https://mcp.exa.ai/mcp",
         parallel_endpoint: "https://search.parallel.ai/mcp",
         you_endpoint: "https://api.you.com/mcp?profile=free",
@@ -102,19 +99,28 @@ Configure anonymous endpoints and ordered provider membership:
 }
 ```
 
-Add credentialed adapters by declaring Tau secrets and referring to their
-names. API-key bytes do not belong in `config`:
+`endpoint` remains a backwards-compatible alias for `exa_endpoint`; if both are
+set, they must contain the same value.
+
+Add optional authentication and credentialed adapters by declaring Tau secrets
+and referring to their names. API-key bytes do not belong in `config`:
 
 ```yaml
 extensions:
   std-websearch:
     secrets:
       brave_search: {}
+      exa: {}
+      parallel: {}
+      you: {}
       tavily: {}
       firecrawl: {}
     config:
       search_providers: [exa, parallel, you, brave, tavily, firecrawl]
       fetch_providers: [exa, parallel, tavily, firecrawl]
+      exa_api_key_secret: exa
+      parallel_api_key_secret: parallel
+      you_api_key_secret: you
       brave_api_key_secret: brave_search
       tavily_api_key_secret: tavily
       firecrawl_api_key_secret: firecrawl
@@ -124,7 +130,10 @@ extensions:
       firecrawl_endpoint: https://api.firecrawl.dev/v2/
 ```
 
-Brave cannot appear in `fetch_providers`; anonymous You.com cannot either.
+Exa, Parallel, and You.com remain usable without named secrets. When
+`you_api_key_secret` is set and `you_endpoint` is omitted, Tau selects the
+authenticated `https://api.you.com/mcp` endpoint instead of the anonymous free
+profile. Brave cannot appear in `fetch_providers`; You.com cannot either.
 Selecting Brave, Tavily, or Firecrawl without its named, non-empty Tau secret
 rejects configuration. Tau does not watch configuration or secret files:
 restart Tau (or explicitly restart the extension through its supervisor) after

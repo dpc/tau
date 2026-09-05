@@ -14,11 +14,11 @@ Tau keeps separate provider pools for `web_search` and `web_fetch`. Their
 round-robin cursors are independent: search defaults to Exa, Parallel, and
 anonymous You.com; fetch defaults to Exa and Parallel.
 
-| Adapter | Search | Fetch | Tau access | Current provider facts, verified September 4, 2026 |
+| Adapter | Search | Fetch | Tau access | Current provider facts, verified September 5, 2026 |
 |---|:---:|:---:|---|---|
-| Exa | ✓ | ✓ | Default, anonymous | [Exa MCP][exa-mcp] needs no API key. Its free plan is provider-rate-limited; Tau has no Exa named-secret field. |
-| Parallel | ✓ | ✓ | Default, anonymous | [Search MCP][parallel-mcp] is free without auth. A Parallel key raises limits, but Tau does not configure or send one. |
-| You.com | ✓ | — | Default, anonymous | The `profile=free` route is [search-only, no-signup, and 100 queries/day][you-mcp]. Tau does not configure You.com's authenticated route. |
+| Exa | ✓ | ✓ | Default, optional named secret | [Exa MCP][exa-mcp] needs no API key; `exa_api_key_secret` overcomes anonymous rate limits. [Exa currently gives new accounts $20 plus $10/month without a payment method][exa-pricing]. |
+| Parallel | ✓ | ✓ | Default, optional named secret | [Search MCP][parallel-mcp] is free without auth; `parallel_api_key_secret` sends the documented bearer token for higher limits. [Eligible card-backed organizations currently receive $5/month, covering up to 5,000 Search API requests][parallel-free]. |
+| You.com | ✓ | — | Default, optional named secret | The `profile=free` route is [search-only, no-signup, and 100 queries/day][you-mcp]. `you_api_key_secret` selects the authenticated MCP endpoint by default; new accounts currently receive $100 in one-time complimentary credits. |
 | Brave | ✓ | — | Optional named secret | Create an account, activate Search, and supply `brave_api_key_secret`. [Search is currently $5/1,000 calls][brave-plans]; plans include $5 monthly credit, but [there is no standalone free plan and a card is required][brave-faq]. |
 | Tavily | ✓ | ✓ | Optional named secret | Create an account and supply `tavily_api_key_secret`. [Researcher is currently 1,000 credits/month with no card; Project is $30 for 4,000 credits][tavily-credits]. Tau's basic search costs one provider credit. |
 | Firecrawl | ✓ | ✓ | Optional named secret | Supply `firecrawl_api_key_secret`. [Free is currently 1,000 credits/month with no card; Hobby is $16/month billed yearly for 5,000 credits/month][firecrawl-pricing]. Firecrawl now offers [keyless access][firecrawl-keyless], but Tau's current REST adapter still sends bearer auth and requires a key. |
@@ -42,18 +42,26 @@ extensions:
   std-websearch:
     secrets:
       brave_search: {}
+      exa: {}
+      parallel: {}
+      you: {}
       tavily: {}
       firecrawl: {}
     config:
       search_providers: [exa, parallel, you, brave, tavily, firecrawl]
       fetch_providers: [exa, parallel, tavily, firecrawl]
+      exa_api_key_secret: exa
+      parallel_api_key_secret: parallel
+      you_api_key_secret: you
       brave_api_key_secret: brave_search
       tavily_api_key_secret: tavily
       firecrawl_api_key_secret: firecrawl
 ```
 
 [exa-mcp]: https://exa.ai/docs/reference/exa-mcp
+[exa-pricing]: https://exa.ai/pricing?tab=api
 [parallel-mcp]: https://docs.parallel.ai/integrations/mcp/programmatic-use
+[parallel-free]: https://parallel.ai/blog/free-tier-parallel
 [you-mcp]: https://you.com/docs/build-with-agents/mcp-server
 [brave-plans]: https://api-dashboard.search.brave.com/app/plans
 [brave-faq]: https://api-dashboard.search.brave.com/documentation/resources/help-feedback
@@ -125,6 +133,9 @@ Configured under `extensions.std-websearch.config`:
 extensions: {
   "std-websearch": {
     secrets: {
+      exa: {},
+      parallel: {},
+      you: {},
       brave_search: {},
       tavily: {},
       firecrawl: {},
@@ -137,7 +148,11 @@ extensions: {
       you_endpoint: "https://api.you.com/mcp?profile=free",
       search_providers: ["exa", "parallel", "you"],
       fetch_providers: ["exa", "parallel"],
-      // Optional: brave, tavily, and firecrawl.
+      // Optional authentication for default MCP providers.
+      exa_api_key_secret: "exa",
+      parallel_api_key_secret: "parallel",
+      you_api_key_secret: "you",
+      // Required when selecting brave, tavily, or firecrawl.
       brave_api_key_secret: "brave_search",
       tavily_api_key_secret: "tavily",
       firecrawl_api_key_secret: "firecrawl",
@@ -146,12 +161,30 @@ extensions: {
 }
 ```
 
-Tau does not configure or send a Parallel API key; the built-in Parallel integration uses the default unauthenticated endpoint. If both `endpoint` and `exa_endpoint` are configured, they must be identical. Endpoint values are validated when configuration is applied: HTTPS is required except for loopback HTTP test endpoints, and userinfo credentials are rejected. Provider requests reject HTTP redirects rather than crossing the validated endpoint's scheme or origin; configure the final endpoint URL directly. Raw endpoints are not logged because URLs can contain credentials or query secrets. Provider transport diagnostics and JSON-RPC errors can become model-visible tool errors; Tau sanitizes configured endpoint echoes, request targets, query keys/values, fragments, and userinfo, then bounds the sanitized error text. Oversized JSON-RPC error messages are replaced with a compact deterministic error. HTTP 429 rate limits return `web service rate-limited the request; try again later.` without reading or echoing a provider body. HTTP calls use the platform root store, MCP protocol version `2025-06-18`, and accept JSON or SSE JSON-RPC responses. Composite HTTP attempts use scheduler-owned slices of one admission-anchored 45-second total deadline.
+Exa uses `x-api-key`; Parallel and You.com use bearer authorization. All key
+bytes come from named Tau secrets and are omitted for anonymous operation.
+Configuring a You.com key without an endpoint override selects
+`https://api.you.com/mcp`; otherwise its default remains the anonymous
+`profile=free` endpoint. If both `endpoint` and `exa_endpoint` are configured,
+they must be identical. Endpoint values are validated when configuration is
+applied: HTTPS is required except for loopback HTTP test endpoints, and userinfo
+credentials are rejected. Provider requests reject HTTP redirects rather than
+crossing the validated endpoint's scheme or origin; configure the final endpoint
+URL directly. Raw endpoints are not logged because URLs can contain credentials
+or query secrets. Provider transport diagnostics and JSON-RPC errors can become
+model-visible tool errors; Tau sanitizes configured endpoint echoes, request
+targets, query keys/values, fragments, userinfo, and configured API-key values,
+then bounds the sanitized error text. Oversized JSON-RPC error messages are
+replaced with a compact deterministic error. HTTP 429 rate limits return `web
+service rate-limited the request; try again later.` without reading or echoing a
+provider body. HTTP calls use the platform root store, MCP protocol version
+`2025-06-18`, and accept JSON or SSE JSON-RPC responses. Composite HTTP attempts
+use scheduler-owned slices of one admission-anchored 45-second total deadline.
 
-Brave is search-only. Anonymous You.com is search-only. Tavily and Firecrawl
-support both operations. Credentialed providers take API keys only through
-named Tau secrets. Configuration and secret changes require an extension/Tau
-restart; files are not watched.
+Brave and You.com are search-only. Tavily and Firecrawl support both
+operations. Credentialed providers take API keys only through named Tau secrets.
+Configuration and secret changes require an extension/Tau restart; files are
+not watched.
 
 The ordered lists are independent; one entry selects explicit single-provider
 mode. Cursors are extension-process memory, advance once per admitted call, and
