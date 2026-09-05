@@ -589,7 +589,11 @@ fn push_optional_empty_command_diagnostic(
     );
     diagnostics.push(ExtensionStartupDiagnostic {
         extension: name.clone(),
-        message: format!("optional extension {name} did not initialize"),
+        message: format!(
+            "optional extension `{name}` was skipped: its resolved command is empty. \
+             Set `extensions.{name}.command` to an executable, configure a Tau subcommand suffix, \
+             or disable the extension"
+        ),
         kind: ExtensionStartupDiagnosticKind::OptionalSkip,
     });
 }

@@ -1480,6 +1480,34 @@ impl Harness {
         }
     }
 
+    /// Warn about explicit role models absent from the complete accepted
+    /// startup provider registry without changing role or model selection.
+    pub(super) fn emit_unavailable_role_model_warnings(&mut self) {
+        let mut unavailable = self
+            .config
+            .available_roles
+            .iter()
+            .filter_map(|(role_name, role)| {
+                let model = role.model.as_ref()?;
+                (!self.provider_runtime.model_info.contains_key(model))
+                    .then(|| (role_name.clone(), model.clone()))
+            })
+            .collect::<Vec<_>>();
+        unavailable.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+        for (role_name, model) in unavailable {
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_CONFIG_ERROR,
+                tau_proto::NoticeLevel::Warning,
+                tau_proto::NoticePurpose::Alert,
+                &format!(
+                    "role `{role_name}` configures model `{model}`, but no ready provider advertises it; \
+                     no substitute was selected. Correct this role's `model` or run `tau provider list`"
+                ),
+            );
+        }
+    }
+
     /// Push the configured `config` value (from `harness.yaml`) to
     /// the just-said-Hello extension. Sends point-to-point so it
     /// arrives even if the extension hasn't subscribed to the

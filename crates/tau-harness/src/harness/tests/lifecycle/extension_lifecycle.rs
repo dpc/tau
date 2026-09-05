@@ -96,7 +96,9 @@ fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
                     && info.purpose == tau_proto::NoticePurpose::Alert
-                    && info.message == "optional extension optional-timeout-ext did not initialize"
+                    && info.message.contains("optional extension `optional-timeout-ext` was skipped")
+                    && info.message.contains("extensions.optional-timeout-ext.startup_timeout_seconds")
+                    && info.message.contains("startup logs")
         )
     ));
 
@@ -117,7 +119,9 @@ fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
             if info.level == tau_proto::NoticeLevel::Warning
                 && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
                 && info.purpose == tau_proto::NoticePurpose::Alert
-                && info.message == "optional extension optional-timeout-ext did not initialize"
+                && info.message.contains("optional extension `optional-timeout-ext` was skipped")
+                && info.message.contains("extensions.optional-timeout-ext.startup_timeout_seconds")
+                && info.message.contains("startup logs")
     )));
 }
 
@@ -3835,7 +3839,10 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
                     && info.purpose == tau_proto::NoticePurpose::Alert
-                    && info.message == "optional extension optional-pre-ready-drop did not initialize"
+                    && info.message.contains("optional extension `optional-pre-ready-drop` was skipped")
+                    && info.message.contains("disconnected before becoming ready")
+                    && info.message.contains("extensions.optional-pre-ready-drop.command")
+                    && info.message.contains("startup logs")
         )
     ));
 
@@ -3856,7 +3863,10 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
             if info.level == tau_proto::NoticeLevel::Warning
                 && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
                 && info.purpose == tau_proto::NoticePurpose::Alert
-                && info.message == "optional extension optional-pre-ready-drop did not initialize"
+                && info.message.contains("optional extension `optional-pre-ready-drop` was skipped")
+                && info.message.contains("disconnected before becoming ready")
+                && info.message.contains("extensions.optional-pre-ready-drop.command")
+                && info.message.contains("startup logs")
     )));
 }
 

@@ -1400,7 +1400,9 @@ fn resolve_extensions_optional_empty_command_is_skipped_with_diagnostic() {
     assert_eq!(resolved.diagnostics[0].extension, "optional-empty");
     assert_eq!(
         resolved.diagnostics[0].message,
-        "optional extension optional-empty did not initialize"
+        "optional extension `optional-empty` was skipped: its resolved command is empty. \
+         Set `extensions.optional-empty.command` to an executable, configure a Tau subcommand \
+         suffix, or disable the extension"
     );
 }
 

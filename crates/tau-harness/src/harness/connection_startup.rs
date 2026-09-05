@@ -408,7 +408,10 @@ impl Harness {
             );
             self.disable_optional_extension(
                 connection_id,
-                &format!("optional extension {name} did not initialize"),
+                &format!(
+                    "optional extension `{name}` was skipped: it disconnected before becoming ready. \
+                     Check `extensions.{name}.command` and its startup logs"
+                ),
             );
             self.maybe_finish_extension_activation(Some(connection_id))?;
             return Ok(());
@@ -787,7 +790,11 @@ impl Harness {
             );
             self.disable_optional_extension(
                 &connection_id,
-                &format!("optional extension {} did not initialize", expired.name),
+                &format!(
+                    "optional extension `{}` was skipped: it did not connect before the startup \
+                     timeout. Check `extensions.{}.command` and its startup logs",
+                    expired.name, expired.name
+                ),
             );
         }
         Ok(())

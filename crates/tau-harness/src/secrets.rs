@@ -75,7 +75,10 @@ pub fn resolve_extension_secrets_excluding(
                     );
                     diagnostics.push(ExtensionStartupDiagnostic {
                         extension: extension.clone(),
-                        message: format!("optional extension {extension} did not initialize"),
+                        message: format!(
+                            "optional extension `{extension}` was skipped: its configured secrets \
+                             could not be resolved. Check `extensions.{extension}.secrets`"
+                        ),
                         kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                     });
                     skipped_extensions.insert(extension.clone());

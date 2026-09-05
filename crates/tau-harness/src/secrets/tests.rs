@@ -141,10 +141,16 @@ fn optional_extension_missing_required_secret_is_skipped_with_diagnostic() {
     assert_eq!(resolved.diagnostics[0].extension, "std-email");
     assert_eq!(
         resolved.diagnostics[0].message,
-        "optional extension std-email did not initialize"
+        "optional extension `std-email` was skipped: its configured secrets could not be resolved. \
+         Check `extensions.std-email.secrets`"
     );
     assert!(!resolved.diagnostics[0].message.contains("mail_password"));
     assert!(!resolved.diagnostics[0].message.contains("super-secret"));
+    assert!(
+        !resolved.diagnostics[0]
+            .message
+            .contains(td.path().to_string_lossy().as_ref())
+    );
 }
 
 #[test]
@@ -162,7 +168,8 @@ fn optional_extension_invalid_secret_name_is_skipped_with_diagnostic() {
     assert!(resolved.skipped_extensions.contains("std-email"));
     assert_eq!(
         resolved.diagnostics[0].message,
-        "optional extension std-email did not initialize"
+        "optional extension `std-email` was skipped: its configured secrets could not be resolved. \
+         Check `extensions.std-email.secrets`"
     );
     assert!(!resolved.diagnostics[0].message.contains("../bad"));
 }

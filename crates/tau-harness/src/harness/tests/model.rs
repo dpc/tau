@@ -2768,6 +2768,137 @@ fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     );
 }
 
+/// An explicit role model absent after every startup provider settles must
+/// produce actionable replayable alerts without selecting a substitute.
+#[test]
+fn unavailable_explicit_role_model_emits_replayable_configuration_warning() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: coordinator
+  role_groups:
+    custom:
+      roles:
+        coordinator:
+          model: echo/not-published
+        reviewer:
+          model: echo/also-not-published
+"#,
+    )
+    .expect("write harness config");
+
+    let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    assert_eq!(h.config.selected_role, "coordinator");
+    assert_eq!(h.config.selected_model, None);
+    assert!(
+        h.provider_runtime
+            .model_info
+            .contains_key(&ModelId::from("echo/model")),
+        "the warning must be distinct from the settled-empty provider path"
+    );
+
+    let notices = h
+        .runtime_io
+        .replayable_harness_notices
+        .iter()
+        .filter(|notice| notice.kind == tau_proto::notice_kind::HARNESS_CONFIG_ERROR)
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    assert!(notices.iter().all(|notice| {
+        notice.level == NoticeLevel::Warning
+            && notice.purpose == tau_proto::NoticePurpose::Alert
+            && notice.message.contains("no substitute was selected")
+            && notice.message.contains("tau provider list")
+    }));
+    assert!(notices[0].message.contains("role `coordinator`"));
+    assert!(notices[0].message.contains("model `echo/not-published`"));
+    assert!(notices[1].message.contains("role `reviewer`"));
+    assert!(
+        notices[1]
+            .message
+            .contains("model `echo/also-not-published`")
+    );
+
+    let ui_conn = crate::test_connection_id("late-ui-invalid-role-model");
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe late");
+    assert!(
+        ui_sink
+            .lock()
+            .expect("ui sink")
+            .iter()
+            .any(|routed| matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if delivery.replay
+                        && matches!(
+                            delivery.event.as_ref(),
+                            Event::HarnessNotice(replayed)
+                                if replayed.kind == tau_proto::notice_kind::HARNESS_CONFIG_ERROR
+                                    && replayed.message.contains("echo/not-published")
+                        )
+            ))
+    );
+}
+
+/// An explicit role model advertised by the settled provider registry must not
+/// produce a configuration warning.
+#[test]
+fn available_explicit_role_model_does_not_emit_configuration_warning() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: coordinator
+  role_groups:
+    custom:
+      roles:
+        coordinator:
+          model: echo/model
+"#,
+    )
+    .expect("write harness config");
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    assert_eq!(h.config.selected_role, "coordinator");
+    assert_eq!(h.config.selected_model, Some(ModelId::from("echo/model")));
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .all(|notice| {
+                notice.kind != tau_proto::notice_kind::HARNESS_CONFIG_ERROR
+                    || !notice.message.contains("role `coordinator`")
+            })
+    );
+}
+
 /// Ensures a profile-selected missing default role reaches the existing startup
 /// fallback path instead of being ignored while profiles are applied.
 #[test]

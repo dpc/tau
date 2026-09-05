@@ -497,6 +497,7 @@ impl Harness {
             harness.queue_extension_connect(command)?;
         }
         harness.wait_for_extensions_ready()?;
+        harness.emit_unavailable_role_model_warnings();
         #[cfg(test)]
         harness.register_harness_tools();
         harness.publish_delegate_roles_context();
@@ -695,6 +696,7 @@ impl Harness {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
             return Err(error);
         }
+        harness.emit_unavailable_role_model_warnings();
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "extensions ready");
         #[cfg(test)]
         harness.register_harness_tools();

@@ -423,7 +423,12 @@ impl Harness {
                 );
                 self.disable_optional_extension(
                     &connection_id,
-                    &format!("optional extension {} did not initialize", deadline.name),
+                    &format!(
+                        "optional extension `{}` was skipped: it did not become ready before \
+                         `extensions.{}.startup_timeout_seconds`. Check its command and startup \
+                         logs; increase the timeout only if slow startup is expected",
+                        deadline.name, deadline.name
+                    ),
                 );
             } else {
                 self.extensions
@@ -494,7 +499,11 @@ impl Harness {
             );
             self.disable_optional_extension(
                 &connection_id,
-                &format!("optional extension {name} did not initialize"),
+                &format!(
+                    "optional extension `{name}` was skipped: it did not become ready before \
+                     `extensions.{name}.startup_timeout_seconds`. Check its command and startup \
+                     logs; increase the timeout only if slow startup is expected"
+                ),
             );
         }
         self.maybe_finish_extension_activation(None)?;
