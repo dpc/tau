@@ -11,6 +11,14 @@ when the exact model route does not win with provider-hosted search.
 fetch primitive. Native failure never switches implementation mid-turn; an
 ambiguous provider retry may repeat billable hosted search.
 
+## Maintaining self-knowledge
+
+Keep the built-in [websearch self-knowledge skill](../tau-skills/self-knowledge/tau-self-knowledge-ext-websearch.md)
+current when changing adapter inventory, default pools, authentication/config
+fields, failover, or restart behavior. That skill owns the user-facing provider,
+account, free-tier, and paid-plan matrix; do not duplicate it in architecture
+records. Recheck its dated external sources when provider policies change.
+
 When a role supplies `allowed_domains`, the harness freezes that restriction as
 hidden invocation policy rather than exposing it as model arguments. External
 fetch rejects a non-HTTP(S), userinfo, IP-literal, or out-of-allowlist target

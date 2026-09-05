@@ -8,6 +8,59 @@ advertise: false
 
 `std-websearch` is Tau's built-in generic web search extension. It runs `tau-ext-websearch`, is enabled by default, and adapts hosted web providers into Tau tools.
 
+## Practical provider overview
+
+Tau keeps separate provider pools for `web_search` and `web_fetch`. Their
+round-robin cursors are independent: search defaults to Exa, Parallel, and
+anonymous You.com; fetch defaults to Exa and Parallel.
+
+| Adapter | Search | Fetch | Tau access | Current provider facts, verified September 4, 2026 |
+|---|:---:|:---:|---|---|
+| Exa | ✓ | ✓ | Default, anonymous | [Exa MCP][exa-mcp] needs no API key. Its free plan is provider-rate-limited; Tau has no Exa named-secret field. |
+| Parallel | ✓ | ✓ | Default, anonymous | [Search MCP][parallel-mcp] is free without auth. A Parallel key raises limits, but Tau does not configure or send one. |
+| You.com | ✓ | — | Default, anonymous | The `profile=free` route is [search-only, no-signup, and 100 queries/day][you-mcp]. Tau does not configure You.com's authenticated route. |
+| Brave | ✓ | — | Optional named secret | Create an account, activate Search, and supply `brave_api_key_secret`. [Search is currently $5/1,000 calls][brave-plans]; plans include $5 monthly credit, but [there is no standalone free plan and a card is required][brave-faq]. |
+| Tavily | ✓ | ✓ | Optional named secret | Create an account and supply `tavily_api_key_secret`. [Researcher is currently 1,000 credits/month with no card; Project is $30 for 4,000 credits][tavily-credits]. Tau's basic search costs one provider credit. |
+| Firecrawl | ✓ | ✓ | Optional named secret | Supply `firecrawl_api_key_secret`. [Free is currently 1,000 credits/month with no card; Hobby is $16/month billed yearly for 5,000 credits/month][firecrawl-pricing]. Firecrawl now offers [keyless access][firecrawl-keyless], but Tau's current REST adapter still sends bearer auth and requires a key. |
+
+These provider plans, quotas, and prices are external policies, not Tau
+contracts; recheck the linked provider documentation before relying on them.
+
+An admitted call advances only its operation's cursor once, then tries providers
+sequentially in circular order until the first non-empty success, with at most
+three attempts under one shared 45-second deadline. Tau returns that one result;
+it does not merge providers. Every contacted provider may consume quota or incur
+cost, including failed or empty attempts. Configuration, provider-list, and
+named-secret changes are not watched: restart Tau (or restart `std-websearch`)
+before expecting them to take effect; a restart resets both cursors.
+
+Configure optional adapters by declaring their names and referring to those
+names—never put key bytes in ordinary config:
+
+```yaml
+extensions:
+  std-websearch:
+    secrets:
+      brave_search: {}
+      tavily: {}
+      firecrawl: {}
+    config:
+      search_providers: [exa, parallel, you, brave, tavily, firecrawl]
+      fetch_providers: [exa, parallel, tavily, firecrawl]
+      brave_api_key_secret: brave_search
+      tavily_api_key_secret: tavily
+      firecrawl_api_key_secret: firecrawl
+```
+
+[exa-mcp]: https://exa.ai/docs/reference/exa-mcp
+[parallel-mcp]: https://docs.parallel.ai/integrations/mcp/programmatic-use
+[you-mcp]: https://you.com/docs/build-with-agents/mcp-server
+[brave-plans]: https://api-dashboard.search.brave.com/app/plans
+[brave-faq]: https://api-dashboard.search.brave.com/documentation/resources/help-feedback
+[tavily-credits]: https://docs.tavily.com/documentation/api-credits
+[firecrawl-pricing]: https://www.firecrawl.dev/pricing
+[firecrawl-keyless]: https://www.firecrawl.dev/blog/firecrawl-keyless-launch
+
 Harness-level `agents.web_tools` policy may replace ordinary search with an
 exact-route provider-hosted implementation at prompt materialization.
 Caller-directed `web_fetch` remains external, and selection never switches

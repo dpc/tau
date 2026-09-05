@@ -942,6 +942,62 @@ fn secrets_self_knowledge_retains_three_layer_delivery_contract() {
     }
 }
 
+/// Ensures the websearch skill retains its provider inventory, externally dated
+/// operating facts, bounded failover semantics, and secret-safe configuration.
+#[test]
+fn websearch_self_knowledge_retains_practical_provider_overview() {
+    let source = BUILT_IN_SKILL_SOURCES
+        .iter()
+        .find(|source| source.diagnostic_path == "tau-self-knowledge-ext-websearch.md")
+        .expect("embedded websearch self-knowledge");
+    let overview = source
+        .content
+        .split_once("## Practical provider overview\n")
+        .and_then(|(_, following)| following.split_once("\nHarness-level `agents.web_tools`"))
+        .map(|(overview, _)| overview.replace('\n', " "))
+        .expect("websearch practical provider overview");
+    for token in [
+        "separate provider pools for `web_search` and `web_fetch`",
+        "search defaults to Exa, Parallel, and anonymous You.com; fetch defaults to Exa and Parallel",
+        "| Exa | ✓ | ✓ | Default, anonymous |",
+        "| Parallel | ✓ | ✓ | Default, anonymous |",
+        "| You.com | ✓ | — | Default, anonymous |",
+        "| Brave | ✓ | — | Optional named secret |",
+        "| Tavily | ✓ | ✓ | Optional named secret |",
+        "| Firecrawl | ✓ | ✓ | Optional named secret |",
+        "verified September 4, 2026",
+        "100 queries/day",
+        "$5/1,000 calls",
+        "1,000 credits/month",
+        "$16/month billed yearly for 5,000 credits/month",
+        "Firecrawl now offers [keyless access][firecrawl-keyless], but Tau's current REST adapter still sends bearer auth and requires a key",
+        "round-robin cursors are independent",
+        "sequentially in circular order",
+        "first non-empty success",
+        "at most three attempts",
+        "one shared 45-second deadline",
+        "may consume quota or incur cost",
+        "not watched",
+        "restart resets both cursors",
+        "never put key bytes in ordinary config",
+        "brave_api_key_secret: brave_search",
+        "tavily_api_key_secret: tavily",
+        "firecrawl_api_key_secret: firecrawl",
+        "[exa-mcp]: https://exa.ai/",
+        "[parallel-mcp]: https://docs.parallel.ai/",
+        "[you-mcp]: https://you.com/",
+        "[brave-plans]: https://api-dashboard.search.brave.com/",
+        "[tavily-credits]: https://docs.tavily.com/",
+        "[firecrawl-pricing]: https://www.firecrawl.dev/",
+        "[firecrawl-keyless]: https://www.firecrawl.dev/",
+    ] {
+        assert!(
+            overview.contains(token),
+            "websearch self-knowledge lost `{token}`"
+        );
+    }
+}
+
 /// Pins the built-in loader's stable source order and complete name inventory.
 #[test]
 fn built_in_skills_have_expected_name_order_and_set() {

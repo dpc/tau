@@ -38,7 +38,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-ext-shell` — extension details for `core-shell` filesystem, shell, editing, directory-lock, and AGENTS.md discovery tools.
 - `tau-self-knowledge-ext-std-notifications` — extension details for prompt/response sounds, idle notifications, OSC 1337, bells, and notification commands.
 - `tau-self-knowledge-ext-test-dummy` — extension details for the disabled test-only dummy extension and restart/interception behavior.
-- `tau-self-knowledge-ext-websearch` — extension details for `std-websearch`, hybrid Exa/Parallel search and fetch, failover, and explicit provider modes.
+- `tau-self-knowledge-ext-websearch` — `std-websearch` provider pools, all hosted adapters, credentials, current provider plans, failover, and configuration.
 - `tau-self-knowledge-prompt-templating` — prompt fragment and system template variables, helpers, priorities, and examples.
 - `tau-self-knowledge-source-code` — where to fetch Tau source code for debugging or detailed understanding.
 - `tau-self-knowledge-community` — places to ask questions or talk about Tau.
