@@ -109,11 +109,11 @@ agents:
         engineer-junior:
           order: 10
           description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
-          effort: decrease:0.15
+          effort: decrease:0.25
         engineer:
           order: 20
           description: Capable individual contributor. Good default for most tasks.
         engineer-senior:
           order: 30
-          effort: increase:0.15
+          effort: increase:0.25
           description: Slow and expensive individual contributor using higher reasoning. Use only for the hardest tasks without prior planning, or when specifically requested.
