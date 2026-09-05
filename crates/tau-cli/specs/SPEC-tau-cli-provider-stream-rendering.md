@@ -28,10 +28,12 @@ forgets the prompt correlation. This local presentation state does not alter
 provider events, journals, replay authority, or compaction replacement facts.
 
 Live prompt output inside the terminal active area has a stable semantic order:
-thinking, provider compaction status, assistant response, then active tool
+thinking, assistant response, provider compaction status, then active tool
 summary/tool-call blocks. New live response-side blocks must be inserted before
 active tool anchors rather than appended after them, so running tool UI remains
-pinned nearest the prompt while assistant text continues streaming.
+pinned nearest the prompt while assistant text continues streaming. Provider
+compaction status trails the response so it remains visible when a long response
+fills the viewport.
 
 For an ordinary selected-transcript final, the CLI stages expensive terminal
 projection for a canonical `provider.response_finished` before publishing it. It then retires the

@@ -7931,7 +7931,7 @@ impl EventRenderer {
         spid: &tau_proto::AgentPromptId,
         block: tau_cli_term::StyledBlock,
     ) {
-        // Insert thinking above the live compaction/response stack while keeping
+        // Insert thinking above the live response/compaction stack while keeping
         // any active tool-call UI pinned below the whole streaming response.
         let tbid = self
             .resources
@@ -7996,7 +7996,7 @@ impl EventRenderer {
             .resources
             .handle
             .new_block(format!("agent-compaction-live:{spid}"), block);
-        let anchors = self.live_compaction_anchor_ids(spid);
+        let anchors = self.live_compaction_anchor_ids();
         self.resources
             .handle
             .push_above_active_before_any(block_id, anchors);
@@ -8033,17 +8033,9 @@ impl EventRenderer {
         anchors
     }
 
-    fn live_compaction_anchor_ids(
-        &self,
-        spid: &tau_proto::AgentPromptId,
-    ) -> Vec<tau_cli_term::BlockId> {
-        let mut anchors = Vec::new();
-        if let Some(state) = self.transcript.runtime.prompts.get(spid)
-            && let Some(block_id) = state.response_block_id
-        {
-            anchors.push(block_id);
-        }
-        anchors.extend(self.active_tool_anchor_ids());
+    fn live_compaction_anchor_ids(&self) -> Vec<tau_cli_term::BlockId> {
+        let mut anchors = self.active_tool_anchor_ids();
+        anchors.extend(self.non_tool_activity_anchor_ids());
         anchors
     }
 

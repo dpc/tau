@@ -2878,6 +2878,48 @@ fn render_provider_compaction_update_as_compact_progress() {
     assert!(!vt.screen_contains(80, "compacting"));
 }
 
+/// Prevents a long streaming response from pushing a later inline-compaction
+/// progress marker above the actual visible terminal viewport.
+#[test]
+fn render_provider_compaction_progress_after_long_response_in_visible_viewport() {
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let agent_prompt_id = test_agent_prompt_id("sp-compact-long-response");
+
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            agent_prompt_id.clone(),
+            (0..20)
+                .map(|line| format!("streamed response line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: Some(tau_proto::ProviderResponseCompactionUpdate {
+            status: tau_proto::ProviderResponseCompactionStatus::Started,
+            original_input_tokens: Some(226_200),
+            compaction_output_tokens: None,
+        }),
+        status: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    let progress = format!("compact #226.2k {}", tau_proto::PROGRESS_INDICATOR_TEXT);
+    assert!(vt.screen_contains(80, &progress));
+}
+
 #[test]
 fn render_provider_compaction_item_when_response_finishes() {
     let (_term, handle, vt) = setup(80, 24);

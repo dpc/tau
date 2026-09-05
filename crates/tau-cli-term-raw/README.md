@@ -136,7 +136,7 @@ the diff renderer can update them in place.
 their own semantic sub-order inside it. The chat UI uses:
 
 ```
-thinking → compaction → streaming response → active tool summary/tool calls
+thinking → streaming response → compaction → active tool summary/tool calls
 → queued prompts → watched engineers
 ```
 
