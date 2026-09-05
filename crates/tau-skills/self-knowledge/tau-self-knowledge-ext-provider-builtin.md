@@ -112,8 +112,9 @@ Supported profile kinds:
   labels it `OpenAI Responses API`.
 
 For `Qwen/Qwen3.8-27B`, configure a model-local Chat Completions
-compatibility block with literal reasoning efforts `low`, `medium`, and `xhigh`,
-plus `single_initial_system_message: true`. Select role effort `xhigh`, retain
+compatibility block with explicit cut-point bands for literal reasoning efforts
+`low`, `medium`, and `xhigh`, plus `single_initial_system_message: true`. Select
+role effort `xhigh`, retain
 Qwen's fixed thinking sampler, set
 `chat_template_kwargs.preserve_thinking: true` and `reasoning_replay: both`, and use the
 server's actual context reservation as `context_window`. Non-thinking is a
@@ -226,13 +227,16 @@ partial terminal outside context for accounting and inspection, never installs
 it as a replacement window, and never retries it automatically. Other
 incomplete reasons remain provider failures.
 
-Each `responses.models[]` entry can set `efforts` to an exact set of supported
-reasoning levels. Omission uses `[off, minimal, low, medium, high, xhigh, max]`;
-an explicit empty list disables the control. Non-empty overrides reject
-duplicates and publish in that canonical order. `tau provider add` omits the
-field, so generated profiles receive the full set. Each request explicitly
-sends the harness-effective level as `reasoning.effort`, mapping Tau `off` to
-API `none`.
+Each `responses.models[]` entry can set `reasoning_effort.mapping` to exact
+portable cut points and supported native levels. Omission uses the standard full
+mapping for `[none, minimal, low, medium, high, xhigh, max]`; an explicit empty
+mapping disables the control. Non-empty mappings start at `0.0` and strictly
+increase both cut points and levels. Boundaries at or below `0.5` belong to the
+higher band, while boundaries above `0.5` belong to the preceding lower band.
+Profiles using the former `efforts` array must migrate to mapping bands.
+`tau provider add` omits the field, so generated profiles receive the full
+default. Each request explicitly sends the harness-effective native level as
+`reasoning.effort`; the native `none` level uses the API spelling `none`.
 
 The extension has no ordinary `extensions.provider-builtin.config` credential
 schema. Inline credentials remain in provider auth/profile storage; referenced

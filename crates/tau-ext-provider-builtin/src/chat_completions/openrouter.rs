@@ -18,7 +18,7 @@ use super::{ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider
 
 const OPENROUTER_DISCOVERY_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(30);
 const MAX_OPENROUTER_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
-const OPENROUTER_MODELS_CACHE_VERSION: u8 = 1;
+const OPENROUTER_MODELS_CACHE_VERSION: u8 = 2;
 
 /// OpenRouter's wire representation for one discoverable model.
 #[derive(Deserialize)]
@@ -163,7 +163,7 @@ impl OpenRouterProfile {
             {
                 return Err("OpenRouter does not support image modality declarations");
             }
-            if let Some(compat) = model.compat {
+            if let Some(compat) = &model.compat {
                 compat.validate()?;
             }
         }

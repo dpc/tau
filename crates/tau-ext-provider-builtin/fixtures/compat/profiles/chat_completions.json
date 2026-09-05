@@ -18,12 +18,27 @@
           }
         },
         "reasoning_effort": {
-          "efforts": [
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high"
+          "mapping": [
+            {
+              "from": "0.0",
+              "level": "none"
+            },
+            {
+              "from": "0.1",
+              "level": "minimal"
+            },
+            {
+              "from": "0.2",
+              "level": "low"
+            },
+            {
+              "from": "0.35",
+              "level": "medium"
+            },
+            {
+              "from": "0.65",
+              "level": "high"
+            }
           ],
           "wire": "open_ai"
         }

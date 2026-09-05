@@ -134,8 +134,11 @@ from those above only a separate input maximum. Effective support is
 `supports_standalone_compaction || standalone_compaction_generation_negative`;
 generation-negative routes keep their standalone metadata. Reasoning mappings
 must be non-empty, start at `0.0`, keep thresholds within `0.0..=1.0`, and
-strictly increase both thresholds and native levels. Tau does not strip or
-default invalid fields.
+strictly increase both thresholds and native levels. A non-first threshold must
+be below `1.0`, because inward ownership would make a higher band starting at
+`1.0` unreachable. Tau does not strip or default invalid fields. At an exact cut
+point at or below `0.5`, the higher band owns the value; above `0.5`, the
+preceding lower band owns it.
 
 ```rust
 struct ProviderModelInfo {
@@ -626,17 +629,40 @@ backend performs one finite typed attempt.
 
 `compat` may appear at provider or model level. When a model has `compat`, that
 object fully replaces the provider object; fields do not merge. A configured
-`reasoning_effort` requires a non-empty list of unique native effort values and
-publishes exactly that set in canonical order. Its wire policy is:
+`reasoning_effort.mapping` requires a non-empty sequence of strictly increasing
+portable cut points and native effort values. The first cut point must be `0.0`.
+Cut points at or below `0.5` belong to the higher band that starts there; cut
+points above `0.5` belong to the preceding lower band. Thus a standard medium
+range is `[0.35, 0.65]`, while providers remain free to configure asymmetric
+cuts. Its wire policy is:
 
 - `open_ai`: publish and send the distinct `none` through `high` spellings;
 - `literal`: preserve extended `xhigh`/`max` instead of folding them to `high`
   while retaining the shared provider spellings;
 - `omit`: publish one fixed configured effort but send no top-level field.
 
-Omitting `reasoning_effort` publishes unsupported control and sends no field. Use `omit`
-only for one fixed server-side effort, such as `efforts: ["xhigh"]`; publishing
-several values would imply a choice the wire cannot convey.
+Omitting `reasoning_effort` publishes unsupported control and sends no field. Use
+`omit` only for one fixed server-side effort, such as
+`mapping: [{"from": "0.0", "level": "xhigh"}]`; publishing several values would
+imply a choice the wire cannot convey.
+
+Provider profiles using the former `efforts: ["low", ...]` shorthand must migrate
+to explicit bands. For example:
+
+```json
+"reasoning_effort": {
+  "mapping": [
+    {"from": "0.0", "level": "low"},
+    {"from": "0.35", "level": "medium"},
+    {"from": "0.65", "level": "high"}
+  ],
+  "wire": "literal"
+}
+```
+
+Put this object in provider-level `compat` to define the provider default, or in
+one model's `compat` to replace that complete provider compatibility object for
+the exact model.
 `reasoning_replay` selects `reasoning_content`, `reasoning`, or `both` for
 assistant history. The default is `reasoning_content`.
 `single_initial_system_message: true` retains Tau's leading system prompt but
@@ -679,7 +705,11 @@ text-first profile intentionally does not advertise image input:
     "compat": {
       "stream_options": true,
       "reasoning_effort": {
-        "efforts": ["low", "medium", "xhigh"],
+        "mapping": [
+          {"from": "0.0", "level": "low"},
+          {"from": "0.35", "level": "medium"},
+          {"from": "0.8", "level": "xhigh"}
+        ],
         "wire": "literal"
       },
       "reasoning_replay": "both",
@@ -694,8 +724,9 @@ Qwen's recommended/default thinking mode. The adapter sends literal `low`,
 `medium`, or `xhigh` only when the profile publishes them. Some local servers,
 including current llama.cpp releases, do not accept the top-level
 `reasoning_effort` extension. For those servers, configure
-`"reasoning_effort": {"efforts": ["xhigh"], "wire": "omit"}` so Tau publishes
-fixed `xhigh` behavior while relying on Qwen's default template behavior.
+`"reasoning_effort": {"mapping": [{"from": "0.0", "level": "xhigh"}],
+"wire": "omit"}` so Tau publishes fixed `xhigh` behavior while relying on Qwen's
+default template behavior.
 Keep `preserve_thinking: true` and `reasoning_replay: "both"` for tool
 continuations.
 
@@ -1022,21 +1053,30 @@ summary compaction, the partial response remains durable non-context accounting
 data; Tau never installs it as the replacement window or retries it
 automatically. Other incomplete reasons remain provider failures.
 
-Each `responses.models[]` entry may set `efforts` to describe the exact
-reasoning-effort levels its upstream model accepts:
+Each `responses.models[]` entry may set `reasoning_effort.mapping` to describe the
+exact reasoning-effort levels and portable cut points its upstream model accepts:
 
 ```json
 {
   "id": "quirky-model",
-  "efforts": ["none", "low", "medium", "high"]
+  "reasoning_effort": {
+    "mapping": [
+      {"from": "0.0", "level": "none"},
+      {"from": "0.2", "level": "low"},
+      {"from": "0.35", "level": "medium"},
+      {"from": "0.65", "level": "high"}
+    ]
+  }
 }
 ```
 
-Omitting `efforts` publishes the full canonical set
-`[none, minimal, low, medium, high, xhigh, max]`, including for existing
-profiles. An explicit `efforts: []` publishes no reasoning-effort capability.
-Non-empty overrides are sets: Tau rejects duplicates and publishes the selected
-levels in that canonical order, regardless of their order in JSON or YAML.
+Omitting `reasoning_effort` publishes the standard full mapping for
+`[none, minimal, low, medium, high, xhigh, max]`. An explicit
+`reasoning_effort: {"mapping": []}` publishes no reasoning-effort capability.
+Existing profiles using `efforts: [...]` must replace that field with the
+explicit mapping object shown above. Non-empty mappings must start at `0.0` and
+strictly increase both cut points and native levels; every later cut point must
+remain below `1.0`.
 The harness clamps numeric portable intent only while mapping each prompt to the
 published native levels. Disabled selects `none` when available, or the minimum
 native level otherwise. Provider-default intent omits the effort selector.

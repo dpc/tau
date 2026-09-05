@@ -214,7 +214,7 @@ fn builtin_estimated_prices(
 }
 
 /// Serialized OpenAI-compatible request controls.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatCompletionsCompat {
     /// Request streamed usage.
@@ -257,112 +257,13 @@ impl Default for ChatCompletionsCompat {
 }
 
 /// Exact reasoning efforts and extended-level spelling accepted by one route.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatCompletionsReasoningEffort {
-    /// NativeReasoningEffort levels published for model selection in canonical
-    /// order.
-    pub efforts: ChatCompletionsReasoningEfforts,
+    /// Exact portable-intensity cut points and native levels.
+    pub mapping: Vec<tau_proto::ReasoningEffortBand>,
     /// Wire emission and spelling policy.
     pub wire: ChatCompletionsReasoningEffortWire,
-}
-
-/// Validated set of reasoning effort levels accepted by a Chat Completions
-/// route.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ChatCompletionsReasoningEfforts(
-    /// Bit set indexed by [`tau_proto::NativeReasoningEffort`]; constructors
-    /// and deserialization guarantee at least one bit and reject repeated
-    /// configured values.
-    u8,
-);
-
-/// Invalid exact reasoning-effort set supplied through the typed API.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChatCompletionsReasoningEffortsError {
-    /// The set contains no effective effort.
-    Empty,
-    /// The input repeats an effort value.
-    Duplicate,
-}
-
-impl std::fmt::Display for ChatCompletionsReasoningEffortsError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("reasoning efforts must not be empty"),
-            Self::Duplicate => formatter.write_str("reasoning efforts must not contain duplicates"),
-        }
-    }
-}
-
-impl std::error::Error for ChatCompletionsReasoningEffortsError {}
-
-impl ChatCompletionsReasoningEfforts {
-    /// Creates a validated non-empty set from unique effort values.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the input is empty or repeats a value.
-    pub fn new(
-        efforts: impl IntoIterator<Item = tau_proto::NativeReasoningEffort>,
-    ) -> Result<Self, ChatCompletionsReasoningEffortsError> {
-        let mut mask = 0_u8;
-        for effort in efforts {
-            let bit = 1_u8 << effort as u8;
-            if mask & bit != 0 {
-                return Err(ChatCompletionsReasoningEffortsError::Duplicate);
-            }
-            mask |= bit;
-        }
-        if mask == 0 {
-            return Err(ChatCompletionsReasoningEffortsError::Empty);
-        }
-        Ok(Self(mask))
-    }
-
-    /// Construct the distinct OpenAI-compatible set through `high`.
-    ///
-    /// The OpenAI wire collapses extended levels to `high`, so publishing them
-    /// as separate choices would overstate the effective route capability.
-    const fn open_ai() -> Self {
-        Self((1_u8 << tau_proto::NativeReasoningEffort::XHigh as u8) - 1)
-    }
-
-    /// Return whether this set contains one effort level.
-    #[must_use]
-    pub fn contains(self, effort: tau_proto::NativeReasoningEffort) -> bool {
-        self.0 & (1 << effort as u8) != 0
-    }
-
-    /// Return the set in stable model-publication order.
-    #[must_use]
-    pub fn canonical(self) -> Vec<tau_proto::NativeReasoningEffort> {
-        tau_proto::NativeReasoningEffort::ALL
-            .into_iter()
-            .filter(|effort| self.contains(*effort))
-            .collect()
-    }
-}
-
-impl Serialize for ChatCompletionsReasoningEfforts {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.canonical().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ChatCompletionsReasoningEfforts {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error as _;
-
-        let configured = Vec::<tau_proto::NativeReasoningEffort>::deserialize(deserializer)?;
-        Self::new(configured).map_err(D::Error::custom)
-    }
 }
 
 /// Provider-specific emission and spelling for Tau reasoning effort.
@@ -481,7 +382,7 @@ impl ChatCompletionsProvider {
                     "Chat Completions image input and tool-result modalities must be declared together",
                 );
             }
-            if let Some(compat) = model.compat {
+            if let Some(compat) = &model.compat {
                 compat.validate()?;
             }
         }
@@ -507,14 +408,21 @@ impl ChatCompletionsCompat {
 
     /// Controls used for OpenAI-compatible public endpoints.
     #[must_use]
-    pub const fn openai_defaults() -> Self {
+    pub fn openai_defaults() -> Self {
         Self {
             stream_options: true,
             parallel_tool_calls: true,
             tool_choice: true,
             openai_prompt_cache: None,
             reasoning_effort: Some(ChatCompletionsReasoningEffort {
-                efforts: ChatCompletionsReasoningEfforts::open_ai(),
+                mapping: crate::ReasoningEffortMapping::standard([
+                    tau_proto::NativeReasoningEffort::None,
+                    tau_proto::NativeReasoningEffort::Minimal,
+                    tau_proto::NativeReasoningEffort::Low,
+                    tau_proto::NativeReasoningEffort::Medium,
+                    tau_proto::NativeReasoningEffort::High,
+                ])
+                .mapping,
                 wire: ChatCompletionsReasoningEffortWire::OpenAi,
             }),
             reasoning_replay: ChatCompletionsReasoningReplay::ReasoningContent,
@@ -536,24 +444,30 @@ impl ChatCompletionsCompat {
         if self.cache_usage != CacheUsageCompat::None && !self.stream_options {
             return Err("cache_usage requires stream_options");
         }
-        if self.reasoning_effort.is_some_and(|config| {
-            config.wire == ChatCompletionsReasoningEffortWire::Omit
-                && config.efforts.0.count_ones() != 1
-        }) {
-            return Err("omitted reasoning_effort wire requires exactly one effective effort");
-        }
-        if self.reasoning_effort.is_some_and(|config| {
-            config.wire == ChatCompletionsReasoningEffortWire::OpenAi
+        if let Some(config) = &self.reasoning_effort {
+            let mapping = crate::ReasoningEffortMapping {
+                mapping: config.mapping.clone(),
+            };
+            if mapping.is_empty() || !mapping.is_valid() {
+                return Err("reasoning_effort mapping must be non-empty and structurally valid");
+            }
+            if config.wire == ChatCompletionsReasoningEffortWire::Omit && mapping.len() != 1 {
+                return Err("omitted reasoning_effort wire requires exactly one effective effort");
+            }
+            if config.wire == ChatCompletionsReasoningEffortWire::OpenAi
                 && (config
-                    .efforts
-                    .contains(tau_proto::NativeReasoningEffort::XHigh)
+                    .mapping
+                    .iter()
+                    .any(|band| band.level == tau_proto::NativeReasoningEffort::XHigh)
                     || config
-                        .efforts
-                        .contains(tau_proto::NativeReasoningEffort::Max))
-        }) {
-            return Err(
-                "OpenAI reasoning_effort wire cannot publish collapsed xhigh or max levels",
-            );
+                        .mapping
+                        .iter()
+                        .any(|band| band.level == tau_proto::NativeReasoningEffort::Max))
+            {
+                return Err(
+                    "OpenAI reasoning_effort wire cannot publish collapsed xhigh or max levels",
+                );
+            }
         }
         Ok(())
     }

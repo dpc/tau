@@ -57,10 +57,10 @@ capability. The persisted discovery cache is versioned so rows written before
 exact capability metadata cannot regain legacy Function support while offline.
 Tau does not force strict OpenRouter parameter routing.
 
-Chat Completions compatibility also owns the exact non-empty set of published
-reasoning efforts and OpenAI-compatible, extended-literal, or omitted wire
-lowering. Omitted lowering publishes one exact effective effort while relying on
-the server's fixed default. Model-level compatibility, when present, fully
+Chat Completions compatibility also owns the exact non-empty portable cut-point
+mapping of published reasoning efforts and OpenAI-compatible, extended-literal,
+or omitted wire lowering. Omitted lowering publishes one exact effective effort
+while relying on the server's fixed default. Model-level compatibility, when present, fully
 replaces rather than merges with provider-level compatibility as one complete
 route contract. The same contract selects which assistant reasoning aliases
 semantic transcript replay emits. Routes whose templates allow system authority only initially

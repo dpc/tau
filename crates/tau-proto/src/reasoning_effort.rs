@@ -316,12 +316,16 @@ impl<'de> Deserialize<'de> for ReasoningIntent {
     }
 }
 
-/// One inclusive lower-bound mapping from portable intensity to native effort.
+/// One cut point mapping portable intensity to a native effort.
+///
+/// Cut points at or below [`ReasoningIntensity::MEDIUM`] belong to this higher
+/// band. Cut points above medium belong to the preceding lower band.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReasoningEffortBand {
-    /// Inclusive lower bound in the nominal range.
+    /// Cut point in the nominal range.
     pub from: ReasoningIntensity,
-    /// Native level selected at and above this lower bound.
+    /// Native level selected above this cut point, including it only at or
+    /// below medium.
     pub level: crate::NativeReasoningEffort,
 }
 
@@ -339,7 +343,7 @@ pub enum ReasoningEffortControl {
     },
     /// The route accepts mapped native selectors.
     Mapped {
-        /// Strictly increasing inclusive lower-bound bands.
+        /// Strictly increasing inward-owned cut-point bands.
         mapping: Vec<ReasoningEffortBand>,
     },
 }
@@ -377,8 +381,8 @@ impl ReasoningEffortCapability {
                                 crate::NativeReasoningEffort::Minimal => 100_000,
                                 crate::NativeReasoningEffort::Low if has_minimal => 200_000,
                                 crate::NativeReasoningEffort::Low => 100_000,
-                                crate::NativeReasoningEffort::Medium => 300_000,
-                                crate::NativeReasoningEffort::High => 700_000,
+                                crate::NativeReasoningEffort::Medium => 350_000,
+                                crate::NativeReasoningEffort::High => 650_000,
                                 crate::NativeReasoningEffort::XHigh => 800_000,
                                 crate::NativeReasoningEffort::Max => 900_000,
                             }
@@ -407,6 +411,10 @@ impl ReasoningEffortCapability {
                 };
                 first.from.millionths() == 0
                     && mapping.iter().all(|band| band.from.is_nominal())
+                    && mapping
+                        .iter()
+                        .skip(1)
+                        .all(|band| band.from.millionths() < REASONING_INTENSITY_ONE)
                     && mapping
                         .windows(2)
                         .all(|pair| pair[0].from < pair[1].from && pair[0].level < pair[1].level)
@@ -449,7 +457,13 @@ impl ReasoningEffortCapability {
                     mapping
                         .iter()
                         .rev()
-                        .find(|band| band.from <= numeric)
+                        .find(|band| {
+                            if band.from <= ReasoningIntensity::MEDIUM {
+                                band.from <= numeric
+                            } else {
+                                band.from < numeric
+                            }
+                        })
                         .or_else(|| mapping.first())
                         .map_or(EffectiveReasoningEffort::Unsupported, |band| {
                             EffectiveReasoningEffort::Native(band.level)

@@ -20,6 +20,7 @@ mod prewarm;
 mod provider_settings_validation;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
+mod reasoning_effort_mapping;
 mod receipt_observation;
 mod report_sink;
 mod responses;
@@ -50,7 +51,6 @@ pub use cache_contract::ProviderCacheContract;
 pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
     ChatCompletionsReasoningEffort, ChatCompletionsReasoningEffortWire,
-    ChatCompletionsReasoningEfforts, ChatCompletionsReasoningEffortsError,
     ChatCompletionsReasoningReplay, LocalSummaryCompactionConfig,
     OpenAiPromptCache as ChatCompletionsOpenAiPromptCache, OpenAiPromptCacheBoundary,
     OpenAiPromptCacheMode, OpenAiPromptCacheOptions, OpenAiPromptCacheTtl,
@@ -73,6 +73,7 @@ use provider_settings_validation::{
 };
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
+pub use reasoning_effort_mapping::ReasoningEffortMapping;
 use receipt_observation::{ReceiptObservation, ReceiptOutcome};
 use report_sink::ProviderReportSink;
 pub use responses::{
@@ -81,7 +82,7 @@ pub use responses::{
     OpenAiPromptCacheMode as ResponsesOpenAiPromptCacheMode,
     OpenAiPromptCacheOptions as ResponsesOpenAiPromptCacheOptions,
     OpenAiPromptCacheTtl as ResponsesOpenAiPromptCacheTtl, ResponsesCompat, ResponsesModel,
-    ResponsesNativeReasoningEfforts, ResponsesProvider,
+    ResponsesProvider,
 };
 use responses::{
     PromptAttemptOutcome as ResponsesAttemptOutcome,
@@ -162,7 +163,8 @@ impl BuiltinProviderProfile {
         match self {
             Self::ChatCompletions(provider) => provider.validate(),
             Self::OpenRouter(profile) => profile.validate(),
-            Self::Chatgpt(_) | Self::Responses(_) => Ok(()),
+            Self::Responses(provider) => provider.validate_reasoning_effort(),
+            Self::Chatgpt(_) => Ok(()),
         }
     }
 
@@ -1813,7 +1815,7 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
             (!id.is_empty()).then(|| {
                 ModelName::try_new(id.to_owned()).map(|id| ResponsesModel {
                     id,
-                    efforts: None,
+                    reasoning_effort: None,
                     compat: None,
                     display_name: None,
                     context_window: tau_proto::TokenCount::new(128_000),

@@ -2773,6 +2773,7 @@ fn xhigh_metadata_is_model_specific() {
             "chatgpt/gpt-5.6-sol",
             "chatgpt/gpt-5.6-terra",
             "chatgpt/gpt-5.6-luna",
+            "chatgpt/gpt-6-astra",
             "chatgpt/gpt-5.5",
             "chatgpt/gpt-5.4",
             "chatgpt/gpt-5.3-codex"

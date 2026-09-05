@@ -621,7 +621,7 @@ fn profile_round_trips_explicit_models() {
     let encoded = serde_json::to_value(&profile).expect("serialize profile");
     assert_eq!(encoded["base_url"], "https://example.test/v1");
     assert_eq!(encoded["models"][0]["id"], "example-model");
-    assert!(encoded["models"][0].get("efforts").is_none());
+    assert!(encoded["models"][0].get("reasoning_effort").is_none());
     assert!(encoded.get("protocol_preset").is_none());
     assert_eq!(encoded["transport"], "sse");
 }
@@ -672,7 +672,7 @@ fn profile_publishes_default_responses_efforts() {
         api_key: String::new(),
         models: vec![ResponsesModel {
             id: tau_proto::ModelName::new("example-model"),
-            efforts: None,
+            reasoning_effort: None,
             compat: None,
             display_name: None,
             context_window: tau_proto::TokenCount::new(128_000),
@@ -743,7 +743,7 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
     assert_eq!(
         resolved_summary_config(&ResponsesModel {
             id: ModelName::new("local"),
-            efforts: None,
+            reasoning_effort: None,
             compat: None,
             display_name: None,
             context_window: tau_proto::TokenCount::new(8192),
@@ -983,75 +983,86 @@ fn profile_publishes_configured_runtime_cache_contract() {
     );
 }
 
-/// Non-empty effort overrides are sets, so profile loading must canonicalize
-/// their publication order instead of changing UI cycling based on input order.
+/// A configured Responses mapping publishes its exact asymmetric cut points
+/// rather than rebuilding standard thresholds from native level names.
 #[test]
-fn profile_canonicalizes_responses_effort_override() {
+fn profile_publishes_configured_responses_effort_mapping() {
     let provider: ResponsesProvider = serde_json::from_value(serde_json::json!({
         "models": [{
             "id": "example-model",
-            "efforts": ["max", "low", "none", "xhigh"]
+            "reasoning_effort": {
+                "mapping": [
+                    {"from": "0.0", "level": "none"},
+                    {"from": "0.24", "level": "low"},
+                    {"from": "0.81", "level": "xhigh"},
+                    {"from": "0.93", "level": "max"}
+                ]
+            }
         }]
     }))
     .expect("profile");
+    provider.validate_reasoning_effort().expect("valid profile");
 
+    let published =
+        &models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0].efforts;
     assert_eq!(
-        models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0].efforts,
-        tau_proto::ReasoningEffortCapability::mapped([
-            tau_proto::NativeReasoningEffort::None,
-            tau_proto::NativeReasoningEffort::Low,
-            tau_proto::NativeReasoningEffort::XHigh,
-            tau_proto::NativeReasoningEffort::Max,
-        ])
-    );
-    assert_eq!(
-        provider.models[0]
-            .efforts
+        published,
+        &provider.models[0]
+            .reasoning_effort
             .as_ref()
-            .expect("configured effort override")
-            .as_slice(),
-        &[
-            tau_proto::NativeReasoningEffort::None,
-            tau_proto::NativeReasoningEffort::Low,
-            tau_proto::NativeReasoningEffort::XHigh,
-            tau_proto::NativeReasoningEffort::Max,
-        ]
+            .expect("configured effort mapping")
+            .capability()
+    );
+    assert_eq!(
+        published.select(tau_proto::ReasoningIntent::Intensity(
+            tau_proto::ReasoningIntensity::from_millionths(810_000)
+        )),
+        tau_proto::EffectiveReasoningEffort::Native(tau_proto::NativeReasoningEffort::Low)
+    );
+    assert_eq!(
+        published.select(tau_proto::ReasoningIntent::Intensity(
+            tau_proto::ReasoningIntensity::from_millionths(810_001)
+        )),
+        tau_proto::EffectiveReasoningEffort::Native(tau_proto::NativeReasoningEffort::XHigh)
     );
 }
 
-/// Duplicate configured effort names must fail profile loading rather than
-/// quietly creating an ambiguous capability override.
+/// Responses profile validation rejects malformed cut-point order and repeated
+/// native levels before model publication.
 #[test]
-fn profile_rejects_duplicate_responses_efforts() {
-    let error = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
-        "models": [{"id": "example-model", "efforts": ["low", "low"]}]
+fn profile_rejects_invalid_responses_effort_mapping() {
+    let provider = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
+        "models": [{
+            "id": "example-model",
+            "reasoning_effort": {
+                "mapping": [
+                    {"from": "0.0", "level": "low"},
+                    {"from": "0.4", "level": "low"}
+                ]
+            }
+        }]
     }))
-    .expect_err("duplicate efforts must fail");
-
-    assert!(error.to_string().contains("must not contain duplicates"));
-}
-
-/// Direct Rust construction must retain the same duplicate rejection as
-/// serialized profiles, so callers cannot publish an ambiguous effort set.
-#[test]
-fn responses_efforts_reject_duplicates() {
-    assert!(
-        ResponsesNativeReasoningEfforts::try_from(vec![
-            tau_proto::NativeReasoningEffort::Low,
-            tau_proto::NativeReasoningEffort::Low
-        ])
-        .is_err()
+    .expect("syntactically valid profile");
+    assert_eq!(
+        provider.validate_reasoning_effort(),
+        Err("reasoning_effort mapping must be structurally valid")
     );
 }
 
-/// An explicit empty effort override must publish unsupported reasoning-effort
+/// An explicit empty mapping must publish unsupported reasoning-effort
 /// control so the provider omits a selector instead of inventing native none.
 #[test]
 fn profile_empty_responses_effort_override_disables_capability() {
     let provider: ResponsesProvider = serde_json::from_value(serde_json::json!({
-        "models": [{"id": "example-model", "efforts": []}]
+        "models": [{
+            "id": "example-model",
+            "reasoning_effort": {"mapping": []}
+        }]
     }))
     .expect("profile");
+    provider
+        .validate_reasoning_effort()
+        .expect("empty mapping disables control");
 
     assert_eq!(
         models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0].efforts,

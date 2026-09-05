@@ -1652,6 +1652,15 @@ fn is_gpt_5_6(model: &str) -> bool {
 }
 
 fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {
+    if model == "gpt-6-astra" {
+        return vec![
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::Medium,
+            NativeReasoningEffort::High,
+            NativeReasoningEffort::XHigh,
+            NativeReasoningEffort::Max,
+        ];
+    }
     let mut efforts = vec![
         NativeReasoningEffort::None,
         NativeReasoningEffort::Minimal,

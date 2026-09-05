@@ -14,8 +14,7 @@ pub use prompt_cache::{
     OpenAiPromptCache, OpenAiPromptCacheBoundary, OpenAiPromptCacheMode, OpenAiPromptCacheOptions,
     OpenAiPromptCacheTtl,
 };
-use serde::de::Error as SerdeError;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use tau_proto::{ModelName, NativeReasoningEffort, ProviderModelInfo, ProviderName, TokenCount};
 use tau_provider::local_summary_compaction::{
     Config as SummaryCompactionConfig, ConfigError as SummaryCompactionConfigError,
@@ -61,6 +60,19 @@ pub struct ResponsesProvider {
 }
 
 impl ResponsesProvider {
+    /// Validate every model-local reasoning-effort mapping.
+    pub(crate) fn validate_reasoning_effort(&self) -> Result<(), &'static str> {
+        if self.models.iter().any(|model| {
+            model
+                .reasoning_effort
+                .as_ref()
+                .is_some_and(|mapping| !mapping.is_valid())
+        }) {
+            return Err("reasoning_effort mapping must be structurally valid");
+        }
+        Ok(())
+    }
+
     /// Validate every model's optional summary limits against its own context
     /// window.
     pub(crate) fn validate_local_summary_compaction(
@@ -81,10 +93,10 @@ impl ResponsesProvider {
 pub struct ResponsesModel {
     /// Upstream model identifier.
     pub id: ModelName,
-    /// Optional supported reasoning-effort set. Omission uses every canonical
-    /// effort, while an empty list disables reasoning-effort selection.
+    /// Optional exact reasoning-effort mapping. Omission uses the standard full
+    /// mapping, while an empty mapping disables reasoning-effort selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub efforts: Option<ResponsesNativeReasoningEfforts>,
+    pub reasoning_effort: Option<crate::ReasoningEffortMapping>,
     /// Optional model-specific public Responses wire compatibility override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ResponsesCompat>,
@@ -157,67 +169,10 @@ impl ResponsesCompat {
     }
 }
 
-/// A validated canonical set of public Responses reasoning-effort levels.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResponsesNativeReasoningEfforts {
-    /// Unique configured levels in canonical UI cycling order.
-    levels: Vec<NativeReasoningEffort>,
-}
-
-impl ResponsesNativeReasoningEfforts {
-    /// Returns the validated levels in canonical UI cycling order.
-    #[must_use]
-    pub fn as_slice(&self) -> &[NativeReasoningEffort] {
-        &self.levels
-    }
-}
-
-impl Serialize for ResponsesNativeReasoningEfforts {
-    /// Serializes validated effort levels as the profile's direct array value.
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.levels.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ResponsesNativeReasoningEfforts {
-    /// Deserializes and validates the profile's direct effort array value.
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::try_from(Vec::deserialize(deserializer)?).map_err(SerdeError::custom)
-    }
-}
-
-impl TryFrom<Vec<NativeReasoningEffort>> for ResponsesNativeReasoningEfforts {
-    type Error = &'static str;
-
-    /// Validates unique configured levels and stores them in canonical order.
-    fn try_from(configured: Vec<NativeReasoningEffort>) -> Result<Self, Self::Error> {
-        if configured
-            .iter()
-            .enumerate()
-            .any(|(index, effort)| configured[..index].contains(effort))
-        {
-            return Err("Responses model efforts must not contain duplicates");
-        }
-
-        Ok(Self {
-            levels: NativeReasoningEffort::ALL
-                .into_iter()
-                .filter(|effort| configured.contains(effort))
-                .collect(),
-        })
-    }
-}
-
-fn model_efforts(model: &ResponsesModel) -> Vec<NativeReasoningEffort> {
-    model.efforts.as_ref().map_or_else(
-        || NativeReasoningEffort::ALL.to_vec(),
-        |efforts| efforts.as_slice().to_vec(),
+fn model_reasoning_effort(model: &ResponsesModel) -> tau_proto::ReasoningEffortCapability {
+    model.reasoning_effort.as_ref().map_or_else(
+        || crate::ReasoningEffortMapping::standard(NativeReasoningEffort::ALL).capability(),
+        crate::ReasoningEffortMapping::capability,
     )
 }
 
@@ -271,7 +226,7 @@ pub fn models_for_provider(
                 max_output_tokens: model
                     .max_output_tokens
                     .map(|tokens| TokenCount::new(u64::from(tokens.get()))),
-                efforts: tau_proto::ReasoningEffortCapability::mapped(model_efforts(model)),
+                efforts: model_reasoning_effort(model),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,

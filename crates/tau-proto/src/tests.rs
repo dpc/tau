@@ -5999,7 +5999,7 @@ fn reasoning_intent_adjusts_outside_nominal_range_and_maps_at_selection() {
 }
 
 /// Standard mappings keep `0.5` medium-like across common native vocabularies
-/// while preserving explicit sparse lower-bound tiers.
+/// while preserving explicit sparse cut-point tiers.
 #[test]
 fn standard_reasoning_mappings_keep_half_intensity_medium_like() {
     for levels in [
@@ -6035,6 +6035,171 @@ fn standard_reasoning_mappings_keep_half_intensity_medium_like() {
             crate::EffectiveReasoningEffort::Native(NativeReasoningEffort::Medium)
         );
     }
+}
+
+/// The complete standard vocabulary gives medium both inward boundaries and
+/// assigns every other exact cut point toward portable intensity `0.5`.
+#[test]
+fn standard_reasoning_mapping_owns_cut_points_toward_medium() {
+    let capability = crate::ReasoningEffortCapability::mapped(crate::NativeReasoningEffort::ALL);
+    let crate::ReasoningEffortControl::Mapped { mapping } = &capability.control else {
+        panic!("standard levels must produce a mapped capability");
+    };
+    assert_eq!(
+        mapping,
+        &[
+            crate::ReasoningEffortBand {
+                from: crate::ReasoningIntensity::from_millionths(0),
+                level: NativeReasoningEffort::None,
+            },
+            crate::ReasoningEffortBand {
+                from: crate::ReasoningIntensity::from_millionths(100_000),
+                level: NativeReasoningEffort::Minimal,
+            },
+            crate::ReasoningEffortBand {
+                from: crate::ReasoningIntensity::from_millionths(200_000),
+                level: NativeReasoningEffort::Low,
+            },
+            crate::ReasoningEffortBand {
+                from: crate::ReasoningIntensity::from_millionths(350_000),
+                level: NativeReasoningEffort::Medium,
+            },
+            crate::ReasoningEffortBand {
+                from: crate::ReasoningIntensity::from_millionths(650_000),
+                level: NativeReasoningEffort::High,
+            },
+            crate::ReasoningEffortBand {
+                from: crate::ReasoningIntensity::from_millionths(800_000),
+                level: NativeReasoningEffort::XHigh,
+            },
+            crate::ReasoningEffortBand {
+                from: crate::ReasoningIntensity::from_millionths(900_000),
+                level: NativeReasoningEffort::Max,
+            },
+        ]
+    );
+
+    for (millionths, expected) in [
+        (0, NativeReasoningEffort::None),
+        (99_999, NativeReasoningEffort::None),
+        (100_000, NativeReasoningEffort::Minimal),
+        (199_999, NativeReasoningEffort::Minimal),
+        (200_000, NativeReasoningEffort::Low),
+        (349_999, NativeReasoningEffort::Low),
+        (350_000, NativeReasoningEffort::Medium),
+        (500_000, NativeReasoningEffort::Medium),
+        (650_000, NativeReasoningEffort::Medium),
+        (650_001, NativeReasoningEffort::High),
+        (800_000, NativeReasoningEffort::High),
+        (800_001, NativeReasoningEffort::XHigh),
+        (900_000, NativeReasoningEffort::XHigh),
+        (900_001, NativeReasoningEffort::Max),
+        (1_000_000, NativeReasoningEffort::Max),
+    ] {
+        assert_eq!(
+            capability.select(crate::ReasoningIntent::Intensity(
+                crate::ReasoningIntensity::from_millionths(millionths)
+            )),
+            crate::EffectiveReasoningEffort::Native(expected),
+            "{millionths}"
+        );
+    }
+}
+
+/// Configured asymmetric cut points retain provider ownership, while exact
+/// boundaries consistently belong to the interval nearer `0.5`.
+#[test]
+fn configured_reasoning_mapping_owns_asymmetric_cut_points_inward() {
+    let capability = crate::ReasoningEffortCapability {
+        control: crate::ReasoningEffortControl::Mapped {
+            mapping: vec![
+                crate::ReasoningEffortBand {
+                    from: crate::ReasoningIntensity::from_millionths(0),
+                    level: NativeReasoningEffort::Low,
+                },
+                crate::ReasoningEffortBand {
+                    from: crate::ReasoningIntensity::from_millionths(400_000),
+                    level: NativeReasoningEffort::Medium,
+                },
+                crate::ReasoningEffortBand {
+                    from: crate::ReasoningIntensity::from_millionths(720_000),
+                    level: NativeReasoningEffort::High,
+                },
+            ],
+        },
+        provider_default: None,
+    };
+    assert!(capability.is_valid());
+    for (millionths, expected) in [
+        (399_999, NativeReasoningEffort::Low),
+        (400_000, NativeReasoningEffort::Medium),
+        (720_000, NativeReasoningEffort::Medium),
+        (720_001, NativeReasoningEffort::High),
+    ] {
+        assert_eq!(
+            capability.select(crate::ReasoningIntent::Intensity(
+                crate::ReasoningIntensity::from_millionths(millionths)
+            )),
+            crate::EffectiveReasoningEffort::Native(expected),
+            "{millionths}"
+        );
+    }
+}
+
+/// An exact `0.5` cut point deterministically belongs to the newly starting
+/// higher band, as selected for the otherwise directionless midpoint tie.
+#[test]
+fn configured_reasoning_mapping_assigns_half_to_higher_band() {
+    let capability = crate::ReasoningEffortCapability {
+        control: crate::ReasoningEffortControl::Mapped {
+            mapping: vec![
+                crate::ReasoningEffortBand {
+                    from: crate::ReasoningIntensity::from_millionths(0),
+                    level: NativeReasoningEffort::Low,
+                },
+                crate::ReasoningEffortBand {
+                    from: crate::ReasoningIntensity::MEDIUM,
+                    level: NativeReasoningEffort::High,
+                },
+            ],
+        },
+        provider_default: None,
+    };
+    assert!(capability.is_valid());
+    assert_eq!(
+        capability.select(crate::ReasoningIntent::Intensity(
+            crate::ReasoningIntensity::from_millionths(499_999)
+        )),
+        crate::EffectiveReasoningEffort::Native(NativeReasoningEffort::Low)
+    );
+    assert_eq!(
+        capability.select(crate::ReasoningIntent::Intensity(
+            crate::ReasoningIntensity::MEDIUM
+        )),
+        crate::EffectiveReasoningEffort::Native(NativeReasoningEffort::High)
+    );
+}
+
+/// Validation rejects a final cut point at `1.0`, because inward ownership
+/// would leave its higher band unreachable after nominal-range clamping.
+#[test]
+fn reasoning_mapping_rejects_unreachable_upper_endpoint_band() {
+    let capability = crate::ReasoningEffortCapability {
+        control: crate::ReasoningEffortControl::Mapped {
+            mapping: vec![
+                crate::ReasoningEffortBand {
+                    from: crate::ReasoningIntensity::from_millionths(0),
+                    level: NativeReasoningEffort::Low,
+                },
+                crate::ReasoningEffortBand {
+                    from: crate::ReasoningIntensity::from_millionths(1_000_000),
+                    level: NativeReasoningEffort::Max,
+                },
+            ],
+        },
+        provider_default: None,
+    };
+    assert!(!capability.is_valid());
 }
 
 /// Fixed control proves the omitted-selector result, while structural
@@ -6079,6 +6244,10 @@ fn reasoning_effort_capability_serde_preserves_invalid_raw_mappings() {
         serde_json::json!([
             {"from": "0.0", "level": "low"},
             {"from": "1.1", "level": "medium"}
+        ]),
+        serde_json::json!([
+            {"from": "0.0", "level": "low"},
+            {"from": "1.0", "level": "medium"}
         ]),
         serde_json::json!([
             {"from": "0.0", "level": "medium"},

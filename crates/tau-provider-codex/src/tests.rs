@@ -1299,6 +1299,29 @@ fn publishes_chatgpt_model_metadata() {
         .expect("gpt-6-astra model");
     assert_eq!(astra.default_affinity, 0);
     assert_eq!(
+        astra.efforts.select(tau_proto::ReasoningIntent::Intensity(
+            tau_proto::ReasoningIntensity::from_millionths(650_000)
+        )),
+        tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::Medium)
+    );
+    assert_eq!(
+        astra.efforts.select(tau_proto::ReasoningIntent::Intensity(
+            tau_proto::ReasoningIntensity::from_millionths(650_001)
+        )),
+        tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::High)
+    );
+    for level in [
+        NativeReasoningEffort::Low,
+        NativeReasoningEffort::Medium,
+        NativeReasoningEffort::High,
+        NativeReasoningEffort::XHigh,
+        NativeReasoningEffort::Max,
+    ] {
+        assert!(astra.efforts.contains(level), "{level}");
+    }
+    assert!(!astra.efforts.contains(NativeReasoningEffort::None));
+    assert!(!astra.efforts.contains(NativeReasoningEffort::Minimal));
+    assert_eq!(
         models
             .iter()
             .max_by_key(|model| model.default_affinity)
@@ -1383,7 +1406,10 @@ fn publishes_chatgpt_model_metadata() {
     assert!(
         models
             .iter()
-            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
+            .filter(|model| {
+                !model.id.model.as_str().starts_with("gpt-5.6-")
+                    && model.id.model.as_str() != "gpt-6-astra"
+            })
             .all(|model| !model.efforts.contains(NativeReasoningEffort::Max))
     );
     assert!(

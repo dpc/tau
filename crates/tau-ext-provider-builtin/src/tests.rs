@@ -3186,7 +3186,7 @@ fn responses_add_omits_effort_override() {
     let models = parse_responses_model_list("gpt-5.4, gpt-5.4-mini").expect("model list");
 
     assert_eq!(models.len(), 2);
-    assert!(models.iter().all(|model| model.efforts.is_none()));
+    assert!(models.iter().all(|model| model.reasoning_effort.is_none()));
 }
 
 /// Persistent providers reject unknown fields instead of hiding schema

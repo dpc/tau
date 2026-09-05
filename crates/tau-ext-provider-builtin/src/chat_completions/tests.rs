@@ -82,7 +82,11 @@ fn qwen_reasoning_profile_publishes_exact_efforts() {
             "context_window": 262144,
             "compat": {
                 "reasoning_effort": {
-                    "efforts": ["xhigh", "low", "medium"],
+                    "mapping": [
+                        {"from": "0.0", "level": "low"},
+                        {"from": "0.35", "level": "medium"},
+                        {"from": "0.8", "level": "xhigh"}
+                    ],
                     "wire": "literal"
                 },
                 "reasoning_replay": "both",
@@ -102,10 +106,30 @@ fn qwen_reasoning_profile_publishes_exact_efforts() {
             tau_proto::NativeReasoningEffort::XHigh,
         ])
     );
+    assert_eq!(
+        models[0]
+            .efforts
+            .select(tau_proto::ReasoningIntent::Intensity(
+                tau_proto::ReasoningIntensity::from_millionths(800_000)
+            )),
+        tau_proto::EffectiveReasoningEffort::Native(tau_proto::NativeReasoningEffort::Medium)
+    );
+    assert_eq!(
+        models[0]
+            .efforts
+            .select(tau_proto::ReasoningIntent::Intensity(
+                tau_proto::ReasoningIntensity::from_millionths(800_001)
+            )),
+        tau_proto::EffectiveReasoningEffort::Native(tau_proto::NativeReasoningEffort::XHigh)
+    );
     let encoded = serde_json::to_value(&provider).expect("serialize Qwen profile");
     assert_eq!(
-        encoded["models"][0]["compat"]["reasoning_effort"]["efforts"],
-        serde_json::json!(["low", "medium", "xhigh"])
+        encoded["models"][0]["compat"]["reasoning_effort"]["mapping"],
+        serde_json::json!([
+            {"from": "0.0", "level": "low"},
+            {"from": "0.35", "level": "medium"},
+            {"from": "0.8", "level": "xhigh"}
+        ])
     );
     assert_eq!(
         encoded["models"][0]["compat"]["reasoning_replay"],
@@ -238,30 +262,33 @@ fn openrouter_rejects_and_clears_image_capabilities() {
     assert!(published[0].tool_result_modalities.is_empty());
 }
 
-/// Empty and duplicate effort sets are ambiguous publication contracts and
-/// must fail while decoding the operator profile.
+/// Empty and structurally invalid mappings are ambiguous publication contracts
+/// and must fail provider-profile validation.
 #[test]
-fn reasoning_effort_profile_rejects_empty_and_duplicate_sets() {
-    for (efforts, expected) in [
-        (serde_json::json!([]), "must not be empty"),
-        (
-            serde_json::json!(["low", "low"]),
-            "must not contain duplicates",
-        ),
+fn reasoning_effort_profile_rejects_empty_and_invalid_mappings() {
+    for mapping in [
+        serde_json::json!([]),
+        serde_json::json!([
+            {"from": "0.0", "level": "low"},
+            {"from": "0.4", "level": "low"}
+        ]),
     ] {
-        let error = serde_json::from_value::<ChatCompletionsProvider>(serde_json::json!({
+        let provider = serde_json::from_value::<ChatCompletionsProvider>(serde_json::json!({
             "models": [{
                 "id": "model",
                 "compat": {
                     "reasoning_effort": {
-                        "efforts": efforts,
+                        "mapping": mapping,
                         "wire": "literal"
                     }
                 }
             }]
         }))
-        .expect_err("invalid effort set");
-        assert!(error.to_string().contains(expected), "{error}");
+        .expect("syntactically valid mapping");
+        assert_eq!(
+            provider.validate(),
+            Err("reasoning_effort mapping must be non-empty and structurally valid")
+        );
     }
 }
 
@@ -274,7 +301,10 @@ fn omitted_reasoning_effort_wire_requires_one_effective_effort() {
             "id": "llama-cpp-qwen",
             "compat": {
                 "reasoning_effort": {
-                    "efforts": ["low", "xhigh"],
+                    "mapping": [
+                        {"from": "0.0", "level": "low"},
+                        {"from": "0.8", "level": "xhigh"}
+                    ],
                     "wire": "omit"
                 }
             }
@@ -296,7 +326,7 @@ fn omitted_reasoning_effort_wire_publishes_fixed_capability() {
             "id": "llama-cpp-qwen",
             "compat": {
                 "reasoning_effort": {
-                    "efforts": ["xhigh"],
+                    "mapping": [{"from": "0.0", "level": "xhigh"}],
                     "wire": "omit"
                 }
             }
@@ -324,8 +354,10 @@ fn openai_reasoning_effort_publication_stops_at_high() {
     let efforts = ChatCompletionsCompat::openai_defaults()
         .reasoning_effort
         .expect("OpenAI effort")
-        .efforts
-        .canonical();
+        .mapping
+        .into_iter()
+        .map(|band| band.level)
+        .collect::<Vec<_>>();
     assert_eq!(
         efforts,
         vec![
@@ -348,7 +380,10 @@ fn openai_reasoning_effort_rejects_collapsed_extended_levels() {
                 "id": "collapsed",
                 "compat": {
                     "reasoning_effort": {
-                        "efforts": ["high", level],
+                        "mapping": [
+                            {"from": "0.0", "level": "high"},
+                            {"from": "0.8", "level": level}
+                        ],
                         "wire": "open_ai"
                     }
                 }
@@ -1247,6 +1282,7 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
     assert!(
         provider.models[0]
             .compat
+            .as_ref()
             .expect("model compatibility")
             .parallel_tool_calls
     );
@@ -1510,6 +1546,7 @@ fn openai_model_configs_publish_distinct_cache_policies() {
     assert!(matches!(
         gpt_5_6
             .compat
+            .as_ref()
             .expect("GPT-5.6 compatibility")
             .openai_prompt_cache
             .expect("GPT-5.6 cache request control")
@@ -1519,6 +1556,7 @@ fn openai_model_configs_publish_distinct_cache_policies() {
     assert!(matches!(
         older
             .compat
+            .as_ref()
             .expect("older compatibility")
             .openai_prompt_cache
             .expect("older cache request control")

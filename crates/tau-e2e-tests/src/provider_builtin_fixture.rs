@@ -137,7 +137,11 @@ impl ProviderBuiltinFixture {
                 "compat": {
                     "stream_options": true,
                     "reasoning_effort": {
-                        "efforts": ["low", "medium", "xhigh"],
+                        "mapping": [
+                            {"from": "0.0", "level": "low"},
+                            {"from": "0.35", "level": "medium"},
+                            {"from": "0.8", "level": "xhigh"}
+                        ],
                         "wire": "literal"
                     },
                     "reasoning_replay": "both",

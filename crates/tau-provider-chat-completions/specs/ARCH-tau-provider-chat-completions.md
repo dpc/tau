@@ -18,8 +18,9 @@ failures retain the established transport retry classification.
 
 ## Exact route compatibility
 
-The extension selects which Tau reasoning efforts a configured model publishes
-and whether the adapter lowers them with OpenAI spellings or literal spellings.
+The extension selects the portable cut points and Tau reasoning efforts a
+configured model publishes, and whether the adapter lowers them with OpenAI
+spellings or literal spellings.
 OpenAI lowering folds extended levels to `high`; literal lowering preserves
 `xhigh`. An omit-wire policy publishes one fixed effective server-side effort
 without sending `reasoning_effort`; absence of an effort capability publishes

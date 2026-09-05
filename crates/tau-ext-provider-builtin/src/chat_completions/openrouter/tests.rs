@@ -34,7 +34,7 @@ fn discovery_maps_exact_tool_parameter_capabilities() {
     let capabilities = models
         .iter()
         .map(|model| {
-            let compat = model.compat.expect("discovered compatibility");
+            let compat = model.compat.as_ref().expect("discovered compatibility");
             (
                 model.id.as_str(),
                 model.supported_tool_types.as_slice(),
@@ -240,6 +240,7 @@ fn openrouter_conversion_strips_upstream_cache_contract() {
     assert_eq!(provider.models[0].cache_contract, None);
     let compat = provider.models[0]
         .compat
+        .as_ref()
         .expect("configured model compatibility");
     assert!(compat.stream_options);
     assert_eq!(compat.cache_usage, CacheUsageCompat::OpenAi);
@@ -370,6 +371,25 @@ fn unversioned_cache_is_ineligible_for_offline_fallback() {
 
     fetch_openrouter_models_from("", &network(), &status.url(), Some(&cache))
         .expect_err("unversioned cache must fail closed");
+
+    status.finish();
+}
+
+/// Version 1 embedded the retired native-effort-list profile schema and must
+/// not be interpreted as the current explicit reasoning-mapping schema.
+#[test]
+fn native_effort_cache_version_is_ineligible_for_offline_fallback() {
+    let directory = tempfile::tempdir().expect("cache directory");
+    let cache = directory.path().join("models.json");
+    fs::write(
+        &cache,
+        r#"{"version":1,"models":[{"id":"vendor/legacy","context_window":1234}]}"#,
+    )
+    .expect("version 1 cache");
+    let status = ScriptedHttpServer::spawn(503, "{}");
+
+    fetch_openrouter_models_from("", &network(), &status.url(), Some(&cache))
+        .expect_err("version 1 cache must fail closed");
 
     status.finish();
 }

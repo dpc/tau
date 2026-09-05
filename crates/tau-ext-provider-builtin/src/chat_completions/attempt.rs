@@ -47,16 +47,19 @@ pub fn models_for_provider(
                 efforts: compat.reasoning_effort.as_ref().map_or_else(
                     tau_proto::ReasoningEffortCapability::default,
                     |config| {
-                        let levels = config.efforts.canonical();
                         if config.wire == super::ChatCompletionsReasoningEffortWire::Omit {
+                            let level = config.mapping[0].level;
                             tau_proto::ReasoningEffortCapability {
-                                control: tau_proto::ReasoningEffortControl::Fixed {
-                                    level: levels[0],
-                                },
-                                provider_default: Some(levels[0]),
+                                control: tau_proto::ReasoningEffortControl::Fixed { level },
+                                provider_default: Some(level),
                             }
                         } else {
-                            tau_proto::ReasoningEffortCapability::mapped(levels)
+                            tau_proto::ReasoningEffortCapability {
+                                control: tau_proto::ReasoningEffortControl::Mapped {
+                                    mapping: config.mapping.clone(),
+                                },
+                                provider_default: None,
+                            }
                         }
                     },
                 ),
@@ -107,7 +110,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     network: &tau_provider::OutboundNetworkPolicy,
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
-    let compat = model.compat.unwrap_or(provider.compat);
+    let compat = model.compat.as_ref().unwrap_or(&provider.compat);
     let config = tau_provider_chat_completions::AttemptConfig {
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
@@ -262,7 +265,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
 
 /// Lower serialized route capabilities into one backend attempt.
 fn lower_compat(
-    compat: super::ChatCompletionsCompat,
+    compat: &super::ChatCompletionsCompat,
 ) -> tau_provider_chat_completions::AttemptCompat {
     tau_provider_chat_completions::AttemptCompat {
         stream_options: compat.stream_options,
@@ -286,6 +289,7 @@ fn lower_compat(
         }),
         reasoning_effort: compat
             .reasoning_effort
+            .as_ref()
             .and_then(|config| match config.wire {
                 super::ChatCompletionsReasoningEffortWire::OpenAi => {
                     Some(tau_provider_chat_completions::ReasoningEffortWire::OpenAi)

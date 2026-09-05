@@ -108,7 +108,7 @@ for control of the emit/intercept pipeline.
   bindings. Observation timestamps are preserved during late-subscriber catch-up.
 - **`harness.efforts_available`** — The selected role's resolved model
   reasoning capability: unsupported, fixed, or an exact portable-to-native
-  lower-bound mapping.
+  inward-owned cut-point mapping.
 - **`harness.verbosities_available`** — Which output verbosity levels are valid
   for the selected role's resolved model. Empty means no resolved model;
   `[medium]` means the provider does not expose a verbosity knob.

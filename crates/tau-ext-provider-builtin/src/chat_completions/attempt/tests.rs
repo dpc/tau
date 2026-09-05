@@ -13,11 +13,11 @@ fn cache_usage_capability_lowers_explicitly() {
             .expect("declared DeepSeek compatibility");
 
     assert_eq!(
-        lower_compat(compat).cache_usage,
+        lower_compat(&compat).cache_usage,
         tau_provider_chat_completions::CacheUsageCompat::DeepSeek
     );
     assert_eq!(
-        lower_compat(Default::default()).cache_usage,
+        lower_compat(&Default::default()).cache_usage,
         tau_provider_chat_completions::CacheUsageCompat::None
     );
 }
@@ -30,8 +30,8 @@ fn tool_choice_capability_lowers_explicitly() {
         serde_json::from_value(serde_json::json!({"tool_choice": false}))
             .expect("selector compatibility");
 
-    assert!(!lower_compat(compat).tool_choice);
-    assert!(lower_compat(Default::default()).tool_choice);
+    assert!(!lower_compat(&compat).tool_choice);
+    assert!(lower_compat(&Default::default()).tool_choice);
 }
 
 /// Both structurally valid public cache variants must reach the matching
@@ -47,7 +47,7 @@ fn public_cache_options_lower_by_variant() {
                 }
             }))
             .expect("valid public cache compatibility");
-        lower_compat(compat)
+        lower_compat(&compat)
             .prompt_cache
             .expect("lowered cache policy")
     };
