@@ -31,6 +31,11 @@ compact deterministic diagnostic, and every final sanitized model-visible error
 is capped to 512 KiB with a UTF-8-safe suffix. Endpoint redaction occurs before
 the final cap.
 
+Configured provider-side character budgets do not replace these bounds and are
+never emulated by local success truncation. A Firecrawl response that contains a
+raw encoded PDF but omits selected markdown remains an invalid/empty provider
+outcome under the existing body, diagnostic, and failover bounds.
+
 Cancellation prevents subsequent attempts. An already issued request through
 the blocking transport can continue until its allocated attempt deadline and
 may consume quota; its response is discarded when cancellation wins before the

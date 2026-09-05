@@ -23,6 +23,10 @@ Restricted search is eligible only for adapters whose declaration promises
 provider-side per-call filtering. Filtering returned results is not an egress
 control. When no configured adapter declares enforcement, the logical search
 candidate is unavailable and performs zero network activity.
+Configured excluded domains are soft provider preferences, not authority. When
+an adapter cannot combine them with a harness-authored allowlist, it omits the
+exclusions and sends the allowlist unchanged; it never subtracts sets, rewrites
+the query, or post-filters results as an egress control.
 Each Parallel and You.com attempt performs the MCP initialize/initialized
 handshake before `tools/call`, sends the negotiated protocol header only after
 initialization, requires the server's tools capability, and returns any
@@ -69,6 +73,11 @@ Credentialed adapters resolve API keys from named Tau secrets rather than
 ordinary extension configuration. Provider requests carry credentials only in
 the documented authentication header. Model-visible and logged diagnostics
 redact both endpoint material and credential values.
+
+Provider-side content budgets and cache ages remain request hints. Unsupported
+controls are omitted rather than emulated locally. Firecrawl PDF parsing
+disabled sends an empty parser list, but the adapter still selects only markdown
+and never projects a returned encoded file.
 
 Response and diagnostic bounds are specified by
 [SPEC-tau-ext-websearch-runtime-safeguards](SPEC-tau-ext-websearch-runtime-safeguards.md).

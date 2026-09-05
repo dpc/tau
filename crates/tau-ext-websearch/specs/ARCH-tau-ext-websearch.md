@@ -12,6 +12,12 @@ may be added explicitly. Provider-specific Exa and Parallel tools remain
 disabled by default for explicit role opt-in. An ordered list with one provider
 gives the default tool explicit single-provider behavior.
 
+Optional provider-neutral request preferences cover PDF parsing and page caps,
+recency, soft excluded domains, locale, search depth, provider-side content
+budgets, and cache age. Omitted preferences preserve existing provider requests.
+Each adapter applies only supported controls; the component README owns the
+current support matrix and operational cost caveats.
+
 Each operation's cursor belongs to the extension process, advances once for
 each admitted composite call, and is not persisted. Argument validation, busy
 rejection, and replay do not advance it. The serial protocol loop reserves

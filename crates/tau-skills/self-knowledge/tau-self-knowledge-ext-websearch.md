@@ -56,7 +56,17 @@ extensions:
       brave_api_key_secret: brave_search
       tavily_api_key_secret: tavily
       firecrawl_api_key_secret: firecrawl
+      fetch_pdf_parsing: disabled
+      search_recency: week
+      search_exclude_domains: [ads.example]
+      search_depth: balanced
 ```
+
+All general preferences are optional and providers omit unsupported controls.
+Firecrawl `fetch_pdf_parsing: disabled` sends `parsers: []`, still costs one flat
+provider credit for that PDF attempt, and never projects `rawBase64`; it is not
+a global spend cap because other providers and failover attempts can still parse
+or bill for the PDF.
 
 [exa-mcp]: https://exa.ai/docs/reference/exa-mcp
 [exa-pricing]: https://exa.ai/pricing?tab=api
@@ -157,6 +167,18 @@ extensions: {
       brave_api_key_secret: "brave_search",
       tavily_api_key_secret: "tavily",
       firecrawl_api_key_secret: "firecrawl",
+      // Optional provider-neutral preferences:
+      fetch_pdf_parsing: "disabled", // disabled, fast, auto, or ocr
+      fetch_pdf_max_pages: null,
+      search_recency: "week", // day, week, month, or year
+      search_exclude_domains: ["ads.example"],
+      search_country: "US",
+      search_language: "en",
+      search_depth: "balanced", // fast, balanced, or deep
+      search_max_content_chars: null,
+      fetch_max_content_chars: null,
+      search_cache_max_age_seconds: null,
+      fetch_cache_max_age_seconds: null,
     },
   },
 }
@@ -186,6 +208,42 @@ Brave and You.com are search-only. Tavily and Firecrawl support both
 operations. Credentialed providers take API keys only through named Tau secrets.
 Configuration and secret changes require an extension/Tau restart; files are
 not watched.
+
+All request preferences are optional; omission preserves the previous request
+and provider defaults. Current adapter support is:
+
+| Preference | Exa | Parallel | You.com | Brave | Tavily | Firecrawl |
+|---|---|---|---|---|---|---|
+| PDF parsing/page cap | — | — | — | — | — | fetch |
+| Recency | — | — | search | search | search | search |
+| Excluded domains | — | authenticated search | search | — | search | search |
+| Country | — | authenticated search | search | search | — | search |
+| Language | — | — | search | search | search | — |
+| Depth | search (`fast`/`balanced`) | authenticated search | — | — | search | — |
+| Search/fetch content chars | fetch only | search only, authenticated | — | — | — | — |
+| Search/fetch cache age | — | search only, authenticated | — | — | — | fetch only |
+
+Unsupported controls are omitted, not emulated by query rewriting,
+post-filtering, or local result truncation. A harness `allowed_domains` policy
+remains authoritative: Tavily and Firecrawl receive it unchanged and omit soft
+configured exclusions. Parallel sends request overrides only with an API key
+because its anonymous service ignores them.
+You.com, Brave, and authenticated Parallel omit country codes outside their
+conservatively shared documented set. You.com converts known language tags to
+its uppercase enum, while Brave uses exact supported spellings such as
+`ja` → `jp` and omits unknown search languages.
+Parallel also omits search cache ages below its current 600-second provider
+minimum instead of making MCP initialization fail.
+
+Deep search, OCR, and fresh-cache choices can cost more or take longer.
+Firecrawl PDF parsing is currently billed per page.
+`fetch_pdf_parsing: disabled` sends `parsers: []`; Tau still requests only
+markdown, never projects `rawBase64`, and treats a raw-file-only response as a
+provider failure eligible for normal failover. Firecrawl still charges one flat
+provider credit for that disabled-parsing PDF attempt. This is not a global spend
+cap: another fetch provider or a later failover attempt can still parse or bill
+for the PDF. Provider-side character budgets remain hints, while Tau's 512 KiB
+projected-result rejection remains unchanged.
 
 The ordered lists are independent; one entry selects explicit single-provider
 mode. Cursors are extension-process memory, advance once per admitted call, and

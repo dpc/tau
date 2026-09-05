@@ -13,6 +13,7 @@ mod composite;
 mod hosted;
 #[cfg(test)]
 mod hosted_tests;
+mod options;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -28,6 +29,7 @@ use composite::{
 #[cfg(test)]
 use hosted::HostedAttempt;
 use hosted::{HostedClient, HostedConfig, HttpHostedClient};
+use options::{ProviderOptions, RawProviderOptions};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     CborValue, Event, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolStarted,
@@ -247,7 +249,12 @@ trait Searcher: Send + Sync + 'static {
     ///
     /// Stateful production implementations override this method so endpoint
     /// and credential replacement occurs under one lock.
-    fn configure(&self, endpoint: Option<String>, api_key: Option<tau_proto::SecretValue>) {
+    fn configure(
+        &self,
+        endpoint: Option<String>,
+        api_key: Option<tau_proto::SecretValue>,
+        _options: ProviderOptions,
+    ) {
         if let Some(endpoint) = endpoint {
             self.set_endpoint(endpoint);
         }
@@ -292,7 +299,12 @@ trait ParallelClient: Send + Sync + 'static {
     ///
     /// Stateful production implementations override this method so endpoint
     /// and credential replacement occurs under one lock.
-    fn configure(&self, endpoint: Option<String>, api_key: Option<tau_proto::SecretValue>) {
+    fn configure(
+        &self,
+        endpoint: Option<String>,
+        api_key: Option<tau_proto::SecretValue>,
+        _options: ProviderOptions,
+    ) {
         if let Some(endpoint) = endpoint {
             self.set_endpoint(endpoint);
         }
@@ -334,6 +346,28 @@ struct ExtConfig {
     search_providers: Vec<WebAdapter>,
     /// Ordered providers used for model-visible web fetch.
     fetch_providers: Vec<WebAdapter>,
+    /// Firecrawl PDF parsing preference.
+    fetch_pdf_parsing: Option<options::PdfParsing>,
+    /// Firecrawl PDF page cap.
+    fetch_pdf_max_pages: Option<u32>,
+    /// Provider-side search recency preference.
+    search_recency: Option<options::SearchRecency>,
+    /// Provider-side soft excluded-domain hints.
+    search_exclude_domains: Vec<String>,
+    /// Provider-side search country preference.
+    search_country: Option<String>,
+    /// Provider-side search language preference.
+    search_language: Option<String>,
+    /// Provider-side search depth preference.
+    search_depth: Option<options::SearchDepth>,
+    /// Provider-side search content budget.
+    search_max_content_chars: Option<u32>,
+    /// Provider-side fetch content budget.
+    fetch_max_content_chars: Option<u32>,
+    /// Provider-side search cache age.
+    search_cache_max_age_seconds: Option<u64>,
+    /// Provider-side fetch cache age.
+    fetch_cache_max_age_seconds: Option<u64>,
 }
 
 impl Default for ExtConfig {
@@ -354,13 +388,24 @@ impl Default for ExtConfig {
             firecrawl_api_key_secret: None,
             search_providers: vec![WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::You],
             fetch_providers: vec![WebAdapter::Exa, WebAdapter::Parallel],
+            fetch_pdf_parsing: None,
+            fetch_pdf_max_pages: None,
+            search_recency: None,
+            search_exclude_domains: Vec::new(),
+            search_country: None,
+            search_language: None,
+            search_depth: None,
+            search_max_content_chars: None,
+            fetch_max_content_chars: None,
+            search_cache_max_age_seconds: None,
+            fetch_cache_max_age_seconds: None,
         }
     }
 }
 
 impl ExtConfig {
     fn validate(
-        self,
+        mut self,
         secrets: &std::collections::BTreeMap<String, tau_proto::SecretValue>,
     ) -> Result<ValidatedConfig, String> {
         if self.endpoint.is_some()
@@ -386,6 +431,20 @@ impl ExtConfig {
         }
         let search_pool = ProviderPool::new("search_providers", self.search_providers)?;
         let fetch_pool = ProviderPool::new("fetch_providers", self.fetch_providers)?;
+        let options = RawProviderOptions {
+            fetch_pdf_parsing: self.fetch_pdf_parsing,
+            fetch_pdf_max_pages: self.fetch_pdf_max_pages,
+            search_recency: self.search_recency,
+            search_exclude_domains: std::mem::take(&mut self.search_exclude_domains),
+            search_country: self.search_country.take(),
+            search_language: self.search_language.take(),
+            search_depth: self.search_depth,
+            search_max_content_chars: self.search_max_content_chars,
+            fetch_max_content_chars: self.fetch_max_content_chars,
+            search_cache_max_age_seconds: self.search_cache_max_age_seconds,
+            fetch_cache_max_age_seconds: self.fetch_cache_max_age_seconds,
+        }
+        .validate()?;
         if fetch_pool.contains(WebAdapter::You) || fetch_pool.contains(WebAdapter::Brave) {
             return Err("`fetch_providers` contains a search-only provider".to_owned());
         }
@@ -464,7 +523,9 @@ impl ExtConfig {
                     self.firecrawl_api_key_secret.as_deref(),
                     "firecrawl_api_key_secret",
                 )?,
+                options: options.clone(),
             },
+            options,
             search_pool,
             fetch_pool,
         })
@@ -505,6 +566,8 @@ struct ValidatedConfig {
     parallel_api_key: Option<tau_proto::SecretValue>,
     /// Validated additional hosted-provider settings.
     hosted: HostedConfig,
+    /// Validated provider-neutral request preferences.
+    options: ProviderOptions,
     /// Validated non-empty search provider pool.
     search_pool: ProviderPool,
     /// Validated non-empty fetch provider pool.
@@ -706,13 +769,17 @@ impl TauExtension for WebsearchExtension {
                 }
                 cx.state
                     .searcher
-                    .configure(exa_endpoint, cfg.exa_api_key);
+                    .configure(exa_endpoint, cfg.exa_api_key, cfg.options.clone());
                 if cfg.parallel_endpoint.is_some() {
                     tracing::info!(target: LOG_TARGET, provider = "parallel", "applying endpoint override");
                 }
                 cx.state
                     .parallel_client
-                    .configure(cfg.parallel_endpoint, cfg.parallel_api_key);
+                    .configure(
+                        cfg.parallel_endpoint,
+                        cfg.parallel_api_key,
+                        cfg.options.clone(),
+                    );
                 cx.state.hosted_client.configure(cfg.hosted);
                 cx.state.search_pool = cfg.search_pool;
                 cx.state.fetch_pool = cfg.fetch_pool;
@@ -1690,6 +1757,8 @@ struct McpRuntimeConfig {
     endpoint: String,
     /// Optional provider API key.
     api_key: Option<tau_proto::SecretValue>,
+    /// Validated provider-neutral request preferences.
+    options: ProviderOptions,
 }
 
 struct HttpExaSearcher {
@@ -1709,6 +1778,7 @@ impl HttpExaSearcher {
             config: Mutex::new(McpRuntimeConfig {
                 endpoint,
                 api_key: None,
+                options: ProviderOptions::default(),
             }),
         }
     }
@@ -1730,7 +1800,7 @@ impl Searcher for HttpExaSearcher {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let endpoint = config.endpoint;
+        let endpoint = exa_endpoint_with_options(&config.endpoint, &config.options);
         let api_key = config.api_key;
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1779,13 +1849,21 @@ impl Searcher for HttpExaSearcher {
             .clone();
         let endpoint = config.endpoint;
         let api_key = config.api_key;
+        let options = config.options;
+        let mut arguments = serde_json::json!({"urls": [url]});
+        if let Some(max_characters) = options.fetch_max_content_chars {
+            arguments
+                .as_object_mut()
+                .expect("object literal")
+                .insert("maxCharacters".to_owned(), max_characters.into());
+        }
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": {
                 "name": EXA_REMOTE_FETCH_TOOL,
-                "arguments": {"urls": [url]},
+                "arguments": arguments,
             },
         });
         let payload = post_mcp(
@@ -1825,7 +1903,12 @@ impl Searcher for HttpExaSearcher {
             .api_key = api_key;
     }
 
-    fn configure(&self, endpoint: Option<String>, api_key: Option<tau_proto::SecretValue>) {
+    fn configure(
+        &self,
+        endpoint: Option<String>,
+        api_key: Option<tau_proto::SecretValue>,
+        options: ProviderOptions,
+    ) {
         let mut config = self
             .config
             .lock()
@@ -1834,6 +1917,7 @@ impl Searcher for HttpExaSearcher {
             config.endpoint = endpoint;
         }
         config.api_key = api_key;
+        config.options = options;
     }
 }
 
@@ -1854,6 +1938,7 @@ impl HttpParallelClient {
             config: Mutex::new(McpRuntimeConfig {
                 endpoint,
                 api_key: None,
+                options: ProviderOptions::default(),
             }),
         }
     }
@@ -1888,6 +1973,8 @@ impl ParallelClient for HttpParallelClient {
             .clone();
         let endpoint = config.endpoint;
         let api_key = config.api_key;
+        let parallel_config =
+            parallel_search_config_header(remote_tool, &config.options, api_key.is_some())?;
         let deadline = Instant::now() + timeout;
         let initialize = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1908,6 +1995,7 @@ impl ParallelClient for HttpParallelClient {
             initialize,
             None,
             false,
+            parallel_config.as_deref(),
             remaining_parallel(deadline)?,
         )?;
         let initialized = parse_sse_or_json(&payload, "parallel").map_err(|error| {
@@ -1948,6 +2036,7 @@ impl ParallelClient for HttpParallelClient {
             }),
             session_id.as_deref(),
             true,
+            parallel_config.as_deref(),
             remaining_parallel(deadline)?,
         )?;
         check_parallel_cancelled(cancelled)?;
@@ -1966,6 +2055,7 @@ impl ParallelClient for HttpParallelClient {
             body,
             session_id.as_deref(),
             true,
+            parallel_config.as_deref(),
             remaining_parallel(deadline)?,
         )?;
         let text = decode_mcp_text_result(&payload, "parallel").map_err(|error| {
@@ -1998,7 +2088,12 @@ impl ParallelClient for HttpParallelClient {
             .api_key = api_key;
     }
 
-    fn configure(&self, endpoint: Option<String>, api_key: Option<tau_proto::SecretValue>) {
+    fn configure(
+        &self,
+        endpoint: Option<String>,
+        api_key: Option<tau_proto::SecretValue>,
+        options: ProviderOptions,
+    ) {
         let mut config = self
             .config
             .lock()
@@ -2007,6 +2102,7 @@ impl ParallelClient for HttpParallelClient {
             config.endpoint = endpoint;
         }
         config.api_key = api_key;
+        config.options = options;
     }
 }
 
@@ -2031,6 +2127,7 @@ fn post_parallel_mcp(
     body: serde_json::Value,
     session_id: Option<&str>,
     negotiated: bool,
+    search_config: Option<&str>,
     timeout: Duration,
 ) -> Result<(String, Option<String>), String> {
     let agent = provider_http_agent(timeout);
@@ -2049,6 +2146,9 @@ fn post_parallel_mcp(
             "Authorization",
             &format!("Bearer {}", api_key.expose_secret()),
         );
+    }
+    if let Some(search_config) = search_config {
+        request = request.header("x-parallel-search-config", search_config);
     }
     let mut response = request.send(body.to_string()).map_err(|error| {
         format!(
@@ -2078,6 +2178,128 @@ fn post_parallel_mcp(
         .map(str::to_owned);
     read_success_body(response.body_mut().as_reader(), "parallel")
         .map(|payload| (payload, response_session))
+}
+
+fn exa_endpoint_with_options(endpoint: &str, options: &ProviderOptions) -> String {
+    let search_type = match options.search_depth {
+        Some(options::SearchDepth::Fast) => Some("fast"),
+        Some(options::SearchDepth::Balanced) => Some("auto"),
+        Some(options::SearchDepth::Deep) | None => None,
+    };
+    let Some(search_type) = search_type else {
+        return endpoint.to_owned();
+    };
+    let Ok(mut endpoint) = Url::parse(endpoint) else {
+        return endpoint.to_owned();
+    };
+    let pairs = endpoint
+        .query_pairs()
+        .filter(|(name, _)| name != "defaultSearchType")
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    endpoint.set_query(None);
+    {
+        let mut query = endpoint.query_pairs_mut();
+        query.extend_pairs(pairs);
+        query.append_pair("defaultSearchType", search_type);
+    }
+    endpoint.into()
+}
+
+fn parallel_search_config_header(
+    remote_tool: &str,
+    options: &ProviderOptions,
+    authenticated: bool,
+) -> Result<Option<String>, String> {
+    if !authenticated || remote_tool != PARALLEL_REMOTE_SEARCH_TOOL {
+        return Ok(None);
+    }
+    let mut config = serde_json::Map::new();
+    if let Some(depth) = options.search_depth {
+        let mode = match depth {
+            options::SearchDepth::Fast => "fast",
+            options::SearchDepth::Balanced => "basic",
+            options::SearchDepth::Deep => "advanced",
+        };
+        config.insert("mode".to_owned(), mode.into());
+    }
+    if let Some(max_chars) = options.search_max_content_chars {
+        config.insert("max_chars_total".to_owned(), max_chars.into());
+    }
+    let mut advanced = serde_json::Map::new();
+    if !options.search_exclude_domains.is_empty() {
+        advanced.insert(
+            "source_policy".to_owned(),
+            serde_json::json!({
+                "exclude_domains": &options.search_exclude_domains,
+            }),
+        );
+    }
+    if let Some(country) = options
+        .search_country
+        .as_deref()
+        .and_then(supported_search_country)
+    {
+        advanced.insert("location".to_owned(), country.to_ascii_lowercase().into());
+    }
+    if let Some(max_age @ 600..) = options.search_cache_max_age_seconds {
+        advanced.insert(
+            "fetch_policy".to_owned(),
+            serde_json::json!({"max_age_seconds": max_age}),
+        );
+    }
+    if !advanced.is_empty() {
+        config.insert("advanced_settings".to_owned(), advanced.into());
+    }
+    if config.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::to_string(&config)
+            .map(Some)
+            .map_err(|error| format!("parallel search configuration is invalid: {error}"))
+    }
+}
+
+fn supported_search_country(country: &str) -> Option<&str> {
+    matches!(
+        country,
+        "AR" | "AU"
+            | "AT"
+            | "BE"
+            | "BR"
+            | "CA"
+            | "CL"
+            | "DK"
+            | "FI"
+            | "FR"
+            | "DE"
+            | "HK"
+            | "IN"
+            | "ID"
+            | "IT"
+            | "JP"
+            | "KR"
+            | "MY"
+            | "MX"
+            | "NL"
+            | "NZ"
+            | "NO"
+            | "CN"
+            | "PL"
+            | "PT"
+            | "PH"
+            | "RU"
+            | "SA"
+            | "ZA"
+            | "ES"
+            | "SE"
+            | "CH"
+            | "TW"
+            | "TR"
+            | "GB"
+            | "US"
+    )
+    .then_some(country)
 }
 
 #[derive(Clone, Copy)]

@@ -9,7 +9,11 @@ use std::time::Duration;
 
 use tau_proto::SecretValue;
 
-use super::hosted::{HostedAttempt, HostedClient, HostedConfig, HostedRequest, HttpHostedClient};
+use super::hosted::{
+    HostedAttempt, HostedClient, HostedConfig, HostedRequest, HttpHostedClient,
+    brave_search_language, you_search_language,
+};
+use super::options::{PdfParsing, ProviderOptions, SearchDepth, SearchRecency};
 use super::{DEFAULT_YOU_ENDPOINT, WebAdapter, WebOperation};
 
 /// Loopback HTTP server that captures an exact provider request sequence.
@@ -121,6 +125,7 @@ fn config() -> HostedConfig {
         tavily_api_key: None,
         firecrawl_endpoint: None,
         firecrawl_api_key: None,
+        options: ProviderOptions::default(),
     }
 }
 
@@ -271,6 +276,13 @@ fn you_authenticated_mcp_fixture_sends_bearer_token() {
     client.configure(HostedConfig {
         you_endpoint: format!("{}mcp", server.origin),
         you_api_key: Some(fixture_secret("you-fixture-secret")),
+        options: ProviderOptions {
+            search_recency: Some(SearchRecency::Year),
+            search_exclude_domains: vec!["ads.example".to_owned()].into_boxed_slice(),
+            search_country: Some("US".to_owned()),
+            search_language: Some("en".to_owned()),
+            ..ProviderOptions::default()
+        },
         ..config()
     });
     assert_eq!(
@@ -290,12 +302,79 @@ fn you_authenticated_mcp_fixture_sends_bearer_token() {
     );
     let requests = server.finish_all();
     assert_eq!(requests.len(), 3);
-    for request in requests {
+    for request in &requests {
         assert!(
             request.contains("authorization: Bearer you-fixture-secret\r\n"),
             "request: {request}"
         );
     }
+    assert_eq!(
+        request_json(&requests[2])["params"]["arguments"],
+        serde_json::json!({
+            "query": "rust agents",
+            "count": 7,
+            "freshness": "year",
+            "exclude_domains": ["ads.example"],
+            "country": "US",
+            "language": "EN",
+        })
+    );
+}
+
+/// Ensures You.com omits provider-unsupported locale values rather than sending
+/// a general country or language tag that its generated tool enum rejects.
+#[test]
+fn you_search_omits_unsupported_locale() {
+    let server = FixtureServer::sequence(vec![
+        (
+            "200 OK".to_owned(),
+            "Mcp-Session-Id: you-session\r\n".to_owned(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"you","version":"1"}}}"#.to_owned(),
+        ),
+        ("202 Accepted".to_owned(), String::new(), String::new()),
+        (
+            "200 OK".to_owned(),
+            String::new(),
+            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"you result"}]}}"#.to_owned(),
+        ),
+    ]);
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        you_endpoint: format!("{}mcp", server.origin),
+        options: ProviderOptions {
+            search_country: Some("ZZ".to_owned()),
+            search_language: Some("id".to_owned()),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    client
+        .call(
+            WebAdapter::You,
+            request(
+                WebOperation::Search,
+                "rust agents",
+                7,
+                "",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect("You.com fixture");
+    let requests = server.finish_all();
+    let arguments = &request_json(&requests[2])["params"]["arguments"];
+    assert!(arguments.get("country").is_none());
+    assert!(arguments.get("language").is_none());
+}
+
+/// Pins You.com's conservative language boundary so unsupported plain
+/// Indonesian and Portuguese are omitted while exact regional Portuguese tags
+/// remain available.
+#[test]
+fn you_language_mapping_uses_only_exact_supported_tags() {
+    assert_eq!(you_search_language("id"), None);
+    assert_eq!(you_search_language("pt"), None);
+    assert_eq!(you_search_language("pt-br").as_deref(), Some("PT-BR"));
+    assert_eq!(you_search_language("pt-pt").as_deref(), Some("PT-PT"));
 }
 
 /// Ensures authenticated You.com JSON-RPC diagnostics cannot echo the
@@ -448,6 +527,99 @@ fn brave_search_fixture_is_exact() {
     assert!(request.contains("x-subscription-token: brave-fixture-secret\r\n"));
 }
 
+/// Ensures Brave maps supported recency and locale preferences to query
+/// parameters while omitting unsupported excluded-domain and depth hints.
+#[test]
+fn brave_search_maps_supported_preferences() {
+    let server = FixtureServer::once(
+        "200 OK",
+        r#"{"web":{"results":[{"title":"Brave","url":"https://example.test"}]}}"#,
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        brave_endpoint: Some(format!("{}search", server.origin)),
+        brave_api_key: Some(fixture_secret("brave-fixture-secret")),
+        options: ProviderOptions {
+            search_recency: Some(SearchRecency::Week),
+            search_exclude_domains: vec!["omit.example".to_owned()].into_boxed_slice(),
+            search_country: Some("US".to_owned()),
+            search_language: Some("ja".to_owned()),
+            search_depth: Some(SearchDepth::Deep),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    client
+        .call(
+            WebAdapter::Brave,
+            request(
+                WebOperation::Search,
+                "rust agents",
+                7,
+                "",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect("Brave fixture");
+    let request = server.finish();
+    assert!(
+        request.starts_with(
+            "GET /search?q=rust%20agents&count=7&extra_snippets=true&freshness=pw&country=US&search_lang=jp HTTP/1.1\r\n"
+        ),
+        "request: {request}"
+    );
+    assert!(!request.contains("omit.example"));
+    assert!(!request.contains("search_depth"));
+}
+
+/// Ensures Brave omits general locale values outside the adapter's conservative
+/// supported sets instead of sending provider-invalid query parameters.
+#[test]
+fn brave_search_omits_unsupported_locale() {
+    let server = FixtureServer::once(
+        "200 OK",
+        r#"{"web":{"results":[{"title":"Brave","url":"https://example.test"}]}}"#,
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        brave_endpoint: Some(format!("{}search", server.origin)),
+        brave_api_key: Some(fixture_secret("brave-fixture-secret")),
+        options: ProviderOptions {
+            search_country: Some("ZZ".to_owned()),
+            search_language: Some("tlh".to_owned()),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    client
+        .call(
+            WebAdapter::Brave,
+            request(
+                WebOperation::Search,
+                "rust agents",
+                7,
+                "",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect("Brave fixture");
+    let request = server.finish();
+    assert!(!request.contains("country="));
+    assert!(!request.contains("search_lang="));
+}
+
+/// Pins Brave's exact language conversion boundary so neutral Japanese maps to
+/// the provider's `jp` spelling while unsupported generic variants are omitted.
+#[test]
+fn brave_language_mapping_uses_only_exact_supported_tags() {
+    assert_eq!(brave_search_language("id"), None);
+    assert_eq!(brave_search_language("pt"), None);
+    assert_eq!(brave_search_language("zh"), None);
+    assert_eq!(brave_search_language("ja").as_deref(), Some("jp"));
+    assert_eq!(brave_search_language("pt-br").as_deref(), Some("pt-br"));
+    assert_eq!(brave_search_language("zh-hans").as_deref(), Some("zh-hans"));
+}
+
 /// Locks Tavily fetch to the documented `/extract` request and `results`
 /// projection.
 #[test]
@@ -542,6 +714,89 @@ fn tavily_search_fixture_is_exact() {
     );
 }
 
+/// Ensures Tavily maps supported recency, excluded-domain, language, and depth
+/// preferences into its structured search request.
+#[test]
+fn tavily_search_maps_supported_preferences() {
+    let server = FixtureServer::once(
+        "200 OK",
+        r#"{"results":[{"title":"Tavily","url":"https://example.test"}]}"#,
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        tavily_endpoint: Some(server.origin.clone()),
+        tavily_api_key: Some(fixture_secret("tavily-fixture-secret")),
+        options: ProviderOptions {
+            search_recency: Some(SearchRecency::Month),
+            search_exclude_domains: vec!["ads.example".to_owned()].into_boxed_slice(),
+            search_language: Some("en".to_owned()),
+            search_depth: Some(SearchDepth::Deep),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    client
+        .call(
+            WebAdapter::Tavily,
+            request(
+                WebOperation::Search,
+                "rust agents",
+                7,
+                "",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect("Tavily fixture");
+    assert_eq!(
+        request_json(&server.finish()),
+        serde_json::json!({
+            "query": "rust agents",
+            "max_results": 7,
+            "search_depth": "advanced",
+            "time_range": "month",
+            "exclude_domains": ["ads.example"],
+            "language": "en",
+        })
+    );
+}
+
+/// Preserves the harness allowlist as authoritative by omitting configured
+/// Tavily exclusions instead of combining or subtracting policy domains.
+#[test]
+fn tavily_search_omits_exclusions_with_allowed_domains() {
+    let server = FixtureServer::once(
+        "200 OK",
+        r#"{"results":[{"title":"Tavily","url":"https://example.test"}]}"#,
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        tavily_endpoint: Some(server.origin.clone()),
+        tavily_api_key: Some(fixture_secret("tavily-fixture-secret")),
+        options: ProviderOptions {
+            search_exclude_domains: vec!["ads.example".to_owned()].into_boxed_slice(),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    let domains = vec!["docs.example".to_owned()];
+    client
+        .call(
+            WebAdapter::Tavily,
+            request_with_domains(
+                WebOperation::Search,
+                "rust agents",
+                7,
+                "",
+                Some(&domains),
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect("Tavily fixture");
+    let body = request_json(&server.finish());
+    assert_eq!(body["include_domains"], serde_json::json!(["docs.example"]));
+    assert!(body.get("exclude_domains").is_none());
+}
+
 /// Locks Firecrawl search to the v2 `/search` shape and projects only web
 /// results from the provider envelope.
 #[test]
@@ -591,6 +846,52 @@ fn firecrawl_search_fixture_is_exact() {
     );
 }
 
+/// Ensures Firecrawl maps supported recency, excluded-domain, and country
+/// preferences without enabling result scraping.
+#[test]
+fn firecrawl_search_maps_supported_preferences_without_scraping() {
+    let server = FixtureServer::once(
+        "200 OK",
+        r#"{"data":{"web":[{"title":"Firecrawl","url":"https://example.test"}]}}"#,
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        firecrawl_endpoint: Some(server.origin.clone()),
+        firecrawl_api_key: Some(fixture_secret("firecrawl-fixture-secret")),
+        options: ProviderOptions {
+            search_recency: Some(SearchRecency::Day),
+            search_exclude_domains: vec!["ads.example".to_owned()].into_boxed_slice(),
+            search_country: Some("US".to_owned()),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    client
+        .call(
+            WebAdapter::Firecrawl,
+            request(
+                WebOperation::Search,
+                "rust agents",
+                7,
+                "",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect("Firecrawl fixture");
+    let body = request_json(&server.finish());
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "query": "rust agents",
+            "limit": 7,
+            "tbs": "qdr:d",
+            "excludeDomains": ["ads.example"],
+            "country": "US",
+        })
+    );
+    assert!(body.get("scrapeOptions").is_none());
+}
+
 /// Locks Firecrawl fetch to the v2 `/scrape` request and returns only bounded
 /// Markdown rather than provider accounting or metadata.
 #[test]
@@ -627,6 +928,140 @@ fn firecrawl_fetch_fixture_is_exact() {
             "formats": [{"type": "markdown"}],
         })
     );
+}
+
+/// Ensures Firecrawl maps enabled PDF parsing, page caps, and cache age without
+/// requesting raw file contents.
+#[test]
+fn firecrawl_fetch_maps_pdf_and_cache_preferences() {
+    let server = FixtureServer::once(
+        "200 OK",
+        r#"{"data":{"markdown":"page text","rawBase64":"must-not-project"}}"#,
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        firecrawl_endpoint: Some(server.origin.clone()),
+        firecrawl_api_key: Some(fixture_secret("firecrawl-fixture-secret")),
+        options: ProviderOptions {
+            fetch_pdf_parsing: Some(PdfParsing::Ocr),
+            fetch_pdf_max_pages: Some(12),
+            fetch_cache_max_age_seconds: Some(30),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    let result = client
+        .call(
+            WebAdapter::Firecrawl,
+            request(
+                WebOperation::Fetch,
+                "",
+                0,
+                "https://example.test/report.pdf",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect("Firecrawl fixture");
+    assert_eq!(result, "page text");
+    assert!(!result.contains("must-not-project"));
+    assert_eq!(
+        request_json(&server.finish()),
+        serde_json::json!({
+            "url": "https://example.test/report.pdf",
+            "formats": [{"type": "markdown"}],
+            "parsers": [{"type": "pdf", "mode": "ocr", "maxPages": 12}],
+            "maxAge": 30_000,
+        })
+    );
+}
+
+/// Ensures disabling Firecrawl PDF parsing sends an empty parser list and never
+/// projects a returned encoded file when markdown is unavailable.
+#[test]
+fn firecrawl_disabled_pdf_parsing_never_projects_raw_base64() {
+    let raw = "sensitive-base64-file";
+    let server = FixtureServer::once(
+        "200 OK",
+        &serde_json::json!({
+            "data": {
+                "rawBase64": raw,
+                "metadata": {"contentType": "application/pdf"},
+            },
+        })
+        .to_string(),
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        firecrawl_endpoint: Some(server.origin.clone()),
+        firecrawl_api_key: Some(fixture_secret("firecrawl-fixture-secret")),
+        options: ProviderOptions {
+            fetch_pdf_parsing: Some(PdfParsing::Disabled),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    let error = client
+        .call(
+            WebAdapter::Firecrawl,
+            request(
+                WebOperation::Fetch,
+                "",
+                0,
+                "https://example.test/report.pdf",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect_err("missing markdown must fail");
+    assert!(!error.contains(raw), "error: {error}");
+    assert_eq!(
+        request_json(&server.finish())["parsers"],
+        serde_json::json!([])
+    );
+}
+
+/// Ensures a raw-only PDF response cannot bypass the successful-body cap when
+/// parsing is disabled, even though the encoded file is never selected.
+#[test]
+fn firecrawl_disabled_pdf_parsing_keeps_raw_base64_bounded() {
+    let raw = "A".repeat(super::SUCCESS_BODY_MAX_BYTES + 1);
+    let server = FixtureServer::once(
+        "200 OK",
+        &serde_json::json!({
+            "data": {
+                "rawBase64": raw,
+                "metadata": {"contentType": "application/pdf"},
+            },
+        })
+        .to_string(),
+    );
+    let client = HttpHostedClient::default();
+    client.configure(HostedConfig {
+        firecrawl_endpoint: Some(server.origin.clone()),
+        firecrawl_api_key: Some(fixture_secret("firecrawl-fixture-secret")),
+        options: ProviderOptions {
+            fetch_pdf_parsing: Some(PdfParsing::Disabled),
+            ..ProviderOptions::default()
+        },
+        ..config()
+    });
+    let error = client
+        .call(
+            WebAdapter::Firecrawl,
+            request(
+                WebOperation::Fetch,
+                "",
+                0,
+                "https://example.test/report.pdf",
+                &AtomicBool::new(false),
+            ),
+        )
+        .expect_err("oversize raw file must fail");
+    server.finish();
+    assert!(
+        error.contains("response exceeded 1048576 bytes"),
+        "error: {error}"
+    );
+    assert!(!error.contains("AAAA"), "error leaked raw content");
 }
 
 /// Ensures provider diagnostics redact both endpoint query material and API

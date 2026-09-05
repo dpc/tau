@@ -59,6 +59,13 @@ fn http_fixture_json(request: &str) -> serde_json::Value {
     serde_json::from_str(body).expect("request JSON")
 }
 
+fn http_fixture_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (header, value) = line.split_once(':')?;
+        header.eq_ignore_ascii_case(name).then_some(value.trim())
+    })
+}
+
 fn serve_parallel_success(listener: TcpListener, result: &str) -> Vec<String> {
     let mut requests = Vec::new();
     for index in 0..3 {
@@ -87,6 +94,23 @@ fn serve_parallel_success(listener: TcpListener, result: &str) -> Vec<String> {
         }
     }
     requests
+}
+
+fn serve_mcp_success(listener: TcpListener, result: &str) -> String {
+    let (mut stream, _) = listener.accept().expect("accept");
+    let request = read_http_fixture_request(&stream);
+    write_http_fixture_response(
+        &mut stream,
+        "200 OK",
+        "",
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": result}]},
+        })
+        .to_string(),
+    );
+    request
 }
 
 /// Hidden fetch policy accepts exact/subdomain targets and rejects other hosts
@@ -1241,6 +1265,99 @@ fn provider_list_configuration_distinguishes_single_and_invalid_modes() {
     ] {
         let config: ExtConfig = serde_json::from_value(invalid).expect("deserialize invalid");
         assert!(config.validate(&BTreeMap::new()).is_err());
+    }
+}
+
+/// Ensures provider-neutral options normalize locale fields and retain all
+/// supported explicit preferences without changing provider membership.
+#[test]
+fn provider_options_validate_and_normalize() {
+    let config: ExtConfig = serde_json::from_value(serde_json::json!({
+        "fetch_pdf_parsing": "auto",
+        "fetch_pdf_max_pages": 25,
+        "search_recency": "week",
+        "search_exclude_domains": ["ads.example", "tracker.example"],
+        "search_country": "us",
+        "search_language": "EN-us",
+        "search_depth": "deep",
+        "search_max_content_chars": 4096,
+        "fetch_max_content_chars": 8192,
+        "search_cache_max_age_seconds": 3600,
+        "fetch_cache_max_age_seconds": 7200,
+    }))
+    .expect("deserialize options");
+    let validated = config.validate(&BTreeMap::new()).expect("validate options");
+    assert_eq!(
+        validated.options.fetch_pdf_parsing,
+        Some(options::PdfParsing::Auto)
+    );
+    assert_eq!(validated.options.fetch_pdf_max_pages, Some(25));
+    assert_eq!(
+        validated.options.search_recency,
+        Some(options::SearchRecency::Week)
+    );
+    assert_eq!(
+        validated.options.search_exclude_domains.as_ref(),
+        ["ads.example", "tracker.example"]
+    );
+    assert_eq!(validated.options.search_country.as_deref(), Some("US"));
+    assert_eq!(validated.options.search_language.as_deref(), Some("en-us"));
+    assert_eq!(
+        validated.options.search_depth,
+        Some(options::SearchDepth::Deep)
+    );
+    assert_eq!(validated.options.search_max_content_chars, Some(4096));
+    assert_eq!(validated.options.fetch_max_content_chars, Some(8192));
+    assert_eq!(validated.options.search_cache_max_age_seconds, Some(3600));
+    assert_eq!(validated.options.fetch_cache_max_age_seconds, Some(7200));
+}
+
+/// Prevents invalid bounds, ambiguous PDF controls, and unsafe domain or locale
+/// values from reaching any provider runtime state.
+#[test]
+fn provider_options_reject_invalid_values() {
+    for (config, expected) in [
+        (
+            serde_json::json!({
+                "fetch_pdf_parsing": "disabled",
+                "fetch_pdf_max_pages": 1,
+            }),
+            "cannot be set when PDF parsing is disabled",
+        ),
+        (
+            serde_json::json!({"fetch_pdf_max_pages": 10001}),
+            "must be between 1 and 10000",
+        ),
+        (
+            serde_json::json!({"search_exclude_domains": ["https://example.com"]}),
+            "lowercase DNS domain name",
+        ),
+        (
+            serde_json::json!({"search_exclude_domains": ["example.com", "example.com"]}),
+            "duplicates `example.com`",
+        ),
+        (
+            serde_json::json!({"search_country": "usa"}),
+            "two-letter country code",
+        ),
+        (
+            serde_json::json!({"search_language": "en_US"}),
+            "BCP-47-like",
+        ),
+        (
+            serde_json::json!({"search_max_content_chars": 0}),
+            "must be between 1",
+        ),
+        (
+            serde_json::json!({"fetch_cache_max_age_seconds": 31536001}),
+            "no greater than 31536000",
+        ),
+    ] {
+        let config: ExtConfig = serde_json::from_value(config).expect("deserialize invalid option");
+        let Err(error) = config.validate(&BTreeMap::new()) else {
+            panic!("invalid option unexpectedly validated");
+        };
+        assert!(error.contains(expected), "error: {error}");
     }
 }
 
@@ -3682,6 +3799,77 @@ fn exa_fetch_client_posts_urls_array() {
         body["params"]["arguments"]["urls"],
         serde_json::json!(["https://example.com/article"])
     );
+    assert_eq!(
+        body["params"]["arguments"],
+        serde_json::json!({"urls": ["https://example.com/article"]})
+    );
+}
+
+/// Ensures Exa maps an explicit provider-side fetch content budget without
+/// changing the stable plural URL argument.
+#[test]
+fn exa_fetch_maps_content_budget() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = thread::spawn(move || serve_mcp_success(listener, "page"));
+    let client = HttpExaSearcher::new(endpoint);
+    client.configure(
+        None,
+        None,
+        ProviderOptions {
+            fetch_max_content_chars: Some(12_345),
+            ..ProviderOptions::default()
+        },
+    );
+    assert_eq!(
+        client.fetch("https://example.com/article").expect("fetch"),
+        "page"
+    );
+    let body = http_fixture_json(&server.join().expect("join"));
+    assert_eq!(
+        body["params"]["arguments"],
+        serde_json::json!({
+            "urls": ["https://example.com/article"],
+            "maxCharacters": 12_345,
+        })
+    );
+}
+
+/// Ensures Exa depth updates only its documented connection query parameter,
+/// preserving unrelated endpoint parameters and omitting unsupported deep mode.
+#[test]
+fn exa_depth_updates_only_default_search_type() {
+    let endpoint = "https://mcp.exa.ai/mcp?tenant=one&defaultSearchType=neural";
+    let fast = exa_endpoint_with_options(
+        endpoint,
+        &ProviderOptions {
+            search_depth: Some(options::SearchDepth::Fast),
+            ..ProviderOptions::default()
+        },
+    );
+    assert_eq!(
+        fast,
+        "https://mcp.exa.ai/mcp?tenant=one&defaultSearchType=fast"
+    );
+    let balanced = exa_endpoint_with_options(
+        endpoint,
+        &ProviderOptions {
+            search_depth: Some(options::SearchDepth::Balanced),
+            ..ProviderOptions::default()
+        },
+    );
+    assert_eq!(
+        balanced,
+        "https://mcp.exa.ai/mcp?tenant=one&defaultSearchType=auto"
+    );
+    let deep = exa_endpoint_with_options(
+        endpoint,
+        &ProviderOptions {
+            search_depth: Some(options::SearchDepth::Deep),
+            ..ProviderOptions::default()
+        },
+    );
+    assert_eq!(deep, endpoint);
 }
 
 /// Ensures anonymous Exa requests omit both supported authentication headers.
@@ -3805,7 +3993,11 @@ fn parallel_client_sends_configured_bearer_token() {
     let server = thread::spawn(move || serve_parallel_success(listener, "ok"));
 
     let client = HttpParallelClient::new(endpoint);
-    client.set_api_key(Some(tau_proto::SecretValue::new("parallel-fixture-secret")));
+    client.configure(
+        None,
+        Some(tau_proto::SecretValue::new("parallel-fixture-secret")),
+        ProviderOptions::default(),
+    );
     assert_eq!(
         client
             .call(
@@ -3823,6 +4015,12 @@ fn parallel_client_sends_configured_bearer_token() {
     for request in &requests {
         assert!(
             request.contains("authorization: Bearer parallel-fixture-secret\r\n"),
+            "request: {request}"
+        );
+        assert!(
+            !request
+                .to_ascii_lowercase()
+                .contains("x-parallel-search-config:"),
             "request: {request}"
         );
     }
@@ -3864,4 +4062,121 @@ fn parallel_client_sends_configured_bearer_token() {
             },
         })
     );
+}
+
+/// Ensures authenticated Parallel search maps supported preferences into the
+/// same exact connection override header on every handshake request.
+#[test]
+fn parallel_authenticated_search_maps_preferences() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = thread::spawn(move || serve_parallel_success(listener, "ok"));
+    let client = HttpParallelClient::new(endpoint);
+    client.configure(
+        None,
+        Some(tau_proto::SecretValue::new("parallel-fixture-secret")),
+        ProviderOptions {
+            search_exclude_domains: vec!["ads.example".to_owned()].into_boxed_slice(),
+            search_country: Some("US".to_owned()),
+            search_depth: Some(options::SearchDepth::Deep),
+            search_max_content_chars: Some(9000),
+            search_cache_max_age_seconds: Some(600),
+            ..ProviderOptions::default()
+        },
+    );
+    assert_eq!(
+        client
+            .call(
+                PARALLEL_REMOTE_SEARCH_TOOL,
+                adapt_parallel_search_arguments(serde_json::json!({"query": "rust"}))
+                    .expect("adapt"),
+            )
+            .expect("Parallel call"),
+        "ok"
+    );
+    for request in server.join().expect("join") {
+        let header = http_fixture_header(&request, "x-parallel-search-config")
+            .unwrap_or_else(|| panic!("request omitted Parallel config: {request}"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(header).expect("config header JSON"),
+            serde_json::json!({
+                "advanced_settings": {
+                    "fetch_policy": {"max_age_seconds": 600},
+                    "location": "us",
+                    "source_policy": {"exclude_domains": ["ads.example"]},
+                },
+                "max_chars_total": 9000,
+                "mode": "advanced",
+            })
+        );
+    }
+}
+
+/// Ensures Parallel accepts general search preferences in anonymous config but
+/// omits its authenticated-only connection override header.
+#[test]
+fn parallel_anonymous_search_omits_config_header() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = thread::spawn(move || serve_parallel_success(listener, "ok"));
+    let client = HttpParallelClient::new(endpoint);
+    client.configure(
+        None,
+        None,
+        ProviderOptions {
+            search_depth: Some(options::SearchDepth::Deep),
+            search_max_content_chars: Some(9000),
+            ..ProviderOptions::default()
+        },
+    );
+    assert_eq!(
+        client
+            .call(
+                PARALLEL_REMOTE_SEARCH_TOOL,
+                adapt_parallel_search_arguments(serde_json::json!({"query": "rust"}))
+                    .expect("adapt"),
+            )
+            .expect("Parallel call"),
+        "ok"
+    );
+    for request in server.join().expect("join") {
+        assert!(
+            !request
+                .to_ascii_lowercase()
+                .contains("x-parallel-search-config:"),
+            "request: {request}"
+        );
+    }
+}
+
+/// Ensures a general cache hint below Parallel's provider minimum is omitted
+/// instead of making authenticated MCP initialization reject the request.
+#[test]
+fn parallel_search_omits_cache_age_below_provider_minimum() {
+    let header = parallel_search_config_header(
+        PARALLEL_REMOTE_SEARCH_TOOL,
+        &ProviderOptions {
+            search_cache_max_age_seconds: Some(599),
+            ..ProviderOptions::default()
+        },
+        true,
+    )
+    .expect("build header");
+    assert_eq!(header, None);
+}
+
+/// Ensures provider-specific country support is conservative so an otherwise
+/// valid general code cannot make Parallel reject its connection override.
+#[test]
+fn parallel_search_omits_unsupported_country() {
+    let header = parallel_search_config_header(
+        PARALLEL_REMOTE_SEARCH_TOOL,
+        &ProviderOptions {
+            search_country: Some("ZZ".to_owned()),
+            ..ProviderOptions::default()
+        },
+        true,
+    )
+    .expect("build header");
+    assert_eq!(header, None);
 }

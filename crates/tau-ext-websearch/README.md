@@ -127,6 +127,18 @@ extensions:
       brave_api_key_secret: brave_search
       tavily_api_key_secret: tavily
       firecrawl_api_key_secret: firecrawl
+      # Optional provider-neutral preferences:
+      fetch_pdf_parsing: disabled # disabled, fast, auto, or ocr
+      fetch_pdf_max_pages: null   # 1..10000; incompatible with disabled
+      search_recency: week        # day, week, month, or year
+      search_exclude_domains: [ads.example]
+      search_country: US          # normalized uppercase alpha-2
+      search_language: en         # normalized lowercase BCP-47-like tag
+      search_depth: balanced      # fast, balanced, or deep
+      search_max_content_chars: null
+      fetch_max_content_chars: null
+      search_cache_max_age_seconds: null
+      fetch_cache_max_age_seconds: null
       # Optional final/base endpoint overrides:
       brave_endpoint: https://api.search.brave.com/res/v1/web/search
       tavily_endpoint: https://api.tavily.com/
@@ -145,6 +157,57 @@ changing them.
 Provider lists must be non-empty and contain no duplicates. Search and fetch
 have independent extension-process cursors. Successful configuration resets
 both cursors to list index zero; cursors are not persisted.
+
+Every preference is optional. Omission preserves the provider's existing
+request shape and default cost. A provider applies only controls that its
+current API exposes:
+
+| Preference | Exa | Parallel | You.com | Brave | Tavily | Firecrawl |
+|---|---|---|---|---|---|---|
+| PDF parsing/page cap | — | — | — | — | — | fetch |
+| Recency | — | — | search | search | search | search |
+| Excluded domains | — | authenticated search | search | — | search | search |
+| Country | — | authenticated search | search | search | — | search |
+| Language | — | — | search | search | search | — |
+| Depth | search (`fast`/`balanced`) | authenticated search | — | — | search | — |
+| Search content chars | — | authenticated search | — | — | — | — |
+| Fetch content chars | fetch | — | — | — | — | — |
+| Search cache age | — | authenticated search | — | — | — | — |
+| Fetch cache age | — | — | — | — | — | fetch |
+
+PDF pages accept 1–10,000; content budgets accept 1–524,288 characters; cache
+ages accept 0–31,536,000 seconds. Country is normalized to uppercase alpha-2,
+language to a bounded lowercase BCP-47-like tag, and excluded domains use the
+same lowercase DNS-only, non-IP grammar and 100-entry bound as web allowlists.
+Duplicate or malformed exclusions reject the complete configuration.
+You.com, Brave, and authenticated Parallel send country only for their
+conservatively shared documented set; other valid alpha-2 values are omitted for
+those adapters. You.com converts known language tags to its uppercase enum,
+Brave sends only exact supported search languages (including `ja` → `jp`), and
+other unsupported locale values are omitted rather than causing a
+provider-invalid request.
+Parallel currently honors search cache ages only from 600 seconds upward and
+omits smaller general hints rather than sending a provider-invalid override.
+
+Unsupported preferences are omitted rather than emulated by query rewriting,
+post-filtering, or local truncation. Parallel's connection override header is
+sent only with a configured API key because its anonymous service ignores those
+settings. If a harness-authored `allowed_domains` restriction is present,
+Tavily and Firecrawl receive that authoritative include list and omit configured
+soft exclusions; Tau does not subtract domain sets or invent an
+empty-intersection policy.
+
+`search_depth: deep`, `fetch_pdf_parsing: ocr`, and fresh/live cache settings can
+increase provider cost or latency. In particular, Firecrawl currently bills PDF
+parsing per page. `fetch_pdf_parsing: disabled` sends `parsers: []`, but requests
+only markdown and never projects a returned `rawBase64` file. A response without
+markdown remains a bounded provider failure so hybrid failover can continue.
+Firecrawl still charges one flat provider credit for that disabled-parsing PDF
+attempt. This controls only Firecrawl: another fetch provider may still parse or
+bill for the same PDF, and sequential failover may contact more than one
+provider.
+Provider-side character budgets remain hints; Tau still rejects projected output
+over 512 KiB and never silently truncates a successful result.
 
 If both `endpoint` and `exa_endpoint` are set, they must have the same value.
 Endpoint values are validated when configuration is applied. They must be HTTPS

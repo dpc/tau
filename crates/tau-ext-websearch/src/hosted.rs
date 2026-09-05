@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tau_proto::SecretValue;
 
+use super::options::{ProviderOptions, SearchDepth};
 use super::{
     DEFAULT_BRAVE_ENDPOINT, DEFAULT_FIRECRAWL_ENDPOINT, DEFAULT_TAVILY_ENDPOINT,
     DEFAULT_YOU_ENDPOINT, HTTP_TOO_MANY_REQUESTS, MCP_PROTOCOL_VERSION, RATE_LIMITED_ERROR,
@@ -33,6 +34,8 @@ pub(super) struct HostedConfig {
     pub(super) firecrawl_endpoint: Option<String>,
     /// Optional Firecrawl bearer token.
     pub(super) firecrawl_api_key: Option<SecretValue>,
+    /// Validated provider-neutral request preferences.
+    pub(super) options: ProviderOptions,
 }
 
 /// Provider seam used by the composite scheduler.
@@ -91,6 +94,8 @@ struct RuntimeConfig {
     firecrawl_endpoint: String,
     /// Firecrawl bearer token.
     firecrawl_api_key: Option<SecretValue>,
+    /// Validated provider-neutral request preferences.
+    options: ProviderOptions,
 }
 
 impl Default for RuntimeConfig {
@@ -104,6 +109,7 @@ impl Default for RuntimeConfig {
             tavily_api_key: None,
             firecrawl_endpoint: DEFAULT_FIRECRAWL_ENDPOINT.to_owned(),
             firecrawl_api_key: None,
+            options: ProviderOptions::default(),
         }
     }
 }
@@ -142,6 +148,7 @@ impl HostedClient for HttpHostedClient {
                 config.you_api_key.as_ref(),
                 query,
                 *count,
+                &config.options,
                 attempt.timeout,
                 attempt.cancelled,
             ),
@@ -157,17 +164,20 @@ impl HostedClient for HttpHostedClient {
                 required_key(&config.brave_api_key, "brave")?,
                 query,
                 *count,
+                &config.options,
                 attempt.timeout,
             ),
             (WebAdapter::Tavily, _) => call_tavily(
                 &config.tavily_endpoint,
                 required_key(&config.tavily_api_key, "tavily")?,
                 &attempt,
+                &config.options,
             ),
             (WebAdapter::Firecrawl, _) => call_firecrawl(
                 &config.firecrawl_endpoint,
                 required_key(&config.firecrawl_api_key, "firecrawl")?,
                 &attempt,
+                &config.options,
             ),
             _ => Err(format!(
                 "{} does not support {}",
@@ -203,6 +213,7 @@ impl HostedClient for HttpHostedClient {
         current.brave_api_key = config.brave_api_key;
         current.tavily_api_key = config.tavily_api_key;
         current.firecrawl_api_key = config.firecrawl_api_key;
+        current.options = config.options;
     }
 }
 
@@ -219,6 +230,7 @@ fn call_you(
     api_key: Option<&SecretValue>,
     query: &str,
     count: u32,
+    options: &ProviderOptions,
     timeout: Duration,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
@@ -274,13 +286,38 @@ fn call_you(
         remaining(deadline)?,
     )?;
     check_cancelled(cancelled)?;
+    let mut arguments = serde_json::json!({"query": query, "count": count});
+    let arguments = arguments.as_object_mut().expect("object literal");
+    if let Some(recency) = options.search_recency {
+        arguments.insert("freshness".to_owned(), recency.as_long().into());
+    }
+    if !options.search_exclude_domains.is_empty() {
+        arguments.insert(
+            "exclude_domains".to_owned(),
+            serde_json::json!(&options.search_exclude_domains),
+        );
+    }
+    if let Some(country) = options
+        .search_country
+        .as_deref()
+        .and_then(super::supported_search_country)
+    {
+        arguments.insert("country".to_owned(), country.into());
+    }
+    if let Some(language) = options
+        .search_language
+        .as_deref()
+        .and_then(you_search_language)
+    {
+        arguments.insert("language".to_owned(), language.into());
+    }
     let call = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
         "params": {
             "name": YOU_SEARCH_TOOL,
-            "arguments": {"query": query, "count": count},
+            "arguments": arguments,
         },
     });
     let (payload, _) = post_you_mcp(
@@ -377,16 +414,35 @@ fn call_brave(
     key: &SecretValue,
     query: &str,
     count: u32,
+    options: &ProviderOptions,
     timeout: Duration,
 ) -> Result<String, String> {
     let agent = provider_http_agent(timeout);
-    let response = agent
+    let mut request = agent
         .get(endpoint)
         .query("q", query)
         .query("count", count.min(20).to_string())
         .query("extra_snippets", "true")
         .header("Accept", "application/json")
-        .header("X-Subscription-Token", key.expose_secret())
+        .header("X-Subscription-Token", key.expose_secret());
+    if let Some(recency) = options.search_recency {
+        request = request.query("freshness", recency.as_brave());
+    }
+    if let Some(country) = options
+        .search_country
+        .as_deref()
+        .and_then(super::supported_search_country)
+    {
+        request = request.query("country", country);
+    }
+    if let Some(language) = options
+        .search_language
+        .as_deref()
+        .and_then(brave_search_language)
+    {
+        request = request.query("search_lang", &language);
+    }
+    let response = request
         .call()
         .map_err(|error| safe_error("brave", error.to_string(), endpoint, key))?;
     normalize_response(response, "brave", endpoint, key, &["web", "results"])
@@ -396,6 +452,7 @@ fn call_tavily(
     base: &str,
     key: &SecretValue,
     attempt: &HostedAttempt<'_>,
+    options: &ProviderOptions,
 ) -> Result<String, String> {
     let (path, mut body, projection): (&str, serde_json::Value, &[&str]) = match &attempt.request {
         HostedRequest::Search {
@@ -427,6 +484,34 @@ fn call_tavily(
             .expect("object literal")
             .insert("include_domains".to_owned(), serde_json::json!(domains));
     }
+    if let HostedRequest::Search {
+        query: _,
+        count: _,
+        allowed_domains,
+    } = &attempt.request
+    {
+        let body = body.as_object_mut().expect("object literal");
+        if let Some(recency) = options.search_recency {
+            body.insert("time_range".to_owned(), recency.as_long().into());
+        }
+        if allowed_domains.is_none() && !options.search_exclude_domains.is_empty() {
+            body.insert(
+                "exclude_domains".to_owned(),
+                serde_json::json!(&options.search_exclude_domains),
+            );
+        }
+        if let Some(language) = &options.search_language {
+            body.insert("language".to_owned(), language.clone().into());
+        }
+        if let Some(depth) = options.search_depth {
+            let depth = match depth {
+                SearchDepth::Fast => "fast",
+                SearchDepth::Balanced => "basic",
+                SearchDepth::Deep => "advanced",
+            };
+            body.insert("search_depth".to_owned(), depth.into());
+        }
+    }
     let endpoint = endpoint_path(base, path)?;
     post_json(&endpoint, key, "tavily", body, attempt.timeout, projection)
 }
@@ -435,6 +520,7 @@ fn call_firecrawl(
     base: &str,
     key: &SecretValue,
     attempt: &HostedAttempt<'_>,
+    options: &ProviderOptions,
 ) -> Result<String, String> {
     let (path, mut body, projection): (&str, serde_json::Value, &[&str]) = match &attempt.request {
         HostedRequest::Search {
@@ -461,6 +547,58 @@ fn call_firecrawl(
         body.as_object_mut()
             .expect("object literal")
             .insert("includeDomains".to_owned(), serde_json::json!(domains));
+    }
+    match &attempt.request {
+        HostedRequest::Search {
+            query: _,
+            count: _,
+            allowed_domains,
+        } => {
+            let body = body.as_object_mut().expect("object literal");
+            if let Some(recency) = options.search_recency {
+                body.insert("tbs".to_owned(), recency.as_firecrawl().into());
+            }
+            if allowed_domains.is_none() && !options.search_exclude_domains.is_empty() {
+                body.insert(
+                    "excludeDomains".to_owned(),
+                    serde_json::json!(&options.search_exclude_domains),
+                );
+            }
+            if let Some(country) = &options.search_country {
+                body.insert("country".to_owned(), country.clone().into());
+            }
+        }
+        HostedRequest::Fetch { url: _ } => {
+            let body = body.as_object_mut().expect("object literal");
+            if options.fetch_pdf_parsing.is_some() || options.fetch_pdf_max_pages.is_some() {
+                let mut parsers = options.fetch_pdf_parsing.map_or_else(
+                    || vec![serde_json::json!({"type": "pdf"})],
+                    |parsing| {
+                        parsing.enabled_mode().map_or_else(Vec::new, |mode| {
+                            vec![serde_json::json!({"type": "pdf", "mode": mode})]
+                        })
+                    },
+                );
+                if let (Some(parser), Some(max_pages)) =
+                    (parsers.first_mut(), options.fetch_pdf_max_pages)
+                {
+                    parser
+                        .as_object_mut()
+                        .expect("object literal")
+                        .insert("maxPages".to_owned(), max_pages.into());
+                }
+                body.insert("parsers".to_owned(), parsers.into());
+            }
+            if let Some(seconds) = options.fetch_cache_max_age_seconds {
+                body.insert(
+                    "maxAge".to_owned(),
+                    seconds
+                        .checked_mul(1000)
+                        .expect("validated cache age")
+                        .into(),
+                );
+            }
+        }
     }
     let endpoint = endpoint_path(base, path)?;
     post_json(
@@ -554,4 +692,58 @@ fn safe_diagnostic(message: String, endpoint: &str, key: &SecretValue) -> String
     sanitize_endpoint_error(&message.replace(key, "…"), endpoint)
         .replace(&format!("Bearer {key}"), "Bearer …")
         .replace(key, "…")
+}
+
+pub(super) fn you_search_language(language: &str) -> Option<String> {
+    let language = language.to_ascii_uppercase();
+    matches!(
+        language.as_str(),
+        "AR" | "BN"
+            | "DE"
+            | "EN"
+            | "EN-GB"
+            | "ES"
+            | "FR"
+            | "HI"
+            | "IT"
+            | "JA"
+            | "KO"
+            | "NL"
+            | "PL"
+            | "PT-BR"
+            | "PT-PT"
+            | "RU"
+            | "SV"
+            | "TR"
+            | "ZH-HANS"
+            | "ZH-HANT"
+    )
+    .then_some(language)
+}
+
+pub(super) fn brave_search_language(language: &str) -> Option<String> {
+    if language == "ja" {
+        return Some("jp".to_owned());
+    }
+    matches!(
+        language,
+        "ar" | "bn"
+            | "de"
+            | "en"
+            | "es"
+            | "fr"
+            | "hi"
+            | "it"
+            | "ko"
+            | "nl"
+            | "pl"
+            | "pt-br"
+            | "pt-pt"
+            | "ru"
+            | "sv"
+            | "tr"
+            | "zh-hans"
+            | "zh-hant"
+    )
+    .then(|| language.to_owned())
 }

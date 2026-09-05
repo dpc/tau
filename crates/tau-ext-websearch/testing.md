@@ -43,3 +43,8 @@ exact closing sentinels, makes unsafe Unicode visible, checks the exact final
 512 KiB post-framing boundary
 and oversize rejection, and proves identical preservation through Chat
 Completions and Codex/Responses tool-result lowering.
+
+Provider-preference coverage must retain an omission oracle for every existing
+request fixture, exact wire tests for each supported mapping, authenticated and
+anonymous Parallel header behavior, allowlist-over-exclusion authority, and
+Firecrawl PDF fixtures proving `parsers: []` never projects `rawBase64`.
