@@ -5388,7 +5388,7 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
             .effort
             .expect("built-in junior effort")
             .to_string(),
-        "0.35"
+        "0.25"
     );
     let engineer = &s.roles["engineer"];
     assert_eq!(
@@ -5443,7 +5443,7 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
             .effort
             .expect("built-in senior effort")
             .to_string(),
-        "0.65"
+        "0.75"
     );
 }
 
@@ -5484,9 +5484,9 @@ fn harness_user_agent_effort_rebases_built_in_relative_presets() {
         .expect("write config");
     let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load config");
     for (role, effort) in [
-        ("engineer-junior", "0.45"),
+        ("engineer-junior", "0.35"),
         ("engineer", "0.6"),
-        ("engineer-senior", "0.75"),
+        ("engineer-senior", "0.85"),
     ] {
         assert_eq!(
             settings.roles[role]
