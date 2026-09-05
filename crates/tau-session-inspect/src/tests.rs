@@ -1878,3 +1878,189 @@ fn write_framed_session_event(path: &std::path::Path, event: &tau_core::Persiste
     frame.extend(payload);
     path_std_fs::write(path, frame).expect("write framed session fixture");
 }
+/// Offline cache reports preserve accepted accounting while excluding private
+/// terminal bodies, raw IDs, and provider reports from completion counts.
+#[test]
+fn cache_report_projects_only_canonical_facts_and_preserves_unknowns() {
+    let root = tempfile::tempdir().expect("state root");
+    let agents = root.path().join("agents");
+    create_trace_agent(
+        &agents,
+        "cache-agent",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_trace_prompt_lifecycle(&agents, "cache-agent", "cache-prompt", 2);
+    append_trace_provider_terminal(
+        &agents,
+        "cache-agent",
+        "cache-prompt",
+        3,
+        Some(tau_proto::ProviderTokenUsage {
+            model: Some("provider/model".into()),
+            prompt_sent_tokens: 100,
+            prompt_cached_tokens: 25,
+            prompt_cache_read_ceiling_tokens: None,
+            cache: None,
+            response_received_tokens: 10,
+            stats: Default::default(),
+        }),
+        Some(123),
+    );
+    let options = crate::CacheOptions {
+        state_dir: root.path().into(),
+        scope: crate::CacheScope::Agent {
+            agent_id: "cache-agent".parse().expect("agent id"),
+            include_descendants: false,
+        },
+        prompt: None,
+        limits: Default::default(),
+        producer_build: "fixture".into(),
+    };
+    let report = crate::read_cache_report(&options).expect("cache report");
+    assert!(report.is_partial());
+    let mut bytes = Vec::new();
+    report.write_jsonl(&mut bytes).expect("write report");
+    let text = String::from_utf8(bytes).expect("UTF-8 report");
+    assert!(!text.contains("private response"));
+    assert!(!text.contains("private provider error"));
+    assert!(!text.contains("private.example"));
+    assert!(!text.contains("base_url"));
+    let rows = text
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON row"))
+        .collect::<Vec<_>>();
+    let responses = rows
+        .iter()
+        .filter(|row| row["record_kind"] == "canonical_response")
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 1);
+    let row = responses[0];
+    assert_eq!(row["canonical"]["input_tokens"], 100);
+    assert_eq!(row["canonical"]["read_tokens"], 25);
+    assert_eq!(row["derived"]["metrics"]["non_read_input"], 75);
+    assert!(row["derived"]["metrics"]["eligibility_utilization"].is_null());
+    assert_eq!(row["derived"]["residency_miss"], "unknown");
+    assert!(row["reported"].is_null());
+    assert_eq!(
+        rows.last().expect("summary")["canonical"]["response_count"],
+        1
+    );
+}
+
+/// Session membership structural failures report unavailable partial evidence,
+/// preserving the entire source tree rather than repairing the selected
+/// journal.
+#[test]
+fn cache_session_membership_corruption_is_partial_and_read_only() {
+    let root = tempfile::tempdir().expect("state root");
+    let directory = root.path().join("sessions/cache-session");
+    path_std_fs::create_dir_all(&directory).expect("session directory");
+    let path = directory.join("events.cbor");
+    let options = cache_session_options(root.path());
+    for case in ["truncated", "invalid_sequence", "invalid_event"] {
+        match case {
+            "truncated" => path_std_fs::write(&path, [1, 2, 3]).expect("torn length prefix"),
+            "invalid_sequence" => write_framed_session_event(
+                &path,
+                &tau_core::PersistedSessionEvent {
+                    seq: tau_core::PersistedSessionEventSeq::new(9),
+                    source: None,
+                    event: Event::SessionAgentLoaded(SessionAgentLoaded {
+                        session_id: "cache-session".parse().expect("session"),
+                        agent_id: "cache-agent".parse().expect("agent"),
+                        agent_initialization_id: "init".parse().expect("init"),
+                        ephemeral: false,
+                    }),
+                    recorded_at: tau_proto::UnixMicros::new(0),
+                },
+            ),
+            _ => write_framed_session_event(
+                &path,
+                &tau_core::PersistedSessionEvent {
+                    seq: tau_core::PersistedSessionEventSeq::new(0),
+                    source: None,
+                    event: Event::AgentStarted(tau_proto::AgentStarted {
+                        agent_id: "cache-agent".parse().expect("agent"),
+                        creator: Some(tau_proto::AgentCreator::User),
+                        parent_agent: None,
+                        role: "test".into(),
+                        display_name: None,
+                        metadata: Vec::new(),
+                        ephemeral: false,
+                    }),
+                    recorded_at: tau_proto::UnixMicros::new(0),
+                },
+            ),
+        }
+        let before = source_tree_snapshot(root.path()).expect("before inspection");
+        let report = crate::read_cache_report(&options).expect("partial report");
+        assert!(report.is_partial(), "{case}");
+        let mut output = Vec::new();
+        report.write_jsonl(&mut output).expect("report");
+        let text = String::from_utf8(output).expect("UTF-8 report");
+        assert!(
+            text.contains("session_membership_corrupt_or_unavailable"),
+            "{case}: {text}"
+        );
+        assert!(
+            text.contains("\"snapshot_inspected\":false"),
+            "{case}: {text}"
+        );
+        assert_eq!(
+            source_tree_snapshot(root.path()).expect("after inspection"),
+            before,
+            "{case}"
+        );
+    }
+    path_std_fs::remove_file(&path).expect("remove fixture journal");
+    let before = source_tree_snapshot(root.path()).expect("before absent inspection");
+    assert!(
+        crate::read_cache_report(&options)
+            .expect("missing-source report")
+            .is_partial()
+    );
+    assert_eq!(
+        source_tree_snapshot(root.path()).expect("after absent inspection"),
+        before
+    );
+}
+
+/// An incompatible typed session envelope fails rather than claiming an empty
+/// successfully inspected session; the source bytes remain untouched.
+#[test]
+fn cache_session_semantic_decode_skew_is_rejected_without_mutation() {
+    let root = tempfile::tempdir().expect("state root");
+    let directory = root.path().join("sessions/cache-session");
+    path_std_fs::create_dir_all(&directory).expect("session directory");
+    let mut payload = Vec::new();
+    ciborium::into_writer(&serde_json::json!({"future_schema":99}), &mut payload)
+        .expect("skew payload");
+    let mut bytes = (payload.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(payload);
+    path_std_fs::write(directory.join("events.cbor"), &bytes).expect("skew fixture");
+    let before = source_tree_snapshot(root.path()).expect("before inspection");
+    assert!(matches!(
+        crate::read_cache_report(&cache_session_options(root.path())),
+        Err(crate::InspectError::SessionStore(
+            tau_core::SessionStoreError::Decode { .. }
+        ))
+    ));
+    assert_eq!(
+        source_tree_snapshot(root.path()).expect("after inspection"),
+        before
+    );
+}
+
+/// Selects a synthetic membership journal without depending on process
+/// configuration.
+fn cache_session_options(root: &std::path::Path) -> crate::CacheOptions {
+    crate::CacheOptions {
+        state_dir: root.into(),
+        scope: crate::CacheScope::Session("cache-session".parse().expect("session")),
+        prompt: None,
+        limits: Default::default(),
+        producer_build: "fixture".into(),
+    }
+}

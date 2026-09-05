@@ -45,6 +45,7 @@ mod ui_prompt;
 mod unload_agent;
 mod watch_activity;
 
+use std::process::ExitCode;
 use std::sync::{Mutex, MutexGuard};
 use std::{fmt, io};
 
@@ -109,6 +110,10 @@ pub(crate) fn random_startup_pun() -> &'static str {
 /// Errors returned by the CLI.
 #[derive(Debug)]
 pub enum CliError {
+    /// Offline cache analysis produced useful output with missing evidence.
+    CachePartial,
+    /// Offline cache invocation or required schema could not be inspected.
+    CacheInvalid,
     Io(io::Error),
     Encode(tau_proto::EncodeError),
     Harness(tau_harness::HarnessError),
@@ -133,6 +138,8 @@ pub enum CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CachePartial => f.write_str("cache analysis is partial; see report coverage"),
+            Self::CacheInvalid => f.write_str("cache source unavailable, unsupported, or invalid; use a matching-build inspector and check the selected scope and limits"),
             Self::Io(source) => write!(f, "I/O error: {source}"),
             Self::Encode(source) => write!(f, "encode error: {source}"),
             Self::Harness(source) => write!(f, "harness error: {source}"),
@@ -151,6 +158,16 @@ impl fmt::Display for CliError {
 }
 
 impl CliError {
+    /// Distinguishes partial offline evidence from invalid invocation and
+    /// ordinary failures.
+    fn exit_code(&self) -> ExitCode {
+        match self {
+            Self::CachePartial => ExitCode::from(3),
+            Self::CacheInvalid => ExitCode::from(2),
+            _ => ExitCode::FAILURE,
+        }
+    }
+
     /// Returns whether the top-level CLI may write this failure to stderr.
     fn should_report_to_terminal(&self) -> bool {
         !matches!(
@@ -901,6 +918,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::SessionCommand::List(_) => "session list",
                     cli::SessionCommand::Show { .. } => "session show",
                     cli::SessionCommand::Stats { .. } => "session stats",
+                    cli::SessionCommand::Cache(_) => "session cache",
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
@@ -909,6 +927,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::AgentCommand::List(_) => "agent list",
                     cli::AgentCommand::Unload(_) => "agent unload",
                     cli::AgentCommand::Trace(_) => "agent trace",
+                    cli::AgentCommand::Cache(_) => "agent cache",
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
@@ -1105,6 +1124,21 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 reject_harness_config_overrides(&harness_config_overrides, "agent unload")?;
                 unload_agent::run(&args)
             }
+            DispatchCommand::Other(cli::Command::Agent {
+                command: cli::AgentCommand::Cache(args),
+            }) => run_cache_report(
+                args.options,
+                tau_session_inspect::CacheScope::Agent {
+                    agent_id: args.agent_id,
+                    include_descendants: args.include_descendants,
+                },
+            ),
+            DispatchCommand::Other(cli::Command::Session {
+                command: cli::SessionCommand::Cache(args),
+            }) => run_cache_report(
+                args.options,
+                tau_session_inspect::CacheScope::Session(args.session_id),
+            ),
             DispatchCommand::Other(cli::Command::Agent {
                 command: cli::AgentCommand::Trace(args),
             }) => {
@@ -1317,8 +1351,38 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             if error.should_report_to_terminal() {
                 eprintln!("error: {error}");
             }
-            ExitCode::FAILURE
+            error.exit_code()
         }
+    }
+}
+
+/// Runs the dependency-light cache inspector without connecting to a daemon.
+fn run_cache_report(
+    args: cli::CacheArgs,
+    scope: tau_session_inspect::CacheScope,
+) -> Result<(), CliError> {
+    let options = tau_session_inspect::CacheOptions {
+        state_dir: args.state_dir,
+        scope,
+        prompt: args.prompt,
+        limits: tau_session_inspect::CacheScanLimits {
+            compressed_file_bytes: args.max_compressed_bytes,
+            decompressed_file_bytes: args.max_decompressed_bytes,
+            total_decompressed_bytes: args.max_total_bytes,
+            working_memory_bytes: args.max_memory_bytes,
+        },
+        producer_build: build_revision(),
+    };
+    let report =
+        tau_session_inspect::read_cache_report(&options).map_err(|_| CliError::CacheInvalid)?;
+    line_output::stream_stdout(|writer| match args.format {
+        cli::CacheFormat::Summary => report.write_summary(writer),
+        cli::CacheFormat::Jsonl => report.write_jsonl(writer),
+    })?;
+    if report.is_partial() {
+        Err(CliError::CachePartial)
+    } else {
+        Ok(())
     }
 }
 

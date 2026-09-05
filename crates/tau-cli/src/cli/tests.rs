@@ -1,6 +1,52 @@
+use std::process::ExitCode;
+
 use clap::{CommandFactory, Parser};
 
 use super::{Cli, Command, DevCommand};
+
+/// Offline cache scopes parse typed identities and expose no placeholder future
+/// views.
+#[test]
+fn offline_cache_scopes_parse_without_future_placeholder_options() {
+    assert!(
+        Cli::try_parse_from([
+            "tau",
+            "agent",
+            "cache",
+            "agent",
+            "--include-descendants",
+            "--format",
+            "jsonl",
+            "--prompt",
+            "prompt"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "tau",
+            "session",
+            "cache",
+            "session",
+            "--state-dir",
+            "/tmp/state"
+        ])
+        .is_ok()
+    );
+    assert!(Cli::try_parse_from(["tau", "agent", "cache", "bad.id"]).is_err());
+    assert!(
+        Cli::try_parse_from(["tau", "agent", "cache", "agent", "--index", "/tmp/index"]).is_err()
+    );
+    assert!(Cli::try_parse_from(["tau", "agent", "cache", "agent", "--view", "geometry"]).is_err());
+}
+
+/// Useful partial evidence and incompatible sources retain distinct process
+/// exit codes.
+#[test]
+fn cache_evidence_exit_codes_are_not_generic_failures() {
+    assert_eq!(crate::CliError::CachePartial.exit_code(), ExitCode::from(3));
+    assert_eq!(crate::CliError::CacheInvalid.exit_code(), ExitCode::from(2));
+}
 
 /// Agent-list and headless-send parse their session argument into the shared
 /// durable identity before command dispatch, rejecting the same invalid

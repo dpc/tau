@@ -4,6 +4,7 @@
 //! dependency on the harness daemon, keeping inspection dependency-light.
 
 mod agent_trace;
+mod cache;
 mod lossless_json;
 mod session_stats;
 
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 pub use agent_trace::*;
+pub use cache::*;
 pub use session_stats::*;
 use tau_core::{AgentEntry, AgentStoreError, SessionStore, SessionStoreError};
 use tau_proto::{CborValue, ContentPart, ContextItem, ToolCallItem, ToolResultStatus};

@@ -6317,6 +6317,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ciborium",
+ "libc",
  "opentelemetry-proto",
  "serde",
  "serde_json",
@@ -6325,6 +6326,7 @@ dependencies = [
  "tau-core",
  "tau-proto",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]

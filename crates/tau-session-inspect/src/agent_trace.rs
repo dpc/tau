@@ -155,7 +155,7 @@ pub(crate) fn prepare_agent_trace_for_test(
     )
 }
 
-fn discover_agents(
+pub(crate) fn discover_agents(
     agents_dir: &Path,
     root_agent_id: &AgentId,
     descendants: DescendantSelection,

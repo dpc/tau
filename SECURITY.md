@@ -1261,6 +1261,15 @@ usage accounting, and the no-write behavior of offline inspection.
 
 ## Offline agent trace export
 
+`tau agent cache` and `tau session cache` perform offline inspection only. Their
+content-free reports omit bodies, provider IDs, endpoint/account/cache-key values,
+and source paths, but retain local navigation IDs and workload accounting. They
+write no state or indexes, never contact providers, and do not enable captures.
+Legacy private capture files provide only partial inventory evidence, not an
+exhaustive attempt ledger or exact terminal joins. See
+[`docs/agent-cache.md`](docs/agent-cache.md) for the initial coverage and
+conservative resource-admission limits.
+
 `tau agent trace` can export unredacted durable journals. Native, OTLP, and
 compact output can contain full
 prompts, reasoning, images, tool arguments and results, messages, model

@@ -521,3 +521,8 @@ and accounting counters until that agent's rows are emitted. It drops prompt,
 tool, response, error, model-parameter, endpoint, rate, and cumulative-token
 payloads while streaming the journal. Pathological identifier cardinality or
 length can still exhaust memory.
+# Cache-specific evidence
+
+For content-free canonical cache accounting and bounded private capture coverage,
+see [Offline cache evidence](agent-cache.md). The initial `tau agent/session cache`
+commands do not reconstruct chains or make residency claims.

@@ -271,6 +271,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
+    /// Inspect durable cache accounting and private capture coverage offline.
+    Cache(SessionCacheArgs),
     /// List currently running sessions.
     List(SessionListArgs),
 
@@ -326,6 +328,8 @@ fn parse_canonical_directory(value: &str) -> Result<PathBuf, String> {
 
 #[derive(Subcommand)]
 pub enum AgentCommand {
+    /// Inspect durable cache accounting and private capture coverage offline.
+    Cache(AgentCacheArgs),
     /// List agents known to a running session.
     List(AgentListArgs),
     /// Unload one idle saved agent without deleting its transcript or session
@@ -338,6 +342,65 @@ pub enum AgentCommand {
     /// Project a validated durable agent snapshot (defaults to compact TOON
     /// lite).
     Trace(AgentTraceArgs),
+}
+
+/// Offline cache report options shared by agent and session scopes.
+#[derive(Args, Clone)]
+pub struct CacheArgs {
+    /// Emit a compact summary or internal version-zero JSON Lines.
+    #[arg(long, value_enum, default_value_t)]
+    pub format: CacheFormat,
+    /// Restrict canonical responses to this exact local prompt.
+    #[arg(long)]
+    pub prompt: Option<tau_proto::AgentPromptId>,
+    /// Existing Tau state root; inspection never creates it.
+    #[arg(long, default_value_os_t = tau_session_inspect::default_state_dir())]
+    pub state_dir: PathBuf,
+    /// Inclusive compressed byte limit per capture.
+    #[arg(long, default_value_t = 16 * 1024 * 1024)]
+    pub max_compressed_bytes: u64,
+    /// Inclusive decompressed byte limit per capture.
+    #[arg(long, default_value_t = 64 * 1024 * 1024)]
+    pub max_decompressed_bytes: u64,
+    /// Inclusive cumulative decompressed capture bytes.
+    #[arg(long, default_value_t = 1024 * 1024 * 1024)]
+    pub max_total_bytes: u64,
+    /// Capture parser and report working-memory budget in bytes.
+    #[arg(long, default_value_t = 512 * 1024 * 1024)]
+    pub max_memory_bytes: u64,
+}
+
+/// Available first-delivery content-free cache report encodings.
+#[derive(Clone, Copy, Default, ValueEnum)]
+pub enum CacheFormat {
+    /// Counts and explicit evidence gaps.
+    #[default]
+    Summary,
+    /// Canonical per-response facts, recorded costs, and coverage.
+    Jsonl,
+}
+
+/// Offline cache inspection rooted at one durable agent.
+#[derive(Args, Clone)]
+pub struct AgentCacheArgs {
+    /// Existing durable agent identity.
+    pub agent_id: tau_proto::AgentId,
+    /// Include authenticated creator descendants recursively.
+    #[arg(long)]
+    pub include_descendants: bool,
+    /// Shared read-only report controls.
+    #[command(flatten)]
+    pub options: CacheArgs,
+}
+
+/// Offline cache inspection of durable session membership.
+#[derive(Args, Clone)]
+pub struct SessionCacheArgs {
+    /// Existing durable session identity.
+    pub session_id: tau_proto::SessionId,
+    /// Shared read-only report controls.
+    #[command(flatten)]
+    pub options: CacheArgs,
 }
 
 /// Options for `tau agent unload`.
