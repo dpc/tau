@@ -6,7 +6,7 @@ use crate::completion::{
 };
 
 /// Ensures the built-in `./` rule reads the injected working directory and
-/// keeps its local prefix in an accepted file candidate.
+/// keeps its local prefix in both preview and accepted file candidates.
 #[test]
 fn dotslash_token_triggers_filesystem_candidates() {
     let cwd = tempfile::tempdir().expect("tempdir");
@@ -27,15 +27,14 @@ fn dotslash_token_triggers_filesystem_candidates() {
     assert_eq!(candidates[0].replacement, "./tau-cli-term-dotslash.txt");
 }
 
+/// Ensures a home completion previews the typed tilde form, then expands only
+/// its accepted token while preserving cursor position and quoted prompt text.
 #[test]
-fn home_relative_token_reads_injected_home_and_preserves_tilde_replacement() {
-    // `~/...` completion must read entries from the user's home
-    // directory, but accepting a candidate should keep the prompt
-    // home-relative instead of inserting an absolute path.
+fn home_relative_token_previews_tilde_and_accepts_absolute_home_path() {
     let home = tempfile::tempdir().expect("tempdir");
     fs::write(home.path().join("alpha.txt"), "").expect("write alpha");
     fs::write(home.path().join("beta.txt"), "").expect("write beta");
-    let buffer = "open ~/a now";
+    let buffer = r#"open ~/a and "~/literal""#;
     let cursor = "open ~/a".len();
 
     let cands = build_candidates_with_home(
@@ -48,7 +47,70 @@ fn home_relative_token_reads_injected_home_and_preserves_tilde_replacement() {
 
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].label, "~/alpha.txt");
-    assert_eq!(cands[0].replacement, "open ~/alpha.txt now");
+    assert_eq!(cands[0].replacement, r#"open ~/alpha.txt and "~/literal""#);
+    assert_eq!(cands[0].cursor, "open ~/alpha.txt".len());
+    let acceptance = cands[0].acceptance.as_ref().expect("home acceptance");
+    assert_eq!(
+        acceptance.replacement,
+        format!(
+            r#"open {} and "~/literal""#,
+            home.path().join("alpha.txt").display()
+        )
+    );
+    assert_eq!(
+        acceptance.cursor,
+        "open ".len() + home.path().join("alpha.txt").to_string_lossy().len()
+    );
+}
+
+/// Ensures a missing HOME retains the existing behavior: no `~/` candidate
+/// exists, so prompt text cannot be expanded by completion.
+#[test]
+fn home_relative_token_without_home_has_no_completion() {
+    let buffer = "open ~/a";
+    assert!(
+        build_candidates_with_home(
+            &[CommandCompletion::new(":whatever", "")],
+            &CompletionData::new(),
+            buffer,
+            buffer.len(),
+            None,
+        )
+        .is_empty()
+    );
+}
+
+/// Ensures accepted candidates use the same lossy path conversion as existing
+/// filesystem completion when the configured HOME path is not UTF-8.
+#[cfg(unix)]
+#[test]
+fn home_relative_token_with_non_utf8_home_uses_lossy_absolute_acceptance() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let parent = tempfile::tempdir().expect("tempdir");
+    let home = parent.path().join(OsString::from_vec(vec![b'h', 0x80]));
+    fs::create_dir(&home).expect("create non-UTF-8 home");
+    fs::write(home.join("alpha.txt"), "").expect("write alpha");
+    let buffer = "open ~/a";
+    let candidates = build_candidates_with_home(
+        &[CommandCompletion::new(":whatever", "")],
+        &CompletionData::new(),
+        buffer,
+        buffer.len(),
+        Some(&home),
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].replacement, "open ~/alpha.txt");
+    assert_eq!(
+        candidates[0]
+            .acceptance
+            .as_ref()
+            .expect("home acceptance")
+            .replacement,
+        format!("open {}", home.join("alpha.txt").to_string_lossy())
+    );
 }
 
 #[test]

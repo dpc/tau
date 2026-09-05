@@ -49,7 +49,8 @@ Typing any of the following prefixes at the prompt triggers inline path completi
 | `../` | Directory prefix matching in the parent directory. |
 | `:` | Intrinsic command/action completion when it is the first non-whitespace character; `::text` submits literal `:text`. |
 | `/` | Filesystem path completion for leading absolute paths and path tokens later in a prompt. |
-| `~`, `~/` | Directory prefix matching in the home directory. |
+| `~` | Directory prefix matching in the home directory; accepting it retains the tilde form. |
+| `~/` | Directory prefix matching in the home directory. Previewing or cycling keeps `~/...`; explicit acceptance replaces only the completed token with the full `$HOME` path. |
 
 `@...` is intentionally not a file completion trigger; it remains reserved for
 agent mention completion.

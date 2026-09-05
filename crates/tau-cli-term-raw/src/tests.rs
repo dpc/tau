@@ -3584,6 +3584,7 @@ fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
                 description: "candidate".to_owned(),
                 replacement: "replacement".to_owned(),
                 cursor: "replacement".len(),
+                acceptance: None,
             }],
             selected: None,
             original_buffer: st.editor.buffer.clone(),
@@ -6839,12 +6840,14 @@ fn completion_keys_take_precedence_over_bindings() {
                     description: "switch model".to_owned(),
                     replacement: ":model".to_owned(),
                     cursor: ":model".len(),
+                    acceptance: None,
                 },
                 Candidate {
                     label: ":quit".to_owned(),
                     description: "exit".to_owned(),
                     replacement: ":quit".to_owned(),
                     cursor: ":quit".len(),
+                    acceptance: None,
                 },
             ]
         } else {
@@ -6908,6 +6911,7 @@ fn completion_accept_preserves_suffix_and_explicit_cursor() {
                 description: "candidate".to_owned(),
                 replacement: "日本 tail".to_owned(),
                 cursor: "日本".len(),
+                acceptance: None,
             }],
             selected: None,
             original_buffer: st.editor.buffer.clone(),
@@ -6942,20 +6946,95 @@ fn completion_accept_preserves_suffix_and_explicit_cursor() {
     assert_eq!(handle.get_cursor(), "日本".len());
 }
 
-/// Rejects malformed completion cursor metadata before preview or later edits.
+/// Ensures cycling keeps an alternate accepted replacement out of the prompt
+/// until the user explicitly accepts the preview.
+#[test]
+fn completion_accept_replaces_preview_only_after_explicit_acceptance() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    handle.set_buffer("open ~/al suffix".to_owned(), "open ~/al".len());
+    {
+        let mut st = handle.lock();
+        st.editor.completion = Some(CompletionMenu {
+            candidates: vec![Candidate {
+                label: "~/alpha".to_owned(),
+                description: "file".to_owned(),
+                replacement: "open ~/alpha suffix".to_owned(),
+                cursor: "open ~/alpha".len(),
+                acceptance: Some(CompletionAcceptance {
+                    replacement: "open /home/test/alpha suffix".to_owned(),
+                    cursor: "open /home/test/alpha".len(),
+                }),
+            }],
+            selected: None,
+            original_buffer: st.editor.buffer.clone(),
+            original_cursor: st.editor.cursor,
+        });
+    }
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("cycle completion");
+    assert!(matches!(
+        term.get_next_event().expect("preview completion"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "open ~/alpha suffix");
+    assert_eq!(handle.get_cursor(), "open ~/alpha".len());
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("accept completion");
+    assert!(matches!(
+        term.get_next_event().expect("accept completion"),
+        Event::CompletionAccept
+    ));
+    assert_eq!(handle.get_buffer(), "open /home/test/alpha suffix");
+    assert_eq!(handle.get_cursor(), "open /home/test/alpha".len());
+}
+
+/// Rejects malformed preview or acceptance cursor metadata before later edits
+/// can install an invalid candidate.
 #[test]
 fn completion_rejects_invalid_cursor_metadata() {
-    for (replacement, invalid_cursor) in [("e\u{301}", 1), ("é", 99)] {
+    let invalid_candidates = [
+        Candidate {
+            label: "invalid preview boundary".to_owned(),
+            description: "candidate".to_owned(),
+            replacement: "e\u{301}".to_owned(),
+            cursor: 1,
+            acceptance: None,
+        },
+        Candidate {
+            label: "invalid preview bounds".to_owned(),
+            description: "candidate".to_owned(),
+            replacement: "é".to_owned(),
+            cursor: 99,
+            acceptance: None,
+        },
+        Candidate {
+            label: "invalid acceptance".to_owned(),
+            description: "candidate".to_owned(),
+            replacement: "valid".to_owned(),
+            cursor: "valid".len(),
+            acceptance: Some(CompletionAcceptance {
+                replacement: "é".to_owned(),
+                cursor: 1,
+            }),
+        },
+    ];
+    for candidate in invalid_candidates {
         let buf = SharedBuffer::new();
         let (mut term, handle, input_tx) =
             Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
         term.set_completion_source(Some(Box::new(move |_: &str, _: usize| {
-            vec![Candidate {
-                label: "invalid".to_owned(),
-                description: "candidate".to_owned(),
-                replacement: replacement.to_owned(),
-                cursor: invalid_cursor,
-            }]
+            vec![candidate.clone()]
         })));
 
         input_tx
@@ -6999,12 +7078,14 @@ fn accepting_completion_refreshes_next_candidates_immediately() {
                 description: "directory".to_owned(),
                 replacement: "./crates/".to_owned(),
                 cursor: "./crates/".len(),
+                acceptance: None,
             }],
             "./crates/" => vec![Candidate {
                 label: "./crates/tau-cli-term-raw/".to_owned(),
                 description: "directory".to_owned(),
                 replacement: "./crates/tau-cli-term-raw/".to_owned(),
                 cursor: "./crates/tau-cli-term-raw/".len(),
+                acceptance: None,
             }],
             _ => Vec::new(),
         },

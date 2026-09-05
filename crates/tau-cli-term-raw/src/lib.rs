@@ -200,8 +200,19 @@ pub struct Candidate {
     pub label: String,
     /// Description shown to the right of the label.
     pub description: String,
-    /// Buffer contents to install when this candidate is selected
-    /// (preview) or accepted.
+    /// Buffer contents to install when this candidate is selected for preview.
+    pub replacement: String,
+    /// UTF-8 byte offset at which to place the prompt cursor in `replacement`.
+    pub cursor: usize,
+    /// Optional buffer replacement installed only when the user accepts this
+    /// candidate instead of merely previewing it.
+    pub acceptance: Option<CompletionAcceptance>,
+}
+
+/// A candidate's whole-buffer replacement and cursor position at acceptance.
+#[derive(Clone, Debug)]
+pub struct CompletionAcceptance {
+    /// Buffer contents to install when the user accepts the candidate.
     pub replacement: String,
     /// UTF-8 byte offset at which to place the prompt cursor in `replacement`.
     pub cursor: usize,
@@ -218,11 +229,13 @@ pub trait CompletionSource: Send + Sync {
     /// `cursor` is a UTF-8 byte offset into `buffer`, clamped to a grapheme
     /// boundary by the prompt before this hook is called. The hook runs
     /// synchronously on the input-event path, so implementations should avoid
-    /// blocking work. Accepting or previewing a returned candidate replaces the
-    /// entire prompt buffer with [`Candidate::replacement`] and places the
-    /// cursor at [`Candidate::cursor`]. Sources must provide a UTF-8 byte
-    /// offset on an extended-grapheme boundary no larger than the
-    /// replacement length; malformed candidates are omitted.
+    /// blocking work. Previewing a returned candidate replaces the entire
+    /// prompt buffer with [`Candidate::replacement`] and places the cursor
+    /// at [`Candidate::cursor`]. Accepting it uses
+    /// [`Candidate::acceptance`] when present, otherwise it retains the
+    /// preview. Sources must provide UTF-8 byte offsets on
+    /// extended-grapheme boundaries no larger than their replacement
+    /// lengths; malformed candidates are omitted.
     fn candidates(&self, buffer: &str, cursor: usize) -> Vec<Candidate>;
 }
 
@@ -739,19 +752,22 @@ impl SharedState {
         true
     }
 
-    /// Accepts the currently previewed candidate: closes the menu,
-    /// leaves the previewed buffer in place. Returns `true` if a
-    /// candidate was accepted (i.e. the menu had a selection).
+    /// Accepts the currently previewed candidate and closes the menu. An
+    /// acceptance-specific replacement supersedes the preview when present.
+    /// Returns `true` if a candidate was accepted (i.e. the menu had a
+    /// selection).
     fn accept_completion(&mut self) -> bool {
-        let Some(menu) = self.editor.completion.as_ref() else {
+        let Some(menu) = self.editor.completion.take() else {
             return false;
         };
-        if menu.selected.is_none() {
+        let Some(selected) = menu.selected else {
+            self.editor.completion = Some(menu);
             return false;
+        };
+        if let Some(acceptance) = &menu.candidates[selected].acceptance {
+            self.editor.buffer.clone_from(&acceptance.replacement);
+            self.write_cursor(acceptance.cursor);
         }
-        // Buffer already matches the previewed replacement; just
-        // close the menu.
-        self.editor.completion = None;
         true
     }
 
@@ -998,7 +1014,7 @@ pub enum Event {
     /// depends on either (typically the menu and the prompt itself).
     BufferChanged,
     /// The user pressed Ctrl-Enter with a candidate previewed in the
-    /// menu. The buffer is now the candidate's replacement and
+    /// menu. The buffer is now the candidate's accepted replacement and
     /// completion has been re-evaluated for that buffer. The caller
     /// should re-render the menu area but typically *should not*
     /// submit — a second Ctrl-Enter is expected to confirm.
@@ -2813,6 +2829,13 @@ impl Term {
             .filter(|candidate| {
                 candidate.cursor
                     == clamp_cursor_to_grapheme_boundary(&candidate.replacement, candidate.cursor)
+                    && candidate.acceptance.as_ref().is_none_or(|acceptance| {
+                        acceptance.cursor
+                            == clamp_cursor_to_grapheme_boundary(
+                                &acceptance.replacement,
+                                acceptance.cursor,
+                            )
+                    })
             })
             .collect::<Vec<_>>();
         let mut st = self.handle.lock();
@@ -3354,10 +3377,8 @@ impl Term {
     }
 
     fn submit_or_accept_completion(&self) -> Event {
-        // If a candidate is previewed, accept it but stay on the
-        // line — the buffer already reflects the replacement (cycling
-        // previewed it), so we just close the menu and surface a
-        // distinct event.
+        // If a candidate is previewed, accept it but stay on the line.
+        // Acceptance can replace preview text, so surface a distinct event.
         if self.accept_completion_event().is_some() {
             return Event::CompletionAccept;
         }

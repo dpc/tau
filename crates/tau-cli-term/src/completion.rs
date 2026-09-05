@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::{collections as path_std_collections, fmt};
 
-use tau_cli_term_raw::{Candidate, CompletionView, Span, StyledBlock, StyledText};
+use tau_cli_term_raw::{
+    Candidate, CompletionAcceptance, CompletionView, Span, StyledBlock, StyledText,
+};
 use tau_term_screen::{display_width, truncate_to_width};
 use tau_themes::Theme;
 
@@ -684,6 +686,7 @@ fn build_cmd_candidates(
             description: cmd.description.clone(),
             replacement: cmd.name.to_string(),
             cursor: cmd.name.as_str().len(),
+            acceptance: None,
         })
         .collect()
 }
@@ -801,6 +804,7 @@ fn build_agent_mention_candidates(
                     description: item.description,
                     replacement: String::new(),
                     cursor: 0,
+                    acceptance: None,
                 },
                 token.before,
                 &accepted,
@@ -886,6 +890,7 @@ fn build_filesystem_candidates_with_home(
                                 description: "git file".to_owned(),
                                 replacement: String::new(),
                                 cursor: 0,
+                                acceptance: None,
                             },
                             path_token.before,
                             &display,
@@ -922,12 +927,20 @@ fn build_filesystem_candidates_with_home(
         if is_dir && !replacement.ends_with('/') {
             replacement.push('/');
         }
+        let acceptance = home_completion_acceptance(
+            path_token,
+            home_dir,
+            &replacement,
+            path_token.before,
+            path_token.after,
+        );
         candidates.push(replace_candidate(
             Candidate {
                 label: replacement.clone(),
                 description: if is_dir { "directory" } else { "file" }.to_owned(),
                 replacement: String::new(),
                 cursor: 0,
+                acceptance,
             },
             path_token.before,
             &replacement,
@@ -989,6 +1002,7 @@ fn build_arg_candidates(
                     description: item.description,
                     replacement: String::new(),
                     cursor: 0,
+                    acceptance: None,
                 },
                 &replacement_prefix,
                 &accepted,
@@ -996,6 +1010,28 @@ fn build_arg_candidates(
             )
         })
         .collect()
+}
+
+/// Builds the absolute prompt replacement used only after accepting a `~/`
+/// filesystem candidate.
+fn home_completion_acceptance(
+    path_token: &PathToken<'_>,
+    home_dir: Option<&Path>,
+    display_replacement: &str,
+    before: &str,
+    after: &str,
+) -> Option<CompletionAcceptance> {
+    path_token.prefix.strip_prefix("~/")?;
+    let home_dir = home_dir?;
+    let completed = display_replacement.strip_prefix("~/")?;
+    let mut absolute = home_dir.join(completed).to_string_lossy().into_owned();
+    if display_replacement.ends_with('/') && !absolute.ends_with('/') {
+        absolute.push('/');
+    }
+    Some(CompletionAcceptance {
+        cursor: before.len() + absolute.len(),
+        replacement: format!("{before}{absolute}{after}"),
+    })
 }
 
 const COMPLETION_MENU_MAX_HEIGHT_PERCENT: usize = 30;

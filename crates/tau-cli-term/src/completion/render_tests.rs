@@ -8,6 +8,7 @@ fn view(count: usize, selected: Option<usize>) -> CompletionView {
                 description: "description".to_owned(),
                 replacement: format!("item-{i}"),
                 cursor: format!("item-{i}").len(),
+                acceptance: None,
             })
             .collect(),
         selected,
@@ -52,6 +53,7 @@ fn long_candidates_are_truncated_to_one_terminal_row() {
             description: "directory".to_owned(),
             replacement: String::new(),
             cursor: 0,
+            acceptance: None,
         }],
         selected: None,
     };
@@ -71,6 +73,7 @@ fn emoji_candidates_are_truncated_by_grapheme_width() {
             description: "👩‍💻x".to_owned(),
             replacement: String::new(),
             cursor: 0,
+            acceptance: None,
         }],
         selected: None,
     };
@@ -90,6 +93,7 @@ fn very_narrow_completion_menu_does_not_wrap() {
             description: "description".to_owned(),
             replacement: String::new(),
             cursor: 0,
+            acceptance: None,
         }],
         selected: None,
     };
