@@ -903,7 +903,12 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
     assert_eq!(
         h.selected_model_params().effort,
-        tau_proto::ReasoningSelection::default()
+        tau_proto::ReasoningSelection {
+            requested: tau_proto::ReasoningIntent::Intensity(
+                tau_proto::ReasoningIntensity::from_millionths(500_000),
+            ),
+            effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::High,),
+        }
     );
     let conv = &h.agent_runtime.agent_registry.agents[&test_user_agent(&h)];
     assert!(conv.dispatch.pending_prompts.is_empty());
@@ -1787,7 +1792,12 @@ fn provider_model_metadata_drives_selection_state() {
     assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
     assert_eq!(
         h.selected_model_params().effort,
-        tau_proto::ReasoningSelection::default()
+        tau_proto::ReasoningSelection {
+            requested: tau_proto::ReasoningIntent::Intensity(
+                tau_proto::ReasoningIntensity::from_millionths(500_000),
+            ),
+            effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::High,),
+        }
     );
     assert_eq!(h.selected_model_params().verbosity, Verbosity::Low);
     assert_eq!(
@@ -1847,7 +1857,12 @@ fn provider_model_metadata_drives_selection_state() {
 
     assert_eq!(
         h.selected_model_params().effort,
-        tau_proto::ReasoningSelection::default()
+        tau_proto::ReasoningSelection {
+            requested: tau_proto::ReasoningIntent::Intensity(
+                tau_proto::ReasoningIntensity::from_millionths(500_000),
+            ),
+            effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::None,),
+        }
     );
     assert_eq!(h.selected_model_params().verbosity, Verbosity::High);
     assert_eq!(
@@ -2224,11 +2239,11 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
     );
 }
 
-/// Role settings stand on their own: a non-engineer role with no model or
-/// effort uses the first available model and the selected model's default
-/// effort, not engineer's configured model or effort.
+/// A non-engineer role without model or effort uses the first available model,
+/// inherits the built-in agent effort, and does not inherit engineer's
+/// model-specific settings.
 #[test]
-fn role_missing_fields_use_model_defaults() {
+fn role_missing_model_uses_model_defaults_and_effort_inherits_agent_default() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -2311,7 +2326,15 @@ fn role_missing_fields_use_model_defaults() {
         est_cache_storage_cost_1m_token_hour_usd: None,
     }]);
     let params = selected_params_for_role(&provider_models, &roles, "plain", &selected);
-    assert_eq!(params.effort, tau_proto::ReasoningSelection::default());
+    assert_eq!(
+        params.effort,
+        tau_proto::ReasoningSelection {
+            requested: tau_proto::ReasoningIntent::Intensity(
+                tau_proto::ReasoningIntensity::from_millionths(500_000),
+            ),
+            effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::Low),
+        }
+    );
 }
 
 /// Roles without an explicit verbosity default to low when the provider

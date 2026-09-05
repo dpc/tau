@@ -5353,8 +5353,9 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
     );
 }
 
-/// Ensures the embedded built-in role catalog contains only engineer roles and
-/// gives each role the capability-gated delegate-role fragment.
+/// Ensures the embedded built-in role catalog contains only engineer roles,
+/// gives each role the capability-gated delegate-role fragment, and resolves
+/// its relative effort presets from the shared default.
 #[test]
 fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
     // The available-role list is shared across roles, but its Handlebars guard
@@ -5383,10 +5384,20 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
     );
     let engineer_junior = &s.roles["engineer-junior"];
     assert_eq!(
-        engineer_junior.effort,
-        Some(tau_proto::NativeReasoningEffort::Low.into())
+        engineer_junior
+            .effort
+            .expect("built-in junior effort")
+            .to_string(),
+        "0.35"
     );
     let engineer = &s.roles["engineer"];
+    assert_eq!(
+        engineer
+            .effort
+            .expect("built-in engineer effort")
+            .to_string(),
+        "0.5"
+    );
     let delegate_roles = engineer
         .prompt_fragments
         .iter()
@@ -5428,9 +5439,63 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
     assert!(!s.roles.contains_key("assistant"));
     let engineer_senior = &s.roles["engineer-senior"];
     assert_eq!(
-        engineer_senior.effort,
-        Some(tau_proto::NativeReasoningEffort::Max.into())
+        engineer_senior
+            .effort
+            .expect("built-in senior effort")
+            .to_string(),
+        "0.65"
     );
+}
+
+/// User role layers override a built-in relative effort preset instead of
+/// being re-adjusted after the higher-precedence value is applied.
+#[test]
+fn harness_user_role_effort_overrides_built_in_relative_preset() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    engineer:
+      roles:
+        engineer-junior:
+          effort: 0.8
+"#,
+    )
+    .expect("write config");
+
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load config");
+    assert_eq!(
+        settings.roles["engineer-junior"]
+            .effort
+            .expect("user override effort")
+            .to_string(),
+        "0.8"
+    );
+}
+
+/// A user agent-wide effort rebases the built-in relative junior and senior
+/// presets while engineer inherits the new shared value.
+#[test]
+fn harness_user_agent_effort_rebases_built_in_relative_presets() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(td.path().join("harness.yaml"), "agents:\n  effort: 0.6\n")
+        .expect("write config");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load config");
+    for (role, effort) in [
+        ("engineer-junior", "0.45"),
+        ("engineer", "0.6"),
+        ("engineer-senior", "0.75"),
+    ] {
+        assert_eq!(
+            settings.roles[role]
+                .effort
+                .expect("rebased built-in effort")
+                .to_string(),
+            effort
+        );
+    }
 }
 
 /// Ensures user-defined role groups can load custom role definitions.

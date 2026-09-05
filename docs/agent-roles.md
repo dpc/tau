@@ -366,6 +366,7 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
 {
   agents: {
     default_role: "engineer",
+    effort: 0.5,
     role_groups: {
       engineer: {
         prompt_fragments: [
@@ -375,13 +376,12 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
           "engineer-junior": {
             order: 10,
             description: "Lower-reasoning engineer",
-            effort: 0.25,
+            effort: "decrease:0.15",
           },
           "engineer": {
             order: 20,
             description: "Balanced coding engineer",
             model: "chatgpt/gpt-5.3-codex",
-            effort: 0.5,
             compaction: { reserve: 25000 },
             tools: ["read", "grep"],
             enable_tool_groups: ["calendar", "email"],
@@ -390,8 +390,8 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
           },
           "engineer-senior": {
             order: 30,
-            description: "Maximum-reasoning engineer",
-            effort: 1.0,
+            description: "Higher-reasoning engineer",
+            effort: "increase:0.15",
           },
           "old-role": {
             enable: false,
@@ -421,7 +421,9 @@ Tau ships built-in `engineer-junior`, `engineer`, and `engineer-senior` roles,
 with `agents.default_role: engineer`. `engineer-junior` uses lower reasoning
 for straightforward engineering work, `engineer` uses balanced
 individual-contributor defaults, and `engineer-senior` is the
-maximum-reasoning engineering variant.
+higher-reasoning engineering variant. Their built-in shared effort is 0.5,
+so junior, engineer, and senior request 0.35, 0.5, and 0.65 respectively;
+higher-precedence `agents.effort` settings rebase the relative presets.
 
 For every role whose effective tool surface includes `agent_start`, Tau's
 built-in global prompt fragment lists the available agent roles for

@@ -40,6 +40,7 @@ tool_policy:
         - shell:lock
 agents:
   default_role: engineer
+  effort: 0.5
   web_tools:
     allowed_domains: null
     search:
@@ -108,11 +109,11 @@ agents:
         engineer-junior:
           order: 10
           description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
-          effort: 0.25
+          effort: decrease:0.15
         engineer:
           order: 20
           description: Capable individual contributor. Good default for most tasks.
         engineer-senior:
           order: 30
-          effort: 1.0
-          description: Slow and expensive individual contributor using maximum reasoning. Use only for the hardest tasks without prior planning, or when specifically requested.
+          effort: increase:0.15
+          description: Slow and expensive individual contributor using higher reasoning. Use only for the hardest tasks without prior planning, or when specifically requested.
