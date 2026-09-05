@@ -302,11 +302,13 @@ untouched startup transcript. An attached UI never grants that authority to
 broadcast activity: pre-boundary transcript rows and reconstructed starts never
 auto-select, and only `SessionReplayComplete` may claim `InitialOverview`.
 
-Cold staging derives an automatic attach candidate from the exhaustive
-intersection of two bounded maps: agents with successful replay completion and
-agents present in the current runtime snapshot. It selects only a unique
-intersection member; zero, overflow, or ambiguity commits explicit Overview.
-The boundary releases both maps.
+Replay-boundary target resolution derives the initial target from two exhaustive
+bounded maps: agents with successful replay completion and agents present in the
+current runtime snapshot. A unique intersection member is selected. When both
+maps are empty, the genuinely fresh session enters the new-agent composer so its
+first prompt creates an agent without an explicit command. A nonempty zero
+intersection, agent- or session-level replay failure, overflow, or ambiguity
+commits explicit Overview instead. The boundary releases both maps.
 
 The socket reader admits decoded deliveries to one FIFO bounded at 1,024 items
 and 64 MiB of encoded frames. Full admission backpressures socket reading and

@@ -1682,11 +1682,11 @@ fn spawn_renderer_thread(
                                     );
                                 }
                                 cold_attach_stager::RendererPresentation::FinishAttach {
-                                    agent_id,
+                                    target,
                                 } => {
                                     renderer.handle_attach_replay_complete_socket_delivery(
                                         &event,
-                                        agent_id.as_deref(),
+                                        target,
                                         recorded_at,
                                         delivery_id,
                                     );

@@ -9,7 +9,7 @@ use tau_cli_term_raw::Term;
 use tau_config::settings as path_tau_config_settings;
 
 use super::finished_response_projection::assistant_text_with_citations;
-use super::selection_intent::SelectionIntent;
+use super::selection_intent::{InitialAttachTarget, SelectionIntent};
 use super::{
     AgentActivity, EventRenderer, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES,
     RoleCompletionDetails, assistant_text_from_message_item, assistant_text_from_output_items,
@@ -2543,7 +2543,7 @@ fn cold_attach_suppresses_routine_snapshots_but_keeps_alert_and_boundary() {
             session_id: "s1".parse().expect("valid session id"),
             error: None,
         }),
-        None,
+        InitialAttachTarget::Overview,
         tau_proto::UnixMicros::new(3),
         RendererDeliveryId::new(3),
     );

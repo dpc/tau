@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use tau_proto::{Event, UnixMicros};
 
 use super::{RENDERER_QUEUE_MAX_BYTES, RENDERER_QUEUE_MAX_ITEMS, RendererDeliveryId};
+use crate::event_renderer::selection_intent::InitialAttachTarget;
 
 #[cfg(test)]
 mod tests;
@@ -62,8 +63,8 @@ pub(super) enum RendererPresentation {
     },
     /// Finish attach-time target resolution at the replay boundary.
     FinishAttach {
-        /// Sole replayable current runtime, or `None` for explicit overview.
-        agent_id: Option<Box<tau_proto::AgentId>>,
+        /// Exhaustively resolved initial input target.
+        target: InitialAttachTarget,
     },
 }
 
@@ -280,14 +281,18 @@ impl ColdAttachStager {
                 snapshotted: HashSet::new(),
             },
             tool_reconciliation: ToolReconciliation::Disabled,
-            attach_selection: AttachSelection::Disabled,
+            attach_selection: AttachSelection::Collecting {
+                successful_replays: HashMap::new(),
+                runtime_agents: HashMap::new(),
+            },
         }
     }
 
     /// Admits one decoded delivery and returns deliveries ready for rendering.
     pub(super) fn admit(&mut self, mut delivery: RendererDelivery) -> Vec<RendererDelivery> {
         self.observe_attach_agent_candidate(delivery.event.as_ref(), delivery.queue_bytes);
-        if !matches!(self.attach_selection, AttachSelection::Disabled)
+        if matches!(self.phase, StagingPhase::Staging)
+            && !matches!(self.attach_selection, AttachSelection::Disabled)
             && matches!(
                 delivery.presentation,
                 RendererPresentation::Ordinary | RendererPresentation::Replay
@@ -304,6 +309,13 @@ impl ColdAttachStager {
             return self.finish_tool_reconstruction(Some(delivery), true);
         }
         let replay_complete = matches!(delivery.event.as_ref(), Event::SessionReplayComplete(_));
+        if matches!(
+            delivery.event.as_ref(),
+            Event::SessionReplayComplete(complete) if complete.error.is_some()
+        ) && matches!(self.attach_selection, AttachSelection::Collecting { .. })
+        {
+            self.attach_selection = AttachSelection::FailedClosed;
+        }
         if !replay_complete {
             delivery = match self.fold_tool_delivery(delivery) {
                 ToolFold::Consumed => return Vec::new(),
@@ -316,7 +328,7 @@ impl ColdAttachStager {
         }
         if replay_complete {
             delivery.presentation = RendererPresentation::FinishAttach {
-                agent_id: self.take_unique_attach_agent().map(Box::new),
+                target: self.take_initial_attach_target(),
             };
             delivery.abandoned_shell_starts = self.finish_shell_reconciliation();
         }
@@ -406,6 +418,15 @@ impl ColdAttachStager {
     /// Records existing replay/runtime facts used only to select an unambiguous
     /// attach target at the session replay boundary.
     fn observe_attach_agent_candidate(&mut self, event: &Event, charge: usize) {
+        if matches!(
+            event,
+            Event::AgentReplayComplete(complete) if complete.error.is_some()
+        ) {
+            if matches!(self.attach_selection, AttachSelection::Collecting { .. }) {
+                self.attach_selection = AttachSelection::FailedClosed;
+            }
+            return;
+        }
         let candidate = match event {
             Event::AgentReplayComplete(complete) if complete.error.is_none() => {
                 Some((true, complete.agent_id.clone()))
@@ -451,22 +472,31 @@ impl ColdAttachStager {
         }
     }
 
-    /// Returns the sole agent proven replayable and present in the current
-    /// runtime, then releases all attach-only candidate metadata.
-    fn take_unique_attach_agent(&mut self) -> Option<tau_proto::AgentId> {
+    /// Resolves fresh creation, one safe existing target, or explicit overview,
+    /// then releases all attach-only candidate metadata.
+    fn take_initial_attach_target(&mut self) -> InitialAttachTarget {
         let state = std::mem::replace(&mut self.attach_selection, AttachSelection::Disabled);
         let AttachSelection::Collecting {
             successful_replays,
             runtime_agents,
         } = state
         else {
-            return None;
+            return InitialAttachTarget::Overview;
         };
+        if successful_replays.is_empty() && runtime_agents.is_empty() {
+            return InitialAttachTarget::FreshSession;
+        }
         let mut candidates = successful_replays
             .into_keys()
             .filter(|agent_id| runtime_agents.contains_key(agent_id));
-        let candidate = candidates.next()?.clone();
-        candidates.next().is_none().then_some(candidate)
+        let Some(candidate) = candidates.next() else {
+            return InitialAttachTarget::Overview;
+        };
+        if candidates.next().is_some() {
+            InitialAttachTarget::Overview
+        } else {
+            InitialAttachTarget::Agent(Box::new(candidate))
+        }
     }
 
     /// Records the current-session, loaded-agent, transcript-call join used to

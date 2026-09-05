@@ -10,7 +10,7 @@ use super::{
     RendererPresentation, RetainedUsage, ShellStartPresentation, ToolReconciliation,
     renderer_event_from_delivery, tool_terminal_id,
 };
-use crate::event_renderer::selection_intent::UiTarget;
+use crate::event_renderer::selection_intent::{InitialAttachTarget, UiTarget};
 
 /// Builds one plain replayable transcript prompt.
 fn historical_prompt(text: &str) -> Event {
@@ -61,10 +61,10 @@ fn render_delivery(
                 delivery.delivery_id,
             );
         }
-        RendererPresentation::FinishAttach { agent_id } => {
+        RendererPresentation::FinishAttach { target } => {
             renderer.handle_attach_replay_complete_socket_delivery(
                 &delivery.event,
-                agent_id.as_deref(),
+                target,
                 delivery.recorded_at,
                 delivery.delivery_id,
             );
@@ -265,30 +265,21 @@ fn selects_unique_successful_runtime_agent_at_replay_boundary() {
     assert_eq!(stager.admit(replay(historical_tool_error(), 1, 1)).len(), 1);
     assert_eq!(
         stager
-            .admit(live(
-                agent_replay_complete("legacy-agent", Some("incompatible journal")),
-                2,
-            ))
+            .admit(live(agent_replay_complete("restored-agent", None), 2))
             .len(),
         1
     );
     assert_eq!(
-        stager
-            .admit(live(agent_replay_complete("restored-agent", None), 3))
-            .len(),
-        1
-    );
-    assert_eq!(
-        stager.admit(live(agent_stats("restored-agent"), 4)).len(),
+        stager.admit(live(agent_stats("restored-agent"), 3)).len(),
         1
     );
 
-    let ready = stager.admit(live(replay_complete(), 5));
+    let ready = stager.admit(live(replay_complete(), 4));
 
     assert!(matches!(
         ready.last().map(|delivery| &delivery.presentation),
         Some(RendererPresentation::FinishAttach {
-            agent_id: Some(agent_id),
+            target: InitialAttachTarget::Agent(agent_id),
         }) if agent_id.as_str() == "restored-agent"
     ));
 }
@@ -325,7 +316,9 @@ fn bounds_and_releases_attach_selection_metadata() {
     let boundary = overflowing.admit(live(replay_complete(), 3));
     assert!(matches!(
         boundary.last().map(|delivery| &delivery.presentation),
-        Some(RendererPresentation::FinishAttach { agent_id: None })
+        Some(RendererPresentation::FinishAttach {
+            target: InitialAttachTarget::Overview
+        })
     ));
 
     let mut disconnected = ColdAttachStager::staging();
@@ -364,12 +357,59 @@ fn leaves_ambiguous_runtime_agents_unselected() {
 
     assert!(matches!(
         ready.last().map(|delivery| &delivery.presentation),
-        Some(RendererPresentation::FinishAttach { agent_id: None })
+        Some(RendererPresentation::FinishAttach {
+            target: InitialAttachTarget::Overview
+        })
+    ));
+}
+
+/// Any failed agent replay proves the session is not safely empty, so the
+/// replay boundary must fail closed to explicit overview.
+#[test]
+fn failed_agent_replay_cannot_enable_implicit_creation() {
+    let mut stager = ColdAttachStager::staging();
+    assert_eq!(
+        stager
+            .admit(live(
+                agent_replay_complete("broken-agent", Some("invalid journal")),
+                1,
+            ))
+            .len(),
+        1
+    );
+
+    let ready = stager.admit(live(replay_complete(), 2));
+
+    assert!(matches!(
+        ready.last().map(|delivery| &delivery.presentation),
+        Some(RendererPresentation::FinishAttach {
+            target: InitialAttachTarget::Overview
+        })
+    ));
+}
+
+/// A session-level replay failure likewise cannot masquerade as an empty
+/// session with permission to create from the first prompt.
+#[test]
+fn failed_session_replay_cannot_enable_implicit_creation() {
+    let mut stager = ColdAttachStager::staging();
+    let failed_boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        session_id: "session-1".parse().expect("valid session id"),
+        error: Some("replay failed".to_owned()),
+    });
+
+    let ready = stager.admit(live(failed_boundary, 1));
+
+    assert!(matches!(
+        ready.last().map(|delivery| &delivery.presentation),
+        Some(RendererPresentation::FinishAttach {
+            target: InitialAttachTarget::Overview
+        })
     ));
 }
 
 /// Live prompt traffic racing catch-up remains display-only until the attach
-/// boundary resolves an empty candidate set to overview.
+/// boundary resolves the genuinely empty session to implicit creation.
 #[test]
 fn live_prompt_before_empty_boundary_cannot_claim_initial_selection() {
     let (_term, handle, _vt) = crate::tests::setup(100, 24);
@@ -405,7 +445,7 @@ fn live_prompt_before_empty_boundary_cannot_claim_initial_selection() {
     }
     let intent = selected.lock().expect("selection intent");
     assert!(intent.selected_agent_id().is_none());
-    assert!(matches!(intent.target(), UiTarget::Overview));
+    assert!(matches!(intent.target(), UiTarget::Creating));
 }
 
 /// Transcript rows for multiple valid restored agents must remain display-only

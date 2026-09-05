@@ -44,6 +44,7 @@ const MAX_AGENT_START_PAIRS: usize = 2;
 /// See `SPEC-tau-e2e-deterministic-provider`.
 const PUBLIC_PTY_DYNAMIC_LANE_SCENARIOS: &[&str] = &[
     "spawned-tau-cold-resume",
+    "implicit-fresh-create",
     "live-dual-pty-attach",
     "prompt-stdin-literal-colon",
     "prompt-stdin-piped-terminal-controls",

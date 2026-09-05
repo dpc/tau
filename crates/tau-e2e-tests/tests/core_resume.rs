@@ -390,13 +390,14 @@ fn late_attached_public_pty_publishes_history_before_boundary()
     Ok(())
 }
 
-/// Production input routing keeps overview Enter local.
+/// A genuinely fresh public UI routes its first prompt through production
+/// create handling without requiring an explicit `:agent new`.
 #[test]
-fn overview_enter_emits_no_prompt_or_create_wire_frame() -> Result<(), Box<dyn std::error::Error>> {
+fn fresh_session_first_prompt_creates_agent() -> Result<(), Box<dyn std::error::Error>> {
     let scenario = ScenarioV2::new(
-        "negative-create-wire",
+        "implicit-fresh-create",
         vec![ScenarioLaneV2 {
-            ctx_id: "negative-create".to_owned(),
+            ctx_id: "implicit-fresh-create".to_owned(),
             actions: vec![ScenarioActionV2::Text {
                 user_text: "<user>first create prompt</user>".to_owned(),
                 response: "first create complete".to_owned(),
@@ -410,29 +411,25 @@ fn overview_enter_emits_no_prompt_or_create_wire_frame() -> Result<(), Box<dyn s
     let mut observer = SideObserver::connect(
         &socket,
         &session_id,
-        fixture.artifact_path("negative-create-observer.json"),
+        fixture.artifact_path("implicit-fresh-create-observer.json"),
         deadline,
     )?;
     wait_extensions(&mut observer, deadline)?;
     wait_for_dummy_role_selection(&mut observer, deadline)?;
-    terminal.wait_for("Overview — select an agent", deadline)?;
-
-    let before = observer.events.len();
-    terminal.send_line("overview retained draft")?;
-    terminal.wait_for("overview retained draft", deadline)?;
-    terminal.send_clear_prompt_key()?;
-    terminal.send_line(":role deterministic-e2e")?;
+    terminal.wait_for(
+        &format!("Write a message to start a new {DUMMY_ROLE} agent"),
+        deadline,
+    )?;
+    terminal.send_line("first create prompt")?;
     observer.recv_until(deadline, |observed| {
-        !observed.replay && matches!(observed.event, Event::HarnessRoleSelected(_))
+        !observed.replay
+            && matches!(
+                &observed.event,
+                Event::AgentPromptSubmitted(submitted)
+                    if submitted.text == "first create prompt"
+            )
     })?;
-    if observer.events[before..].iter().any(|observed| {
-        matches!(
-            observed.event,
-            Event::UiPromptSubmitted(_) | Event::AgentPromptSubmitted(_)
-        )
-    }) {
-        return Err("overview Enter emitted a prompt/create lifecycle".into());
-    }
+    terminal.wait_for("first create complete", deadline)?;
     drop(observer);
     terminal.finish()?;
     fixture.require_boot_gone(session_id.as_str())?;

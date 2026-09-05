@@ -4602,19 +4602,25 @@ impl EventRenderer {
     pub(crate) fn handle_attach_replay_complete_socket_delivery(
         &mut self,
         event: &Event,
-        target_agent_id: Option<&tau_proto::AgentId>,
+        target: selection_intent::InitialAttachTarget,
         recorded_at: UnixMicros,
         delivery_id: RendererDeliveryId,
     ) {
         self.begin_cold_attach_redraw();
-        match target_agent_id {
-            Some(target_agent_id) => {
-                let claimed_epoch = self.claim_initial_selection_intent(target_agent_id);
+        match target {
+            selection_intent::InitialAttachTarget::Agent(target_agent_id) => {
+                let claimed_epoch = self.claim_initial_selection_intent(target_agent_id.as_ref());
                 if let Some(intent_epoch) = claimed_epoch {
-                    self.apply_claimed_agent(target_agent_id.clone(), intent_epoch);
+                    self.apply_claimed_agent(*target_agent_id, intent_epoch);
                 }
             }
-            None => {
+            selection_intent::InitialAttachTarget::FreshSession => {
+                if self.claim_initial_creation_intent() {
+                    self.selection.awaiting_new_agent_selection = true;
+                    self.refresh_prompt_placeholder();
+                }
+            }
+            selection_intent::InitialAttachTarget::Overview => {
                 if self.claim_initial_overview_intent() {
                     self.selection.awaiting_new_agent_selection = true;
                     self.refresh_prompt_placeholder();
@@ -4661,7 +4667,7 @@ impl EventRenderer {
     ) {
         self.handle_attach_replay_complete_socket_delivery(
             event,
-            Some(target_agent_id),
+            selection_intent::InitialAttachTarget::Agent(Box::new(target_agent_id.clone())),
             recorded_at,
             delivery_id,
         );
@@ -4674,6 +4680,15 @@ impl EventRenderer {
             .current_agent_state
             .lock()
             .is_ok_and(|mut intent| intent.claim_initial_overview())
+    }
+
+    /// Claims untouched startup as implicit creation only for a proven-empty
+    /// attach snapshot.
+    fn claim_initial_creation_intent(&self) -> bool {
+        self.selection
+            .current_agent_state
+            .lock()
+            .is_ok_and(|mut intent| intent.claim_initial_creation())
     }
 
     /// Applies a matching create result only when the request still owns this

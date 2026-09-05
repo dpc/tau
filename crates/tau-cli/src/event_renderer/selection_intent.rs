@@ -14,6 +14,19 @@ pub(crate) enum UiTarget {
     Creating,
 }
 
+/// Target resolved from exhaustive attach-time session state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum InitialAttachTarget {
+    /// No replayable or current runtime agent exists, so the first prompt may
+    /// create one without an explicit command.
+    FreshSession,
+    /// Existing state is absent from the unique active intersection or was too
+    /// ambiguous to select safely.
+    Overview,
+    /// Sole replayable agent present in the current runtime.
+    Agent(Box<tau_proto::AgentId>),
+}
+
 /// Semantic no-agent targets accepted by renderer commands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EmptyUiTarget {
@@ -184,6 +197,16 @@ impl SelectionIntent {
         }
         self.epoch = 1;
         self.target = UiTarget::Overview;
+        true
+    }
+
+    /// Claims untouched startup as the implicit fresh-session composer.
+    pub(super) fn claim_initial_creation(&mut self) -> bool {
+        if self.epoch != 0 || !matches!(self.target, UiTarget::InitialOverview) {
+            return false;
+        }
+        self.epoch = 1;
+        self.target = UiTarget::Creating;
         true
     }
 

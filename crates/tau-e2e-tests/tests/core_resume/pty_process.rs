@@ -404,18 +404,13 @@ impl PtyProcess {
         self.wait_for_prompt("editable terminal prompt", deadline, prompt_ready)
     }
 
-    /// Waits for an empty editable prompt that names the exact role used to
-    /// start the first agent after explicitly entering creation mode.
+    /// Waits for the fresh-session composer naming the exact role used to start
+    /// the first agent.
     pub(super) fn wait_ready_to_start_role(
         &mut self,
         role: &str,
         deadline: Instant,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let overview = "Overview — select an agent or use :agent new.";
-        self.wait_for_prompt(&format!("prompt `{overview}`"), deadline, |parser| {
-            prompt_ready_for(parser, overview)
-        })?;
-        self.send_line(":new")?;
         let needle = format!("Write a message to start a new {role} agent...");
         self.wait_for_prompt(&format!("prompt `{needle}`"), deadline, |parser| {
             prompt_ready_for(parser, &needle)

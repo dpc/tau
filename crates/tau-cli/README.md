@@ -66,7 +66,8 @@ suspended agents. Both pickers render work status and current-turn state as
 compact emoji; lifecycle and role remain
 available from `tau agent list` but are omitted from picker presentation. The
 overview is non-interactive: use `:new` or `:agent new` to enter the explicit
-new-agent composer. The underlying picker actions remain configurable, and the
+new-agent composer. A genuinely empty fresh session starts in that composer
+automatically. The underlying picker actions remain configurable, and the
 all-agent action has no default key binding.
 
 `tau agent trace <agent-id>` operates offline and projects from a stable,
