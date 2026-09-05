@@ -2,6 +2,33 @@
 
 use std::time::Duration;
 
+/// Presentation-only cache geometry used when the provider supplied no exact
+/// cache-read ceiling.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CacheEstimateContext {
+    /// Generic same-agent preceding-turn estimate.
+    #[default]
+    Generic,
+    /// Empirical private ChatGPT Responses geometry for `gpt-6-astra`.
+    AstraChatGptResponses,
+}
+
+/// Exact provider ceiling or the presentation context for an uncertain
+/// denominator. This replaces `Option<u64>` without enlarging retained state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CacheReadCeilingProjection {
+    /// Provider supplied an exact cache-read ceiling; the presentation context
+    /// remains available to classify the next adjacent response.
+    Exact {
+        /// Exact provider ceiling.
+        ceiling: u64,
+        /// Route/model context retained independently of exactness.
+        context: CacheEstimateContext,
+    },
+    /// Provider supplied no exact ceiling; use this presentation context.
+    Estimated(CacheEstimateContext),
+}
+
 /// Scalar usage values needed to present one completed provider response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TurnStatsUsageProjection {
@@ -9,8 +36,8 @@ pub(crate) struct TurnStatsUsageProjection {
     pub(crate) prompt_sent_tokens: u64,
     /// Input tokens served from the provider cache.
     pub(crate) prompt_cached_tokens: u64,
-    /// Exact cache-read ceiling, when the provider supplied one.
-    pub(crate) prompt_cache_read_ceiling_tokens: Option<u64>,
+    /// Exact provider ceiling or context for an uncertain UI estimate.
+    pub(crate) cache_read_ceiling: CacheReadCeilingProjection,
     /// Output tokens received for this response.
     pub(crate) response_received_tokens: u64,
 }
@@ -20,7 +47,13 @@ impl From<&tau_proto::ProviderTokenUsage> for TurnStatsUsageProjection {
         Self {
             prompt_sent_tokens: usage.prompt_sent_tokens,
             prompt_cached_tokens: usage.prompt_cached_tokens,
-            prompt_cache_read_ceiling_tokens: usage.prompt_cache_read_ceiling_tokens,
+            cache_read_ceiling: usage.prompt_cache_read_ceiling_tokens.map_or(
+                CacheReadCeilingProjection::Estimated(CacheEstimateContext::Generic),
+                |ceiling| CacheReadCeilingProjection::Exact {
+                    ceiling,
+                    context: CacheEstimateContext::Generic,
+                },
+            ),
             response_received_tokens: usage.response_received_tokens,
         }
     }
@@ -33,13 +66,42 @@ pub(crate) struct PreviousTurnUsageProjection {
     pub(crate) prompt_sent_tokens: u64,
     /// Output tokens received for the preceding response.
     pub(crate) response_received_tokens: u64,
+    /// Route/model context that qualified the preceding estimate.
+    pub(crate) cache_estimate_context: CacheEstimateContext,
 }
 
-impl From<TurnStatsUsageProjection> for PreviousTurnUsageProjection {
-    fn from(usage: TurnStatsUsageProjection) -> Self {
+impl From<(TurnStatsUsageProjection, CacheEstimateContext)> for PreviousTurnUsageProjection {
+    fn from(
+        (usage, cache_estimate_context): (TurnStatsUsageProjection, CacheEstimateContext),
+    ) -> Self {
         Self {
             prompt_sent_tokens: usage.prompt_sent_tokens,
             response_received_tokens: usage.response_received_tokens,
+            cache_estimate_context,
+        }
+    }
+}
+
+impl TurnStatsUsageProjection {
+    /// Retains route/model context independently of whether the provider
+    /// supplied an exact ceiling.
+    pub(crate) fn with_estimate_context(mut self, context: CacheEstimateContext) -> Self {
+        self.cache_read_ceiling = match self.cache_read_ceiling {
+            CacheReadCeilingProjection::Exact { ceiling, .. } => {
+                CacheReadCeilingProjection::Exact { ceiling, context }
+            }
+            CacheReadCeilingProjection::Estimated(_) => {
+                CacheReadCeilingProjection::Estimated(context)
+            }
+        };
+        self
+    }
+
+    /// Returns the uncertain-estimate context retained for a later turn.
+    pub(crate) fn estimate_context(self) -> CacheEstimateContext {
+        match self.cache_read_ceiling {
+            CacheReadCeilingProjection::Exact { context, .. }
+            | CacheReadCeilingProjection::Estimated(context) => context,
         }
     }
 }

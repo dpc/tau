@@ -1935,6 +1935,133 @@ fn turn_stats_retain_only_scalar_projection_with_exact_legacy_rendering() {
     assert!(cold_vt.screen_contains(100, "Δ! 1k/?"));
 }
 
+/// Ensures renderer wiring retains Astra route/model classification across an
+/// exact-ceiling turn so the next adjacent uncertain turn uses the empirical
+/// 128-token estimate.
+#[test]
+fn astra_turn_stats_keep_route_context_across_exact_ceiling() {
+    let backend = || tau_proto::ProviderBackend {
+        kind: tau_proto::ProviderBackendKind::Responses,
+        base_url: "https://chatgpt.com/backend-api".to_owned(),
+        transport: tau_proto::ProviderBackendTransport::Websocket,
+        stale_chain_fallback: false,
+    };
+    let usage = |sent, cached, ceiling, received| tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: sent,
+        prompt_cached_tokens: cached,
+        prompt_cache_read_ceiling_tokens: ceiling,
+        response_received_tokens: received,
+        ..Default::default()
+    };
+
+    let (_term, handle, _vt) = setup(100, 30);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent(agent_id("main"));
+    renderer.apply_setting("show-turn-stats", "true");
+
+    let mut first_prompt = agent_prompt_created("astra-exact", "s1");
+    first_prompt.model = "chatgpt-fedi/gpt-6-astra".parse().expect("Astra model");
+    renderer.handle(&Event::AgentPromptCreated(first_prompt));
+    let mut first = finished_response("astra-exact", Vec::new());
+    first.backend = Some(backend());
+    first.usage = Some(usage(2_031, 1_900, Some(2_000), 269));
+    renderer.handle(&Event::ProviderResponseFinished(first));
+
+    let mut second_prompt = agent_prompt_created("astra-estimated", "s1");
+    second_prompt.model = "chatgpt-fedi/gpt-6-astra".parse().expect("Astra model");
+    renderer.handle(&Event::AgentPromptCreated(second_prompt));
+    let mut second = finished_response("astra-estimated", Vec::new());
+    second.backend = Some(backend());
+    second.usage = Some(usage(2_300, 1_792, None, 0));
+    renderer.handle(&Event::ProviderResponseFinished(second));
+
+    let retained = renderer.retained_turn_stats_blocks_for_test();
+    let line = retained[1]
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert!(line.starts_with("Δ100%? 1.7k/1.7k? ↑508"));
+}
+
+/// Ensures an intervening usage-less ordinary or standalone terminal breaks
+/// Astra predecessor continuity instead of reaching past the gap.
+#[test]
+fn astra_turn_stats_do_not_reach_past_usage_less_terminal() {
+    for standalone in [false, true] {
+        let (_term, handle, _vt) = setup(100, 30);
+        let mut renderer = EventRenderer::new(
+            handle,
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.switch_agent(agent_id("main"));
+        renderer.apply_setting("show-turn-stats", "true");
+
+        let mut first_prompt = agent_prompt_created("astra-before-gap", "s1");
+        first_prompt.model = "chatgpt-fedi/gpt-6-astra".parse().expect("Astra model");
+        renderer.handle(&Event::AgentPromptCreated(first_prompt));
+        let mut first = finished_response("astra-before-gap", Vec::new());
+        first.backend = Some(tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::Responses,
+            base_url: "https://chatgpt.com/backend-api".to_owned(),
+            transport: tau_proto::ProviderBackendTransport::Websocket,
+            stale_chain_fallback: false,
+        });
+        first.usage = Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 2_031,
+            response_received_tokens: 269,
+            ..Default::default()
+        });
+        renderer.handle(&Event::ProviderResponseFinished(first));
+
+        let mut gap_prompt = agent_prompt_created("cache-gap", "s1");
+        gap_prompt.model = "other/model".parse().expect("other model");
+        if standalone {
+            gap_prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+        }
+        renderer.handle(&Event::AgentPromptCreated(gap_prompt));
+        renderer.handle(&Event::ProviderResponseFinished(finished_response(
+            "cache-gap",
+            Vec::new(),
+        )));
+
+        let mut final_prompt = agent_prompt_created("astra-after-gap", "s1");
+        final_prompt.model = "chatgpt-fedi/gpt-6-astra".parse().expect("Astra model");
+        renderer.handle(&Event::AgentPromptCreated(final_prompt));
+        let mut final_response = finished_response("astra-after-gap", Vec::new());
+        final_response.backend = Some(tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::Responses,
+            base_url: "https://chatgpt.com/backend-api".to_owned(),
+            transport: tau_proto::ProviderBackendTransport::Websocket,
+            stale_chain_fallback: false,
+        });
+        final_response.usage = Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 2_300,
+            prompt_cached_tokens: 1_792,
+            ..Default::default()
+        });
+        renderer.handle(&Event::ProviderResponseFinished(final_response));
+
+        let retained = renderer.retained_turn_stats_blocks_for_test();
+        let line = retained[1]
+            .content
+            .spans()
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert!(
+            line.starts_with("Δ! 1.7k/? ↑2.3k"),
+            "standalone={standalone}: {line}"
+        );
+    }
+}
+
 /// Foreground-ownership fail-stop must bypass generic stderr reporting because
 /// the process cannot confirm that it owns the terminal.
 #[test]

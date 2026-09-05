@@ -4,6 +4,8 @@ use tau_cli_term::RendererDeliveryId;
 
 use super::super::event_renderer::{ToolTimerNotifier, UiIoStats, unix_time_millis};
 use super::*;
+use crate::tool_render::format_turn_stats_line_with_context;
+use crate::turn_stats_projection::CacheEstimateContext;
 
 /// Live and attach-reconstructed blocks must use the same mode projection when
 /// they move between visible and detached agent transcripts.
@@ -6076,6 +6078,111 @@ fn format_turn_stats_line_estimates_unknown_cache_ceiling() {
     let line = format_turn_stats_line(&usage, Some(&previous_usage), None, None);
 
     assert_eq!(line, "Δ99%? 120.3k/121.3k? ↑0 ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures consecutive private ChatGPT Astra responses use the provisional
+/// one-block-less 128-token input boundary while remaining visibly estimated.
+#[test]
+fn format_turn_stats_line_estimates_astra_cache_boundary() {
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 121_300,
+        prompt_cached_tokens: 119_808,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 120_031,
+        response_received_tokens: 1_300,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line_with_context(
+        &usage,
+        CacheEstimateContext::AstraChatGptResponses,
+        Some(&previous_usage),
+        CacheEstimateContext::AstraChatGptResponses,
+        None,
+        None,
+    );
+
+    assert_eq!(line, "Δ100%? 119.8k/119.8k? ↑1.4k ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures the provisional Astra estimate saturates at zero for a predecessor
+/// smaller than one cache block.
+#[test]
+fn format_turn_stats_line_saturates_small_astra_predecessor() {
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 200,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 127,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line_with_context(
+        &usage,
+        CacheEstimateContext::AstraChatGptResponses,
+        Some(&previous_usage),
+        CacheEstimateContext::AstraChatGptResponses,
+        None,
+        None,
+    );
+
+    assert_eq!(line, "Δ—? 0/0? ↑200 ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures an observed cache read above the provisional Astra boundary raises
+/// the uncertain denominator instead of rendering an impossible percentage.
+#[test]
+fn format_turn_stats_line_bounds_astra_estimate_by_observed_read() {
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 2_000,
+        prompt_cached_tokens: 1_900,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 2_000,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line_with_context(
+        &usage,
+        CacheEstimateContext::AstraChatGptResponses,
+        Some(&previous_usage),
+        CacheEstimateContext::AstraChatGptResponses,
+        None,
+        None,
+    );
+
+    assert_eq!(line, "Δ100%? 1.9k/1.9k? ↑100 ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures a route/model discontinuity does not apply Astra's specialized
+/// boundary to an unrelated preceding response.
+#[test]
+fn format_turn_stats_line_uses_generic_estimate_across_astra_discontinuity() {
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 2_300,
+        prompt_cached_tokens: 1_792,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 2_031,
+        response_received_tokens: 269,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line_with_context(
+        &usage,
+        CacheEstimateContext::AstraChatGptResponses,
+        Some(&previous_usage),
+        CacheEstimateContext::Generic,
+        None,
+        None,
+    );
+
+    assert_eq!(line, "Δ77%? 1.7k/2.3k? ↑0 ↓0 Σ↑0/0 ↓0");
 }
 
 /// Ensures a nonzero reusable prefix with no provider cache read remains a

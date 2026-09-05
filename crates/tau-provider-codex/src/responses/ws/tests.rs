@@ -71,44 +71,10 @@ fn upgrade_error_extracts_allowlisted_request_id_precedence() {
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbortWaker};
 
-/// Every allow-listed ChatGPT model must preserve the exact empirical minimum,
-/// offset, and step boundaries rather than drifting to generic block rounding.
+/// A warm ChatGPT response must not publish the retired synthesized cache
+/// ceiling, because current provider reads can exceed its stale 1024/512 shape.
 #[test]
-fn cache_read_ceiling_uses_shared_provider_geometry() {
-    assert_eq!(WsConn::cache_read_ceiling(0), 0);
-    assert_eq!(WsConn::cache_read_ceiling(1_535), 0);
-    assert_eq!(WsConn::cache_read_ceiling(1_536), 1_536);
-    assert_eq!(WsConn::cache_read_ceiling(2_559), 1_536);
-    assert_eq!(WsConn::cache_read_ceiling(2_560), 2_560);
-}
-
-/// Capability matching must accept only the documented model allow-list and
-/// reject every other cache-geometry precondition.
-#[test]
-fn cache_read_ceiling_capability_is_narrow() {
-    let mut config = test_responses_config();
-    config.base_url = "https://chatgpt.com/backend-api".to_owned();
-    config.mode = ResponsesMode::Standard;
-    for model in CHATGPT_CACHE_READ_GEOMETRY_MODELS {
-        config.model_id = (*model).to_owned();
-        assert!(supports_cache_read_ceiling(&config, false));
-        assert!(!supports_cache_read_ceiling(&config, true));
-    }
-
-    config.mode = ResponsesMode::LiteCompatibility;
-    assert!(!supports_cache_read_ceiling(&config, false));
-    config.mode = ResponsesMode::Standard;
-    config.model_id = "gpt-5.6-sol-latest".to_owned();
-    assert!(!supports_cache_read_ceiling(&config, false));
-    config.model_id = "gpt-5.6-sol".to_owned();
-    config.base_url = "https://chatgpt.com/backend-api/".to_owned();
-    assert!(!supports_cache_read_ceiling(&config, false));
-}
-
-/// A matching live-socket anchor emits the ceiling on an ordinary completion,
-/// while the same warm lineage suppresses it when the response compacts.
-#[test]
-fn warm_anchor_emits_ceiling_except_for_compaction() {
+fn warm_anchor_does_not_synthesize_cache_read_ceiling() {
     for compaction in [false, true] {
         let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
         conn.cached_response_anchor =
@@ -156,7 +122,7 @@ fn warm_anchor_emits_ceiling_except_for_compaction() {
                 .state
                 .usage()
                 .and_then(|usage| usage.prompt_cache_read_ceiling_tokens),
-            (!compaction).then_some(1_536),
+            None,
         );
     }
 }

@@ -709,12 +709,6 @@ impl WsConn {
         let lowering_started = private_trace::started(private_trace);
         let mut envelope =
             build_ws_envelope(config, request, self.cached_response_anchor.as_ref(), None);
-        let eligible_previous_input_tokens = envelope
-            .body
-            .previous_response_id
-            .as_ref()
-            .and(self.cached_response_anchor.as_ref())
-            .and_then(|anchor| anchor.prompt_input_tokens);
         if self.cached_response_anchor.is_none()
             && let Some(baseline) = self.prewarm_baseline.take()
         {
@@ -763,10 +757,6 @@ impl WsConn {
             on_update,
             private_trace,
         )?;
-        if supports_cache_read_ceiling(config, state.compaction_update().is_some()) {
-            state.prompt_cache_read_ceiling_tokens =
-                eligible_previous_input_tokens.map(Self::cache_read_ceiling);
-        }
         let response_input_tokens = state.input_tokens;
         self.cached_response_anchor = state.response_id.clone().and_then(|response_id| {
             if response_mode == ResponseMode::Compact {
@@ -795,18 +785,6 @@ impl WsConn {
             state,
             request_body,
         })
-    }
-
-    /// Applies the provider-local ChatGPT cache reporting geometry.
-    fn cache_read_ceiling(tokens: u64) -> u64 {
-        const MINIMUM: u64 = 1_536;
-        const STEP: u64 = 1_024;
-        const OFFSET: u64 = 512;
-
-        if tokens < MINIMUM {
-            return 0;
-        }
-        OFFSET + ((tokens - OFFSET) / STEP) * STEP
     }
 
     /// Sends one non-generating prewarm envelope with an absolute response
@@ -1096,19 +1074,6 @@ impl WsConn {
     pub(super) fn carry_response_bytes(&mut self, bytes: u64) {
         self.carried_response_bytes = bytes;
     }
-}
-
-/// ChatGPT models with the observed WebSocket cache-read geometry.
-const CHATGPT_CACHE_READ_GEOMETRY_MODELS: &[&str] =
-    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
-
-/// Matches the exact route contract that can establish an exact cache-read
-/// ceiling for a non-compaction response.
-fn supports_cache_read_ceiling(config: &ResponsesConfig, compaction: bool) -> bool {
-    !compaction
-        && config.base_url == "https://chatgpt.com/backend-api"
-        && config.mode == super::ResponsesMode::Standard
-        && CHATGPT_CACHE_READ_GEOMETRY_MODELS.contains(&config.model_id.as_str())
 }
 
 fn prewarm_shape(

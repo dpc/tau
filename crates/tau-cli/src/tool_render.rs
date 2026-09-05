@@ -9,8 +9,8 @@ use std::time::Duration;
 use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 
 use crate::turn_stats_projection::{
-    CumulativeTurnUsageProjection, PreviousTurnUsageProjection, TurnStatsPresentationProjection,
-    TurnStatsUsageProjection,
+    CacheEstimateContext, CacheReadCeilingProjection, CumulativeTurnUsageProjection,
+    PreviousTurnUsageProjection, TurnStatsPresentationProjection, TurnStatsUsageProjection,
 };
 
 #[cfg(test)]
@@ -20,10 +20,33 @@ pub(crate) fn format_turn_stats_line(
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> String {
+    format_turn_stats_line_with_context(
+        usage,
+        CacheEstimateContext::Generic,
+        previous_usage,
+        CacheEstimateContext::Generic,
+        turn_latency,
+        total_latency,
+    )
+}
+
+/// Formats one turn-stat line with explicit cache-estimate contexts for focused
+/// presentation tests.
+#[cfg(test)]
+pub(crate) fn format_turn_stats_line_with_context(
+    usage: &tau_proto::ProviderTokenUsage,
+    cache_estimate_context: CacheEstimateContext,
+    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+    previous_cache_estimate_context: CacheEstimateContext,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
+) -> String {
     turn_stats_parts_from_provider(
         usage,
         &usage.stats.total,
+        cache_estimate_context,
         previous_usage,
+        previous_cache_estimate_context,
         turn_latency,
         total_latency,
     )
@@ -64,7 +87,9 @@ pub(crate) fn render_provider_turn_stats_block_with_cumulative_usage(
         turn_stats_parts_from_provider(
             usage,
             cumulative_usage,
+            CacheEstimateContext::Generic,
             previous_usage,
+            CacheEstimateContext::Generic,
             turn_latency,
             total_latency,
         ),
@@ -248,16 +273,18 @@ fn turn_stats_parts(
 fn turn_stats_parts_from_provider(
     usage: &tau_proto::ProviderTokenUsage,
     cumulative_usage: &tau_proto::TokenUsageCounts,
+    cache_estimate_context: CacheEstimateContext,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+    previous_cache_estimate_context: CacheEstimateContext,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> Vec<TurnStatsPart> {
     turn_stats_parts(
-        TurnStatsUsageProjection::from(usage),
+        TurnStatsUsageProjection::from(usage).with_estimate_context(cache_estimate_context),
         CumulativeTurnUsageProjection::from(*cumulative_usage),
         previous_usage
             .map(TurnStatsUsageProjection::from)
-            .map(Into::into),
+            .map(|usage| (usage, previous_cache_estimate_context).into()),
         turn_latency,
         total_latency,
     )
@@ -298,13 +325,34 @@ fn reusable_prompt_prefix_tokens(
     usage: TurnStatsUsageProjection,
     previous_usage: Option<PreviousTurnUsageProjection>,
 ) -> u64 {
-    previous_usage
-        .map_or(0, |usage| {
-            usage
+    let cache_estimate_context = usage.estimate_context();
+    let astra_continuation = previous_usage.is_some_and(|previous| {
+        cache_estimate_context == CacheEstimateContext::AstraChatGptResponses
+            && previous.cache_estimate_context == CacheEstimateContext::AstraChatGptResponses
+    });
+    let estimated = previous_usage.map_or(0, |previous| {
+        if astra_continuation {
+            // Empirical UI-only estimate from observed Astra usage. Keep this
+            // visibly uncertain until provider diagnostics or controlled probes
+            // establish the exact boundary contract.
+            const ASTRA_CACHE_BLOCK_TOKENS: u64 = 128;
+            previous
                 .prompt_sent_tokens
-                .saturating_add(usage.response_received_tokens)
-        })
-        .min(usage.prompt_sent_tokens)
+                .saturating_sub(ASTRA_CACHE_BLOCK_TOKENS)
+                / ASTRA_CACHE_BLOCK_TOKENS
+                * ASTRA_CACHE_BLOCK_TOKENS
+        } else {
+            previous
+                .prompt_sent_tokens
+                .saturating_add(previous.response_received_tokens)
+        }
+    });
+    let estimated = if astra_continuation {
+        estimated.max(usage.prompt_cached_tokens.min(usage.prompt_sent_tokens))
+    } else {
+        estimated
+    };
+    estimated.min(usage.prompt_sent_tokens)
 }
 
 fn cache_efficiency(usage: TurnStatsUsageProjection, estimated_ceiling: u64) -> CacheEfficiency {
@@ -313,7 +361,7 @@ fn cache_efficiency(usage: TurnStatsUsageProjection, estimated_ceiling: u64) -> 
     if sent < cached {
         return CacheEfficiency::Invalid { cached };
     }
-    let Some(ceiling) = usage.prompt_cache_read_ceiling_tokens else {
+    let CacheReadCeilingProjection::Exact { ceiling, .. } = usage.cache_read_ceiling else {
         if estimated_ceiling < cached {
             return CacheEfficiency::Invalid { cached };
         }

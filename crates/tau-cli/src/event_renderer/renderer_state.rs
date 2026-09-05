@@ -9,6 +9,7 @@
 use std::cell::Cell;
 
 use super::*;
+use crate::turn_stats_projection::PreviousTurnUsageProjection;
 
 /// Terminal renderer and its logically coherent runtime state.
 pub(crate) struct EventRenderer {
@@ -244,6 +245,9 @@ pub(super) struct TranscriptHistoryState {
     pub(super) thinking_history: Vec<ThinkingBlockEntry>,
     /// Completed turn-stat blocks.
     pub(super) turn_stats_history: Vec<TurnStatsBlockEntry>,
+    /// Usage from the immediately preceding provider terminal, or absence when
+    /// a usage-less/standalone terminal broke cache-estimate continuity.
+    pub(super) turn_stats_predecessor: Option<PreviousTurnUsageProjection>,
     /// Completed tool blocks.
     pub(super) tool_history: Vec<ToolBlockEntry>,
     /// Durable message blocks.

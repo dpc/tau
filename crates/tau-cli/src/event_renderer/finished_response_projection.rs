@@ -1,6 +1,7 @@
 //! Stages and atomically publishes selected transcript provider finals.
 
 use super::*;
+use crate::turn_stats_projection::TurnStatsUsageProjection;
 
 /// Expensive, immutable presentation work prepared before a final is published.
 pub(super) struct FinishedResponseProjection {
@@ -100,6 +101,7 @@ impl EventRenderer {
             .get(&finished.agent_prompt_id)
             .is_some_and(|state| state.is_standalone_compaction);
         if is_standalone {
+            self.transcript.history.turn_stats_predecessor = None;
             self.finish_standalone_compaction_prompt(&finished.agent_prompt_id, None, false);
             #[cfg(test)]
             if let Some(hook) = &self.finished_commit_hook {
@@ -138,6 +140,10 @@ impl EventRenderer {
         let turn_latency = prompt_state
             .and_then(|state| state.started_at)
             .map(|started_at| started_at.elapsed());
+        let cache_estimate_context = cache_estimate_context(
+            prompt_state.and_then(|state| state.model.as_ref()),
+            finished,
+        );
         let retain_thinking = self.presentation.show_thinking || !self.presentation.verbose_mode;
         #[cfg(test)]
         let mut reasoning_concat_allocations = 0;
@@ -221,14 +227,10 @@ impl EventRenderer {
         let turn_stats = finished.usage.as_ref().map(|usage| {
             let mut cumulative = self.transcript.status.cumulative_agent_token_usage;
             Self::add_finished_token_usage(&mut cumulative, usage);
-            let previous = self
-                .transcript
-                .history
-                .turn_stats_history
-                .last()
-                .map(|entry| entry.projection.usage.into());
+            let previous = self.transcript.history.turn_stats_predecessor;
             let projection = TurnStatsPresentationProjection {
-                usage: usage.into(),
+                usage: TurnStatsUsageProjection::from(usage)
+                    .with_estimate_context(cache_estimate_context),
                 cumulative_usage: cumulative.into(),
                 previous_usage: previous,
                 turn_latency,
@@ -468,6 +470,7 @@ impl EventRenderer {
         staged: Option<(TurnStatsPresentationProjection, tau_cli_term::StyledBlock)>,
     ) {
         let Some((projection, block)) = staged else {
+            self.transcript.history.turn_stats_predecessor = None;
             return;
         };
         let total = &mut self.transcript.status.cumulative_agent_token_usage;
@@ -481,6 +484,9 @@ impl EventRenderer {
             .received_tokens
             .saturating_add(projection.usage.response_received_tokens);
         let bid = self.resources.handle.print_output("turn-stats", block);
+        let usage = projection.usage;
+        self.transcript.history.turn_stats_predecessor =
+            Some((usage, usage.estimate_context()).into());
         self.transcript
             .history
             .turn_stats_history
@@ -786,6 +792,35 @@ impl EventRenderer {
                 ..ToolCallState::default()
             },
         );
+    }
+}
+
+/// Classifies the narrow route/model combination with an empirical Astra cache
+/// estimate. Missing prompt provenance, stale-chain repair, or any route/model
+/// mismatch retains the generic uncertain estimate.
+fn cache_estimate_context(
+    model: Option<&tau_proto::ModelId>,
+    finished: &tau_proto::ProviderResponseFinished,
+) -> crate::turn_stats_projection::CacheEstimateContext {
+    use tau_proto::{ProviderBackendKind, ProviderBackendTransport};
+
+    use crate::turn_stats_projection::CacheEstimateContext;
+
+    let Some(model) = model else {
+        return CacheEstimateContext::Generic;
+    };
+    let Some(backend) = finished.backend.as_ref() else {
+        return CacheEstimateContext::Generic;
+    };
+    if model.model.as_str() == "gpt-6-astra"
+        && backend.kind == ProviderBackendKind::Responses
+        && backend.base_url == "https://chatgpt.com/backend-api"
+        && backend.transport == ProviderBackendTransport::Websocket
+        && !backend.stale_chain_fallback
+    {
+        CacheEstimateContext::AstraChatGptResponses
+    } else {
+        CacheEstimateContext::Generic
     }
 }
 

@@ -721,6 +721,18 @@ Responses and private ChatGPT routes use their native OpenAI response shape.
 Anthropic/Gemini compatibility routes remain best-effort and expose no native
 cache parsing or object lifecycle.
 
+Private ChatGPT cached-input counts remain provider-reported usage. Tau no
+longer synthesizes an exact cache-read ceiling for Sol, Terra, or Luna because
+the backend's observed cache boundaries no longer match the former fixed
+geometry. When no exact ceiling is available, the CLI marks cache efficiency
+with `?`. For consecutive `gpt-6-astra` turns on the private Responses
+WebSocket route, that uncertain display uses an empirical 128-token,
+one-block-less estimate based only on the preceding input count; it preserves
+the provider counters and falls back to the generic estimate when route/model
+continuity is unavailable. This presentation rule should be reverified when
+the provider exposes usable cache diagnostics or controlled boundary probes
+become available.
+
 DeepSeek Chat Completions routes must explicitly select both
 `compat.stream_options: true` and `compat.cache_usage: deep_seek`. The first
 uses the existing `stream_options.include_usage` request member; the second is

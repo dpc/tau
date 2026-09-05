@@ -1206,6 +1206,8 @@ struct PromptState {
     /// Whether this is a standalone-compaction provider prompt whose semantic
     /// output remains private to the harness.
     is_standalone_compaction: bool,
+    /// Model selected for this prompt, when its start fact reached the CLI.
+    model: Option<tau_proto::ModelId>,
     /// Live agent-response block. `None` until the first provider update
     /// allocates a response/progress block.
     response_block_id: Option<tau_cli_term::BlockId>,
@@ -7479,6 +7481,7 @@ impl EventRenderer {
                 .prompts
                 .entry(prompt.agent_prompt_id.clone())
                 .or_default();
+            state.model = Some(prompt.model.clone());
             if is_standalone_compaction {
                 state.is_standalone_compaction = true;
             }
@@ -7527,6 +7530,7 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_terminated(&mut self, terminated: &tau_proto::AgentPromptTerminated) {
+        self.transcript.history.turn_stats_predecessor = None;
         if self.finish_standalone_compaction_prompt(
             &terminated.agent_prompt_id,
             Some(("stopped", CompactionStatus::Failure)),
