@@ -4272,22 +4272,24 @@ fn agent_activity_clear_resets_active_prompt_ids() {
     assert!(!activity.is_in_progress());
 }
 
-/// Role completion labels retain model controls but omit tool policy fragments,
-/// which add noise without changing the candidate or its role configuration.
+/// Role completion labels retain model and effort but omit unrelated role
+/// metadata, which would crowd the terminal completion row without changing
+/// the selected role.
 #[test]
-fn role_completion_labels_omit_tool_policy() {
+fn role_completion_labels_keep_only_model_and_effort() {
     let details = RoleCompletionDetails::from_description(
-        "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, tools=read_only, enable-tools=web_search",
+        "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, service-tier=fast, inference-compaction=disabled, compactions=eager=160000, tools=read_only, enable-tools=web_search",
     );
 
     assert_eq!(
         details.completion_description(false),
-        "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off"
+        "codex-dpcpw/gpt-5.5 e=xhigh"
     );
 }
 
-/// `:role <name>` completion appends free-form role descriptions after the
-/// parsed model/knob summary instead of parsing that user text as settings.
+/// `:role <name>` completion appends free-form role descriptions after its
+/// compact model and effort summary instead of parsing that user text as
+/// settings.
 #[test]
 fn role_details_append_configured_role_description() {
     let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
@@ -4301,12 +4303,12 @@ fn role_details_append_configured_role_description() {
 
     assert_eq!(
         details.completion_description(false),
-        "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off — Investigate deeply, no rush = thorough"
+        "codex-dpcpw/gpt-5.5 e=xhigh — Investigate deeply, no rush = thorough"
     );
 }
 
-/// Structured role metadata remains authoritative for the non-tool fields
-/// displayed beside each `:role` completion candidate.
+/// Structured role metadata remains authoritative for the model and effort
+/// displayed beside each compact `:role` completion candidate.
 #[test]
 fn role_details_prefer_structured_fields_over_description_text() {
     let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
@@ -4335,14 +4337,15 @@ fn role_details_prefer_structured_fields_over_description_text() {
 
     assert_eq!(
         details.completion_description(false),
-        "provider/model e=0.75→high v=low ts=concise st=fast"
+        "provider/model e=0.75→high"
     );
 }
 
-/// `:role` shows the two independent compaction domains even though it omits
-/// verbose tool-policy details.
+/// `:role` omits both compaction domains along with the other non-selection
+/// metadata, while the detailed `:new` completion retains them and the compact
+/// row retains the model and effort that help select a role.
 #[test]
-fn role_completion_shows_divergent_compaction_policies_without_tool_details() {
+fn role_completion_hides_compaction_policies() {
     let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
         name: "deferred".to_owned(),
         description: String::new(),
@@ -4360,6 +4363,10 @@ fn role_completion_shows_divergent_compaction_policies_without_tool_details() {
 
     assert_eq!(
         details.completion_description(false),
+        "provider/model e=provider_default"
+    );
+    assert_eq!(
+        details.completion_description(true),
         "provider/model e=provider_default v=low ts=off inference-compaction=disabled compactions=eager=160000@outer_turn_finished[done],fallback=provider_default@before_inference[*]"
     );
 }

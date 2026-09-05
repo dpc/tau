@@ -2421,12 +2421,11 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     assert!(vt.screen_contains(90, "replay-output"));
 }
 
-/// Role candidates hide every tool-policy fragment in their display
-/// description, while their matching, insertion text, and subsequent
-/// tool-setting completions remain available for inspecting and editing the
-/// configured policy.
+/// `:role` candidates keep only their model and effort beside the role name,
+/// while `:new` and subsequent role-setting completions retain the metadata
+/// needed to inspect and edit the configured policy.
 #[test]
-fn role_completion_labels_hide_tool_policy_without_hiding_tool_settings() {
+fn role_completion_labels_stay_compact_without_hiding_role_settings() {
     let (_term, handle, _vt) = setup(80, 24);
     let completion_data = tau_cli_term::CompletionData::new();
     let mut renderer = EventRenderer::new(handle, completion_data.clone(), cli_test_theme());
@@ -2469,7 +2468,7 @@ fn role_completion_labels_hide_tool_policy_without_hiding_tool_settings() {
     assert_eq!(role_candidates[0].label, "engineer");
     assert_eq!(
         role_candidates[0].description,
-        "provider/model e=0.75→high v=low ts=concise st=fast — production implementation"
+        "provider/model e=0.75→high — production implementation"
     );
     assert_eq!(role_candidates[0].replacement, ":role engineer");
 
