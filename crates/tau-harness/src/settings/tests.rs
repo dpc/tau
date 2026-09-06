@@ -460,6 +460,23 @@ fn std_zulip_uses_external_executable_without_component_suffix() {
     assert_eq!(zulip.config, serde_json::json!({}));
 }
 
+/// Ensures the disabled standard Slack instance launches the separately
+/// installed executable without retaining the removed Tau component suffix.
+#[test]
+fn std_slack_uses_external_executable_without_component_suffix() {
+    let builtins = builtin_extensions();
+    let slack = builtins
+        .iter()
+        .find(|extension| extension.name == "std-slack")
+        .expect("configured Slack extension");
+
+    assert_eq!(slack.command, ["tau-ext-slack"]);
+    assert!(slack.suffix.is_empty());
+    assert!(!slack.enable);
+    assert_eq!(slack.role.as_deref(), Some("tool"));
+    assert_eq!(slack.config, serde_json::json!({"prefix_agent_id": false}));
+}
+
 /// Ensures invalid per-extension readiness deadlines fail resolution rather
 /// than silently weakening or indefinitely extending startup availability.
 #[test]
@@ -1005,9 +1022,9 @@ fn resolve_extensions_user_suffix_piggybacks_on_current_tau_executable() {
     let mut settings = HarnessSettings::built_in();
     let tool_prefix = tau_proto::ToolNamePrefix::parse("fedi").expect("tool prefix");
     settings.extensions.insert(
-        "fedi-slack".into(),
+        "fedi-xmpp".into(),
         ExtensionEntry {
-            suffix: Some(vec!["component".into(), "ext-slack".into()]),
+            suffix: Some(vec!["component".into(), "ext-xmpp".into()]),
             role: Some("tool".into()),
             tool_prefix: Some(Some(tool_prefix.clone())),
             ..Default::default()
@@ -1017,11 +1034,11 @@ fn resolve_extensions_user_suffix_piggybacks_on_current_tau_executable() {
     let resolved = resolve_extensions(&settings, builtins()).expect("resolve");
     let extension = resolved
         .iter()
-        .find(|extension| extension.name == "fedi-slack")
-        .expect("renamed Slack extension");
+        .find(|extension| extension.name == "fedi-xmpp")
+        .expect("renamed XMPP extension");
 
     assert_eq!(extension.command, current_tau_executable());
-    assert_eq!(extension.args, ["component", "ext-slack"]);
+    assert_eq!(extension.args, ["component", "ext-xmpp"]);
     assert_eq!(extension.role.as_deref(), Some("tool"));
     assert_eq!(extension.tool_prefix.as_ref(), Some(&tool_prefix));
 }

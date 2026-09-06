@@ -1022,10 +1022,13 @@ each issued attempt can consume quota. Cancellation prevents later attempts,
 but the blocking HTTP transport may retain an already issued request until its
 admission-anchored deadline slice ends.
 
-The Slack bridge requires exact configured conversation/kind/thread policy and
-verified live-human admission. Receive permission creates only Tau-issued
-source-bound reply authority; proactive permission is a separate alias-only
-grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and reply-only.
+The disabled-by-default `std-slack` bridge is the separately installed
+`tau-ext-slack` executable, supervised through Tau's normal trusted same-user
+stdio extension route. It requires exact configured conversation/kind/thread
+policy and verified live-human admission. Receive permission creates only
+Tau-issued source-bound reply authority; proactive permission is a separate
+alias-only grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and
+reply-only.
 Slack submits transient message reports through ordinary interception; the
 harness retains each raw publisher claim losslessly for observation and audit.
 The harness publishes an immutable canonical fact only when the top-level claim
@@ -1042,8 +1045,9 @@ Cache eviction, restart, or races may therefore duplicate delivery.
 Slack records an occurrence before identity lookup, local effects, capacity
 admission, and local report write; a later transient failure consumes that
 occurrence until eviction or restart rather than retrying it.
-Use one Slack extension instance for one receiving agent as specified by
-[`ARCH-tau-ext-slack`](crates/tau-ext-slack/specs/ARCH-tau-ext-slack.md).
+Use one Slack extension instance for one receiving agent. The separately
+maintained `tau-ext-slack` project owns the detailed architecture and routing
+contract.
 Re-check record-before-submission ordering, Slack-local cache bounds, and
 disconnect/session route cleanup whenever Slack report submission changes.
 Report flush acknowledges only submission to the local protocol writer, not
@@ -1069,8 +1073,8 @@ names and operator aliases are presentation only. Agent sends reject raw Slack
 mention/control markup; the optional source-mention field can name only the
 verified human already bound to a live reply selector and is frozen with the
 bounded retry body.
-Slack-specific review triggers and failure/replay invariants are recorded in
-[`crates/tau-ext-slack/SECURITY.md`](crates/tau-ext-slack/SECURITY.md).
+The separately maintained `tau-ext-slack` project owns its Slack-specific
+review triggers, failure/replay invariants, operational guidance, and tests.
 
 The disabled-by-default `std-zulip` bridge is the separately installed
 `tau-ext-zulip` executable, supervised through Tau's normal trusted same-user

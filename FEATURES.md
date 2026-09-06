@@ -211,11 +211,12 @@ explicit:
   calendar search and free/busy queries, approved calendar mutations, OAuth
   flows, and audit logs. See the
   [PIM README](crates/tau-ext-pim/README.md).
-- **Slack:** the disabled-by-default Socket Mode bridge accepts allowlisted
-  senders and configured conversations, preserves typed message provenance, and
-  limits replies, proactive sends, and separately authorized exact-message
-  emoji reactions to authorized routes. See the
-  [Slack README](crates/tau-ext-slack/README.md).
+- **Slack:** the separately maintained, disabled-by-default `tau-ext-slack`
+  Socket Mode bridge accepts allowlisted senders and configured conversations,
+  preserves typed message provenance, and limits replies, proactive sends, and
+  separately authorized exact-message emoji reactions to authorized routes.
+  Install the executable separately and make it available through `PATH` before
+  enabling `std-slack`.
 - **Telegram:** the disabled-by-default bot bridge connects allowlisted users
   to explicitly registered agents. An experimental local gateway can own one
   bot's polling and route it to multiple Tau sidecars. See the

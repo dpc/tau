@@ -156,15 +156,6 @@
       "crate": "tau-socket"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "SendFailureCategory::trace_label",
-      "line": 111,
-      "cyclomatic": 15.0,
-      "coverage": 0.0,
-      "crap": 240.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness/subagents_tool.rs",
       "function": "send_external_agent_message_request",
       "line": 2094,
@@ -561,15 +552,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "Extension::ensure_send_installation",
-      "line": 313,
-      "cyclomatic": 10.0,
-      "coverage": 0.0,
-      "crap": 110.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
       "function": "Gateway::new",
       "line": 310,
@@ -741,15 +723,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "QueueDepthBucket::as_str",
-      "line": 203,
-      "cyclomatic": 9.0,
-      "coverage": 0.0,
-      "crap": 90.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "EventReader::read_event",
       "line": 29,
@@ -775,15 +748,6 @@
       "coverage": 32.6530612244898,
       "crap": 83.72837848175504,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "decode_socket_event",
-      "line": 4468,
-      "cyclomatic": 64.0,
-      "coverage": 83.76068376068376,
-      "crap": 81.54135612036116,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-provider-builtin/src/lib.rs",
@@ -984,15 +948,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "handle_live_event",
-      "line": 4939,
-      "cyclomatic": 8.0,
-      "coverage": 0.0,
-      "crap": 72.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "WorkerState::handle_command",
       "line": 1407,
@@ -1047,15 +1002,6 @@
       "crate": "tau-cli-term"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::schedule_send_retry",
-      "line": 927,
-      "cyclomatic": 17.0,
-      "coverage": 45.26315789473684,
-      "crap": 64.39549438693686,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
       "function": "format_progress_counter",
       "line": 511,
@@ -1074,24 +1020,6 @@
       "crate": "tau-cli-term"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "SlackApiError::fmt",
-      "line": 58,
-      "cyclomatic": 13.0,
-      "coverage": 33.33333333333333,
-      "crap": 63.07407407407409,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "Extension::handle_send",
-      "line": 347,
-      "cyclomatic": 39.0,
-      "coverage": 75.43859649122807,
-      "crap": 61.536618554696986,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-provider-chat-completions/src/lib.rs",
       "function": "cbor_to_json",
       "line": 1722,
@@ -1108,15 +1036,6 @@
       "coverage": 41.17647058823529,
       "crap": 60.79686545898637,
       "crate": "tau-client"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "SendFailureCategory::fmt",
-      "line": 132,
-      "cyclomatic": 15.0,
-      "coverage": 41.17647058823529,
-      "crap": 60.79686545898637,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-core/src/session.rs",
@@ -1380,15 +1299,6 @@
       "crate": "tau-ext-xmpp"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "Extension::handle_react",
-      "line": 432,
-      "cyclomatic": 40.0,
-      "coverage": 79.35779816513761,
-      "crap": 54.073043924112916,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
       "function": "decode_message",
       "line": 2480,
@@ -1468,15 +1378,6 @@
       "coverage": 40.0,
       "crap": 49.504,
       "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ExtConfig::validate",
-      "line": 471,
-      "cyclomatic": 49.0,
-      "coverage": 98.35164835164835,
-      "crap": 49.01075329995448,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-rhai/src/lib.rs",
@@ -1956,42 +1857,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "EnvelopeClass::as_str",
-      "line": 983,
-      "cyclomatic": 6.0,
-      "coverage": 0.0,
-      "crap": 42.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "socket_frame_class",
-      "line": 4147,
-      "cyclomatic": 6.0,
-      "coverage": 0.0,
-      "crap": 42.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "RemoteCopyPossibility::trace_label",
-      "line": 189,
-      "cyclomatic": 6.0,
-      "coverage": 0.0,
-      "crap": 42.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "socket_worker_once_keeps_responsive_idle_connection",
-      "line": 1796,
-      "cyclomatic": 6.0,
-      "coverage": null,
-      "crap": 42.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/tests.rs",
       "function": "EventReader::read_event",
       "line": 198,
@@ -2080,15 +1945,6 @@
       "coverage": 50.0,
       "crap": 38.5,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "Extension::replay_send_locked",
-      "line": 604,
-      "cyclomatic": 10.0,
-      "coverage": 34.78260869565217,
-      "crap": 37.738966055724504,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-core/src/session.rs",
@@ -2224,15 +2080,6 @@
       "coverage": 80.0,
       "crap": 31.407999999999998,
       "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_delete_admitted",
-      "line": 2394,
-      "cyclomatic": 31.0,
-      "coverage": 92.53731343283582,
-      "crap": 31.399400857153307,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/deterministic_fixture.rs",
@@ -2694,42 +2541,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "slack_api_transport_error",
-      "line": 5551,
-      "cyclomatic": 5.0,
-      "coverage": 0.0,
-      "crap": 30.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "slack_post_transport_error",
-      "line": 5563,
-      "cyclomatic": 5.0,
-      "coverage": 0.0,
-      "crap": 30.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "recv_prompt",
-      "line": 971,
-      "cyclomatic": 5.0,
-      "coverage": null,
-      "crap": 30.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "slow_identity_does_not_block_reader_ack_pong_or_shutdown",
-      "line": 2018,
-      "cyclomatic": 5.0,
-      "coverage": null,
-      "crap": 30.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
       "function": "remove_inactive_socket",
       "line": 1968,
@@ -2910,15 +2721,6 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::post_message",
-      "line": 5706,
-      "cyclomatic": 21.0,
-      "coverage": 74.24242424242425,
-      "crap": 28.536219634360123,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/session_cleanup.rs",
       "function": "cleanup_old_sessions_with",
       "line": 56,
@@ -2998,15 +2800,6 @@
       "coverage": 50.0,
       "crap": 26.125,
       "crate": "tau-session-inspect"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::submit_ingress",
-      "line": 3272,
-      "cyclomatic": 24.0,
-      "coverage": 84.61538461538461,
-      "crap": 26.097405553026856,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-config/src/settings.rs",
@@ -3099,15 +2892,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_message_admitted",
-      "line": 2555,
-      "cyclomatic": 24.0,
-      "coverage": 90.82568807339449,
-      "crap": 24.444777684515174,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-provider-builtin/src/lib.rs",
       "function": "cmd_add",
       "line": 718,
@@ -3115,15 +2899,6 @@
       "coverage": 47.61904761904761,
       "crap": 24.372098045567444,
       "crate": "tau-ext-provider-builtin"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_edit_admitted",
-      "line": 2296,
-      "cyclomatic": 18.0,
-      "coverage": 73.33333333333333,
-      "crap": 24.144000000000005,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-pim/src/calendar/ics_feed.rs",
@@ -3171,15 +2946,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::verified_human_traced",
-      "line": 2056,
-      "cyclomatic": 22.0,
-      "coverage": 84.50704225352112,
-      "crap": 23.799899975133485,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/prompt_history.rs",
       "function": "truncate_corrupt_prompt_history_tail_with_limit",
       "line": 244,
@@ -3196,24 +2962,6 @@
       "coverage": 78.94736842105263,
       "crap": 23.73232249599067,
       "crate": "tau-ext-std-notifications"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "HttpSlackClient::post_reaction",
-      "line": 847,
-      "cyclomatic": 21.0,
-      "coverage": 81.94444444444444,
-      "crap": 23.595799575617285,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::execute_send",
-      "line": 791,
-      "cyclomatic": 11.0,
-      "coverage": 53.06122448979592,
-      "crap": 23.513553026375064,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli/src/provider_quota.rs",
@@ -3297,15 +3045,6 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "handle_socket_text_frame",
-      "line": 4157,
-      "cyclomatic": 17.0,
-      "coverage": 73.21428571428571,
-      "crap": 22.55402127368805,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-pim/src/calendar/ics_feed.rs",
       "function": "build_range_event_seed",
       "line": 546,
@@ -3367,15 +3106,6 @@
       "coverage": 92.63157894736842,
       "crap": 22.193628225688876,
       "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "depth_bucket",
-      "line": 167,
-      "cyclomatic": 9.0,
-      "coverage": 45.45454545454545,
-      "crap": 22.145003756574,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-skills/src/lib.rs",
@@ -4278,24 +4008,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "RemoteCopyPossibility::after_ambiguous",
-      "line": 199,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "recv_message_report",
-      "line": 988,
-      "cyclomatic": 4.0,
-      "coverage": null,
-      "crap": 20.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
       "function": "run_from_env",
       "line": 104,
@@ -4674,15 +4386,6 @@
       "crate": "tau-core"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "parse_slack_api_response",
-      "line": 5645,
-      "cyclomatic": 12.0,
-      "coverage": 65.51724137931035,
-      "crap": 17.904301119357083,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/dev_tmux.rs",
       "function": "prepare_scratch_root",
       "line": 335,
@@ -4701,15 +4404,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_reaction_admitted",
-      "line": 2192,
-      "cyclomatic": 17.0,
-      "coverage": 86.07594936708861,
-      "crap": 17.780179661243835,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness/extension_data.rs",
       "function": "run_extension_data_append_file",
       "line": 466,
@@ -4717,15 +4411,6 @@
       "coverage": 57.692307692307686,
       "crap": 17.572826581702323,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "socket_worker_once_with_heartbeat",
-      "line": 3964,
-      "cyclomatic": 15.0,
-      "coverage": 77.55102040816327,
-      "crap": 17.54549549932426,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-supervisor/src/bin/tau-supervisor-test-child.rs",
@@ -4791,15 +4476,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "socket_worker_loop",
-      "line": 3749,
-      "cyclomatic": 9.0,
-      "coverage": 53.62318840579711,
-      "crap": 17.079559464124266,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
       "function": "Harness::ensure_loaded_agent_for_agent_with_metadata",
       "line": 20308,
@@ -4834,15 +4510,6 @@
       "coverage": 95.0,
       "crap": 17.036125,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::handle_start_command",
-      "line": 2873,
-      "cyclomatic": 13.0,
-      "coverage": 71.26436781609196,
-      "crap": 17.01004247512919,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -4935,15 +4602,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::finish_send_success",
-      "line": 1228,
-      "cyclomatic": 15.0,
-      "coverage": 80.83333333333333,
-      "crap": 16.58424479166667,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/dir_lock/fs.rs",
       "function": "FsLockBackend::acquire_auto",
       "line": 205,
@@ -5032,15 +4690,6 @@
       "coverage": 91.74311926605505,
       "crap": 16.144107969782915,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::handle_conversations",
-      "line": 1740,
-      "cyclomatic": 16.0,
-      "coverage": 92.06349206349206,
-      "crap": 16.127975940523182,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-provider-codex/src/responses.rs",
@@ -5176,15 +4825,6 @@
       "coverage": 56.52173913043478,
       "crap": 15.657351853373882,
       "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::handle_register",
-      "line": 1820,
-      "cyclomatic": 15.0,
-      "coverage": 86.15384615384616,
-      "crap": 15.597269003186163,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
@@ -6123,15 +5763,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "State::send_authority_is_current",
-      "line": 258,
-      "cyclomatic": 13.0,
-      "coverage": 97.61904761904762,
-      "crap": 13.002281071158622,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
       "function": "render_tool_use_state",
       "line": 457,
@@ -6292,15 +5923,6 @@
       "coverage": 82.35294117647058,
       "crap": 12.791369835131285,
       "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "handle_socket_text",
-      "line": 4371,
-      "cyclomatic": 12.0,
-      "coverage": 82.6086956521739,
-      "crap": 12.757458699761651,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-core/src/agent_store.rs",
@@ -8130,60 +7752,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::latch_invalid_installation_if_established",
-      "line": 1965,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::report_installation_restart_once",
-      "line": 2034,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::post",
-      "line": 5585,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "reindex_receive_routes",
-      "line": 405,
-      "cyclomatic": 3.0,
-      "coverage": null,
-      "crap": 12.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "run_protocol_messages",
-      "line": 660,
-      "cyclomatic": 3.0,
-      "coverage": null,
-      "crap": 12.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "assert_no_ingress",
-      "line": 1009,
-      "cyclomatic": 3.0,
-      "coverage": null,
-      "crap": 12.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway_client/tests.rs",
       "function": "connect_error_with_response",
       "line": 18,
@@ -8508,15 +8076,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "reaction_error_message",
-      "line": 791,
-      "cyclomatic": 10.0,
-      "coverage": 75.0,
-      "crap": 11.5625,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-provider-codex/src/quota.rs",
       "function": "fetch_usage",
       "line": 100,
@@ -8533,24 +8092,6 @@
       "coverage": 68.57142857142857,
       "crap": 11.514542274052477,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "classify_api_error",
-      "line": 377,
-      "cyclomatic": 9.0,
-      "coverage": 68.75,
-      "crap": 11.471923828125,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "classify_post_api_error",
-      "line": 401,
-      "cyclomatic": 9.0,
-      "coverage": 68.75,
-      "crap": 11.471923828125,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-pim/src/email/mod.rs",
@@ -8659,15 +8200,6 @@
       "coverage": 88.88888888888889,
       "crap": 11.165980795610425,
       "crate": "tau-client"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_api_base",
-      "line": 5504,
-      "cyclomatic": 11.0,
-      "coverage": 88.88888888888889,
-      "crap": 11.165980795610425,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
@@ -9426,15 +8958,6 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::dispatch_scoped_tool",
-      "line": 1690,
-      "cyclomatic": 9.0,
-      "coverage": 75.86206896551724,
-      "crap": 10.139161097215958,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/lib.rs",
       "function": "parse_role_cli_overrides",
       "line": 299,
@@ -10146,15 +9669,6 @@
       "crate": "tau-config"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "handle_configure",
-      "line": 4878,
-      "cyclomatic": 8.0,
-      "coverage": 73.33333333333333,
-      "crap": 9.21362962962963,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::set_show_thinking",
       "line": 2492,
@@ -10542,15 +10056,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::accepts_event_conversation",
-      "line": 2732,
-      "cyclomatic": 9.0,
-      "coverage": 97.05882352941177,
-      "crap": 9.002060858945654,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-rhai/src/lib.rs",
       "function": "load_runtime",
       "line": 573,
@@ -10911,15 +10416,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::report_tool_terminal",
-      "line": 1430,
-      "cyclomatic": 5.0,
-      "coverage": 47.05882352941176,
-      "crap": 8.709546102177898,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-term-screen/src/screen.rs",
       "function": "Screen::clear_shrunk_scrolling_lines",
       "line": 400,
@@ -10954,15 +10450,6 @@
       "coverage": 58.333333333333336,
       "crap": 8.604166666666666,
       "crate": "tau-ext-provider-builtin"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "cbor_optional_bool_field",
-      "line": 5160,
-      "cyclomatic": 6.0,
-      "coverage": 58.333333333333336,
-      "crap": 8.604166666666666,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-supervisor/src/lib.rs",
@@ -11152,15 +10639,6 @@
       "coverage": 83.33333333333334,
       "crap": 8.296296296296296,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_socket_url",
-      "line": 5524,
-      "cyclomatic": 8.0,
-      "coverage": 83.33333333333334,
-      "crap": 8.296296296296296,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-provider/src/outbound_network.rs",
@@ -11458,15 +10936,6 @@
       "coverage": 90.0,
       "crap": 8.064,
       "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::handle_select_command",
-      "line": 2991,
-      "cyclomatic": 8.0,
-      "coverage": 90.2439024390244,
-      "crap": 8.059430362298864,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-client/src/client_handle.rs",
@@ -12171,42 +11640,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/admission_trace.rs",
-      "function": "AdmissionOutcome::as_str",
-      "line": 35,
-      "cyclomatic": 8.0,
-      "coverage": 100.0,
-      "crap": 8.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission_trace.rs",
-      "function": "EventClass::as_str",
-      "line": 69,
-      "cyclomatic": 8.0,
-      "coverage": 100.0,
-      "crap": 8.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "conversation_policy_value",
-      "line": 5221,
-      "cyclomatic": 8.0,
-      "coverage": 100.0,
-      "crap": 8.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_reaction_name",
-      "line": 5463,
-      "cyclomatic": 8.0,
-      "coverage": 100.0,
-      "crap": 8.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "process_due_idle_hooks",
       "line": 1515,
@@ -12340,15 +11773,6 @@
       "coverage": 62.5,
       "crap": 7.8984375,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "DecodedSlackEvent::event_class",
-      "line": 996,
-      "cyclomatic": 6.0,
-      "coverage": 62.5,
-      "crap": 7.8984375,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
@@ -12522,15 +11946,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::install_or_match_installation",
-      "line": 1212,
-      "cyclomatic": 6.0,
-      "coverage": 65.21739130434783,
-      "crap": 7.5149173995233,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/dir_lock/fs.rs",
       "function": "instance_liveness",
       "line": 1204,
@@ -12664,15 +12079,6 @@
       "coverage": 80.95238095238095,
       "crap": 7.338624338624339,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "cbor_bool_field",
-      "line": 5143,
-      "cyclomatic": 6.0,
-      "coverage": 66.66666666666666,
-      "crap": 7.333333333333336,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
@@ -12943,15 +12349,6 @@
       "coverage": 56.25,
       "crap": 7.093505859375,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::begin_send_attempt",
-      "line": 851,
-      "cyclomatic": 7.0,
-      "coverage": 87.8048780487805,
-      "crap": 7.088869865498179,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-pim/src/email/mod.rs",
@@ -14034,42 +13431,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::handle_command",
-      "line": 2829,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_slack_ts",
-      "line": 5488,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "verified_human_from_response",
-      "line": 5810,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/transport_mentions.rs",
-      "function": "normalize_transport_mentions",
-      "line": 21,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "ExtConfig::validate",
       "line": 479,
@@ -14194,15 +13555,6 @@
       "coverage": 57.14285714285714,
       "crap": 6.96793002915452,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "RemoteCopyPossibility::caveat",
-      "line": 217,
-      "cyclomatic": 5.0,
-      "coverage": 57.14285714285714,
-      "crap": 6.96793002915452,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-pim/src/email/mod.rs",
@@ -14421,15 +13773,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "cbor_string_field",
-      "line": 5278,
-      "cyclomatic": 6.0,
-      "coverage": 75.0,
-      "crap": 6.5625,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-supervisor/src/lib.rs",
       "function": "SupervisedChild::wait_for_exit",
       "line": 397,
@@ -14518,15 +13861,6 @@
       "coverage": 77.77777777777779,
       "crap": 6.395061728395061,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::finish_send_cancelled",
-      "line": 1188,
-      "cyclomatic": 3.0,
-      "coverage": 27.77777777777778,
-      "crap": 6.390432098765432,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli/src/markdown_render.rs",
@@ -14826,15 +14160,6 @@
       "crate": "tau-provider-chat-completions"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "admission_worker_loop",
-      "line": 3837,
-      "cyclomatic": 5.0,
-      "coverage": 64.81481481481481,
-      "crap": 6.088979068231469,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-config/src/settings.rs",
       "function": "SettingsError::fmt",
       "line": 1867,
@@ -14914,15 +14239,6 @@
       "coverage": 87.5,
       "crap": 6.0703125,
       "crate": "tau-cli-term-raw"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "posted_message_from_response",
-      "line": 5851,
-      "cyclomatic": 6.0,
-      "coverage": 87.5,
-      "crap": 6.0703125,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-supervisor/src/lib.rs",
@@ -15150,24 +14466,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "event_matches_installation",
-      "line": 4434,
-      "cyclomatic": 6.0,
-      "coverage": 92.85714285714286,
-      "crap": 6.013119533527696,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "cbor_optional_usize_field",
-      "line": 5177,
-      "cyclomatic": 6.0,
-      "coverage": 92.85714285714286,
-      "crap": 6.013119533527696,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/ui_client.rs",
       "function": "DeadlineUnixReader::read",
       "line": 67,
@@ -15211,15 +14509,6 @@
       "coverage": 93.75,
       "crap": 6.0087890625,
       "crate": "tau-ext-std-notifications"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::finish_send_failure",
-      "line": 1128,
-      "cyclomatic": 5.0,
-      "coverage": 65.71428571428571,
-      "crap": 6.0075801749271145,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
@@ -15465,15 +14754,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "reaction_target_authorized",
-      "line": 758,
-      "cyclomatic": 6.0,
-      "coverage": 96.29629629629629,
-      "crap": 6.00182898948331,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/tools/find.rs",
       "function": "render_find_output",
       "line": 178,
@@ -15517,15 +14797,6 @@
       "coverage": 97.05882352941177,
       "crap": 6.00091593730918,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::remember_attempt",
-      "line": 248,
-      "cyclomatic": 6.0,
-      "coverage": 97.05882352941177,
-      "crap": 6.00091593730918,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli/src/send.rs",
@@ -17679,78 +16950,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::open_socket",
-      "line": 5678,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::auth_test",
-      "line": 5692,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "BlockingReactionClient::react",
-      "line": 238,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "BlockingIdentityClient::verified_human_identity",
-      "line": 284,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "fixed_thread_cfg",
-      "line": 383,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "slack_message",
-      "line": 724,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "slack_reaction",
-      "line": 887,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic",
-      "line": 1874,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/tests.rs",
       "function": "idle_osc_config",
       "line": 287,
@@ -18192,15 +17391,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::handle_to_command",
-      "line": 3041,
-      "cyclomatic": 5.0,
-      "coverage": 66.66666666666666,
-      "crap": 5.925925925925927,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-utils/src/lib.rs",
       "function": "recv_next",
       "line": 562,
@@ -18271,15 +17461,6 @@
       "coverage": 69.23076923076923,
       "crap": 5.728265817023214,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::acquire_channel_turn",
-      "line": 1056,
-      "cyclomatic": 5.0,
-      "coverage": 69.56521739130434,
-      "crap": 5.7047752116380375,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-provider-builtin/src/quota_test_support.rs",
@@ -18480,15 +17661,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::authenticated_installation",
-      "line": 1919,
-      "cyclomatic": 5.0,
-      "coverage": 75.0,
-      "crap": 5.390625,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::handle_agent_prompt_steered",
       "line": 5107,
@@ -18640,15 +17812,6 @@
       "coverage": 78.0,
       "crap": 5.2661999999999995,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "PostAttemptOutcome::trace_label",
-      "line": 180,
-      "cyclomatic": 4.0,
-      "coverage": 57.14285714285714,
-      "crap": 5.259475218658892,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -19074,15 +18237,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "cbor_optional_string_field",
-      "line": 5260,
-      "cyclomatic": 5.0,
-      "coverage": 85.71428571428571,
-      "crap": 5.072886297376093,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "NotificationLoop::handle_agent_prompt_terminated",
       "line": 1139,
@@ -19398,15 +18552,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::plain_text_target",
-      "line": 3100,
-      "cyclomatic": 5.0,
-      "coverage": 90.9090909090909,
-      "crap": 5.018782870022539,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
       "function": "push_action_label_line",
       "line": 1100,
@@ -19605,15 +18750,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/transport_mentions.rs",
-      "function": "complete_backtick_ranges",
-      "line": 64,
-      "cyclomatic": 5.0,
-      "coverage": 93.33333333333333,
-      "crap": 5.007407407407407,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::upsert_tool_duration_suffix_segment",
       "line": 6125,
@@ -19657,15 +18793,6 @@
       "coverage": 93.75,
       "crap": 5.006103515625,
       "crate": "tau-provider"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::insert_target",
-      "line": 211,
-      "cyclomatic": 5.0,
-      "coverage": 93.75,
-      "crap": 5.006103515625,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
@@ -19918,15 +19045,6 @@
       "coverage": 96.7741935483871,
       "crap": 5.000839179618006,
       "crate": "tau-ext-provider-builtin"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "handle_socket_frame",
-      "line": 4110,
-      "cyclomatic": 5.0,
-      "coverage": 96.875,
-      "crap": 5.000762939453125,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
@@ -21171,42 +20289,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::prepare_worker_start",
-      "line": 1900,
-      "cyclomatic": 5.0,
-      "coverage": 100.0,
-      "crap": 5.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_slack_id",
-      "line": 5421,
-      "cyclomatic": 5.0,
-      "coverage": 100.0,
-      "crap": 5.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::wait_until_authorized",
-      "line": 1097,
-      "cyclomatic": 5.0,
-      "coverage": 100.0,
-      "crap": 5.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "valid_outbound_emoji",
-      "line": 728,
-      "cyclomatic": 5.0,
-      "coverage": 100.0,
-      "crap": 5.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "NotificationLoop::handle_provider_response_finished",
       "line": 1175,
@@ -21268,24 +20350,6 @@
       "coverage": 40.0,
       "crap": 4.944,
       "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "bounded_text",
-      "line": 5896,
-      "cyclomatic": 3.0,
-      "coverage": 40.0,
-      "crap": 4.944,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "truncate_utf8_bytes",
-      "line": 449,
-      "cyclomatic": 3.0,
-      "coverage": 40.0,
-      "crap": 4.944,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
@@ -21432,24 +20496,6 @@
       "crate": "tau-ext-telegram"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::insert_reply_route",
-      "line": 1258,
-      "cyclomatic": 3.0,
-      "coverage": 42.857142857142854,
-      "crap": 4.679300291545189,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "Extension::spawn_send_worker",
-      "line": 678,
-      "cyclomatic": 3.0,
-      "coverage": 43.47826086956522,
-      "crap": 4.6251335579847135,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/provider_quota.rs",
       "function": "same_reset_cycle",
       "line": 275,
@@ -21540,51 +20586,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::rejects_unlinked_command",
-      "line": 2801,
-      "cyclomatic": 4.0,
-      "coverage": 66.66666666666666,
-      "crap": 4.5925925925925934,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "channel_type_matches",
-      "line": 3592,
-      "cyclomatic": 4.0,
-      "coverage": 66.66666666666666,
-      "crap": 4.5925925925925934,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_user_id",
-      "line": 5435,
-      "cyclomatic": 4.0,
-      "coverage": 66.66666666666666,
-      "crap": 4.5925925925925934,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "RemoteCopyPossibility::after_success",
-      "line": 208,
-      "cyclomatic": 4.0,
-      "coverage": 66.66666666666666,
-      "crap": 4.5925925925925934,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "PostCompositionError::fmt",
-      "line": 221,
-      "cyclomatic": 4.0,
-      "coverage": 66.66666666666666,
-      "crap": 4.5925925925925934,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "cbor_bool_field",
       "line": 2767,
@@ -21646,15 +20647,6 @@
       "coverage": 45.45454545454545,
       "crap": 4.460555972952667,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "message_is_local_command",
-      "line": 1008,
-      "cyclomatic": 4.0,
-      "coverage": 70.0,
-      "crap": 4.432,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
@@ -21979,15 +20971,6 @@
       "coverage": 77.77777777777779,
       "crap": 4.175582990397805,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::insert_incoming_message",
-      "line": 1292,
-      "cyclomatic": 4.0,
-      "coverage": 77.77777777777779,
-      "crap": 4.175582990397805,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli/src/lib.rs",
@@ -22476,15 +21459,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "is_loopback_host",
-      "line": 5538,
-      "cyclomatic": 4.0,
-      "coverage": 83.33333333333334,
-      "crap": 4.0740740740740735,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
       "function": "is_loopback_host",
       "line": 1641,
@@ -22654,15 +21628,6 @@
       "coverage": 85.71428571428571,
       "crap": 4.0466472303206995,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_team_id",
-      "line": 5445,
-      "cyclomatic": 4.0,
-      "coverage": 85.71428571428571,
-      "crap": 4.0466472303206995,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
@@ -23187,15 +22152,6 @@
       "crate": "tau-ext-utils"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::start_worker_locked",
-      "line": 1974,
-      "cyclomatic": 4.0,
-      "coverage": 91.17647058823529,
-      "crap": 4.010991247710157,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "NotificationLoop::should_skip_finished_response",
       "line": 1199,
@@ -23475,15 +22431,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "SlackPostMode::agent",
-      "line": 247,
-      "cyclomatic": 4.0,
-      "coverage": 93.75,
-      "crap": 4.00390625,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness/interception.rs",
       "function": "Harness::dispatch_publish_step",
       "line": 1277,
@@ -23671,15 +22618,6 @@
       "coverage": 95.23809523809523,
       "crap": 4.001727675197063,
       "crate": "tau-skills"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::reply",
-      "line": 3131,
-      "cyclomatic": 4.0,
-      "coverage": 95.23809523809523,
-      "crap": 4.001727675197063,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
@@ -25788,78 +24726,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ReceivedOccurrenceCache::insert_new",
-      "line": 1107,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::report_worker_connection_failure_once",
-      "line": 2010,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "decode_discovery_cursor",
-      "line": 5205,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "parse_command",
-      "line": 5406,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_conversation_id",
-      "line": 5453,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageCache::insert",
-      "line": 65,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "AdmissionQueue::pop",
-      "line": 62,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionActionKind::parse",
-      "line": 68,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "NotificationLoop::extend_idle_deadlines",
       "line": 1162,
@@ -26517,33 +25383,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "SocketAction::outcome",
-      "line": 4360,
-      "cyclomatic": 3.0,
-      "coverage": 71.42857142857143,
-      "crap": 3.2099125364431487,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "resolve_receive_route",
-      "line": 3548,
-      "cyclomatic": 3.0,
-      "coverage": 71.7948717948718,
-      "crap": 3.201942042178729,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::trimmed_message_text",
-      "line": 2771,
-      "cyclomatic": 3.0,
-      "coverage": 72.0,
-      "crap": 3.197568,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
       "function": "handle_agent_resume_command",
       "line": 1776,
@@ -27147,24 +25986,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ReactionKind::as_str",
-      "line": 945,
-      "cyclomatic": 3.0,
-      "coverage": 80.0,
-      "crap": 3.072,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::send_confirmed",
-      "line": 1399,
-      "cyclomatic": 3.0,
-      "coverage": 80.0,
-      "crap": 3.072,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "pending_idle_summary_query_id",
       "line": 1733,
@@ -27264,15 +26085,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "validate_object_fields",
-      "line": 5295,
-      "cyclomatic": 3.0,
-      "coverage": 81.81818181818183,
-      "crap": 3.0540946656649135,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
       "function": "validate_object_fields",
       "line": 2216,
@@ -27289,15 +26101,6 @@
       "coverage": 81.81818181818183,
       "crap": 3.0540946656649135,
       "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "is_route_authorized",
-      "line": 3656,
-      "cyclomatic": 3.0,
-      "coverage": 82.14285714285714,
-      "crap": 3.0512481778425657,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -27397,15 +26200,6 @@
       "coverage": 83.33333333333334,
       "crap": 3.0416666666666665,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "agent_designator",
-      "line": 5363,
-      "cyclomatic": 3.0,
-      "coverage": 83.33333333333334,
-      "crap": 3.0416666666666665,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-provider-builtin/src/prewarm/abort.rs",
@@ -28038,24 +26832,6 @@
       "crate": "tau-socket"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::report_tool_result_confirmed",
-      "line": 1452,
-      "cyclomatic": 3.0,
-      "coverage": 90.0,
-      "crap": 3.009,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "parse_retry_after",
-      "line": 345,
-      "cyclomatic": 3.0,
-      "coverage": 90.0,
-      "crap": 3.009,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli-term/src/lib.rs",
       "function": "run_prompt_capture_command",
       "line": 1183,
@@ -28137,15 +26913,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::remember_posted_message",
-      "line": 2161,
-      "cyclomatic": 3.0,
-      "coverage": 90.9090909090909,
-      "crap": 3.006761833208114,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
       "function": "handle_configure_message",
       "line": 1998,
@@ -28180,15 +26947,6 @@
       "coverage": 91.17647058823529,
       "crap": 3.006182576836963,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::route_plain_text",
-      "line": 3072,
-      "cyclomatic": 3.0,
-      "coverage": 91.30434782608695,
-      "crap": 3.0059176460918877,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli/src/prompt_history.rs",
@@ -28342,15 +27100,6 @@
       "coverage": 91.66666666666666,
       "crap": 3.0052083333333335,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "agents_text",
-      "line": 5371,
-      "cyclomatic": 3.0,
-      "coverage": 91.66666666666666,
-      "crap": 3.0052083333333335,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
@@ -32637,213 +31386,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "finish_socket_ack",
-      "line": 75,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "DeleteOwner::agent_id",
-      "line": 194,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "DeleteOwner::message_id",
-      "line": 201,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "DeleteOwner::conversation",
-      "line": 208,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "AdmissionContext::matches_state",
-      "line": 218,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "valid_conversation_alias",
-      "line": 668,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "RuntimeConfig::sender_policy",
-      "line": 691,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::wire_tool_name",
-      "line": 1378,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::send",
-      "line": 1391,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::match_established_installation",
-      "line": 1948,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::config_for_allowed_message",
-      "line": 2712,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::post_message_traced",
-      "line": 3173,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "conversation_has_receive_source",
-      "line": 3645,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ShutdownSignal::wait",
-      "line": 3721,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "RetiringReader::read",
-      "line": 4713,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "split_first",
-      "line": 5399,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::get_user",
-      "line": 5614,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "installation_from_response",
-      "line": 5791,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "AdmissionQueue::reserve",
-      "line": 44,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::release_send_worker",
-      "line": 770,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "contains_native_control",
-      "line": 426,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "valid_source_user_id",
-      "line": 430,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionActionKind::as_str",
-      "line": 77,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "NotificationLoop::track_agent_state",
       "line": 981,
@@ -33708,15 +32250,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "Extension::finish_reaction_error_locked",
-      "line": 707,
-      "cyclomatic": 2.0,
-      "coverage": 78.57142857142857,
-      "crap": 2.0393586005830904,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
       "function": "InputRoutingState::agent_switch_target",
       "line": 1729,
@@ -33859,15 +32392,6 @@
       "coverage": 80.0,
       "crap": 2.032,
       "crate": "tau-ext-rhai"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "SlackConversation::route_key",
-      "line": 835,
-      "cyclomatic": 2.0,
-      "coverage": 80.0,
-      "crap": 2.032,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
@@ -34147,24 +32671,6 @@
       "coverage": 84.61538461538461,
       "crap": 2.014565316340464,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "resolve_agent",
-      "line": 5384,
-      "cyclomatic": 2.0,
-      "coverage": 84.61538461538461,
-      "crap": 2.014565316340464,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::post_attempt",
-      "line": 897,
-      "cyclomatic": 2.0,
-      "coverage": 84.61538461538461,
-      "crap": 2.014565316340464,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
@@ -34507,15 +33013,6 @@
       "coverage": 87.5,
       "crap": 2.0078125,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ShutdownSignal::wait_timeout",
-      "line": 3738,
-      "cyclomatic": 2.0,
-      "coverage": 87.5,
-      "crap": 2.0078125,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
@@ -34923,15 +33420,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::insert_received_occurrence",
-      "line": 2697,
-      "cyclomatic": 2.0,
-      "coverage": 92.3076923076923,
-      "crap": 2.0018206645425582,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
       "function": "registry_result",
       "line": 1810,
@@ -35326,15 +33814,6 @@
       "coverage": 95.45454545454545,
       "crap": 2.000375657400451,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::clear_config_after_error",
-      "line": 1621,
-      "cyclomatic": 2.0,
-      "coverage": 95.45454545454545,
-      "crap": 2.000375657400451,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness/subagents_tool.rs",
@@ -52554,807 +51033,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/tests/send_delivery_tests.rs",
-      "function": "StepScheduler::wait",
-      "line": 13,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests/send_delivery_tests.rs",
-      "function": "ScriptedPostClient::new",
-      "line": 34,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests/send_delivery_tests.rs",
-      "function": "ScriptedPostClient::open_socket",
-      "line": 43,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests/send_delivery_tests.rs",
-      "function": "ScriptedPostClient::auth_test",
-      "line": 47,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests/send_delivery_tests.rs",
-      "function": "ScriptedPostClient::verified_human_identity",
-      "line": 54,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests/send_delivery_tests.rs",
-      "function": "ScriptedPostClient::post_message",
-      "line": 62,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "AdmissionContext::matches_local_state",
-      "line": 225,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "AdmissionContext::trace_received_at",
-      "line": 235,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "run_stdio",
-      "line": 246,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "run",
-      "line": 252,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "removed_config_key",
-      "line": 393,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::latch_installation_mismatch",
-      "line": 1194,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::reply_route_is_pinned",
-      "line": 1252,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "run_blocking_test_hook",
-      "line": 1511,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::apply_config",
-      "line": 1595,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::unload_agent",
-      "line": 1663,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::identical_reaction_call_in_flight",
-      "line": 1726,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::resolve_registered_agent",
-      "line": 3126,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "static_receive_covers_dm",
-      "line": 3619,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "run_with_clients_and_scheduler",
-      "line": 4623,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "SendReaderBoundary::retire",
-      "line": 4690,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "apply_output_message",
-      "line": 4924,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::verified_human_identity",
-      "line": 5697,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/transport_mentions.rs",
-      "function": "backtick_run_end",
-      "line": 100,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageCache::remove",
-      "line": 82,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/main.rs",
-      "function": "main",
-      "line": 1,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "Reservation::drop",
-      "line": 124,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/scheduler.rs",
-      "function": "SendWake::wait",
-      "line": 42,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/scheduler.rs",
-      "function": "ImmediateSendScheduler::wait",
-      "line": 79,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::retire_after_output_failure",
-      "line": 1117,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "FrozenPostBody::new",
-      "line": 311,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "Extension::new",
-      "line": 21,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "Extension::new_with_reaction_client",
-      "line": 26,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "SharedWriter::bytes",
-      "line": 48,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "SharedWriter::write",
-      "line": 54,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "SharedWriter::flush",
-      "line": 59,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "sent_message",
-      "line": 76,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "post_message_body",
-      "line": 90,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::new",
-      "line": 123,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::sent_pairs",
-      "line": 134,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::sent_thread_ids",
-      "line": 144,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::push_reaction_result",
-      "line": 154,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "test_verified_human",
-      "line": 163,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::open_socket",
-      "line": 171,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::auth_test",
-      "line": 176,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::verified_human_identity",
-      "line": 184,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::post_message",
-      "line": 192,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "FakeClient::react",
-      "line": 208,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "BlockingIdentityClient::open_socket",
-      "line": 273,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "BlockingIdentityClient::auth_test",
-      "line": 277,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "BlockingIdentityClient::post_message",
-      "line": 300,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "IdentitySequenceClient::open_socket",
-      "line": 310,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "IdentitySequenceClient::auth_test",
-      "line": 314,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "IdentitySequenceClient::verified_human_identity",
-      "line": 321,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "IdentitySequenceClient::post_message",
-      "line": 334,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "cfg",
-      "line": 343,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "dm_cfg",
-      "line": 371,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "proactive_cfg",
-      "line": 426,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "agent_id",
-      "line": 463,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "tool",
-      "line": 467,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "bool_args",
-      "line": 477,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "message_args",
-      "line": 484,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "reaction_args",
-      "line": 498,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "tool_call",
-      "line": 507,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "valid_config_message",
-      "line": 513,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "proactive_config_message",
-      "line": 538,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "malformed_config_message",
-      "line": 561,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "extension",
-      "line": 683,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "admission_context",
-      "line": 702,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "dual_slack_messages",
-      "line": 785,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "slack_conversation",
-      "line": 797,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "slack_edit",
-      "line": 908,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "register_agent",
-      "line": 926,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "apply_test_config",
-      "line": 934,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "cbor_map_keys",
-      "line": 946,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "discovery_aliases",
-      "line": 962,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "shutdown_signal_wait_wakes_after_request",
-      "line": 1650,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "shutdown_signal_wait_timeout_wakes_before_long_backoff",
-      "line": 1669,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "socket_worker_once_shutdown_interrupts_idle_websocket_receive",
-      "line": 1689,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "socket_worker_once_reconnects_after_missing_heartbeat_pong",
-      "line": 1742,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "blocked_socket_write_remains_shutdown_interruptible",
-      "line": 1943,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "blocked_socket_write_remains_pong_deadline_bounded",
-      "line": 1967,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "saturated_admission_does_not_ack_supported_envelope",
-      "line": 2141,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/tests.rs",
-      "function": "install_source_reaction_target",
-      "line": 2327,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "UnavailableReactionClient::react",
-      "line": 46,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::remove_agent",
-      "line": 298,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::source_route_is_pinned",
-      "line": 349,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::identical_call_in_flight",
-      "line": 372,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "reaction_coalesced",
-      "line": 831,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/main.rs",
       "function": "main",
       "line": 1,
@@ -56046,15 +53724,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "current_route_key",
-      "line": 3600,
-      "cyclomatic": 1.0,
-      "coverage": 52.94117647058824,
-      "crap": 1.1042133116222268,
-      "crate": "tau-ext-slack"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
       "function": "parsed_action_arguments",
       "line": 3663,
@@ -56476,15 +54145,6 @@
       "coverage": 80.48780487804879,
       "crap": 1.007428795287358,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::route_text",
-      "line": 3211,
-      "cyclomatic": 1.0,
-      "coverage": 80.76923076923077,
-      "crap": 1.0071119708693672,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -57304,15 +54964,6 @@
       "coverage": 97.72727272727273,
       "crap": 1.0000117392937642,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "static_receive_route_for_message",
-      "line": 3496,
-      "cyclomatic": 1.0,
-      "coverage": 97.77777777777777,
-      "crap": 1.0000109739368999,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-cli-term-raw/src/lib.rs",
@@ -79102,987 +76753,6 @@
       "coverage": 100.0,
       "crap": 1.0,
       "crate": "tau-ext-rhai"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "log_ingress_rejection",
-      "line": 65,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "log_socket_ack_sent",
-      "line": 70,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "SocketHeartbeat::default",
-      "line": 154,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "AdmissionContext::mark",
-      "line": 230,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "elapsed_us",
-      "line": 241,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "secret_value",
-      "line": 775,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "message_fact_conversation",
-      "line": 845,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "slack_message_fact_id",
-      "line": 855,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "slack_sender_ref",
-      "line": 866,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::revoke_message_authority",
-      "line": 1244,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::remove_agent_reply_routes",
-      "line": 1277,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::clear_reply_routes",
-      "line": 1285,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::remove_agent_incoming_messages",
-      "line": 1314,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::clear_incoming_messages",
-      "line": 1327,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::clear_send_ledger",
-      "line": 1333,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::send_agent_generation",
-      "line": 1340,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "State::bump_send_agent_generation",
-      "line": 1348,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::from",
-      "line": 1364,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::from",
-      "line": 1370,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::emit",
-      "line": 1407,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::request_notice",
-      "line": 1411,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Output::report_tool_progress",
-      "line": 1421,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::new_with_scheduler",
-      "line": 1525,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::new_with_clients_and_scheduler",
-      "line": 1540,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::new_socket_worker_view",
-      "line": 1565,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::retire_send_authority",
-      "line": 1646,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::retire_after_output_failure",
-      "line": 1652,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::config_frozen",
-      "line": 1682,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::verified_human",
-      "line": 2050,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_reaction",
-      "line": 2187,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_edit",
-      "line": 2291,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_delete",
-      "line": 2388,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::process_slack_message",
-      "line": 2550,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::insert_received_message",
-      "line": 2683,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::is_self_message",
-      "line": 2723,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::handle_agents_command",
-      "line": 2972,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::admission_authority_is_current",
-      "line": 3156,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::local_effect_authority_is_current",
-      "line": 3164,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "static_parent_receive_covers_dm",
-      "line": 3636,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "Extension::drop",
-      "line": 3686,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ShutdownSignal::new",
-      "line": 3702,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ShutdownSignal::is_requested",
-      "line": 3710,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "ShutdownSignal::request",
-      "line": 3715,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "WorkerOnlineGuard::drop",
-      "line": 3934,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "socket_worker_once",
-      "line": 3942,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "await_socket_write",
-      "line": 4090,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "send_socket_ack",
-      "line": 4332,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "run_with_client",
-      "line": 4605,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "SendReaderBoundary::install",
-      "line": 4678,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "retire_send_state",
-      "line": 4722,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "retire_after_output_failure",
-      "line": 4739,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "SlackExtension::name",
-      "line": 4774,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "SlackExtension::register",
-      "line": 4778,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "handle_output_message",
-      "line": 4914,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "handle_tool_invocation",
-      "line": 4931,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "immutable_config_error",
-      "line": 5000,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "slack_tool_group",
-      "line": 5005,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "example_field",
-      "line": 5012,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "example_text",
-      "line": 5016,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "register_tool_spec",
-      "line": 5020,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "send_tool_spec",
-      "line": 5049,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "conversations_tool_spec",
-      "line": 5102,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "encode_discovery_cursor",
-      "line": 5197,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "structured_tool_result",
-      "line": 5311,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "successful_tool_result",
-      "line": 5318,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "tool_error",
-      "line": 5335,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "agent_display_name",
-      "line": 5353,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "help_text",
-      "line": 5417,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::agent",
-      "line": 5573,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "HttpSlackClient::default",
-      "line": 5638,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/lib.rs",
-      "function": "human_user_from_response",
-      "line": 5844,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageKey::new",
-      "line": 20,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageCache::new",
-      "line": 56,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageCache::get",
-      "line": 77,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageCache::remove_agent",
-      "line": 89,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageCache::clear",
-      "line": 95,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/posted_message_cache.rs",
-      "function": "PostedMessageCache::default",
-      "line": 102,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "AdmissionQueue::new",
-      "line": 31,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "AdmissionQueue::close",
-      "line": 84,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "AdmissionQueue::depth_bucket",
-      "line": 93,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "Reservation::commit",
-      "line": 109,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/admission.rs",
-      "function": "OutstandingPermit::drop",
-      "line": 146,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/scheduler.rs",
-      "function": "SendWake::generation",
-      "line": 17,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/scheduler.rs",
-      "function": "SendWake::notify_lifecycle_change",
-      "line": 25,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/scheduler.rs",
-      "function": "SendWake::notify_progress",
-      "line": 35,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/scheduler.rs",
-      "function": "SystemSendScheduler::wait",
-      "line": 68,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "ObservedSlackBotId::from_validated",
-      "line": 62,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "ObservedSlackBotId::as_str",
-      "line": 67,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::from_extension",
-      "line": 754,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::send_authority_is_current",
-      "line": 1050,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/mod.rs",
-      "function": "SendDeliveryWorker::channel_attempt_barrier",
-      "line": 1086,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "InternalSourceMention::new",
-      "line": 208,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "InternalSourceMention::user_id",
-      "line": 215,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "SlackPostMode::bridge_literal",
-      "line": 267,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "SlackPostMode::text",
-      "line": 288,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "SlackPostMode::mrkdwn",
-      "line": 293,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "FrozenPostBody::wire_json",
-      "line": 329,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "FrozenPostBody::channel_id",
-      "line": 334,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "FrozenPostBody::thread_ts",
-      "line": 339,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "retry_jitter",
-      "line": 358,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "retry_delay",
-      "line": 370,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "escape_slack_entities",
-      "line": 439,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/send_delivery/wire.rs",
-      "function": "truncate_scalars",
-      "line": 445,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::clear",
-      "line": 287,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::remove_agent_sources",
-      "line": 314,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "ReactionState::revoke_message",
-      "line": 338,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "react_tool_spec",
-      "line": 382,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "Extension::finish_reaction_error",
-      "line": 701,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-slack/src/reactions.rs",
-      "function": "HttpSlackClient::react",
-      "line": 932,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-slack"
     },
     {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",

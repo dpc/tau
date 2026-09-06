@@ -235,6 +235,19 @@ Extension-specific settings remain under `config`. For example, std-slack's
 `prefix_agent_id` defaults to `false`; set it to `true` only when Slack posts
 should retain the legacy `[agent-id] ` presentation.
 
+The separately maintained `std-slack` instance is disabled by default. Tau does
+not bundle its source or executable: install the Cargo package
+`dpc-tau-ext-slack` separately, ensure its `tau-ext-slack` executable is
+available through `PATH`, and then enable the instance. Tau launches it through
+the normal supervised stdio extension route.
+
+Tau retains the `std-slack` name, role, configuration, managed-secret delivery,
+per-instance state and checkpoint locations, publisher identity, tool
+prefixing, network policy, and stdio supervision semantics. Running a separate
+executable does not widen its ingress, reply, reaction, proactive-send, or
+dynamic-DM authority. The standalone project owns the detailed setup,
+migration, security, routing, testing, and troubleshooting documentation.
+
 `std-utils` keeps its best-effort `papercut` reporter disabled unless its
 instance config sets `papercut.enable: true`. See the
 [std-utils README](../crates/tau-ext-utils/README.md) for its exact JSONL

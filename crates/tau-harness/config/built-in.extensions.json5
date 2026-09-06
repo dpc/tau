@@ -49,7 +49,7 @@
     },
     {
         name: "std-slack",
-        suffix: ["component", "ext-slack"],
+        command: ["tau-ext-slack"],
         role: "tool",
         enable: false,
         config: { prefix_agent_id: false },

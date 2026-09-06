@@ -22,6 +22,15 @@ tests. Tau retains a focused settings oracle proving that disabled `std-zulip`
 selects the external `tau-ext-zulip` command with no Tau component suffix.
 
 
+## Slack bridge
+
+The separately maintained `tau-ext-slack` project owns the bridge's hermetic
+Socket Mode, admission, routing, mutation, reaction, delivery, lifecycle, and
+standalone-process tests. Tau retains a focused settings oracle proving that
+disabled `std-slack` selects the external `tau-ext-slack` command with no Tau
+component suffix.
+
+
 ## Rendering themes
 
 Rendering and theme behavior tests should use artificial fixture themes with

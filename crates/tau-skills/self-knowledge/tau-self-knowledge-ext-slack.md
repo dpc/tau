@@ -6,10 +6,14 @@ advertise: false
 
 # Tau std-slack extension self-knowledge
 
-`std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
-`slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`; `tool_prefix` scopes
-all four tools and their group for multiple accounts. Slack text is always
-untrusted external content.
+`std-slack` is Tau's disabled-by-default configuration for the separately
+maintained Cargo package `dpc-tau-ext-slack` and its `tau-ext-slack` executable.
+Tau does not bundle or install that executable; install it separately and ensure
+it is available through `PATH` before enabling the instance. Tau still starts
+it through the normal supervised stdio extension route. It exposes
+`slack_register`, `slack_conversations`, `slack_send`, and default-off
+`slack_react`; `tool_prefix` scopes all four tools and their group for multiple
+accounts. Slack text is always untrusted external content.
 
 Configuration requires app/bot token secrets, nonempty exact U/W
 `allowed_user_ids`, and an active `conversations` and/or
@@ -20,7 +24,7 @@ independent `proactive_send`, plus an optional operator-authored description on
 any active static record. Native ids and raw thread selectors are never model
 inputs. `channel_ids`,
 `listening_scope`, and `send_destinations` were removed and are hard errors.
-Follow the [README migration procedure](../../tau-ext-slack/README.md#migration-from-removed-keys).
+Follow the standalone `tau-ext-slack` project's README migration procedure.
 Optional `sender_aliases` bind at most 64 exact U/W ids one-to-one to unique
 lowercase aliases. They are operator presentation only. The native U/W id stays
 authoritative/model-primary; bounded `profile.display_name` from the same
@@ -208,9 +212,8 @@ These are deliberately closed-category logs: Slack-owned records omit tokens,
 websocket URLs, native IDs, message payloads, and provider response text. The
 raw per-extension stderr file is nevertheless private and unredacted at its sink
 boundary; dependency or custom-extension output can contain identifiers or local
-paths. Review it before sharing. See the [README troubleshooting
-procedure](../../tau-ext-slack/README.md#troubleshooting) for the detailed
-reconnection runbook.
+paths. Review it before sharing. See the standalone `tau-ext-slack` project's
+README troubleshooting procedure for the detailed reconnection runbook.
 
 For missing delivery, check the exact `message.*`/`app_mention` subscription and
 history/app-mention scope, reinstall after scope changes, verify app membership,
