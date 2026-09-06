@@ -76,6 +76,9 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         now: Instant,
     ) {
+        self.runtime_io
+            .protocol_version_skew_warned
+            .remove(connection_id);
         self.extensions.startup_deadlines.remove(connection_id);
         self.extensions
             .expired_startup_connects
@@ -1666,6 +1669,27 @@ impl Harness {
             tau_proto::NoticeLevel::Warning,
             tau_proto::NoticePurpose::Alert,
             message,
+        );
+    }
+
+    /// Publishes one replayable but non-journaled alert for an admitted peer's
+    /// minor protocol-version skew.
+    pub(super) fn emit_protocol_version_skew(&mut self, message: &str) {
+        let notice = tau_proto::HarnessNotice {
+            kind: tau_proto::notice_kind::HARNESS_INTERNAL_WARNING.to_owned(),
+            message: message.to_owned(),
+            level: tau_proto::NoticeLevel::Warning,
+            purpose: tau_proto::NoticePurpose::Alert,
+        };
+        self.runtime_io
+            .replayable_harness_notices
+            .push(notice.clone());
+        self.enqueue_publish(
+            Some(crate::harness::harness_connection_id()),
+            Event::HarnessNotice(notice),
+            false,
+            true,
+            None,
         );
     }
 

@@ -35,6 +35,7 @@ mod observation;
 mod prompt_envelope;
 mod prompt_fragment;
 mod prompt_submission;
+mod protocol_version;
 mod provider_cache_policy;
 mod provider_capture_attribution;
 pub use provider_capture_attribution::{CacheOperationId, ProviderCaptureAttribution};
@@ -71,6 +72,7 @@ pub use observation::*;
 pub use prompt_envelope::*;
 pub use prompt_fragment::*;
 pub use prompt_submission::*;
+pub use protocol_version::ProtocolVersion;
 pub use provider_cache_policy::*;
 pub use provider_cache_privacy::*;
 pub use provider_cache_quota::*;
@@ -92,11 +94,10 @@ pub use tool_name_prefix::{
     InvalidToolNamePrefix, ToolNameCompositionError, ToolNamePrefix, ToolNameTarget,
 };
 
-/// Current protocol version implemented by this crate.
+/// Current harness-peer wire and extension-visible event contract revision.
 ///
-/// This stays at zero under
-/// `GATE-no-backward-compatibility`; Tau does not support old protocols.
-pub const PROTOCOL_VERSION: u32 = 0;
+/// `SPEC-extension-protocol-versioning` defines bump and admission policy.
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

@@ -23,6 +23,8 @@ pub(crate) struct RuntimeIoState {
     pub(crate) event_log: std::sync::Arc<EventLog>,
     /// Harness notices replayed to late UI clients.
     pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
+    /// Connections that already emitted their sole minor-skew warning.
+    pub(crate) protocol_version_skew_warned: HashSet<tau_proto::ConnectionId>,
     /// Last diagnostic warning about a lagging live follower.
     pub(crate) last_live_egress_lag_warning: Option<Instant>,
     /// Producer for the best-effort debug event log.

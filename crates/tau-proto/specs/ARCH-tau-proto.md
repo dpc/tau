@@ -75,6 +75,11 @@ event persistence or the harness-extension interface require the explicit
 confirmation mandated by
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
+The shared Hello advertises the explicit protocol revision governed by
+[SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md).
+The revision covers this wire contract and extension-visible event behavior, not
+Cargo releases or journal physical formats.
+
 Saved-agent operator unload uses dedicated `UnloadSessionAgent` and
 `UnloadSessionAgentResult` control messages. They are directed and transient,
 not generic events; the only extension-visible or durable semantic transition

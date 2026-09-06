@@ -23,6 +23,10 @@ The runner writes `Hello`, requires the initial harness `Configure`, installs an
 immutable logical-to-wire tool-name scope, constructs state, and dispatches
 initial Configure handlers exactly once. It then writes static declarations,
 accepted Configure-derived declarations, and `Ready`, in that order.
+The Hello advertises `tau-proto`'s compiled protocol revision. The client does
+not negotiate or independently enforce skew; harness admission is governed by
+[SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md),
+and the first admitted harness response remains Configure.
 `startup_event` preserves durable `Emit` metadata, while
 `startup_transient_event` sets `Emit.persist=false` for runtime-only declarations;
 both retain their builder order before `Ready`.

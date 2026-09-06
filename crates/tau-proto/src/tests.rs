@@ -4267,6 +4267,10 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     let input_json = serde_json::to_value(&input).expect("serialize input");
     assert_eq!(input_json["message"], "hello");
     assert!(input_json.get("payload").is_some());
+    assert_eq!(
+        input_json["payload"]["protocol_version"],
+        serde_json::json!({"major": 1, "minor": 0})
+    );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
         reason: Some("shutdown".to_owned()),
@@ -4274,6 +4278,37 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     let output_json = serde_json::to_value(&output).expect("serialize output");
     assert_eq!(output_json["message"], "disconnect");
     assert!(output_json.get("payload").is_some());
+}
+
+/// Hello requires the explicit object-shaped protocol revision and rejects
+/// missing, malformed, and legacy scalar values without compatibility defaults.
+#[test]
+fn hello_protocol_version_wire_shape_fails_closed() {
+    let hello = serde_json::json!({
+        "client_name": "provider",
+        "client_kind": "provider"
+    });
+    for invalid_version in [
+        None,
+        Some(serde_json::json!(0)),
+        Some(serde_json::json!({"major": 1})),
+        Some(serde_json::json!({"major": "1", "minor": 0})),
+    ] {
+        let mut candidate = hello.clone();
+        if let Some(version) = invalid_version {
+            candidate["protocol_version"] = version;
+        }
+        assert!(
+            serde_json::from_value::<Hello>(candidate.clone()).is_err(),
+            "accepted invalid protocol version: {candidate}"
+        );
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&candidate, &mut cbor).expect("encode malformed Hello");
+        assert!(
+            ciborium::from_reader::<Hello, _>(cbor.as_slice()).is_err(),
+            "accepted invalid CBOR protocol version: {candidate}"
+        );
+    }
 }
 
 /// UI session admission fields retain their exact optional Hello shape and

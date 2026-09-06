@@ -1280,6 +1280,7 @@ fn message_bridge_capability_is_declared_in_hello() {
     let HarnessInputMessage::Hello(hello) = &frames[0] else {
         panic!("first frame must be Hello");
     };
+    assert_eq!(hello.protocol_version, tau_proto::PROTOCOL_VERSION);
     assert_eq!(
         hello.capabilities,
         [tau_proto::PeerCapability::MessageBridge]

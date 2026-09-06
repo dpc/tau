@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, Event, EventSelector,
-    ExtensionName, HostedToolDefinition, InterceptionPriority, NoticeLevel, SessionId,
-    ToolDefinition, ToolNamePrefix,
+    ExtensionName, HostedToolDefinition, InterceptionPriority, NoticeLevel, ProtocolVersion,
+    SessionId, ToolDefinition, ToolNamePrefix,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ pub enum PeerCapability {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
     /// Protocol version understood by the connecting peer.
-    pub protocol_version: u32,
+    pub protocol_version: ProtocolVersion,
     /// Stable name used to identify the connecting peer.
     pub client_name: ExtensionName,
     /// Authority class requested by the connecting peer.

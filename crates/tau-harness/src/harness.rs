@@ -1474,13 +1474,29 @@ fn response_requests_tool_calls(response: &ProviderResponseFinished) -> bool {
         .iter()
         .any(|item| matches!(item, ContextItem::ToolCall(_)))
 }
-fn validate_protocol_version(hello: &Hello) -> Result<(), HarnessError> {
-    if hello.protocol_version == PROTOCOL_VERSION {
-        return Ok(());
+fn validate_protocol_version(hello: &Hello) -> Result<Option<String>, HarnessError> {
+    validate_protocol_version_against(hello, PROTOCOL_VERSION)
+}
+
+fn validate_protocol_version_against(
+    hello: &Hello,
+    harness_version: tau_proto::ProtocolVersion,
+) -> Result<Option<String>, HarnessError> {
+    if hello.protocol_version.major != harness_version.major {
+        return Err(HarnessError::Participant(format!(
+            "unsupported protocol version from {}: peer uses {}, harness uses {}; \
+             rebuild or update the peer for protocol major {}",
+            hello.client_name, hello.protocol_version, harness_version, harness_version.major
+        )));
     }
-    Err(HarnessError::Participant(format!(
-        "unsupported protocol version from {}: got {}, expected {}",
-        hello.client_name, hello.protocol_version, PROTOCOL_VERSION
+    if hello.protocol_version.minor == harness_version.minor {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "protocol version skew for peer `{}`: peer uses {}, harness uses {}; \
+         continuing best-effort because the major versions match. Rebuild or update the peer \
+         if protocol behavior fails",
+        hello.client_name, hello.protocol_version, harness_version
     )))
 }
 
@@ -2963,16 +2979,19 @@ impl Harness {
         }
         match message {
             HarnessInputMessage::Hello(hello) => {
-                if let Err(error) = validate_protocol_version(&hello) {
-                    let _ = self.runtime_io.bus.send_to(
-                        client_id,
-                        None,
-                        HarnessOutputMessage::Disconnect(Disconnect {
-                            reason: Some(error.to_string()),
-                        }),
-                    );
-                    return Ok(ClientMessageDisposition::CloseAfterReply);
-                }
+                let protocol_version_warning = match validate_protocol_version(&hello) {
+                    Ok(warning) => warning,
+                    Err(error) => {
+                        let _ = self.runtime_io.bus.send_to(
+                            client_id,
+                            None,
+                            HarnessOutputMessage::Disconnect(Disconnect {
+                                reason: Some(error.to_string()),
+                            }),
+                        );
+                        return Ok(ClientMessageDisposition::CloseAfterReply);
+                    }
+                };
                 let socket_connection = self
                     .runtime_io
                     .bus
@@ -3030,6 +3049,20 @@ impl Harness {
                     self.ui_runtime
                         .runtime_probe_peers
                         .insert(client_id.clone());
+                }
+                if let Some(warning) = protocol_version_warning
+                    && self
+                        .runtime_io
+                        .protocol_version_skew_warned
+                        .insert(client_id.clone())
+                {
+                    tracing::warn!(
+                        peer = %hello.client_name,
+                        peer_protocol_version = %hello.protocol_version,
+                        harness_protocol_version = %PROTOCOL_VERSION,
+                        "admitting peer with protocol minor-version skew"
+                    );
+                    self.emit_protocol_version_skew(&warning);
                 }
                 Ok(ClientMessageDisposition::Continue)
             }

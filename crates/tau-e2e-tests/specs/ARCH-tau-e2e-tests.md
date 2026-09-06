@@ -53,6 +53,12 @@ arbitrary fixture-loading capability. Tests match selected stable prompt fields
 and exact V1 global-FIFO or V2 lane-local consumption rather than giant prompt
 snapshots.
 
+A focused daemon-socket case deliberately advertises a newer protocol minor,
+then proves best-effort admission and one replayable warning through the
+production Hello and subscription path, then completes one ordinary
+deterministic text turn. It adds no protocol override to the compiled fake
+provider.
+
 `VcrFixture` remains opt-in infrastructure for real provider and shell turns.
 It is not sandboxed: it executes a trusted local `tau` binary, uses the user's
 normal provider authentication store, and allows the shell extension to run

@@ -28,7 +28,7 @@ use crate::harness::{
     PendingUiShellCommand, UiShellRouteId, extension_disconnected_tool_call_error_message,
     extension_restart_disabled_notice, prompt_snapshot_tool_error_message,
     tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
-    unavailable_tool_error_message, validate_protocol_version,
+    unavailable_tool_error_message, validate_protocol_version_against,
 };
 use crate::settings::{
     Config, ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource,

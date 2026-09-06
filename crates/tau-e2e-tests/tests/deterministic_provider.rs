@@ -7,9 +7,11 @@ use tau_e2e_tests::{
     ScenarioV1, ScenarioV2, StatusTerminalPhase, StatusToolOrder,
 };
 use tau_proto::{
-    AgentId, AgentRuntimeState, CborValue, ContextItem, Event, ImageDetail, ImageMediaType,
-    ProviderFailureKind, ToolResultContentPart, ToolResultKind,
+    AgentId, AgentRuntimeState, CborValue, ClientKind, ContextItem, Event, EventName,
+    EventSelector, HarnessInputMessage, Hello, ImageDetail, ImageMediaType, ProtocolVersion,
+    ProviderFailureKind, Subscribe, ToolResultContentPart, ToolResultKind,
 };
+use tau_socket::SocketPeer;
 
 #[path = "deterministic_provider/daemon_support.rs"]
 mod daemon_support;
@@ -33,6 +35,113 @@ const RESTORE_NOTICE: &str = concat!(
     "Session-scoped tool and extension state may also have changed; inspect current tool state ",
     "and recreate timers or other session-scoped setup if still needed."
 );
+
+/// A real daemon socket admits a deliberately newer minor peer, exposes exactly
+/// one replayable warning, and preserves ordinary operation and cleanup.
+#[test]
+fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn std::error::Error>>
+{
+    const PROMPT: &str = "prove minor protocol skew continues";
+    const RESPONSE: &str = "minor skew peer remained operational";
+    let scenario = ScenarioV2::new(
+        "protocol-minor-skew",
+        vec![ScenarioLaneV2 {
+            ctx_id: "protocol-minor-skew".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: PROMPT.to_owned(),
+                response: RESPONSE.to_owned(),
+            }],
+        }],
+    );
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_minor_protocol_skew_warns_and_continues",
+        &scenario,
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("protocol-minor-skew");
+    let daemon = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut peer = loop {
+        match SocketPeer::connect(&socket) {
+            Ok(peer) => break peer,
+            Err(_) if Instant::now() < deadline => std::thread::yield_now(),
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let peer_version = ProtocolVersion::new(
+        tau_proto::PROTOCOL_VERSION.major,
+        tau_proto::PROTOCOL_VERSION.minor + 1,
+    );
+    peer.send(&HarnessInputMessage::Hello(Hello {
+        protocol_version: peer_version,
+        client_name: "tau-e2e-minor-skew".parse()?,
+        client_kind: ClientKind::Ui,
+        expected_session_id: None,
+        capabilities: Vec::new(),
+    }))?;
+    peer.send(&HarnessInputMessage::Subscribe(Subscribe {
+        historical_selectors: vec![
+            EventSelector::Exact(EventName::HARNESS_NOTICE),
+            EventSelector::Exact(EventName::PROVIDER_RESPONSE_FINISHED),
+        ],
+        live_selectors: vec![
+            EventSelector::Exact(EventName::HARNESS_NOTICE),
+            EventSelector::Exact(EventName::PROVIDER_RESPONSE_FINISHED),
+        ],
+    }))?;
+
+    let observed = loop {
+        let observed = recv_observed(&mut peer)?;
+        if matches!(
+            &observed.event,
+            Event::HarnessNotice(notice)
+                if notice.message.contains("protocol version skew for peer")
+        ) {
+            break observed;
+        }
+    };
+    let Event::HarnessNotice(notice) = &observed.event else {
+        unreachable!("loop exits only for a harness notice");
+    };
+    assert!(notice.message.contains("tau-e2e-minor-skew"));
+    assert!(notice.message.contains(&peer_version.to_string()));
+    assert!(
+        notice
+            .message
+            .contains(&tau_proto::PROTOCOL_VERSION.to_string())
+    );
+    assert!(notice.message.contains("continuing best-effort"));
+    assert!(
+        observed.replay,
+        "late subscription must replay the live alert"
+    );
+    create_agent(&mut peer, "protocol-minor-skew", PROMPT)?;
+    loop {
+        if matches!(
+            recv_event(&mut peer)?,
+            Event::ProviderResponseFinished(finished)
+                if finished.output_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        ContextItem::Message(message)
+                            if message.content.iter().any(|part| {
+                                matches!(
+                                    part,
+                                    tau_proto::ContentPart::Text { text } if text == RESPONSE
+                                )
+                            })
+                    )
+                })
+        ) {
+            break;
+        }
+    }
+    disconnect_ui(&mut peer)?;
+    drop(peer);
+    daemon.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
 
 /// The exact incident command unloads an idle saved agent through the
 /// deterministic daemon.

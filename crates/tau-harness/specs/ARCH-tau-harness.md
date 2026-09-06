@@ -635,3 +635,8 @@ absence suppresses stale credentials; source errors preserve the previous record
 and follow required/optional extension startup policy. Memory-only startup
 forwards the credential-free settings generation needed for model declarations
 without resolving or materializing credentials.
+
+Shared Hello admission follows
+[SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md):
+major skew rejects before configuration, while minor skew emits one live
+replayable warning and continues without adding a negotiation round trip.

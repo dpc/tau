@@ -143,6 +143,10 @@ normal interactive startup availability in
 [SPEC-tau-harness-extension-lifecycle](../../tau-harness/specs/SPEC-tau-harness-extension-lifecycle.md);
 embedded launches do not scrub the ordinary child OS environment. Spawned daemon
 acceptance clears it and supplies private HOME/XDG roots plus a fixed locale.
+The protocol-skew daemon case uses one fixture-authored socket UI Hello with the
+compiled major and a deliberately newer minor. It subscribes only to the
+harness-notice and provider-finish families and requires the warning through
+subscribe-time replay before one ordinary exact text action and clean disconnect.
 The provider-context placement fixture separately exposes `message` and
 `provider_context_raw_message` to its main and `restart_test_dummy` to its
 worker; all three are closed test-only actions.
