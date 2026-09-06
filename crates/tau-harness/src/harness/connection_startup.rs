@@ -340,12 +340,20 @@ impl Harness {
             Some(ConnectionOrigin::Socket) => {
                 let shutdown_requested =
                     self.is_authorized_ui_shutdown_request(connection_id, &message);
+                let is_hello = matches!(&message, HarnessInputMessage::Hello(_));
                 let subscribed = matches!(&message, HarnessInputMessage::Subscribe(_));
                 if shutdown_requested {
                     self.ui_runtime.shutdown_requested = true;
+                    self.publish_ui_quit_dispositions();
                 }
                 self.handle_ui_quit_request(connection_id, &message);
                 let disposition = self.handle_client_message_disposition(connection_id, message)?;
+                if is_hello && matches!(disposition, ClientMessageDisposition::Continue) {
+                    self.ui_runtime
+                        .pending_socket_admission
+                        .remove(connection_id);
+                    self.publish_ui_quit_dispositions();
+                }
                 let close = match disposition {
                     ClientMessageDisposition::Continue => false,
                     ClientMessageDisposition::Close => true,

@@ -636,6 +636,36 @@ fn dynamic_commands_are_in_root_completion_menu() {
     assert_eq!(labels, vec![":quit", ":email"]);
 }
 
+/// Intrinsic commands can refresh their help without changing the command token
+/// or allowing the mutable completion state to add another root candidate.
+#[test]
+fn static_command_descriptions_refresh_root_menu_help() {
+    let data = CompletionData::new();
+    data.set_static_command_descriptions([(
+        CommandName::new(":quit"),
+        "Quit UI and shut down the session".to_owned(),
+    )]);
+
+    let candidates = completion::build_candidates(
+        &[
+            CommandCompletion::new(":quit", "Quit this UI using the current session policy"),
+            CommandCompletion::new(":q", "Alias for :quit"),
+        ],
+        &data,
+        ":q",
+        2,
+    );
+
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].label, ":quit");
+    assert_eq!(
+        candidates[0].description,
+        "Quit UI and shut down the session"
+    );
+    assert_eq!(candidates[1].label, ":q");
+    assert_eq!(candidates[1].description, "Alias for :quit");
+}
+
 /// Accepts the complete command-token alphabet.
 #[test]
 fn command_name_accepts_one_colon_and_one_token() {

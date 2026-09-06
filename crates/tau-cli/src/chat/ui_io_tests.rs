@@ -54,6 +54,59 @@ fn renderer_scheduler_channels(
     (remote_tx, local_tx, scheduler)
 }
 
+/// Startup must not open command input until the renderer has applied the
+/// harness-owned ordinary-quit prediction.
+#[test]
+fn initial_quit_disposition_barrier_waits_for_renderer_application() {
+    let (applied_tx, applied_rx) = mpsc::sync_channel(1);
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        waiting_tx.send(()).expect("waiter started");
+        await_initial_quit_disposition(&applied_rx, Duration::from_secs(1))
+    });
+
+    waiting_rx.recv().expect("waiter entered barrier");
+    assert!(
+        !waiter.is_finished(),
+        "barrier returned before renderer acknowledgement"
+    );
+    applied_tx.send(Ok(())).expect("renderer acknowledgement");
+    assert!(waiter.join().expect("waiter").is_ok());
+}
+
+/// The initial projection follows the remote renderer FIFO rather than updating
+/// shared completion state directly from the socket reader.
+#[test]
+fn initial_quit_disposition_uses_remote_renderer_fifo() {
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
+    let arbiter = Arc::new(Mutex::new(()));
+    let (remote_tx, _local_tx, mut scheduler) =
+        renderer_scheduler_channels(1, admitted.clone(), arbiter.clone());
+    let (applied_tx, _applied_rx) = mpsc::sync_channel(1);
+
+    enqueue_remote_quit_disposition(
+        tau_proto::UiQuitDisposition::Terminating,
+        Some(applied_tx),
+        &remote_tx,
+        &arbiter,
+        &admitted,
+    )
+    .expect("enqueue quit disposition");
+
+    assert_eq!(admitted.load(Ordering::Acquire), 1);
+    let RendererCmd::UiQuitDispositionChanged {
+        disposition,
+        initial_applied,
+    } = scheduler
+        .recv_timeout(Duration::from_secs(1))
+        .expect("remote projection")
+    else {
+        panic!("expected remote quit disposition");
+    };
+    assert_eq!(disposition, tau_proto::UiQuitDisposition::Terminating);
+    assert!(initial_applied.is_some());
+}
+
 /// Builds one ordinary remote command for scheduler ordering tests.
 fn remote_bell(delivery_id: u64) -> RendererCmd {
     RendererCmd::Remote {

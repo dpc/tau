@@ -18,6 +18,165 @@ fn quit_reply(disposition: tau_proto::UiQuitDisposition) -> HarnessOutputMessage
     })
 }
 
+/// Expected read-only current-state projection for one UI's ordinary quit.
+fn quit_projection(disposition: tau_proto::UiQuitDisposition) -> HarnessOutputMessage {
+    HarnessOutputMessage::UiQuitDispositionChanged(tau_proto::UiQuitDispositionChanged {
+        disposition,
+    })
+}
+
+/// A UI's projected ordinary-quit outcome changes when another participating UI
+/// arrives or leaves, while the harness remains the sole lifecycle authority.
+#[test]
+fn quit_projection_tracks_other_ui_admission_and_departure() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+
+    let (first_id, mut first) = connect_socket_ui(&mut h);
+    h.publish_ui_quit_dispositions();
+    assert_eq!(
+        first.read_message().expect("initial projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
+    );
+
+    let (second_id, mut second) = connect_socket_ui(&mut h);
+    h.publish_ui_quit_dispositions();
+    for ui in [&mut first, &mut second] {
+        assert_eq!(
+            ui.read_message().expect("joined projection"),
+            Some(quit_projection(tau_proto::UiQuitDisposition::Detached))
+        );
+    }
+
+    h.handle_runtime_disconnect(second_id, &mut 0)
+        .expect("other UI EOF");
+    assert_eq!(
+        first.read_message().expect("post-EOF projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
+    );
+    assert!(!h.ui_runtime.quitting_uis.contains(&first_id));
+}
+
+/// Acknowledge a quitter before EOF, then refresh remaining UI help from the
+/// same state transition; explicit detach clears the policy for future quits.
+#[test]
+fn quit_projection_tracks_quitting_and_detach_policy_clear() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+
+    let (first_id, mut first) = connect_socket_ui(&mut h);
+    let (second_id, mut second) = connect_socket_ui(&mut h);
+    h.publish_ui_quit_dispositions();
+    let _ = first.read_message().expect("first initial projection");
+    let _ = second.read_message().expect("second initial projection");
+
+    h.handle_ui_quit_request(&second_id, &quit_request(false));
+    assert_eq!(
+        second.read_message().expect("quitter result"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    assert_eq!(
+        first.read_message().expect("quitting projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
+    );
+    assert!(h.ui_runtime.quitting_uis.contains(&second_id));
+
+    let (third_id, mut third) = connect_socket_ui(&mut h);
+    h.publish_ui_quit_dispositions();
+    for ui in [&mut first, &mut third] {
+        assert_eq!(
+            ui.read_message().expect("replacement UI projection"),
+            Some(quit_projection(tau_proto::UiQuitDisposition::Detached))
+        );
+    }
+
+    h.handle_ui_quit_request(&third_id, &quit_request(true));
+    assert_eq!(
+        third.read_message().expect("detach result"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    assert_eq!(
+        first.read_message().expect("detach projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Detached))
+    );
+    assert!(!h.ui_runtime.exit_on_disconnect);
+    assert!(!h.ui_runtime.quitting_uis.contains(&first_id));
+}
+
+/// Exact socket admission sends the initial current-quit projection only after
+/// the UI completes Hello and becomes a lifetime participant.
+#[test]
+fn quit_projection_follows_exact_ui_admission() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+    h.session_runtime.exact_socket_session_required = true;
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    let mut served_clients = 0;
+
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(
+            ui_id,
+            HarnessInputMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: crate::test_extension_name("projection-ui"),
+                client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: Some(test_session_id("s1")),
+                capabilities: Vec::new(),
+            }),
+        ),
+        &mut served_clients,
+    )
+    .expect("admit UI");
+
+    assert!(matches!(
+        ui.read_message().expect("admission"),
+        Some(HarnessOutputMessage::SessionAccepted(accepted))
+            if accepted.session_id == test_session_id("s1")
+    ));
+    assert_eq!(
+        ui.read_message().expect("initial projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
+    );
+    assert_eq!(served_clients, 0);
+}
+
+/// The initial startup UI receives the same projection after its Hello, before
+/// its later Subscribe completes the startup handshake.
+#[test]
+fn quit_projection_follows_initial_ui_hello() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+
+    assert!(
+        !h.handle_startup_from_connection(
+            &ui_id,
+            HarnessInputMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: crate::test_extension_name("initial-projection-ui"),
+                client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: Some(test_session_id("s1")),
+                capabilities: Vec::new(),
+            }),
+        )
+        .expect("accept initial UI hello")
+    );
+
+    assert!(matches!(
+        ui.read_message().expect("admission"),
+        Some(HarnessOutputMessage::SessionAccepted(accepted))
+            if accepted.session_id == test_session_id("s1")
+    ));
+    assert_eq!(
+        ui.read_message().expect("initial projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
+    );
+}
+
 /// The auto-shutdown flag is dormant before the first admitted UI, ignores
 /// partial socket admission, and survives the departure of a non-final UI.
 #[test]
@@ -108,6 +267,10 @@ fn final_quit_selects_canonical_shutdown_before_transport_eof() {
     assert_eq!(
         first.read_message().expect("first reply"),
         Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    assert_eq!(
+        last.read_message().expect("remaining UI projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
     );
     h.handle_ui_quit_request(&last_id, &request);
     assert_eq!(
@@ -623,8 +786,12 @@ fn shutdown_request_queues_canonical_shutdown_without_publication() {
 
     assert_eq!(served_clients, 0);
     assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
-    assert_no_message(&mut ui);
-    assert_no_message(&mut observer);
+    for reader in [&mut ui, &mut observer] {
+        assert_eq!(
+            reader.read_message().expect("read quit projection"),
+            Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
+        );
+    }
     assert!(h.ui_runtime.shutdown_requested);
 
     h.shutdown().expect("canonical shutdown");
@@ -704,7 +871,10 @@ fn shutdown_request_controls_startup_only_for_attached_socket_ui() {
             .expect("retain UI shutdown")
     );
     assert!(h.ui_runtime.shutdown_requested);
-    assert_no_message(&mut ui);
+    assert_eq!(
+        ui.read_message().expect("read quit projection"),
+        Some(quit_projection(tau_proto::UiQuitDisposition::Terminating))
+    );
 }
 
 /// A socket client cannot claim report or canonical message publication

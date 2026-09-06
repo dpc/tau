@@ -377,14 +377,41 @@ impl HighTerm {
         completion_rules: CompletionRules,
         terminal_options: TerminalOptions,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
+        let data = CompletionData::new();
+        let (term, handle) = Self::new_with_completion_rules_and_data(
+            left_prompt,
+            commands,
+            theme,
+            bindings,
+            input_history,
+            completion_rules,
+            terminal_options,
+            data.clone(),
+        )?;
+        Ok((term, handle, data))
+    }
+
+    /// Creates a terminal with caller-owned mutable completion state.
+    ///
+    /// Callers may populate this state before the input loop starts, then
+    /// update it later from background owners through its shared handle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_completion_rules_and_data(
+        left_prompt: impl Into<StyledText>,
+        commands: Vec<CommandCompletion>,
+        theme: Theme,
+        bindings: impl IntoIterator<Item = (String, String)>,
+        input_history: impl IntoIterator<Item = String>,
+        completion_rules: CompletionRules,
+        terminal_options: TerminalOptions,
+        data: CompletionData,
+    ) -> io::Result<(Self, TermHandle)> {
         let input_history: Vec<String> = input_history.into_iter().collect();
         let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, terminal_options)?;
         term.defer_submitted_input_history_limit();
         term.seed_input_history(input_history.clone());
         term.set_bindings(bindings);
         let handle_clone = handle.clone();
-        let data = CompletionData::new();
-        let data_clone = data.clone();
         let completion_command_rules = completion_rules.command_rules().clone();
         term.set_completion_source(Some(make_completion_source(
             commands,
@@ -413,7 +440,6 @@ impl HighTerm {
                 last_command_completion_token: None,
             },
             handle_clone,
-            data_clone,
         ))
     }
 
@@ -645,6 +671,11 @@ impl HighTerm {
     fn handle_next_raw_event(&mut self, raw: RawEvent) -> NextEventStep {
         match raw {
             RawEvent::BufferChanged => self.handle_buffer_changed_event(),
+            RawEvent::CompletionRefresh => {
+                self.sync_menu_block();
+                self.handle.redraw();
+                NextEventStep::Continue
+            }
             RawEvent::CompletionAccept => self.handle_completion_accept_event(),
             RawEvent::BackTab => NextEventStep::Return(Event::BackTab),
             RawEvent::Escape => NextEventStep::Return(Event::Escape),
@@ -860,6 +891,11 @@ impl HighTerm {
             RawEvent::BufferChanged => {
                 self.sync_menu_block();
                 PromptActionOutcome::BufferChanged
+            }
+            RawEvent::CompletionRefresh => {
+                self.sync_menu_block();
+                self.handle.redraw();
+                PromptActionOutcome::Continue
             }
             RawEvent::CompletionAccept => {
                 self.sync_menu_block();

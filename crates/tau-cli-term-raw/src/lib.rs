@@ -220,9 +220,9 @@ pub struct CompletionAcceptance {
 
 /// Builds the candidate list for the current buffer.
 ///
-/// Called on every buffer mutation (typing, paste, backspace). An
-/// empty result closes the completion menu; a non-empty result opens
-/// it (or refreshes it if already open).
+/// Called on every buffer mutation (typing, paste, backspace) and on explicit
+/// terminal-owned refresh requests. An empty result closes the completion menu;
+/// a non-empty result opens it (or refreshes it if already open).
 pub trait CompletionSource: Send + Sync {
     /// Returns whole-buffer completion candidates for `buffer`.
     ///
@@ -1013,6 +1013,9 @@ pub enum Event {
     /// open/close/cycle. Caller should re-render anything that
     /// depends on either (typically the menu and the prompt itself).
     BufferChanged,
+    /// A background owner requested that the completion menu be recomputed
+    /// without changing the prompt buffer.
+    CompletionRefresh,
     /// The user pressed Ctrl-Enter with a candidate previewed in the
     /// menu. The buffer is now the candidate's accepted replacement and
     /// completion has been re-evaluated for that buffer. The caller
@@ -1505,6 +1508,14 @@ impl TermHandle {
     pub fn request_input_shutdown(&self) {
         self.lock().terminal.input_shutdown = true;
         let _ = self.input_tx.send(InputMessage::Shutdown);
+    }
+
+    /// Requests a completion-source refresh without changing the prompt buffer.
+    ///
+    /// The input owner recomputes the menu and redraws it, so background state
+    /// updates never run completion code on their own threads.
+    pub fn request_completion_refresh(&self) {
+        let _ = self.input_tx.send(InputMessage::RefreshCompletion);
     }
 
     /// Run `f` while redraw notifications from this handle are suppressed.
@@ -2295,15 +2306,54 @@ pub enum RawEvent {
     /// atomically so a multi-line paste doesn't trigger Enter on
     /// embedded newlines.
     Paste(String),
+    /// Re-evaluate the completion source without treating it as user input.
+    CompletionRefresh,
 }
 
 enum InputMessage {
     /// A raw terminal event to process unless sticky shutdown/EOF already won.
     Raw(RawEvent),
+    /// A real-terminal reader result that retires the in-flight reader marker.
+    RealRaw(RawEvent),
     /// Wake the receiver and transition it to sticky EOF.
     Shutdown,
-    /// A crossterm read error to surface unless shutdown/EOF already won.
-    Error(io::Error),
+    /// Wake the input owner to re-evaluate an already-open completion menu.
+    RefreshCompletion,
+    /// A real-terminal reader error that retires the in-flight reader marker.
+    RealError(io::Error),
+}
+
+/// Starts exactly one real-terminal reader until its result reaches the input
+/// owner, even if non-input wakeups arrive in the meantime.
+fn spawn_real_reader_if_needed(
+    in_flight: &Arc<path_std_sync_atomic::AtomicBool>,
+    tx: path_std_sync::mpsc::Sender<InputMessage>,
+    read: impl FnOnce() -> io::Result<RawEvent> + Send + 'static,
+) -> bool {
+    if in_flight
+        .compare_exchange(
+            false,
+            true,
+            path_std_sync_atomic::Ordering::AcqRel,
+            path_std_sync_atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    thread::spawn(move || {
+        let message = match read() {
+            Ok(raw) => InputMessage::RealRaw(raw),
+            Err(error) => InputMessage::RealError(error),
+        };
+        let _ = tx.send(message);
+    });
+    true
+}
+
+/// Retires a consumed real-terminal reader result on its owning input thread.
+fn finish_real_reader(in_flight: &path_std_sync_atomic::AtomicBool) {
+    in_flight.store(false, path_std_sync_atomic::Ordering::Release);
 }
 
 /// The first reported output failure that permanently stops one terminal
@@ -2366,6 +2416,8 @@ pub struct Term {
     handle: TermHandle,
     /// Receives raw input, read errors, and shutdown wakeups.
     input_rx: path_std_sync::mpsc::Receiver<InputMessage>,
+    /// Keeps one real-terminal read alive across non-input wakeups.
+    real_read_in_flight: Arc<path_std_sync_atomic::AtomicBool>,
     /// Redraw thread handle — taken and joined on drop.
     redraw_thread: Option<JoinHandle<()>>,
     /// Whether to disable raw mode on drop (false for virtual terms).
@@ -2471,6 +2523,7 @@ impl Term {
             Self {
                 handle: handle.clone(),
                 input_rx,
+                real_read_in_flight: Arc::new(path_std_sync_atomic::AtomicBool::new(false)),
                 redraw_thread: Some(redraw_thread),
                 owns_raw_mode: true,
                 terminal_options,
@@ -2548,6 +2601,7 @@ impl Term {
         let term = Self {
             handle: handle.clone(),
             input_rx,
+            real_read_in_flight: Arc::new(path_std_sync_atomic::AtomicBool::new(false)),
             redraw_thread: Some(redraw_thread),
             owns_raw_mode: false,
             terminal_options: TerminalOptions {
@@ -2667,19 +2721,23 @@ impl Term {
                     self.handle.redraw();
                     return Ok(Event::BufferChanged);
                 }
+                RawEvent::CompletionRefresh => {
+                    self.refresh_completion();
+                    self.handle.redraw();
+                    return Ok(Event::CompletionRefresh);
+                }
             }
         }
     }
 
     /// Reads the next raw event, blocking until one arrives.
     ///
-    /// Real terminals perform the blocking crossterm read in a one-shot helper
-    /// thread and wait on the same channel used for shutdown wakeups. The
-    /// helper is intentionally not persistent: callers only launch external
-    /// programs after `get_next_event` returns, so no reader remains active
-    /// to race those programs for stdin. If shutdown wins the race, any
-    /// later helper result is dropped by the closed or shutdown channel
-    /// path.
+    /// Real terminals perform blocking crossterm reads in a one-shot helper
+    /// thread and wait on the same channel used for shutdown wakeups. One
+    /// helper remains associated with an outstanding read across non-input
+    /// wakeups, so refreshes cannot start competing stdin readers. A returned
+    /// input result retires that helper before downstream code handles it; if
+    /// shutdown wins, a later result is dropped by the shutdown channel path.
     fn next_raw(&self) -> io::Result<Option<RawEvent>> {
         {
             let st = self.handle.lock();
@@ -2692,14 +2750,11 @@ impl Term {
         }
 
         if self.owns_raw_mode {
-            let tx = self.handle.input_tx.clone();
-            thread::spawn(move || {
-                let message = match read_real_raw_event(event::read, raw_term_size) {
-                    Ok(raw) => InputMessage::Raw(raw),
-                    Err(error) => InputMessage::Error(error),
-                };
-                let _ = tx.send(message);
-            });
+            spawn_real_reader_if_needed(
+                &self.real_read_in_flight,
+                self.handle.input_tx.clone(),
+                || read_real_raw_event(event::read, raw_term_size),
+            );
         }
 
         let message = match self.input_rx.recv() {
@@ -2717,11 +2772,19 @@ impl Term {
         }
         match message {
             InputMessage::Raw(raw) => Ok(Some(raw)),
+            InputMessage::RealRaw(raw) => {
+                finish_real_reader(&self.real_read_in_flight);
+                Ok(Some(raw))
+            }
             InputMessage::Shutdown => {
                 self.handle.lock().terminal.input_shutdown = true;
                 Ok(None)
             }
-            InputMessage::Error(error) => Err(error),
+            InputMessage::RefreshCompletion => Ok(Some(RawEvent::CompletionRefresh)),
+            InputMessage::RealError(error) => {
+                finish_real_reader(&self.real_read_in_flight);
+                Err(error)
+            }
         }
     }
 

@@ -374,6 +374,48 @@ fn quit_commands_have_distinct_static_help() {
     }
 }
 
+/// Harness quit-state updates must refresh both ordinary-quit spellings without
+/// changing their insertion text or issuing another lifecycle request.
+#[test]
+fn quit_completion_help_follows_harness_disposition() {
+    let (_term, handle, _vt) = mini_term(80, 24);
+    let completion_data = tau_cli_term::CompletionData::new();
+    let _renderer = EventRenderer::new(
+        handle,
+        completion_data.clone(),
+        crate::tests::cli_test_theme(),
+    );
+    let commands = BUILTIN_COMMANDS
+        .iter()
+        .map(|(name, description)| tau_cli_term::CommandCompletion::new(*name, *description))
+        .collect::<Vec<_>>();
+
+    for (disposition, expected) in [
+        (
+            tau_proto::UiQuitDisposition::Terminating,
+            "Quit UI and shut down the session",
+        ),
+        (
+            tau_proto::UiQuitDisposition::Detached,
+            "Quit UI and leave the session running",
+        ),
+    ] {
+        update_ui_quit_completion_descriptions(&completion_data, disposition);
+        let candidates =
+            tau_cli_term::completion::build_candidates(&commands, &completion_data, ":q", 2);
+        for name in [":quit", ":q"] {
+            assert_eq!(
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.label == name)
+                    .expect("quit command candidate")
+                    .description,
+                expected
+            );
+        }
+    }
+}
+
 /// Session token totals are a local command, so completion and command-mode
 /// routing must reserve both its exact spelling and malformed argument forms.
 #[test]

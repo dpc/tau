@@ -130,6 +130,8 @@ pub type ArgCompleter = Arc<dyn Fn(&[&str]) -> Vec<CompletionItem> + Send + Sync
 /// Mutable completion state shared with background renderer updates.
 #[derive(Default)]
 struct CompletionInner {
+    /// Description replacements for intrinsic command-root candidates.
+    static_command_descriptions: HashMap<CommandName, String>,
     arg_completers: HashMap<CommandName, ArgCompleter>,
     dynamic_arg_completers: HashMap<CommandName, ArgCompleter>,
     dynamic_commands: Vec<CommandCompletion>,
@@ -168,6 +170,20 @@ impl CompletionData {
         let mut inner = self.inner.lock().expect("completion data lock");
         inner.dynamic_commands = commands;
         inner.dynamic_arg_completers = arg_completers.into_iter().collect();
+    }
+
+    /// Replaces descriptions for existing intrinsic command-root candidates.
+    ///
+    /// This changes display text only: it cannot add a command or alter its
+    /// insertion text.
+    pub fn set_static_command_descriptions(
+        &self,
+        descriptions: impl IntoIterator<Item = (CommandName, String)>,
+    ) {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .static_command_descriptions = descriptions.into_iter().collect();
     }
 
     /// Sets a flat, single-arg completion list for a command.
@@ -248,6 +264,14 @@ impl CompletionData {
             .expect("completion data lock")
             .agent_mention_completer
             .clone()
+    }
+
+    fn root_commands(&self) -> (HashMap<CommandName, String>, Vec<CommandCompletion>) {
+        let inner = self.inner.lock().expect("completion data lock");
+        (
+            inner.static_command_descriptions.clone(),
+            inner.dynamic_commands.clone(),
+        )
     }
 
     fn dynamic_commands(&self) -> Vec<CommandCompletion> {
@@ -631,7 +655,9 @@ fn build_candidates_with_home_and_rules_at_cwd(
         if view_cursor <= command_token_end {
             let prefix = &view[..view_cursor];
             let suffix = &view[command_token_end..];
-            let candidates = build_cmd_candidates(commands, &data.dynamic_commands(), prefix);
+            let (static_descriptions, dynamic_commands) = data.root_commands();
+            let candidates =
+                build_cmd_candidates(commands, &dynamic_commands, &static_descriptions, prefix);
             return replace_token_candidates(&buffer[..leading_len], suffix, candidates);
         }
 
@@ -673,6 +699,7 @@ fn build_candidates_with_home_and_rules_at_cwd(
 fn build_cmd_candidates(
     static_commands: &[CommandCompletion],
     dynamic_commands: &[CommandCompletion],
+    static_descriptions: &HashMap<CommandName, String>,
     prefix: &str,
 ) -> Vec<Candidate> {
     let mut seen = path_std_collections::HashSet::new();
@@ -683,7 +710,10 @@ fn build_cmd_candidates(
         .filter(|cmd| cmd.name.as_str().starts_with(prefix))
         .map(|cmd| Candidate {
             label: cmd.name.to_string(),
-            description: cmd.description.clone(),
+            description: static_descriptions
+                .get(&cmd.name)
+                .cloned()
+                .unwrap_or_else(|| cmd.description.clone()),
             replacement: cmd.name.to_string(),
             cursor: cmd.name.as_str().len(),
             acceptance: None,
@@ -738,20 +768,25 @@ fn build_action_token_candidates(
     } else {
         format!(":{partial}")
     };
-    build_cmd_candidates(static_commands, dynamic_commands, &lookup_prefix)
-        .into_iter()
-        .map(|candidate| {
-            let replacement = if trigger_prefix == ":" {
-                candidate.replacement.clone()
-            } else {
-                format!(
-                    "{trigger_prefix}{}",
-                    candidate.replacement.trim_start_matches(':')
-                )
-            };
-            replace_candidate(candidate, token.before, &replacement, token.after)
-        })
-        .collect()
+    build_cmd_candidates(
+        static_commands,
+        dynamic_commands,
+        &HashMap::new(),
+        &lookup_prefix,
+    )
+    .into_iter()
+    .map(|candidate| {
+        let replacement = if trigger_prefix == ":" {
+            candidate.replacement.clone()
+        } else {
+            format!(
+                "{trigger_prefix}{}",
+                candidate.replacement.trim_start_matches(':')
+            )
+        };
+        replace_candidate(candidate, token.before, &replacement, token.after)
+    })
+    .collect()
 }
 struct PathToken<'a> {
     prefix: &'a str,

@@ -298,6 +298,14 @@
             tests = craneLib.cargoNextest {
               cargoArtifacts = workspace;
               cargoNextestExtraArgs = "--workspace ${nextestReporterArgs}";
+              # PTY E2E fixtures execute the universal binary for their UI and
+              # component subprocesses. `cargo nextest` does not make that
+              # executable a dependency of its integration-test binaries, so
+              # build the candidate explicitly rather than reusing a stale
+              # artifact from the workspace dependency cache.
+              preCheck = ''
+                cargo build --profile $CARGO_PROFILE --locked -p dpc-tau --bin tau
+              '';
               # This terminal gate has no downstream Cargo consumer. Exporting
               # its target directory would recompress about 3 GiB after every run.
               doInstallCargoArtifacts = false;

@@ -1413,6 +1413,16 @@ pub enum UiQuitDisposition {
     Terminating,
 }
 
+/// Directed current-state projection for the recipient's ordinary UI quit.
+///
+/// This is presentation state only. The harness recomputes the disposition
+/// atomically when it accepts a later [`UiQuitRequest`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiQuitDispositionChanged {
+    /// Current harness prediction for an ordinary quit by this recipient.
+    pub disposition: UiQuitDisposition,
+}
+
 /// Directed acknowledgment of one exact UI quit request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiQuitResult {
@@ -1555,6 +1565,7 @@ pub enum HarnessOutputMessage {
     Configure(Configure),
     SessionAccepted(SessionAccepted),
     Disconnect(Disconnect),
+    UiQuitDispositionChanged(UiQuitDispositionChanged),
     UiQuitResult(UiQuitResult),
     Deliver(EventDelivery),
     InterceptRequest(InterceptRequest),

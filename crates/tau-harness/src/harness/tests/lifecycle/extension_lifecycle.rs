@@ -1742,7 +1742,7 @@ fn pre_hello_shutdown_request_is_rejected_without_semantic_effect() {
     assert!(
         disconnect
             .reason
-            .is_some_and(|reason| reason.contains("exact Hello admission"))
+            .is_some_and(|reason| reason.contains("Hello admission"))
     );
 }
 

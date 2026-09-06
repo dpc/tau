@@ -16,6 +16,10 @@ leaves, including unexpected disconnection. `:detach` first disables that policy
 for the entire daemon incarnation and only then disconnects the UI. Reattachment
 never rearms it; headless launches start with it disabled. This is a last-UI rule,
 not special lifetime authority attached to the creating UI.
+The `:quit` and `:q` completion descriptions show the latest directed harness
+projection: either that quitting the UI shuts down the session or that it leaves
+the session running. They never query or infer participant state while completing,
+and the command still receives a freshly serialized decision.
 `:quit-session` sends the unconditional dedicated shutdown request, regardless of
 policy or other UIs, causing canonical session shutdown.
 

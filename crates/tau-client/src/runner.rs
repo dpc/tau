@@ -369,6 +369,7 @@ pub(crate) fn dispatch_message<State>(
         }
         tau_proto::HarnessOutputMessage::AgentPromptCreatedResult(_)
         | tau_proto::HarnessOutputMessage::SessionAccepted(_)
+        | tau_proto::HarnessOutputMessage::UiQuitDispositionChanged(_)
         | tau_proto::HarnessOutputMessage::UiQuitResult(_)
         | tau_proto::HarnessOutputMessage::RenderedSystemPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedPromptResult(_)

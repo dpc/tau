@@ -509,6 +509,9 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
     match message {
         HarnessOutputMessage::Deliver(delivery) => delivery.event().name().to_string(),
         HarnessOutputMessage::Disconnect(_) => "message.disconnect".to_owned(),
+        HarnessOutputMessage::UiQuitDispositionChanged(_) => {
+            "message.ui_quit_disposition_changed".to_owned()
+        }
         HarnessOutputMessage::UiQuitResult(_) => "message.ui_quit_result".to_owned(),
         HarnessOutputMessage::Configure(_) => "message.configure".to_owned(),
         HarnessOutputMessage::SessionAccepted(_) => "message.session_accepted".to_owned(),

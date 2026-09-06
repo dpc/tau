@@ -76,6 +76,7 @@ enum TestMessage {
     Configure(tau_proto::Configure),
     SessionAccepted(tau_proto::SessionAccepted),
     InterceptRequest(tau_proto::InterceptRequest),
+    UiQuitDispositionChanged(tau_proto::UiQuitDispositionChanged),
     LiveDelivery(EventDelivery),
     AgentPromptCreatedResult(Box<tau_proto::AgentPromptCreatedResult>),
     RenderedSystemPromptResult(Box<tau_proto::RenderedSystemPromptResult>),
@@ -121,6 +122,9 @@ impl TestProtocolItem {
             }
             HarnessOutputMessage::Disconnect(message) => {
                 Self::Message(TestMessage::Disconnect(message))
+            }
+            HarnessOutputMessage::UiQuitDispositionChanged(message) => {
+                Self::Message(TestMessage::UiQuitDispositionChanged(message))
             }
             HarnessOutputMessage::Deliver(delivery) => {
                 if !delivery.replay && delivery.recorded_at.is_some() {
@@ -208,6 +212,7 @@ impl TestMessage {
             Self::Configure(_)
             | Self::SessionAccepted(_)
             | Self::InterceptRequest(_)
+            | Self::UiQuitDispositionChanged(_)
             | Self::LiveDelivery(_)
             | Self::AgentPromptCreatedResult(_)
             | Self::RenderedSystemPromptResult(_)

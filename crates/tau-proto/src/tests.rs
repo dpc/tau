@@ -2555,6 +2555,9 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         HarnessOutputMessage::Disconnect(Disconnect {
             reason: Some("shutdown".to_owned()),
         }),
+        HarnessOutputMessage::UiQuitDispositionChanged(UiQuitDispositionChanged {
+            disposition: UiQuitDisposition::Detached,
+        }),
         HarnessOutputMessage::Deliver(EventDelivery::live(
             UnixMicros::new(1_700_000_000_000_000),
             sample_session_started(),
@@ -4122,8 +4125,8 @@ fn ui_shutdown_request_uses_dedicated_input_message() {
     assert!(decode_message_from_slice::<Event>(&bytes).is_err());
 }
 
-/// Quit disposition is a directed control exchange, never a semantic event;
-/// both ordinary quit and policy-clearing detach retain their wire intent.
+/// Quit controls and current presentation projections stay directed rather than
+/// becoming semantic events; execution and help retain distinct authority.
 #[test]
 fn ui_quit_control_roundtrips_without_event_authority() {
     for detach in [false, true] {
@@ -4142,6 +4145,18 @@ fn ui_quit_control_roundtrips_without_event_authority() {
         assert!(decode_message_from_slice::<Event>(&bytes).is_err());
     }
     for disposition in [UiQuitDisposition::Detached, UiQuitDisposition::Terminating] {
+        let projection = HarnessOutputMessage::UiQuitDispositionChanged(UiQuitDispositionChanged {
+            disposition,
+        });
+        let projection_json = serde_json::to_value(&projection).expect("serialize projection");
+        assert_eq!(projection_json["message"], "ui_quit_disposition_changed");
+        let bytes = encode_harness_output_to_vec(&projection).expect("encode projection");
+        assert_eq!(
+            decode_harness_output_from_slice(&bytes).expect("decode projection"),
+            projection
+        );
+        assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+
         let output = HarnessOutputMessage::UiQuitResult(UiQuitResult {
             request_id: "quit-1".to_owned(),
             disposition,
@@ -4307,7 +4322,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 2, "minor": 0})
+        serde_json::json!({"major": 3, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {

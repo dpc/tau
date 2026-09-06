@@ -651,6 +651,7 @@ pub(super) fn connect_socket_ui(
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("read timeout");
     let client_id = h.accept_client(server_end).expect("accept client");
+    h.ui_runtime.pending_socket_admission.remove(&client_id);
     (
         client_id,
         HarnessOutputReader::new(BufReader::new(client_end)),

@@ -930,13 +930,18 @@ impl Harness {
                     .pending_socket_admission
                     .contains(&connection_id)
                 {
+                    if matches!(message.as_ref(), HarnessInputMessage::Disconnect(_)) {
+                        self.handle_disconnect(&connection_id);
+                        *served_clients += 1;
+                        return Ok(());
+                    }
                     if !matches!(message.as_ref(), HarnessInputMessage::Hello(_)) {
                         let _ = self.runtime_io.bus.send_to(
                             &connection_id,
                             None,
                             HarnessOutputMessage::Disconnect(Disconnect {
                                 reason: Some(
-                                    "socket clients must complete exact Hello admission before semantic messages"
+                                    "socket clients must complete Hello admission before semantic messages"
                                         .to_owned(),
                                 ),
                             }),
@@ -952,6 +957,7 @@ impl Harness {
                         self.ui_runtime
                             .pending_socket_admission
                             .remove(&connection_id);
+                        self.publish_ui_quit_dispositions();
                     } else {
                         if matches!(disposition, ClientMessageDisposition::CloseAfterReply) {
                             self.drain_client_writer(&connection_id);
@@ -963,10 +969,15 @@ impl Harness {
                 }
                 if self.is_authorized_ui_shutdown_request(&connection_id, &message) {
                     self.ui_runtime.shutdown_requested = true;
+                    self.publish_ui_quit_dispositions();
                 }
+                let is_hello = matches!(message.as_ref(), HarnessInputMessage::Hello(_));
                 self.handle_ui_quit_request(&connection_id, &message);
                 let disposition =
                     self.handle_client_message_disposition(&connection_id, *message)?;
+                if is_hello && matches!(disposition, ClientMessageDisposition::Continue) {
+                    self.publish_ui_quit_dispositions();
+                }
                 let close = match disposition {
                     ClientMessageDisposition::Continue => false,
                     ClientMessageDisposition::Close => true,
@@ -1041,6 +1052,36 @@ impl Harness {
         }
     }
 
+    /// Publish each participating UI's current ordinary-quit presentation
+    /// state.
+    ///
+    /// Every recipient receives its own classification because another UI's
+    /// presence changes whether this UI would be the last participant.
+    pub(super) fn publish_ui_quit_dispositions(&mut self) {
+        let participants = self
+            .ui_runtime
+            .client_writers
+            .keys()
+            .filter(|id| {
+                self.is_attached_socket_ui(id)
+                    && !self.ui_runtime.pending_socket_admission.contains(*id)
+                    && !self.ui_runtime.quitting_uis.contains(*id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for connection_id in participants {
+            let _ = self.runtime_io.bus.send_to(
+                &connection_id,
+                None,
+                HarnessOutputMessage::UiQuitDispositionChanged(
+                    tau_proto::UiQuitDispositionChanged {
+                        disposition: self.ui_quit_disposition(&connection_id),
+                    },
+                ),
+            );
+        }
+    }
+
     /// Atomically release one UI's participation and return the harness's
     /// disposition. Explicit detach clears policy before any acknowledgment.
     pub(super) fn handle_ui_quit_request(
@@ -1075,6 +1116,7 @@ impl Harness {
                 disposition,
             }),
         );
+        self.publish_ui_quit_dispositions();
     }
 
     pub(super) fn handle_runtime_disconnect(
@@ -1097,6 +1139,8 @@ impl Harness {
             .connection(&connection_id)
             .is_some_and(|m| m.origin == ConnectionOrigin::Socket);
         self.handle_disconnect(&connection_id);
+        self.update_ui_disconnect_policy();
+        self.publish_ui_quit_dispositions();
         if was_socket && !was_runtime_probe {
             *served_clients += 1;
         }
@@ -1181,7 +1225,7 @@ impl Harness {
         self.ui_runtime
             .client_writers
             .insert(conn_id.clone(), lifecycle);
-        if socket_origin && self.session_runtime.exact_socket_session_required {
+        if socket_origin {
             self.ui_runtime
                 .pending_socket_admission
                 .insert(conn_id.clone());

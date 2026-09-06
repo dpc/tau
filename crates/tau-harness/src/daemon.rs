@@ -1468,10 +1468,10 @@ fn connect_daemon_helper(
                     .unwrap_or_else(|| "session admission rejected".to_owned()),
             ));
         }
-        _ => {
-            return Err(HarnessError::Participant(
-                "daemon did not confirm exact session admission".to_owned(),
-            ));
+        received => {
+            return Err(HarnessError::Participant(format!(
+                "daemon did not confirm exact session admission: {received:?}"
+            )));
         }
     }
     Ok(peer)

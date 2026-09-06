@@ -689,7 +689,7 @@ fn parse_agent_picker_command(
 }
 
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    (":quit", "Quit this UI"),
+    (":quit", "Quit this UI using the current session policy"),
     (":q", "Alias for :quit"),
     (":quit-session", "Quit the session and every attached UI"),
     (":cancel", "Cancel the current in-flight prompt"),
@@ -1009,6 +1009,83 @@ fn enqueue_remote_delivery(
     true
 }
 
+/// Updates intrinsic quit-command help from the harness's current decision.
+fn update_ui_quit_completion_descriptions(
+    completion_data: &tau_cli_term::CompletionData,
+    disposition: tau_proto::UiQuitDisposition,
+) {
+    let description = match disposition {
+        tau_proto::UiQuitDisposition::Detached => "Quit UI and leave the session running",
+        tau_proto::UiQuitDisposition::Terminating => "Quit UI and shut down the session",
+    };
+    completion_data.set_static_command_descriptions([
+        (
+            tau_cli_term::CommandName::new(":quit"),
+            description.to_owned(),
+        ),
+        (tau_cli_term::CommandName::new(":q"), description.to_owned()),
+    ]);
+}
+
+/// One-shot renderer acknowledgement for the initial authoritative quit state.
+type InitialQuitProjectionSender = mpsc::SyncSender<Result<(), String>>;
+
+/// Socket-reader ownership of the initial projection until renderer enqueue.
+type InitialQuitProjection = Arc<Mutex<Option<InitialQuitProjectionSender>>>;
+
+/// Waits until the first harness-owned quit projection has updated completion
+/// state, so command input never starts from a policy-only fallback.
+fn await_initial_quit_disposition(
+    applied: &mpsc::Receiver<Result<(), String>>,
+    timeout: Duration,
+) -> Result<(), CliError> {
+    match applied.recv_timeout(timeout) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(CliError::Participant(format!(
+            "harness quit disposition was unavailable: {error}"
+        ))),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(CliError::Participant(
+            "timed out waiting for harness quit disposition".to_owned(),
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(CliError::Participant(
+            "harness quit disposition channel closed".to_owned(),
+        )),
+    }
+}
+
+/// Enqueues a quit presentation update behind earlier remote work.
+fn enqueue_remote_quit_disposition(
+    disposition: tau_proto::UiQuitDisposition,
+    initial_applied: Option<InitialQuitProjectionSender>,
+    remote_tx: &RemoteRendererSender,
+    renderer_arbiter: &Mutex<()>,
+    remote_admitted: &path_std_sync_atomic::AtomicU64,
+) -> Result<(), Option<InitialQuitProjectionSender>> {
+    {
+        let _guard = renderer_arbiter.lock().expect(MUTEX_POISONED);
+        remote_admitted.fetch_add(1, Ordering::AcqRel);
+    }
+    let cmd = RendererCmd::UiQuitDispositionChanged {
+        disposition,
+        initial_applied,
+    };
+    match remote_tx.send(cmd) {
+        Ok(()) => Ok(()),
+        Err(mpsc::SendError(RendererCmd::UiQuitDispositionChanged {
+            initial_applied, ..
+        })) => Err(initial_applied),
+        Err(_) => unreachable!("quit projection enqueue must retain its command"),
+    }
+}
+
+/// Completes the one-time initial projection barrier unless a queued renderer
+/// command already owns its acknowledgement.
+fn complete_initial_quit_projection(sender: &InitialQuitProjection, result: Result<(), String>) {
+    if let Some(sender) = sender.lock().expect(MUTEX_POISONED).take() {
+        let _ = sender.send(result);
+    }
+}
+
 /// Releases and diagnoses every original frame represented by one projection.
 fn release_remote_queue_frames(
     first: RendererQueueFrame,
@@ -1246,6 +1323,9 @@ fn run_chat_session(
     let input_shutdown_handle: Arc<Mutex<Option<tau_cli_term::TermHandle>>> =
         Arc::new(Mutex::new(None));
     let socket_input_shutdown = input_shutdown_handle.clone();
+    let completion_data = tau_cli_term::CompletionData::new();
+    let (initial_quit_applied_tx, initial_quit_applied_rx) = mpsc::sync_channel(1);
+    let socket_initial_quit_applied = Arc::new(Mutex::new(Some(initial_quit_applied_tx)));
     let remote_disconnected = Arc::new(AtomicBool::new(false));
     let socket_remote_disconnected = remote_disconnected.clone();
     let peer_exit = match &shutdown {
@@ -1270,6 +1350,7 @@ fn run_chat_session(
         socket_remote_admitted,
         socket_renderer_arbiter,
         socket_input_shutdown,
+        socket_initial_quit_applied,
         socket_remote_disconnected,
         socket_ui_io_meter,
         socket_local_disconnect_started,
@@ -1323,7 +1404,7 @@ fn run_chat_session(
         }
     };
     let terminal_options = terminal_options_from_settings(&settings);
-    let (mut term, handle, completion_data) = HighTerm::new_with_completion_rules(
+    let (mut term, handle) = HighTerm::new_with_completion_rules_and_data(
         prompt,
         commands,
         theme.clone(),
@@ -1331,6 +1412,7 @@ fn run_chat_session(
         input_history,
         completion_rules,
         terminal_options,
+        completion_data.clone(),
     )?;
     let cold_attach_redraw = attach.then(|| handle.suppress_redraws());
     *input_shutdown_handle.lock().expect(MUTEX_POISONED) = Some(handle.clone());
@@ -1435,6 +1517,8 @@ fn run_chat_session(
     let renderer_ui_io_meter = ui_io_meter.clone();
     let renderer_thread = spawn_renderer_thread(
         renderer,
+        completion_data.clone(),
+        handle.clone(),
         renderer_ui_io_meter,
         remote_rx,
         renderer_rx,
@@ -1445,6 +1529,8 @@ fn run_chat_session(
         queued_remote_items,
         renderer_byte_budget,
     );
+    let initial_quit_disposition =
+        await_initial_quit_disposition(&initial_quit_applied_rx, UI_SESSION_ADMISSION_TIMEOUT);
     if attach {
         let roster_tx = event_tx.clone();
         let roster_socket = harness_socket_path.clone();
@@ -1481,36 +1567,38 @@ fn run_chat_session(
     // TermHandle as remote events, so they don't garble the TUI like
     // `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
-    tracing::info!(target: "tau_cli::ui", "terminal UI input ready");
-    let input_result = terminal_input_loop(
-        &mut term,
-        &writer,
-        &mut active_session_id,
-        TerminalInputLoopCtx {
-            quit_results: quit_result_rx.clone(),
-            fast_service_tier_state,
-            current_role_state,
-            routing: input_routing,
-            roles_available,
-            role_groups_available,
-            role_group_memory,
-            theme,
-            dirs: dirs.clone(),
-            prompt_symbol: settings.prompt_symbol,
-            agent_in_progress,
-            remote_disconnected: remote_disconnected.clone(),
-            renderer_tx: event_tx,
-            active_session_state,
-            editor_context,
-            action_state,
-            draft_handle: draft_handle.clone(),
-            prompt_history,
-            custom_prompts,
-            ui_io_meter: ui_io_meter.clone(),
-            harness_socket_path,
-            agent_estimated_api_costs,
-        },
-    );
+    let input_result = initial_quit_disposition.and_then(|()| {
+        tracing::info!(target: "tau_cli::ui", "terminal UI input ready");
+        terminal_input_loop(
+            &mut term,
+            &writer,
+            &mut active_session_id,
+            TerminalInputLoopCtx {
+                quit_results: quit_result_rx.clone(),
+                fast_service_tier_state,
+                current_role_state,
+                routing: input_routing,
+                roles_available,
+                role_groups_available,
+                role_group_memory,
+                theme,
+                dirs: dirs.clone(),
+                prompt_symbol: settings.prompt_symbol,
+                agent_in_progress,
+                remote_disconnected: remote_disconnected.clone(),
+                renderer_tx: event_tx,
+                active_session_state,
+                editor_context,
+                action_state,
+                draft_handle: draft_handle.clone(),
+                prompt_history,
+                custom_prompts,
+                ui_io_meter: ui_io_meter.clone(),
+                harness_socket_path,
+                agent_estimated_api_costs,
+            },
+        )
+    });
     let mut foreground_restoration_diagnostic = None;
     let (exit, attachment_error) = match input_result {
         Ok(exit) => (exit, None),
@@ -1592,6 +1680,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn spawn_renderer_thread(
     renderer: EventRenderer,
+    completion_data: tau_cli_term::CompletionData,
+    completion_handle: tau_cli_term::TermHandle,
     renderer_ui_io_meter: UiIoMeter,
     remote_rx: mpsc::Receiver<RendererCmd>,
     renderer_rx: renderer_scheduler::LocalRendererReceiver,
@@ -1730,6 +1820,16 @@ fn spawn_renderer_thread(
                             renderer.handle_disconnect(reason);
                             finish_disconnect_memory(delivery_memory.as_deref(), delivery_id);
                         }
+                        RendererCmd::UiQuitDispositionChanged {
+                            disposition,
+                            initial_applied,
+                        } => {
+                            update_ui_quit_completion_descriptions(&completion_data, disposition);
+                            completion_handle.request_completion_refresh();
+                            if let Some(applied) = initial_applied {
+                                let _ = applied.send(Ok(()));
+                            }
+                        }
                         RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
                         RendererCmd::ToggleVerboseMode => renderer.toggle_verbose_mode(),
                         RendererCmd::SwitchAgent {
@@ -1841,6 +1941,7 @@ fn spawn_socket_reader(
     socket_remote_admitted: Arc<path_std_sync_atomic::AtomicU64>,
     socket_renderer_arbiter: Arc<Mutex<()>>,
     socket_input_shutdown: Arc<Mutex<Option<tau_cli_term::TermHandle>>>,
+    socket_initial_quit_applied: InitialQuitProjection,
     socket_remote_disconnected: Arc<AtomicBool>,
     socket_ui_io_meter: UiIoMeter,
     socket_local_disconnect_started: Arc<AtomicBool>,
@@ -1858,6 +1959,12 @@ fn spawn_socket_reader(
         let notify_disconnect =
             |reason: Option<String>, delivery_id: RendererDeliveryId, queue_bytes: usize| {
                 socket_remote_disconnected.store(true, Ordering::Release);
+                complete_initial_quit_projection(
+                    &socket_initial_quit_applied,
+                    Err(reason
+                        .clone()
+                        .unwrap_or_else(|| "harness connection closed".to_owned())),
+                );
                 if let Some(handle) = socket_input_shutdown
                     .lock()
                     .expect(MUTEX_POISONED)
@@ -1927,6 +2034,10 @@ fn spawn_socket_reader(
                     &socket_renderer_arbiter,
                     &socket_remote_admitted,
                 ) {
+                    complete_initial_quit_projection(
+                        &socket_initial_quit_applied,
+                        Err("renderer stopped before draining initial UI state".to_owned()),
+                    );
                     if let Some(memory) = &socket_delivery_memory {
                         for not_enqueued in deliveries {
                             memory.release(not_enqueued.delivery_id);
@@ -1990,6 +2101,34 @@ fn spawn_socket_reader(
                             }
                             continue;
                         }
+                        HarnessOutputMessage::UiQuitDispositionChanged(change) => {
+                            let initial_applied = socket_initial_quit_applied
+                                .lock()
+                                .expect(MUTEX_POISONED)
+                                .take();
+                            if let Err(initial_applied) = enqueue_remote_quit_disposition(
+                                change.disposition,
+                                initial_applied,
+                                &remote_tx,
+                                &socket_renderer_arbiter,
+                                &socket_remote_admitted,
+                            ) {
+                                if let Some(applied) = initial_applied {
+                                    let _ = applied.send(Err(
+                                        "renderer stopped before applying quit disposition"
+                                            .to_owned(),
+                                    ));
+                                }
+                                if let Some(memory) = &socket_delivery_memory {
+                                    memory.release(delivery_id);
+                                }
+                                return;
+                            }
+                            if let Some(memory) = &socket_delivery_memory {
+                                memory.release(delivery_id);
+                            }
+                            continue;
+                        }
                         HarnessOutputMessage::Disconnect(d) => {
                             if socket_local_disconnect_started.load(Ordering::Acquire) {
                                 if let Some(memory) = &socket_delivery_memory {
@@ -2023,6 +2162,10 @@ fn spawn_socket_reader(
                             &socket_renderer_arbiter,
                             &socket_remote_admitted,
                         ) {
+                            complete_initial_quit_projection(
+                                &socket_initial_quit_applied,
+                                Err("renderer stopped before applying quit disposition".to_owned()),
+                            );
                             return;
                         }
                     }
@@ -2294,6 +2437,13 @@ enum RendererCmd {
         invocation_id: tau_proto::ActionInvocationId,
         /// Transcript that owns the action result.
         owner_agent_id: Option<tau_proto::AgentId>,
+    },
+    /// Harness-owned prediction of this UI's current ordinary-quit outcome.
+    UiQuitDispositionChanged {
+        /// Current ordinary-quit outcome for this UI only.
+        disposition: tau_proto::UiQuitDisposition,
+        /// Startup barrier completed after this update reaches the input owner.
+        initial_applied: Option<InitialQuitProjectionSender>,
     },
     /// One decoded harness delivery admitted to the bounded remote FIFO.
     Remote {

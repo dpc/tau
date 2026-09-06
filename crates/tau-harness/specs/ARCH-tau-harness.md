@@ -133,7 +133,10 @@ last-UI-disconnection shutdown policy, guarded against firing before the first
 authenticated UI. Headless launches leave it disabled. A directed
 `ui_quit_request` releases the requesting UI's lifetime participation and returns
 the authoritative disposition; explicit detach clears the policy before that
-reply. Reconnections cannot rearm it, and runtime probes or incomplete admission
+reply. The harness also sends every participating UI its own current ordinary-quit
+projection when participation or policy changes; it derives this from the same
+classification helper but recomputes the disposition when accepting a quit.
+Reconnections cannot rearm the policy, and runtime probes or incomplete admission
 never keep a session alive. Unconditional UI-requested shutdown uses the
 payload-free `ui_shutdown_request` with the same attached-socket-UI authority;
 it enters the same canonical lifecycle as signal or policy shutdown and does

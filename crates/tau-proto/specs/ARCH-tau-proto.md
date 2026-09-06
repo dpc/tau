@@ -2,9 +2,12 @@
 
 UI lifetime controls are directed messages, not events: `ui_quit_request` carries
 ordinary quit versus explicit daemon-lifetime detach intent, and
-`ui_quit_result` reports the harness's disposition. Unconditional shutdown retains
-`ui_shutdown_request`. Protocol revision 2.0 rejects older UIs whose local-only
-detach could otherwise trigger the restored automatic-shutdown policy.
+`ui_quit_result` reports the harness's committed disposition. The directed
+`ui_quit_disposition_changed` projection supplies each participating UI's current
+ordinary-quit presentation state, while execution recomputes it atomically.
+Unconditional shutdown retains `ui_shutdown_request`. Protocol revision 3.0
+rejects older UIs before an unsolicited quit-state projection could reach a
+decoder that does not recognize it.
 See [SPEC-tau-cli-command-mode](../../tau-cli/specs/SPEC-tau-cli-command-mode.md).
 
 `SessionId` and `AgentPromptId` are controlled wire and journal identifiers.

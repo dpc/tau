@@ -57,7 +57,7 @@ pub(crate) struct UiRuntimeState {
     pub(crate) client_writers: HashMap<tau_proto::ConnectionId, ClientWriterLifecycle>,
     /// Semantically quarantined exact-discovery probes.
     pub(super) runtime_probe_peers: HashSet<tau_proto::ConnectionId>,
-    /// Socket connections that have not completed their exact Hello admission.
+    /// Socket connections that have not completed Hello admission.
     pub(crate) pending_socket_admission: HashSet<tau_proto::ConnectionId>,
     /// Authorized UI request for unconditional canonical harness shutdown.
     pub(super) shutdown_requested: bool,

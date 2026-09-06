@@ -6896,6 +6896,109 @@ fn completion_keys_take_precedence_over_bindings() {
     assert_eq!(handle.get_buffer(), ":quit");
 }
 
+/// A background completion-state update re-runs the source for an already-open
+/// menu on the input owner, without requiring a buffer edit or background I/O.
+#[test]
+fn completion_refresh_requeries_an_open_menu_on_the_input_owner() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    let description = path_std_sync::Arc::new(path_std_sync::Mutex::new("old".to_owned()));
+    let observed = path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new()));
+    let source_description = description.clone();
+    let source_observed = observed.clone();
+    term.set_completion_source(Some(Box::new(move |buffer: &str, _cursor: usize| {
+        if buffer != ":" {
+            return Vec::new();
+        }
+        let description = source_description.lock().expect("description lock").clone();
+        source_observed
+            .lock()
+            .expect("observed descriptions lock")
+            .push(description.clone());
+        vec![Candidate {
+            label: ":quit".to_owned(),
+            description,
+            replacement: ":quit".to_owned(),
+            cursor: ":quit".len(),
+            acceptance: None,
+        }]
+    })));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char(':'),
+            KeyModifiers::NONE,
+        )))
+        .expect("open completion menu");
+    assert!(matches!(
+        term.get_next_event().expect("open menu"),
+        Event::BufferChanged
+    ));
+
+    *description.lock().expect("description lock") = "new".to_owned();
+    handle.request_completion_refresh();
+    assert!(matches!(
+        term.get_next_event().expect("refresh open menu"),
+        Event::CompletionRefresh
+    ));
+    assert_eq!(
+        *observed.lock().expect("observed descriptions lock"),
+        ["old", "new"]
+    );
+}
+
+/// A completion refresh must reuse the outstanding real-terminal reader rather
+/// than spawning a second reader that could race stdin.
+#[test]
+fn completion_refresh_reuses_an_outstanding_real_reader() {
+    let in_flight = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
+    let (input_tx, input_rx) = path_std_sync::mpsc::channel();
+    let (started_tx, started_rx) = path_std_sync::mpsc::channel();
+    let (release_tx, release_rx) = path_std_sync::mpsc::channel();
+    let starts = path_std_sync::Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
+    let first_starts = starts.clone();
+
+    assert!(spawn_real_reader_if_needed(
+        &in_flight,
+        input_tx.clone(),
+        move || {
+            first_starts.fetch_add(1, path_std_sync_atomic::Ordering::AcqRel);
+            started_tx.send(()).expect("reader started");
+            release_rx.recv().expect("release real reader");
+            Ok(RawEvent::FocusChanged { focused: true })
+        },
+    ));
+    started_rx.recv().expect("reader is blocked");
+
+    input_tx
+        .send(InputMessage::RefreshCompletion)
+        .expect("completion refresh");
+    assert!(matches!(
+        input_rx.recv().expect("completion wakeup"),
+        InputMessage::RefreshCompletion
+    ));
+
+    let second_starts = starts.clone();
+    assert!(!spawn_real_reader_if_needed(
+        &in_flight,
+        input_tx,
+        move || {
+            second_starts.fetch_add(1, path_std_sync_atomic::Ordering::AcqRel);
+            unreachable!("second reader must not start")
+        },
+    ));
+    assert_eq!(starts.load(path_std_sync_atomic::Ordering::Acquire), 1);
+
+    release_tx.send(()).expect("release reader");
+    assert!(matches!(
+        input_rx.recv().expect("real reader result"),
+        InputMessage::RealRaw(RawEvent::FocusChanged { focused: true })
+    ));
+    finish_real_reader(&in_flight);
+    assert!(!in_flight.load(path_std_sync_atomic::Ordering::Acquire));
+}
+
 /// Enter acceptance keeps a whole-buffer candidate's explicit UTF-8 byte
 /// cursor.
 #[test]

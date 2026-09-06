@@ -265,6 +265,14 @@ history. New immediately-UI-attached launches enable it; ordinary reconnects do
 not. Unexpected final-UI loss follows the same policy. Startup detach uses the
 same authority and permits the acknowledged UI to leave during initialization.
 Unacknowledged initial UI loss remains a startup failure.
+`ui_quit_disposition_changed` is a directed, non-published current-state
+projection for each participating attached UI's own ordinary quit. The harness
+derives every recipient's `detached` or `terminating` value from the same
+classification used by execution, but recomputes it when accepting a quit.
+It sends the projection after initial or runtime UI admission and after a
+participating UI arrives, leaves, becomes an acknowledged quitter, or clears
+automatic shutdown through detach. Pending admission, probes, dedicated external
+peers, and acknowledged quitters receive no projection.
 
 After the terminal commits, all attached UI writers receive one concurrent
 100-millisecond best-effort delivery grace. Tau then cancels their socket I/O
