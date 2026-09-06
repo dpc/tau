@@ -368,24 +368,27 @@ same neutral unknown state.
 ## Runtime behavior
 
 ChatGPT, public Responses, Chat Completions and OpenRouter profiles support startup-frozen `cache_diagnostics: off|metadata`.
-Metadata defaults on for durable ordinary inference and native Codex standalone compaction, and uses the existing
+Metadata defaults on for durable ordinary inference and standalone compaction, and uses the existing
 private opaque capture directory and thirty-day diagnostic retention. Exact
 request/response captures remain independently default-on for durable activity;
 setting metadata off does not disable them. Ephemeral/memory-only activity
 remains excluded. Scalar records correlate actual dispatches and finite attempts
 and retain bounded raw usage and typed repair/socket facts, not bodies, routes,
-credentials or provider IDs. Successful raw compact responses remain unretained;
-that operation reports `exact_response=false`. Public Responses records one
+credentials or provider IDs. Native Codex successful raw compact responses
+remain unretained, so that operation reports `exact_response=false`. Public Responses records one
 full-replay dispatch at most, with no local repair or connection reuse. Its exact
 request retains a null dispatch index before the final cancellation check; the
 diagnostic dispatch row alone establishes index one. Public local-summary
-compaction keeps its exact captures but has no scalar coverage. Chat Completions
+compaction uses the same backend-scoped metadata and owner-supplied harness
+attempt while keeping logical attempt null. Chat Completions
 records at most one actual send and retains its latest observed allowlisted usage
 snapshot even on later failure, without merging, summing or normalizing repeated
 usage members. Its cache counters follow exact-route compatibility selection;
-its local-summary compaction also retains exact captures only.
-Per-item attribution, other adapters
-remain unsupported. Entered Codex warm backend calls have scalar-only
+its local-summary compaction uses the existing scheduler ordinal for both
+diagnostic attempt fields. Both adapters emit their local-summary attempt end
+before the built-in extension's final narrative validation, so backend success
+does not claim canonical compaction success.
+Per-item attribution and other adapters remain unsupported. Entered Codex warm backend calls have scalar-only
 `cache_refresh` records: prompt/attempt ordinals are null, exact bodies are not
 retained, and backend outcomes are distinct from worker/harness refresh status.
 `tau agent/session cache`

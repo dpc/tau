@@ -68,12 +68,15 @@ set `single_initial_system_message`; the adapter then rejects later System and
 Developer transcript messages before network dispatch.
 
 ChatGPT, public Responses, Chat Completions and OpenRouter profiles also freeze `cache_diagnostics: off|metadata`
-at configured startup, with metadata enabled by default for persistable ordinary
-inference. Native Codex standalone compaction also has scalar coverage.
+at configured startup, with metadata enabled by default for persistable inference
+and standalone compaction. Native Codex standalone compaction also has scalar coverage.
 Credential reload and subsequent initialization cannot change this selection.
 It does not disable or opt in existing default-on exact captures. Public
 Responses forwards its owner-supplied provider attempt only as local diagnostic
-correlation; public Responses and Chat Completions local-summary compaction remain excluded.
+correlation. Chat Completions local summaries preserve their existing scheduler
+ordinal; public Responses local summaries keep logical attempt null. These
+adapter attempt ends precede extension-owned final narrative validation and do
+not claim canonical compaction success.
 Entered Codex prewarm/cache-refresh backend calls have scalar operation coverage:
 prompt attribution and logical/harness-attempt ordinals are null, both exact-body
 capabilities are false, and available parsed counters never become canonical usage.

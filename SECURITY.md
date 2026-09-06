@@ -210,19 +210,23 @@ sensitive: provider error bodies can reflect prompt, account, or service-interna
 data even after configured credentials are removed. Configurable diagnostic
 retention defaults to thirty days; disabling cleanup can retain them
 indefinitely.
-Default-on Codex, public Responses and Chat Completions inference, and native Codex
+Default-on Codex, public Responses and Chat Completions inference and
 standalone-compaction scalar cache diagnostics use the same
 private opaque path and retention. Metadata has an independent startup-frozen
-profile opt-out and is forced off with existing nonpersistable capture policy;
-Existing exact captures remain default-on for durable activity; successful raw
-compact responses remain unretained and advertise `exact_response=false`.
+profile opt-out and is forced off with existing nonpersistable capture policy.
+Existing exact captures remain default-on for durable activity; native Codex
+successful raw compact responses remain unretained and advertise
+`exact_response=false`.
 Scalar records omit payloads, credentials, routes, cache keys, provider IDs and
 error prose, but retain bounded model identities and workload correlation, so
 they remain private rather than public-safe. The metadata budget reserves at
 most 64 records / 16 MiB including in-flight serialized data, with a 256-KiB
 per-record cap. Sequence holes and known-loss counters never prove complete
 capture history. Neither capture failures nor metadata observations affect
-provider execution, canonical accounting, or cache eligibility.
+provider execution, canonical accounting, cache eligibility, or canonical
+compaction outcome. Public Responses and Chat Completions local-summary attempt
+ends describe the finite backend result before extension-owned narrative
+validation.
 Codex warm backend calls use scalar-only operation captures, with no prompt
 identity and no retained exact request/response. Their closed operation
 attribution is permitted only for cache diagnostics and uses a distinct managed

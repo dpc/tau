@@ -182,8 +182,8 @@ fn null_usage_replaces_snapshot_but_absent_usage_does_not() {
     }
 }
 
-/// Metadata opt-out must leave default-on exact capture untouched; memory-only
-/// and local-summary activity must not acquire unsupported scalar coverage.
+/// Metadata opt-out leaves exact capture untouched, memory-only activity stays
+/// excluded, and local summaries use the same backend-scoped correlation.
 #[test]
 fn independent_policy_preserves_exact_capture_and_operation_eligibility() {
     for (policy, persistable, operation, scalar_count, exact_count) in [
@@ -202,10 +202,17 @@ fn independent_policy_preserves_exact_capture_and_operation_eligibility() {
             0,
         ),
         (
-            CacheDiagnostics::Metadata,
+            CacheDiagnostics::Off,
             true,
             tau_proto::PromptOperation::StandaloneCompaction,
             0,
+            2,
+        ),
+        (
+            CacheDiagnostics::Metadata,
+            true,
+            tau_proto::PromptOperation::StandaloneCompaction,
+            2,
             2,
         ),
     ] {
@@ -224,7 +231,19 @@ fn independent_policy_preserves_exact_capture_and_operation_eligibility() {
             assert_eq!(exact[0]["attempt_id"], exact[1]["attempt_id"]);
         }
         if operation == tau_proto::PromptOperation::StandaloneCompaction {
-            assert!(exact.iter().all(|v| v.get("attempt_id").is_none()));
+            let attempt_id = exact[0]["attempt_id"].clone();
+            assert!(attempt_id.is_string());
+            assert!(exact.iter().all(|v| v["attempt_id"] == attempt_id));
+            assert!(exact.iter().all(|v| v["wire_dispatch_index"] == 1));
+            if policy == CacheDiagnostics::Metadata {
+                assert!(
+                    rows.iter()
+                        .all(|v| v["operation"] == "standalone_compaction")
+                );
+                assert!(rows.iter().all(|v| v["logical_attempt"] == 7));
+                assert!(rows.iter().all(|v| v["harness_provider_attempt"] == 7));
+                assert!(rows.iter().all(|v| v["attempt_id"] == attempt_id));
+            }
         }
     }
 }

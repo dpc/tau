@@ -224,6 +224,8 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                     "chat_completions_inference": "metadata",
                     "other_adapters": "unavailable",
                     "codex_standalone_compaction": "metadata",
+                    "public_responses_standalone_compaction": "metadata",
+                    "chat_completions_standalone_compaction": "metadata",
                     "other_standalone_compaction": "unavailable",
                     "codex_cache_refresh_backend": "metadata",
                     "cache_refresh_owner_outcome": "unavailable",

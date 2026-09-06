@@ -70,13 +70,16 @@ attempts release no semantic output.
 
 ## Cache telemetry route capabilities
 
-Persistable ordinary inference produces bounded private cache-diagnostic metadata
+Persistable ordinary inference and local-summary compaction produce bounded private cache-diagnostic metadata
 by default, with an independent startup profile opt-out. Exact captures retain
 their existing default, timing, image redaction and bounds; generated attempt
 correlation is added to their existing projections. Dispatch metadata observes
 the existing callback immediately before polling the send, never a candidate
 request. One finite invocation has no local repair and at most one dispatch.
-Local-summary compaction keeps its exact captures without scalar coverage.
+Local-summary records use `standalone_compaction`, the existing prompt identity
+and scheduler attempt. Their attempt end describes the backend result before the
+built-in extension performs its final narrative validation, so it is not
+canonical compaction outcome authority.
 
 Each observed usage member replaces the entire allowlisted diagnostic snapshot
 before normalization, including null or malformed members. Absent members leave

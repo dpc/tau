@@ -83,8 +83,8 @@ does not alter capture, retention, inference, retry, refresh, or compaction poli
 
 ## Private runtime metadata
 
-ChatGPT/Codex, public Responses and Chat Completions ordinary inference, and native Codex standalone
-compaction, produce bounded scalar captures in the
+ChatGPT/Codex, public Responses and Chat Completions ordinary inference and
+standalone compaction produce bounded scalar captures in the
 existing owner-private session `debug/provider-requests/<instance>/` directory,
 using the `cache-diagnostic.json.zst` filename class. Set
 `"cache_diagnostics": "off"` in a ChatGPT, public Responses, Chat Completions or OpenRouter provider profile to disable only these
@@ -124,8 +124,10 @@ ID, error prose or raw payload enters scalar records.
 Public Responses uses a fresh finite full-replay invocation with at most one
 dispatch and no local repair or connection reuse. Its logical-attempt ordinal is
 unavailable; its harness provider attempt comes directly from the extension.
-Its scalar coverage excludes local-summary standalone compaction while keeping
-that operation's original exact captures.
+Local-summary records use `operation: "standalone_compaction"` and the existing
+prompt identity. Their attempt end reports the backend result before the
+built-in extension validates the summary narrative, so backend success can
+coexist with canonical compaction rejection.
 
 Raw provider input/read/write/output counters remain separate from normalized
 canonical accounting. Missing counters, exact eligibility, model revision and
@@ -136,7 +138,9 @@ Chat Completions retains the latest observed allowlisted usage member, even on
 later failure, without merging or normalizing repeated members. Its raw cache
 counters follow the exact route's selected OpenAI or DeepSeek schema; unselected
 schemas do not become evidence. Its exact captures share the actual dispatch's
-attempt identity and index. Local-summary compaction retains exact captures only.
+attempt identity and index. Local-summary compaction preserves the existing
+scheduler ordinal in both logical and harness-attempt fields; its attempt end
+likewise precedes the built-in extension's final narrative validation.
 Entered Codex prewarm/cache-refresh backend calls produce scalar-only
 `operation: "cache_refresh"` records. This label does not prove the automatic
 refresh scheduler selected the work. Explicit refresh keeps its existing

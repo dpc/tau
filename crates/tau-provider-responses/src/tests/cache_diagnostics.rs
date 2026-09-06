@@ -185,15 +185,16 @@ fn cache_diagnostics_capture_cancellation_has_zero_actual_dispatches() {
     }
 }
 
-/// Metadata opt-out leaves exact capture intact; nonpersistable work submits
-/// neither kind, and local summaries keep only their original exact captures.
+/// Metadata opt-out leaves exact capture intact, nonpersistable work submits
+/// neither kind, and local summaries acquire backend-scoped metadata.
 #[test]
-fn cache_diagnostics_policy_preserves_exact_capture_and_excludes_local_summary() {
-    for (policy, durable, operation, exact_count) in [
+fn cache_diagnostics_policy_preserves_exact_capture_and_covers_local_summary() {
+    for (policy, durable, operation, scalar_count, exact_count) in [
         (
             CacheDiagnostics::Off,
             true,
             tau_proto::PromptOperation::Inference,
+            0,
             2,
         ),
         (
@@ -201,11 +202,20 @@ fn cache_diagnostics_policy_preserves_exact_capture_and_excludes_local_summary()
             false,
             tau_proto::PromptOperation::Inference,
             0,
+            0,
+        ),
+        (
+            CacheDiagnostics::Off,
+            true,
+            tau_proto::PromptOperation::StandaloneCompaction,
+            0,
+            2,
         ),
         (
             CacheDiagnostics::Metadata,
             true,
             tau_proto::PromptOperation::StandaloneCompaction,
+            2,
             2,
         ),
     ] {
@@ -218,12 +228,28 @@ fn cache_diagnostics_policy_preserves_exact_capture_and_excludes_local_summary()
             terminal_event(),
         );
         assert!(matches!(outcome, AttemptOutcome::Completed(_)));
-        assert!(rows.is_empty());
+        assert_eq!(rows.len(), scalar_count);
         assert_eq!(exact.len(), exact_count);
         if policy == CacheDiagnostics::Off {
             assert!(exact[0]["attempt_id"].is_string());
             assert!(exact[0]["wire_dispatch_index"].is_null());
             assert_eq!(exact[1]["wire_dispatch_index"], 1);
+        }
+        if operation == tau_proto::PromptOperation::StandaloneCompaction {
+            let attempt_id = exact[0]["attempt_id"].clone();
+            assert!(attempt_id.is_string());
+            assert!(exact.iter().all(|v| v["attempt_id"] == attempt_id));
+            assert!(exact[0]["wire_dispatch_index"].is_null());
+            assert_eq!(exact[1]["wire_dispatch_index"], 1);
+            if policy == CacheDiagnostics::Metadata {
+                assert!(
+                    rows.iter()
+                        .all(|v| v["operation"] == "standalone_compaction")
+                );
+                assert!(rows.iter().all(|v| v["logical_attempt"].is_null()));
+                assert!(rows.iter().all(|v| v["harness_provider_attempt"] == 3));
+                assert!(rows.iter().all(|v| v["attempt_id"] == attempt_id));
+            }
         }
     }
 }

@@ -25,6 +25,8 @@ pub(super) struct CacheAttempt {
     agent_id: tau_proto::AgentId,
     /// Existing typed prompt and operation identity.
     prompt_id: tau_proto::AgentPromptId,
+    /// Backend operation represented by this finite invocation.
+    operation: tau_proto::PromptOperation,
     /// Owner-supplied attempt, not an inferred logical-attempt ordinal.
     provider_attempt: Option<tau_proto::ProviderAttempt>,
     /// Metadata selection independent of exact capture selection.
@@ -38,15 +40,14 @@ pub(super) struct CacheAttempt {
 }
 
 impl CacheAttempt {
-    /// Select only persistable ordinary inference; local-summary compaction
-    /// retains its existing exact captures without acquiring scalar coverage.
+    /// Select persistable inference or local-summary activity.
     pub(super) fn new(
         prompt: &tau_proto::AgentPromptCreated,
         persistable: bool,
         policy: CacheDiagnostics,
         provider_attempt: Option<tau_proto::ProviderAttempt>,
     ) -> Option<Self> {
-        if !persistable || prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
+        if !persistable {
             return None;
         }
         Some(Self {
@@ -55,6 +56,7 @@ impl CacheAttempt {
             session_id: prompt.session_id.clone(),
             agent_id: prompt.agent_id.clone(),
             prompt_id: prompt.agent_prompt_id.clone(),
+            operation: prompt.operation,
             provider_attempt,
             enabled: policy == CacheDiagnostics::Metadata,
             started: Instant::now(),
@@ -87,7 +89,7 @@ impl CacheAttempt {
             "record_kind": kind, "attempt_id": self.id,
             "session_id": self.session_id, "agent_id": self.agent_id,
             "agent_prompt_id": self.prompt_id, "operation_id": self.prompt_id,
-            "operation": "inference", "logical_attempt": null,
+            "operation": operation_label(self.operation), "logical_attempt": null,
             "harness_provider_attempt": self.provider_attempt,
             "recorded_at_unix_micros": micros(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()),
             "elapsed_us_since_attempt_start": micros(self.started.elapsed()),
@@ -222,6 +224,14 @@ impl CacheAttempt {
             ),
             reservation,
         );
+    }
+}
+
+/// Map the closed prompt operation to the diagnostic wire label.
+fn operation_label(operation: tau_proto::PromptOperation) -> &'static str {
+    match operation {
+        tau_proto::PromptOperation::Inference => "inference",
+        tau_proto::PromptOperation::StandaloneCompaction => "standalone_compaction",
     }
 }
 
