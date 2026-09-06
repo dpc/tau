@@ -132,12 +132,13 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 .contains(&tau_proto::InputModality::Image),
     };
     let mut sampler = ResponseSampler::new();
-    let outcome = tau_provider_chat_completions::run_attempt_numbered(
+    let outcome = tau_provider_chat_completions::run_attempt_with_diagnostics(
         provider_attempt,
         prompt,
         &config,
         &wire_model,
         debug_provider_requests,
+        provider.cache_diagnostics,
         &mut |update| match update {
             tau_provider_chat_completions::AttemptUpdate::Dispatched(at) => {
                 sampler.mark_dispatched(at);

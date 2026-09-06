@@ -96,6 +96,12 @@ impl std::error::Error for OpenRouterDiscoveryError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenRouterProfile {
+    /// Startup-frozen scalar diagnostics for the Chat Completions adapter.
+    #[serde(
+        default,
+        skip_serializing_if = "tau_provider::cache_diagnostic::CacheDiagnostics::is_metadata"
+    )]
+    pub cache_diagnostics: tau_provider::cache_diagnostic::CacheDiagnostics,
     /// API key for OpenRouter bearer auth.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key: String,
@@ -127,6 +133,7 @@ impl OpenRouterProfile {
             }
         }
         ChatCompletionsProvider {
+            cache_diagnostics: self.cache_diagnostics,
             base_url: "https://openrouter.ai/api/v1".to_owned(),
             api_key: self.api_key,
             models: self.models,
@@ -308,6 +315,7 @@ async fn read_openrouter_models(
         .filter_map(openrouter_model)
         .collect::<Vec<_>>();
     let profile = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: String::new(),
         models,
     };
@@ -391,6 +399,7 @@ fn cached_openrouter_models(path: Option<&Path>) -> Option<Vec<ChatCompletionsMo
         return None;
     }
     let profile = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: String::new(),
         models: cached.models,
     };

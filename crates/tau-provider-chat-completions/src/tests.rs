@@ -7,6 +7,7 @@ use std::{
     sync as path_std_sync,
 };
 
+mod cache_diagnostics;
 mod scripted_tcp_server;
 
 use scripted_tcp_server::ScriptedTcpServer;

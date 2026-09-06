@@ -10,6 +10,43 @@ use std::{io as path_std_io, time as path_std_time};
 use super::sampling::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 use super::*;
 
+/// Metadata defaults on independently of exact captures, and both compatible
+/// profile kinds preserve a closed startup opt-out through route lowering.
+#[test]
+fn cache_diagnostics_profile_policy_defaults_on_and_preserves_opt_out() {
+    use tau_provider::cache_diagnostic::CacheDiagnostics;
+    let default: ChatCompletionsProvider = serde_json::from_str("{}").expect("default");
+    assert_eq!(default.cache_diagnostics, CacheDiagnostics::Metadata);
+    assert!(
+        serde_json::to_value(default)
+            .expect("profile")
+            .get("cache_diagnostics")
+            .is_none()
+    );
+    let off: ChatCompletionsProvider =
+        serde_json::from_str(r#"{"cache_diagnostics":"off"}"#).expect("off");
+    assert_eq!(off.cache_diagnostics, CacheDiagnostics::Off);
+    let router: OpenRouterProfile =
+        serde_json::from_str(r#"{"cache_diagnostics":"off"}"#).expect("router");
+    assert_eq!(
+        router.to_chat_completions().cache_diagnostics,
+        CacheDiagnostics::Off
+    );
+    assert_eq!(
+        OpenRouterProfile::default()
+            .to_chat_completions()
+            .cache_diagnostics,
+        CacheDiagnostics::Metadata
+    );
+    for invalid in [
+        r#"{"cache_diagnostics":"raw"}"#,
+        r#"{"cache_diagnostics":true}"#,
+    ] {
+        assert!(serde_json::from_str::<ChatCompletionsProvider>(invalid).is_err());
+        assert!(serde_json::from_str::<OpenRouterProfile>(invalid).is_err());
+    }
+}
+
 /// Rust construction and omitted serialized compatibility must retain the
 /// historical selector behavior; only an explicit false disables it.
 #[test]
@@ -756,6 +793,7 @@ fn openrouter_enables_local_summary_compaction() {
     }))
     .expect("configured remote model");
     let profile = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: String::new(),
         models: vec![model],
     };
@@ -794,6 +832,7 @@ fn openrouter_defaults_to_telemetry_without_cache_policy() {
         est_cache_storage_cost_1m_token_hour_usd: None,
     };
     let provider = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: String::new(),
         models: vec![model],
     }

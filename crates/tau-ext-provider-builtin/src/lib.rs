@@ -1448,6 +1448,7 @@ fn cmd_add_chat_completions(
         .interact_text()?;
     let models = parse_chat_model_list(&models_input)?;
     let profile = ChatCompletionsProvider {
+        cache_diagnostics: Default::default(),
         base_url,
         api_key,
         models,
@@ -1491,7 +1492,11 @@ fn cmd_add_openrouter(
     } else {
         parse_chat_model_list(&models_input)?
     };
-    let profile = OpenRouterProfile { api_key, models };
+    let profile = OpenRouterProfile {
+        api_key,
+        models,
+        cache_diagnostics: Default::default(),
+    };
     save_profile(
         extension_instance,
         &name,

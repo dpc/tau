@@ -83,11 +83,11 @@ does not alter capture, retention, inference, retry, refresh, or compaction poli
 
 ## Private runtime metadata
 
-ChatGPT/Codex and public Responses ordinary inference, and native Codex standalone
+ChatGPT/Codex, public Responses and Chat Completions ordinary inference, and native Codex standalone
 compaction, produce bounded scalar captures in the
 existing owner-private session `debug/provider-requests/<instance>/` directory,
 using the `cache-diagnostic.json.zst` filename class. Set
-`"cache_diagnostics": "off"` in a ChatGPT or public Responses provider profile to disable only these
+`"cache_diagnostics": "off"` in a ChatGPT, public Responses, Chat Completions or OpenRouter provider profile to disable only these
 metadata records, or `"metadata"` (the default) to enable them. Restart after
 changing this startup-frozen setting. Ephemeral/memory-only activity remains
 excluded under the existing capture permission; no filesystem probing infers
@@ -131,8 +131,13 @@ Raw provider input/read/write/output counters remain separate from normalized
 canonical accounting. Missing counters, exact eligibility, model revision and
 unavailable chain counts stay null. There is no established per-item attribution
 parser yet: `raw_attribution` is false, the attribution array stays empty, and
-present usage is labeled `unsupported_shape` for attribution. Chat Completions,
-prewarm and cache refresh do not implement this capture
+present usage is labeled `unsupported_shape` for attribution.
+Chat Completions retains the latest observed allowlisted usage member, even on
+later failure, without merging or normalizing repeated members. Its raw cache
+counters follow the exact route's selected OpenAI or DeepSeek schema; unselected
+schemas do not become evidence. Its exact captures share the actual dispatch's
+attempt identity and index. Local-summary compaction retains exact captures only.
+Prewarm and cache refresh do not implement this capture
 adapter. The inspector reports those capabilities as unavailable rather than
 inventing inference ordinals or complete coverage.
 

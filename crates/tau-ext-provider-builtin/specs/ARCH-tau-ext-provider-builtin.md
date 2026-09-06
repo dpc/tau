@@ -67,13 +67,13 @@ semantic transcript replay emits. Routes whose templates allow system authority 
 set `single_initial_system_message`; the adapter then rejects later System and
 Developer transcript messages before network dispatch.
 
-ChatGPT and public Responses profiles also freeze `cache_diagnostics: off|metadata`
+ChatGPT, public Responses, Chat Completions and OpenRouter profiles also freeze `cache_diagnostics: off|metadata`
 at configured startup, with metadata enabled by default for persistable ordinary
 inference. Native Codex standalone compaction also has scalar coverage.
 Credential reload and subsequent initialization cannot change this selection.
 It does not disable or opt in existing default-on exact captures. Public
 Responses forwards its owner-supplied provider attempt only as local diagnostic
-correlation; its local-summary compaction remains excluded. Other adapters,
+correlation; public Responses and Chat Completions local-summary compaction remain excluded. Other adapters,
 prewarm and cache refresh remain unsupported for scalar cache diagnostics.
 The executable passes its existing build identity in process, never through
 prompt/configuration IPC.

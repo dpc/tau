@@ -2043,6 +2043,7 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
     );
 
     let router_old = crate::chat_completions::OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: "router-old".to_owned(),
         models: vec![chat_model("route/model")],
     };
@@ -5035,6 +5036,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
     startup_profiles.providers.insert(
         ProviderName::new("router"),
         BuiltinProviderProfile::OpenRouter(OpenRouterProfile {
+            cache_diagnostics: Default::default(),
             api_key: "router-key".to_owned(),
             models: vec![chat_model("router-model")],
         }),

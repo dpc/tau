@@ -10,7 +10,7 @@ The harness does not own provider-specific LLM execution; provider extensions ar
 
 ## Prompt-cache prefix stability
 
-For ordinary ChatGPT/Codex and public Responses inference, and native Codex
+For ordinary ChatGPT/Codex, public Responses and Chat Completions (including OpenRouter) inference, and native Codex
 standalone compaction, `cache_diagnostics: "metadata"` is the
 default in provider profiles; `"off"` disables only scalar cache observations
 after restart. Exact request/response capture remains default-on for durable

@@ -653,6 +653,7 @@ fn chatgpt_setup_keeps_oauth_credential_publication() {
 fn keyless_setup_requires_no_secret_publication() {
     let provider = ProviderName::new("local");
     let profile = BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+        cache_diagnostics: Default::default(),
         base_url: "http://localhost:8080/v1".to_owned(),
         api_key: String::new(),
         models: vec![test_chat_model("local-model")],
@@ -682,6 +683,7 @@ fn keyless_setup_requires_no_secret_publication() {
 fn deferred_named_setup_writes_only_credential_free_binding() {
     let provider = ProviderName::new("future");
     let profile = BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+        cache_diagnostics: Default::default(),
         base_url: "https://example.invalid/v1".to_owned(),
         api_key: String::new(),
         models: vec![test_chat_model("model")],
@@ -3269,6 +3271,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
     let provider_name = ProviderName::new("local");
     let configured = test_chat_model("llama");
     let provider = ChatCompletionsProvider {
+        cache_diagnostics: Default::default(),
         base_url: "http://127.0.0.1:8080/v1".to_owned(),
         api_key: String::new(),
         models: vec![configured.clone()],
@@ -3323,6 +3326,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
     let provider_name = ProviderName::new("openrouter");
     let configured = test_chat_model("anthropic/claude-test");
     let profile = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: "key".to_owned(),
         models: vec![configured.clone()],
     };
@@ -3442,6 +3446,7 @@ fn large_openrouter_catalog_moves_into_indexed_route_snapshot() {
     let selected_index = MODEL_COUNT / 2;
     let selected_id = ModelName::new(format!("route/model-{selected_index}"));
     let profile = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: "router-content-canary-bearer".to_owned(),
         models: (0..MODEL_COUNT)
             .map(|index| test_chat_model(&format!("route/model-{index}")))

@@ -70,6 +70,21 @@ attempts release no semantic output.
 
 ## Cache telemetry route capabilities
 
+Persistable ordinary inference produces bounded private cache-diagnostic metadata
+by default, with an independent startup profile opt-out. Exact captures retain
+their existing default, timing, image redaction and bounds; generated attempt
+correlation is added to their existing projections. Dispatch metadata observes
+the existing callback immediately before polling the send, never a candidate
+request. One finite invocation has no local repair and at most one dispatch.
+Local-summary compaction keeps its exact captures without scalar coverage.
+
+Each observed usage member replaces the entire allowlisted diagnostic snapshot
+before normalization, including null or malformed members. Absent members leave
+the snapshot unchanged. The attempt retains this latest snapshot across later
+failure; diagnostics never sum, merge, clamp, or alter canonical accounting.
+Cache-counter projection honors the selected exact-route schema below. No
+per-item attribution or inferred cache eligibility is available.
+
 The adapter parses cache counters only after the extension selects
 `AttemptCompat.cache_usage` for the exact route. DeepSeek hit/miss counters
 therefore never become observations merely because a model or endpoint name

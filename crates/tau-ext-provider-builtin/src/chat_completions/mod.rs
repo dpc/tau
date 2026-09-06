@@ -17,6 +17,13 @@ const DEFAULT_CONTEXT_WINDOW: TokenCount = TokenCount::new(128_000);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatCompletionsProvider {
+    /// Startup-frozen private scalar diagnostics, independent of exact
+    /// captures.
+    #[serde(
+        default,
+        skip_serializing_if = "tau_provider::cache_diagnostic::CacheDiagnostics::is_metadata"
+    )]
+    pub cache_diagnostics: tau_provider::cache_diagnostic::CacheDiagnostics,
     /// Base URL without `/chat/completions`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
@@ -322,6 +329,7 @@ impl CacheUsageCompat {
 impl Default for ChatCompletionsProvider {
     fn default() -> Self {
         Self {
+            cache_diagnostics: Default::default(),
             base_url: String::new(),
             api_key: String::new(),
             models: Vec::new(),

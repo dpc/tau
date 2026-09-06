@@ -103,11 +103,13 @@ fn explicit_profiles_reject_invalid_tool_capabilities_and_duplicates() {
         .expect("model")
     };
     let invalid_tools = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: String::new(),
         models: vec![model("vendor/custom", serde_json::json!(["custom"]), false)],
     };
     assert!(invalid_tools.validate().is_err());
     let duplicates = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: String::new(),
         models: vec![
             model("vendor/duplicate", serde_json::json!(["function"]), true),
@@ -226,6 +228,7 @@ fn openrouter_conversion_strips_upstream_cache_contract() {
     }))
     .expect("valid generic contract");
     let provider = OpenRouterProfile {
+        cache_diagnostics: Default::default(),
         api_key: String::new(),
         models: vec![model],
     }

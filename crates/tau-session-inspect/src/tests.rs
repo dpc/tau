@@ -1940,6 +1940,7 @@ fn cache_report_projects_only_canonical_facts_and_preserves_unknowns() {
         serde_json::json!({
             "codex_inference": "metadata",
             "public_responses_inference": "metadata",
+            "chat_completions_inference": "metadata",
             "other_adapters": "unavailable",
             "codex_standalone_compaction": "metadata",
             "other_standalone_compaction": "unavailable",

@@ -221,6 +221,7 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                 "cache_diagnostic_support": {
                     "codex_inference": "metadata",
                     "public_responses_inference": "metadata",
+                    "chat_completions_inference": "metadata",
                     "other_adapters": "unavailable",
                     "codex_standalone_compaction": "metadata",
                     "other_standalone_compaction": "unavailable",

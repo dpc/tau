@@ -3,19 +3,23 @@
 //! Component responsibilities and provider/replay trust boundaries are
 //! documented in `ARCH-tau-provider-chat-completions`.
 
+mod cache_diagnostic;
 mod canonical_identifier;
+mod capture_correlation;
 mod compact_stream;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Read;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{cell as path_std_cell, io as path_std_io};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use canonical_identifier::CanonicalIdentifierFamily;
+use capture_correlation::CaptureCorrelation;
 use serde::Serialize;
 #[cfg(test)]
 use tau_proto::ToolResultStatus;
@@ -24,6 +28,7 @@ use tau_proto::{
     ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ToolCallItem, ToolChoice,
     ToolDefinition, ToolType,
 };
+use tau_provider::cache_diagnostic::CacheDiagnostics;
 use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_reset_hint, parse_retry_after,
 };
@@ -998,6 +1003,40 @@ pub fn run_attempt_numbered(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
+    run_attempt_with_diagnostics(
+        provider_attempt,
+        prompt,
+        config,
+        model,
+        debug_provider_requests,
+        CacheDiagnostics::Off,
+        on_update,
+        is_canceled,
+        network,
+    )
+}
+
+/// Run one finite attempt with independent scalar diagnostics. The existing
+/// durable-session capture policy still controls persistence eligibility.
+#[allow(clippy::too_many_arguments)]
+pub fn run_attempt_with_diagnostics(
+    provider_attempt: tau_proto::ProviderAttempt,
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    cache_diagnostics: CacheDiagnostics,
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
+    let cache = cache_diagnostic::CacheAttempt::new(
+        prompt,
+        debug_provider_requests,
+        cache_diagnostics,
+        provider_attempt,
+    )
+    .map(Arc::new);
     let mut private_trace = private_trace::AttemptTrace::selected(
         private_trace::Backend::ChatCompletions,
         private_trace::Transport::HttpSse,
@@ -1026,6 +1065,7 @@ pub fn run_attempt_numbered(
             is_canceled,
             network,
             &mut private_trace,
+            cache.as_ref(),
         )
     };
     if let Some(trace) = private_trace.take() {
@@ -1037,7 +1077,11 @@ pub fn run_attempt_numbered(
         };
         trace.finish(outcome);
     }
-    finish_attempt_with_facts(result, attempt.progress.get(), attempt.facts())
+    let outcome = finish_attempt_with_facts(result, attempt.progress.get(), attempt.facts());
+    if let Some(cache) = cache {
+        cache.finish(&outcome);
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -1101,6 +1145,8 @@ fn finish_attempt_with_facts(
 }
 
 struct StreamState {
+    /// Attempt-owned raw usage observer, independent of retained exact events.
+    cache: Option<Arc<cache_diagnostic::CacheAttempt>>,
     text: String,
     thinking: String,
     output_items: Vec<OutputItemAccumulator>,
@@ -1144,6 +1190,7 @@ impl StreamState {
         compact_output_bytes: Option<tau_proto::ByteCount>,
     ) -> Self {
         Self {
+            cache: None,
             text: String::new(),
             thinking: String::new(),
             output_items: Vec::new(),
@@ -1664,6 +1711,7 @@ fn chat_completions_stream(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
     private_trace: &mut Option<private_trace::AttemptTrace>,
+    cache: Option<&Arc<cache_diagnostic::CacheAttempt>>,
 ) -> Result<StreamState, LlmError> {
     let debug_provider_requests = debug_capture_enabled_for_prompt(prompt, debug_provider_requests);
     if is_canceled() {
@@ -1686,7 +1734,13 @@ fn chat_completions_stream(
         .enable_all()
         .build()
         .map_err(LlmError::Io)?;
+    let request_bytes = body_str.len();
+    let dispatched = Cell::new(false);
     let mut on_wire_dispatch = |at| {
+        dispatched.set(true);
+        if let Some(cache) = cache {
+            cache.dispatch(prompt, provider, model, &body, request_bytes);
+        }
         // The standalone compactor transaction deliberately persists only its
         // accepted checkpoint. Debug capture remains private observability.
         maybe_debug_submit_provider_request(
@@ -1695,7 +1749,7 @@ fn chat_completions_stream(
             debug_provider_requests,
             &body,
             provider_attempt,
-            1,
+            cache.map_or_else(|| 1.into(), |cache| cache.correlation()),
         );
         on_dispatched(at);
     };
@@ -1706,6 +1760,7 @@ fn chat_completions_stream(
             body: body_str,
             prompt,
             capture_raw_events: debug_provider_requests,
+            cache: cache.cloned(),
         },
         on_update,
         &mut on_wire_dispatch,
@@ -1721,7 +1776,9 @@ fn chat_completions_stream(
                 model,
                 debug_provider_requests,
                 provider_attempt,
-                None,
+                dispatched
+                    .get()
+                    .then(|| cache.map_or_else(|| 1.into(), |cache| cache.correlation())),
                 &error,
             );
             return Err(error);
@@ -1735,7 +1792,7 @@ fn chat_completions_stream(
         &state,
         &raw_events,
         provider_attempt,
-        1,
+        cache.map_or_else(|| 1.into(), |cache| cache.correlation()),
     );
     ensure_non_empty_end_turn(state.validate_compaction()?)
 }
@@ -1748,6 +1805,8 @@ fn debug_capture_enabled_for_prompt(
 }
 
 struct AsyncAttemptContext<'a> {
+    /// Private raw usage observer retained across later stream failure.
+    cache: Option<Arc<cache_diagnostic::CacheAttempt>>,
     /// Fully resolved Chat Completions endpoint.
     url: &'a str,
     /// Mutable-profile values resolved for this attempt.
@@ -1895,6 +1954,7 @@ async fn chat_completions_stream_async(
         });
     let mut state =
         StreamState::new_for_attempt(context.provider.compat.cache_usage, compact_output_bytes);
+    state.cache = context.cache;
     let mut raw_events = DebugEventCapture::new(context.capture_raw_events);
     let mut pending = Vec::new();
     loop {
@@ -2318,9 +2378,9 @@ fn debug_file_prefix(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut metadata = serde_json::json!({
         "session_id": prompt.session_id,
         "agent_prompt_id": prompt.agent_prompt_id,
         "transport": "http-sse",
@@ -2331,8 +2391,9 @@ fn debug_file_prefix(
             tau_proto::PromptOperation::StandaloneCompaction => "compact",
         },
         "logical_attempt": provider_attempt.get(),
-        "wire_dispatch_index": wire_dispatch_index,
-    })
+    });
+    wire_dispatch_index.into().annotate(&mut metadata);
+    metadata
 }
 
 fn submit_debug_json_with(
@@ -2362,11 +2423,11 @@ fn provider_request_debug_metadata(
     model: &AttemptModel,
     body: &ChatRequest,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) -> serde_json::Value {
     let mut body = serde_json::to_value(body).expect("Chat request serializes");
     redact_image_data_urls(&mut body);
-    serde_json::json!({
+    let mut metadata = serde_json::json!({
         "session_id": prompt.session_id,
         "agent_prompt_id": prompt.agent_prompt_id,
         "transport": "http-sse",
@@ -2381,8 +2442,9 @@ fn provider_request_debug_metadata(
             tau_proto::PromptOperation::StandaloneCompaction => "compact",
         },
         "logical_attempt": provider_attempt.get(),
-        "wire_dispatch_index": wire_dispatch_index,
-    })
+    });
+    wire_dispatch_index.into().annotate(&mut metadata);
+    metadata
 }
 
 fn redact_image_data_urls(value: &mut serde_json::Value) {
@@ -2413,7 +2475,7 @@ fn maybe_debug_submit_provider_request(
     debug_provider_requests: bool,
     body: &ChatRequest,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) {
     maybe_debug_submit_provider_request_with(
         prompt,
@@ -2432,7 +2494,7 @@ fn maybe_debug_submit_provider_request_with(
     debug_provider_requests: bool,
     body: &ChatRequest,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
     if let Err(error) = submit_debug_json_with(
@@ -2466,7 +2528,7 @@ fn maybe_debug_submit_provider_response(
     state: &StreamState,
     raw_events: &[serde_json::Value],
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) {
     maybe_debug_submit_provider_response_with(
         prompt,
@@ -2489,7 +2551,7 @@ fn maybe_debug_submit_captured_provider_response(
     state: &StreamState,
     raw_events: &DebugEventCapture,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) {
     let Some(raw_events) = raw_events.eligible_events() else {
         return;
@@ -2513,7 +2575,7 @@ fn maybe_debug_submit_provider_response_with(
     state: &StreamState,
     raw_events: &[serde_json::Value],
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
     if let Err(error) = submit_debug_json_with(
@@ -2547,7 +2609,7 @@ fn provider_response_debug_metadata(
     state: &StreamState,
     raw_events: &[serde_json::Value],
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) -> serde_json::Value {
     let mut metadata = debug_file_prefix(prompt, model, provider_attempt, wire_dispatch_index);
     if let serde_json::Value::Object(map) = &mut metadata {
@@ -2578,7 +2640,7 @@ fn maybe_debug_submit_provider_http_error(
     status: u16,
     body: &str,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) {
     maybe_debug_submit_provider_http_error_with(
         prompt,
@@ -2598,16 +2660,10 @@ fn finalize_provider_capture(
     model: &AttemptModel,
     debug_provider_requests: bool,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: Option<u64>,
+    wire_dispatch_index: Option<CaptureCorrelation>,
     error: &LlmError,
 ) {
-    let Some(wire_dispatch_index) = wire_dispatch_index.or_else(|| {
-        matches!(
-            error,
-            LlmError::HttpStatus(..) | LlmError::HttpStatusHinted(..)
-        )
-        .then_some(1)
-    }) else {
+    let Some(wire_dispatch_index) = wire_dispatch_index else {
         return;
     };
     match error {
@@ -2634,7 +2690,7 @@ fn maybe_debug_submit_provider_http_error_with(
     status: u16,
     body: &str,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
     if let Err(error) = submit_debug_json_with(
@@ -2668,7 +2724,7 @@ fn provider_http_error_debug_metadata(
     status: u16,
     body: &str,
     provider_attempt: tau_proto::ProviderAttempt,
-    wire_dispatch_index: u64,
+    wire_dispatch_index: impl Into<CaptureCorrelation> + Copy,
 ) -> serde_json::Value {
     let mut metadata = debug_file_prefix(prompt, model, provider_attempt, wire_dispatch_index);
     if let serde_json::Value::Object(map) = &mut metadata {
@@ -3202,6 +3258,9 @@ fn flush_pending_content(
 }
 
 fn capture_usage(state: &mut StreamState, usage: &serde_json::Value) {
+    if let Some(cache) = &state.cache {
+        cache.record_usage(usage, state.cache_usage);
+    }
     state.input_tokens = usage["prompt_tokens"].as_u64();
     state.output_tokens = usage["completion_tokens"].as_u64();
     match state.cache_usage {
