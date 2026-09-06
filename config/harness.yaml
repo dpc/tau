@@ -152,6 +152,8 @@
 #       credential_id: "tau-worker-production"
 #       credential_secret: "swarm_worker_secret"
 #       # hostname: "builder-01"
+#   # Install dpc-tau-ext-telegram separately and make tau-ext-telegram
+#   # available through PATH before enabling this instance.
 #   std-telegram:
 #     enable: true
 #     secrets:

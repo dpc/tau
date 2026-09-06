@@ -212,6 +212,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
         content: include_str!("../self-knowledge/tau-self-knowledge-ext-slack.md"),
     },
     BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-ext-telegram.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-ext-telegram.md"),
+    },
+    BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-ext-zulip.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-ext-zulip.md"),
     },

@@ -248,6 +248,22 @@ executable does not widen its ingress, reply, reaction, proactive-send, or
 dynamic-DM authority. The standalone project owns the detailed setup,
 migration, security, routing, testing, and troubleshooting documentation.
 
+The separately maintained `std-telegram` instance is disabled by default. Tau
+does not bundle its source or executables: install the Cargo package
+`dpc-tau-ext-telegram` separately, ensure its `tau-ext-telegram` executable is
+available through `PATH`, and then enable the instance. Tau launches it through
+the normal supervised stdio extension route. The same standalone package
+provides the optional `tau-telegram-gateway`; operators must install and
+supervise that daemon separately when using gateway-client mode.
+
+Tau retains the `std-telegram` name, role, configuration, managed-secret
+delivery, per-instance Session-scope desired-registration state, checkpoint
+locations, publisher identity, tool prefixing, network policy, and stdio
+supervision semantics. Running a separate executable does not widen Telegram
+sender, chat, registration, reply, gateway endpoint, or gateway-client access
+authority. The standalone project owns detailed setup, migration, security,
+gateway, testing, and troubleshooting documentation.
+
 `std-utils` keeps its best-effort `papercut` reporter disabled unless its
 instance config sets `papercut.enable: true`. See the
 [std-utils README](../crates/tau-ext-utils/README.md) for its exact JSONL

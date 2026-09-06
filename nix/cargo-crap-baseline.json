@@ -552,15 +552,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::new",
-      "line": 310,
-      "cyclomatic": 10.0,
-      "coverage": 0.0,
-      "crap": 110.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-provider-builtin/src/lib.rs",
       "function": "ProviderRuntime::drain_worker_messages",
       "line": 1873,
@@ -577,15 +568,6 @@
       "coverage": 22.857142857142858,
       "crap": 103.97942857142858,
       "crate": "tau-vcr"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "handle_live_event_value",
-      "line": 2011,
-      "cyclomatic": 17.0,
-      "coverage": 33.33333333333333,
-      "crap": 102.62962962962966,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-pim/src/calendar/runtime.rs",
@@ -1299,15 +1281,6 @@
       "crate": "tau-ext-xmpp"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "decode_message",
-      "line": 2480,
-      "cyclomatic": 8.0,
-      "coverage": 11.11111111111111,
-      "crap": 52.94924554183813,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "cbor_to_json",
       "line": 708,
@@ -1875,15 +1848,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::run_forever",
-      "line": 349,
-      "cyclomatic": 6.0,
-      "coverage": 0.0,
-      "crap": 42.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "EventReader::read_config_error",
       "line": 46,
@@ -2071,15 +2035,6 @@
       "coverage": 34.78260869565217,
       "crap": 31.468562505136845,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayArgParser::parse",
-      "line": 233,
-      "cyclomatic": 26.0,
-      "coverage": 80.0,
-      "crap": 31.407999999999998,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/deterministic_fixture.rs",
@@ -2541,15 +2496,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "remove_inactive_socket",
-      "line": 1968,
-      "cyclomatic": 5.0,
-      "coverage": 0.0,
-      "crap": 30.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-test-dummy/src/tests.rs",
       "function": "run_intercept",
       "line": 522,
@@ -2865,15 +2811,6 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "read_gateway_socket_request",
-      "line": 1877,
-      "cyclomatic": 15.0,
-      "coverage": 65.0,
-      "crap": 24.646874999999998,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-config/src/settings.rs",
       "function": "normalize_harness_config_value",
       "line": 2265,
@@ -3097,15 +3034,6 @@
       "coverage": 65.27777777777779,
       "crap": 22.2050004286694,
       "crate": "tau-actions"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "poll_loop_with_tool_names",
-      "line": 1714,
-      "cyclomatic": 22.0,
-      "coverage": 92.63157894736842,
-      "crap": 22.193628225688876,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-skills/src/lib.rs",
@@ -4008,51 +3936,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "run_from_env",
-      "line": 104,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::reject_inactive_chat",
-      "line": 516,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketGuard::bind",
-      "line": 1669,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "accept_gateway_socket_loop",
-      "line": 1688,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "HttpTelegramClient::get_updates",
-      "line": 2391,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-test-dummy/src/tests.rs",
       "function": "DelayedReader::read",
       "line": 132,
@@ -4177,15 +4060,6 @@
       "coverage": 83.15789473684211,
       "crap": 19.54786878553725,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_register",
-      "line": 843,
-      "cyclomatic": 18.0,
-      "coverage": 83.33333333333334,
-      "crap": 19.499999999999996,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness/extension_data.rs",
@@ -4339,15 +4213,6 @@
       "coverage": 30.0,
       "crap": 18.348,
       "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::maybe_handle_start",
-      "line": 449,
-      "cyclomatic": 11.0,
-      "coverage": 60.97560975609756,
-      "crap": 18.191073838162534,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
@@ -4816,24 +4681,6 @@
       "coverage": 56.52173913043478,
       "crap": 15.657351853373882,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayDurableState::reconcile_with_config",
-      "line": 965,
-      "cyclomatic": 9.0,
-      "coverage": 56.52173913043478,
-      "crap": 15.657351853373882,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_send",
-      "line": 1066,
-      "cyclomatic": 13.0,
-      "coverage": 75.38461538461539,
-      "crap": 15.520615384615384,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli-term/src/bounded_command.rs",
@@ -5520,15 +5367,6 @@
       "crate": "tau-harness-tools"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "drive_manual_runtime",
-      "line": 1965,
-      "cyclomatic": 13.0,
-      "coverage": 87.5,
-      "crap": 13.330078125,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "sanitize_endpoint_error",
       "line": 912,
@@ -5772,15 +5610,6 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::request",
-      "line": 134,
-      "cyclomatic": 13.0,
-      "coverage": 98.30508474576271,
-      "crap": 13.000822868939862,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
       "function": "mint_available_agent_id_for_role_with",
       "line": 1141,
@@ -5914,15 +5743,6 @@
       "coverage": 69.23076923076923,
       "crap": 12.913063268092854,
       "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::route_or_command",
-      "line": 593,
-      "cyclomatic": 12.0,
-      "coverage": 82.35294117647058,
-      "crap": 12.791369835131285,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-core/src/agent_store.rs",
@@ -6184,15 +6004,6 @@
       "coverage": 90.0,
       "crap": 12.144,
       "crate": "tau-cli-term"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "run_with_client",
-      "line": 1830,
-      "cyclomatic": 12.0,
-      "coverage": 90.625,
-      "crap": 12.11865234375,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-rhai/src/lib.rs",
@@ -7752,24 +7563,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client/tests.rs",
-      "function": "connect_error_with_response",
-      "line": 18,
-      "cyclomatic": 3.0,
-      "coverage": null,
-      "crap": 12.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "BridgeMode::fmt",
-      "line": 131,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-test-dummy/src/tests.rs",
       "function": "restart_input",
       "line": 88,
@@ -8202,15 +7995,6 @@
       "crate": "tau-client"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "validate_api_base",
-      "line": 1621,
-      "cyclomatic": 11.0,
-      "coverage": 88.88888888888889,
-      "crap": 11.165980795610425,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/settings.rs",
       "function": "ResolvedExtension::apply_user_entry",
       "line": 297,
@@ -8607,15 +8391,6 @@
       "crate": "tau-provider-codex"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "read_initial_config",
-      "line": 1892,
-      "cyclomatic": 9.0,
-      "coverage": 71.42857142857143,
-      "crap": 10.889212827988338,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-core/src/agent_checkpoint.rs",
       "function": "list_agent_entries",
       "line": 288,
@@ -8940,15 +8715,6 @@
       "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::agents_text",
-      "line": 642,
-      "cyclomatic": 9.0,
-      "coverage": 75.67567567567568,
-      "crap": 10.165755236609874,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/dev_tmux/provider_access.rs",
       "function": "TestingProviderAccess::copy_allowed_profiles",
       "line": 45,
@@ -9181,15 +8947,6 @@
       "coverage": 97.05882352941177,
       "crap": 10.002544270303277,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "handle_gateway_socket_client",
-      "line": 1705,
-      "cyclomatic": 10.0,
-      "coverage": 97.22222222222221,
-      "crap": 10.002143347050755,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -9732,15 +9489,6 @@
       "crate": "tau-client"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "handle_gateway_socket_request",
-      "line": 1751,
-      "cyclomatic": 9.0,
-      "coverage": 88.57142857142857,
-      "crap": 9.120909620991254,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-cli-term/src/completion.rs",
       "function": "CompletionRule::parse",
       "line": 288,
@@ -9858,15 +9606,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::apply_local_poll_config",
-      "line": 659,
-      "cyclomatic": 9.0,
-      "coverage": 90.9090909090909,
-      "crap": 9.060856498873028,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/dir_lock.rs",
       "function": "canonical_update_lock_dir",
       "line": 1543,
@@ -9982,15 +9721,6 @@
       "coverage": 95.0,
       "crap": 9.010125,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "write_owner_metadata",
-      "line": 239,
-      "cyclomatic": 9.0,
-      "coverage": 95.0,
-      "crap": 9.010125,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-pim/src/google_oauth.rs",
@@ -10324,24 +10054,6 @@
       "coverage": 100.0,
       "crap": 9.0,
       "crate": "tau-ext-std-notifications"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::route_to",
-      "line": 741,
-      "cyclomatic": 8.0,
-      "coverage": 75.0,
-      "crap": 9.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayDurableState::save",
-      "line": 937,
-      "cyclomatic": 9.0,
-      "coverage": 100.0,
-      "crap": 9.0,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-test-dummy/src/lib.rs",
@@ -10927,15 +10639,6 @@
       "coverage": 90.0,
       "crap": 8.064,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::register_agent",
-      "line": 1348,
-      "cyclomatic": 8.0,
-      "coverage": 90.0,
-      "crap": 8.064,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-client/src/client_handle.rs",
@@ -11649,15 +11352,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::send_agent_message",
-      "line": 1209,
-      "cyclomatic": 8.0,
-      "coverage": 100.0,
-      "crap": 8.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "ExtConfig::validate",
       "line": 386,
@@ -11773,15 +11467,6 @@
       "coverage": 62.5,
       "crap": 7.8984375,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayDurableState::load",
-      "line": 917,
-      "cyclomatic": 6.0,
-      "coverage": 62.5,
-      "crap": 7.8984375,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -12079,24 +11764,6 @@
       "coverage": 80.95238095238095,
       "crap": 7.338624338624339,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "cbor_bool_field",
-      "line": 2199,
-      "cyclomatic": 6.0,
-      "coverage": 66.66666666666666,
-      "crap": 7.333333333333336,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "cbor_string_field",
-      "line": 2231,
-      "cyclomatic": 6.0,
-      "coverage": 66.66666666666666,
-      "crap": 7.333333333333336,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
@@ -12583,15 +12250,6 @@
       "coverage": 93.75,
       "crap": 7.011962890625,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "UpdateStreamLock::acquire",
-      "line": 99,
-      "cyclomatic": 7.0,
-      "coverage": 93.75,
-      "crap": 7.011962890625,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli-term-raw/src/lib.rs",
@@ -13449,33 +13107,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayRequestKind::as_str",
-      "line": 215,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "ExtConfig::validate",
-      "line": 227,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_command",
-      "line": 1300,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "ExtConfig::validate",
       "line": 166,
@@ -13791,15 +13422,6 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_gateway_register",
-      "line": 938,
-      "cyclomatic": 6.0,
-      "coverage": 75.75757575757575,
-      "crap": 6.5128975707488115,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "spawn_command",
       "line": 1980,
@@ -13897,15 +13519,6 @@
       "coverage": 62.5,
       "crap": 6.318359375,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "bounded_socket_error",
-      "line": 2072,
-      "cyclomatic": 5.0,
-      "coverage": 62.5,
-      "crap": 6.318359375,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-shell/src/tools/workdir.rs",
@@ -14682,15 +14295,6 @@
       "crate": "tau-term-screen"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "GatewayRegistrySnapshot::resolve_session",
-      "line": 16,
-      "cyclomatic": 6.0,
-      "coverage": 95.65217391304348,
-      "crap": 6.002958823045944,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-pim/src/calendar/ics_feed.rs",
       "function": "IcsFeedBackend::fetch_feed",
       "line": 214,
@@ -14707,15 +14311,6 @@
       "coverage": 96.0,
       "crap": 6.002304,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "GatewayRegistrySnapshot::resolve_agent_in_session",
-      "line": 42,
-      "cyclomatic": 6.0,
-      "coverage": 96.15384615384616,
-      "crap": 6.002048247610378,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli-term-raw/src/lib.rs",
@@ -16968,132 +16563,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "FakeClient::get_updates",
-      "line": 82,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "FakeClient::send_message",
-      "line": 99,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "telegram_contention_diagnostic",
-      "line": 181,
-      "cyclomatic": 6.0,
-      "coverage": 100.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "bounded_diagnostic_text",
-      "line": 262,
-      "cyclomatic": 6.0,
-      "coverage": 100.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::process_update",
-      "line": 382,
-      "cyclomatic": 6.0,
-      "coverage": 100.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::reply_if_chat_is_active",
-      "line": 546,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "default_state_dir",
-      "line": 1995,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "default_runtime_dir",
-      "line": 2019,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "FakeGatewayClient::send_message",
-      "line": 1418,
-      "cyclomatic": 2.0,
-      "coverage": null,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::rejects_inactive_chat",
-      "line": 1216,
-      "cyclomatic": 6.0,
-      "coverage": 100.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "wait_for_poller_ready_or_shutdown",
-      "line": 1658,
-      "cyclomatic": 6.0,
-      "coverage": 100.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "configure_tool_names",
-      "line": 1914,
-      "cyclomatic": 6.0,
-      "coverage": 100.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "HttpTelegramClient::get_webhook_info",
-      "line": 2386,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "decode_webhook_info",
-      "line": 2451,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-test-dummy/src/lib.rs",
       "function": "handle_restart_invocation",
       "line": 348,
@@ -17418,15 +16887,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "HttpTelegramClient::post",
-      "line": 2422,
-      "cyclomatic": 4.0,
-      "coverage": 51.85185185185185,
-      "crap": 5.785906619925825,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
       "function": "Harness::rollback_rejected_activation_successor",
       "line": 5332,
@@ -17517,15 +16977,6 @@
       "crate": "tau-core"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_to_command",
-      "line": 1424,
-      "cyclomatic": 5.0,
-      "coverage": 70.83333333333334,
-      "crap": 5.6202980324074066,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-proto/src/events.rs",
       "function": "ThinkingSummary::as_openai_wire",
       "line": 896,
@@ -17560,15 +17011,6 @@
       "coverage": 71.42857142857143,
       "crap": 5.5830903790087465,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "create_private_dir",
-      "line": 1952,
-      "cyclomatic": 5.0,
-      "coverage": 71.42857142857143,
-      "crap": 5.5830903790087465,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-harness/src/debug_log.rs",
@@ -17949,15 +17391,6 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::process_message",
-      "line": 421,
-      "cyclomatic": 5.0,
-      "coverage": 80.95238095238095,
-      "crap": 5.172767519706295,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
       "function": "response_text",
       "line": 426,
@@ -17994,15 +17427,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::plain_text_target",
-      "line": 1469,
-      "cyclomatic": 5.0,
-      "coverage": 81.81818181818183,
-      "crap": 5.150262960180315,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-pim/src/email/real_backend.rs",
       "function": "parse_mailbox_header",
       "line": 1316,
@@ -18010,15 +17434,6 @@
       "coverage": 82.35294117647058,
       "crap": 5.137390596376959,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Output::report_tool_terminal",
-      "line": 590,
-      "cyclomatic": 5.0,
-      "coverage": 82.35294117647058,
-      "crap": 5.137390596376959,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
@@ -18102,15 +17517,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::select_agent",
-      "line": 714,
-      "cyclomatic": 5.0,
-      "coverage": 83.33333333333334,
-      "crap": 5.1157407407407405,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/markdown_render.rs",
       "function": "find_closing_delimiter",
       "line": 839,
@@ -18163,15 +17569,6 @@
       "coverage": 85.0,
       "crap": 5.084375,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::route_plain",
-      "line": 774,
-      "cyclomatic": 5.0,
-      "coverage": 85.18518518518519,
-      "crap": 5.0812884214804654,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-core/src/agent_store.rs",
@@ -18705,15 +18102,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_select_command",
-      "line": 1389,
-      "cyclomatic": 5.0,
-      "coverage": 93.10344827586206,
-      "crap": 5.008200418221329,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
       "function": "Harness::accept_standalone_compaction",
       "line": 22277,
@@ -18901,15 +18289,6 @@
       "coverage": 95.0,
       "crap": 5.003125,
       "crate": "tau-cli-term-raw"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayConfig::from_env_args",
-      "line": 141,
-      "cyclomatic": 5.0,
-      "coverage": 95.1219512195122,
-      "crap": 5.002901873159124,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli-term/src/lib.rs",
@@ -20298,24 +19677,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::selection_for_message",
-      "line": 844,
-      "cyclomatic": 5.0,
-      "coverage": 100.0,
-      "crap": 5.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "ToolNames::from_scope",
-      "line": 184,
-      "cyclomatic": 5.0,
-      "coverage": 100.0,
-      "crap": 5.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "MucConfigRaw::validate",
       "line": 425,
@@ -20350,15 +19711,6 @@
       "coverage": 40.0,
       "crap": 4.944,
       "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "bounded_reply_text",
-      "line": 2060,
-      "cyclomatic": 3.0,
-      "coverage": 40.0,
-      "crap": 4.944,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-core/src/tool_registry.rs",
@@ -20485,15 +19837,6 @@
       "coverage": 64.28571428571429,
       "crap": 4.728862973760933,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::selected_or_single_session",
-      "line": 821,
-      "cyclomatic": 4.0,
-      "coverage": 65.0,
-      "crap": 4.686,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli/src/provider_quota.rs",
@@ -20647,15 +19990,6 @@
       "coverage": 45.45454545454545,
       "crap": 4.460555972952667,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_start_command",
-      "line": 1344,
-      "cyclomatic": 4.0,
-      "coverage": 70.37037037037037,
-      "crap": 4.416196717979982,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-shell/src/dir_lock.rs",
@@ -21261,15 +20595,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "State::ensure_update_stream_locked",
-      "line": 504,
-      "cyclomatic": 4.0,
-      "coverage": 82.35294117647058,
-      "crap": 4.0879299816812535,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "WorkerState::handle_direct",
       "line": 2090,
@@ -21459,15 +20784,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "is_loopback_host",
-      "line": 1641,
-      "cyclomatic": 4.0,
-      "coverage": 83.33333333333334,
-      "crap": 4.0740740740740735,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "WorkerState::handle_stanza",
       "line": 1960,
@@ -21630,15 +20946,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::process_updates",
-      "line": 372,
-      "cyclomatic": 4.0,
-      "coverage": 85.71428571428571,
-      "crap": 4.0466472303206995,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-supervisor/src/lib.rs",
       "function": "SupervisedChild::terminate",
       "line": 446,
@@ -21781,15 +21088,6 @@
       "coverage": 88.23529411764706,
       "crap": 4.026053327905557,
       "crate": "tau-client"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::sessions_text",
-      "line": 614,
-      "cyclomatic": 4.0,
-      "coverage": 88.23529411764706,
-      "crap": 4.026053327905557,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -22485,15 +21783,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::dispatch_tool",
-      "line": 819,
-      "cyclomatic": 4.0,
-      "coverage": 94.44444444444444,
-      "crap": 4.002743484224966,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "Extension::dispatch_scoped_tool",
       "line": 800,
@@ -22519,15 +21808,6 @@
       "coverage": 94.5945945945946,
       "crap": 4.002526997413776,
       "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "emit_gateway_deliveries",
-      "line": 360,
-      "cyclomatic": 4.0,
-      "coverage": 94.5945945945946,
-      "crap": 4.002526997413776,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-provider/src/repetition_guard.rs",
@@ -22681,15 +21961,6 @@
       "coverage": 96.15384615384616,
       "crap": 4.000910332271279,
       "crate": "tau-test-support"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::process_update_for_generation",
-      "line": 1159,
-      "cyclomatic": 4.0,
-      "coverage": 96.29629629629629,
-      "crap": 4.000812884214804,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-provider-codex/src/responses/ws.rs",
@@ -24735,105 +24006,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::heartbeat",
-      "line": 1333,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::unregister_agent",
-      "line": 1391,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::ensure_owned_registration",
-      "line": 1414,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::snapshot",
-      "line": 1445,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::enqueue_delivery",
-      "line": 1489,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::connect",
-      "line": 53,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "short_id",
-      "line": 173,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::check_webhook_allows_get_updates",
-      "line": 986,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::config_for_allowed_message",
-      "line": 1192,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::rejects_unlinked_command",
-      "line": 1276,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "send_startup_declarations",
-      "line": 1930,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-utils/src/lib.rs",
       "function": "timer_action_display_args",
       "line": 684,
@@ -25635,15 +24807,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::reannounce_gateway_registrations",
-      "line": 785,
-      "cyclomatic": 2.0,
-      "coverage": 35.294117647058826,
-      "crap": 3.083655607571748,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/runtime.rs",
       "function": "ShellRuntime::handle_invalid_cwd_metadata_set",
       "line": 338,
@@ -26085,15 +25248,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "validate_object_fields",
-      "line": 2216,
-      "cyclomatic": 3.0,
-      "coverage": 81.81818181818183,
-      "crap": 3.0540946656649135,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "cbor_reject_unknown_fields",
       "line": 2793,
@@ -26238,24 +25392,6 @@
       "crate": "tau-skills"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayDurableState::remember_update",
-      "line": 996,
-      "cyclomatic": 3.0,
-      "coverage": 84.61538461538461,
-      "crap": 3.0327719617660445,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::check_outbound_rate_limit",
-      "line": 1257,
-      "cyclomatic": 3.0,
-      "coverage": 85.0,
-      "crap": 3.030375,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/dir_lock.rs",
       "function": "DirLockManager::unlock_manual_with_scope",
       "line": 731,
@@ -26389,15 +25525,6 @@
       "coverage": 85.71428571428571,
       "crap": 3.0262390670553936,
       "crate": "tau-harness-tools"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "write_gateway_socket_response",
-      "line": 1867,
-      "cyclomatic": 3.0,
-      "coverage": 85.71428571428571,
-      "crap": 3.0262390670553936,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
@@ -26724,15 +25851,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "bounded_display_name",
-      "line": 1603,
-      "cyclomatic": 3.0,
-      "coverage": 88.88888888888889,
-      "crap": 3.0123456790123457,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "bounded_xmpp_display_name",
       "line": 2221,
@@ -26913,15 +26031,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "handle_configure_message",
-      "line": 1998,
-      "cyclomatic": 3.0,
-      "coverage": 90.9090909090909,
-      "crap": 3.006761833208114,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-test-dummy/src/lib.rs",
       "function": "intercepted_prompt_replacement",
       "line": 335,
@@ -27100,15 +26209,6 @@
       "coverage": 91.66666666666666,
       "crap": 3.0052083333333335,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "agents_text",
-      "line": 2299,
-      "cyclomatic": 3.0,
-      "coverage": 91.66666666666666,
-      "crap": 3.0052083333333335,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
@@ -27309,15 +26409,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "wait_for_coordination_change_or_shutdown",
-      "line": 1689,
-      "cyclomatic": 3.0,
-      "coverage": 92.85714285714286,
-      "crap": 3.003279883381924,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::clear_live_response_accumulators",
       "line": 5283,
@@ -27505,15 +26596,6 @@
       "coverage": 95.45454545454545,
       "crap": 3.000845229151014,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::apply_gateway_client_config",
-      "line": 716,
-      "cyclomatic": 3.0,
-      "coverage": 95.45454545454545,
-      "crap": 3.000845229151014,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-provider/src/outbound_network.rs",
@@ -31440,159 +30522,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "webhook_active_message",
-      "line": 161,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "read_owner_metadata",
-      "line": 231,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::chat_is_active",
-      "line": 506,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::reply",
-      "line": 556,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::select_session",
-      "line": 694,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::queue_route_or_reply",
-      "line": 856,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "socket_response",
-      "line": 1829,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "split_target_and_text",
-      "line": 155,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "parse_numbered_alias",
-      "line": 210,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "fail_gateway_client_if_current",
-      "line": 412,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Output::send",
-      "line": 561,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::apply_config",
-      "line": 648,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::release_update_stream_lock_if_current",
-      "line": 1010,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::route_plain_text",
-      "line": 1453,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "agent_designator",
-      "line": 2291,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "split_first",
-      "line": 2327,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "decode_update",
-      "line": 2474,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-utils/src/lib.rs",
       "function": "TimerRuntime::complete_agent_replay",
       "line": 391,
@@ -31987,15 +30916,6 @@
       "coverage": 66.66666666666666,
       "crap": 2.1481481481481484,
       "crate": "tau-ext-pim"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "lock_root",
-      "line": 211,
-      "cyclomatic": 2.0,
-      "coverage": 66.66666666666666,
-      "crap": 2.1481481481481484,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
@@ -32394,15 +31314,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "redact_token",
-      "line": 152,
-      "cyclomatic": 2.0,
-      "coverage": 80.0,
-      "crap": 2.032,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "is_loopback_url",
       "line": 267,
@@ -32671,15 +31582,6 @@
       "coverage": 84.61538461538461,
       "crap": 2.014565316340464,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "resolve_agent",
-      "line": 2312,
-      "cyclomatic": 2.0,
-      "coverage": 84.61538461538461,
-      "crap": 2.014565316340464,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
@@ -33015,15 +31917,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "HttpTelegramClient::send_message",
-      "line": 2411,
-      "cyclomatic": 2.0,
-      "coverage": 87.5,
-      "crap": 2.0078125,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
       "function": "Extension::apply_config",
       "line": 775,
@@ -33330,15 +32223,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::reply",
-      "line": 1500,
-      "cyclomatic": 2.0,
-      "coverage": 91.66666666666666,
-      "crap": 2.002314814814815,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-utils/src/lib.rs",
       "function": "TimerRuntime::handle_started_replay",
       "line": 334,
@@ -33420,15 +32304,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "registry_result",
-      "line": 1810,
-      "cyclomatic": 2.0,
-      "coverage": 92.3076923076923,
-      "crap": 2.0018206645425582,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-cli-term/src/completion.rs",
       "function": "build_action_token_candidates",
       "line": 530,
@@ -33472,15 +32347,6 @@
       "coverage": 92.85714285714286,
       "crap": 2.001457725947522,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handle_agents_command",
-      "line": 1373,
-      "cyclomatic": 2.0,
-      "coverage": 92.85714285714286,
-      "crap": 2.001457725947522,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-client/src/runner.rs",
@@ -33877,15 +32743,6 @@
       "coverage": 96.55172413793103,
       "crap": 2.0001640083644268,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::route_text",
-      "line": 1513,
-      "cyclomatic": 2.0,
-      "coverage": 96.55172413793103,
-      "crap": 2.0001640083644268,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
@@ -51510,780 +50367,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "SharedWriter::bytes",
-      "line": 17,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "SharedWriter::write",
-      "line": 23,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "SharedWriter::flush",
-      "line": 28,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "FakeClient::new",
-      "line": 42,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "FakeClient::with_updates",
-      "line": 52,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "FakeClient::with_webhook_info",
-      "line": 62,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "FakeClient::fail_sends",
-      "line": 72,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "FakeClient::get_webhook_info",
-      "line": 78,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "SlowPollClient::get_webhook_info",
-      "line": 114,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "SlowPollClient::get_updates",
-      "line": 118,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "SlowPollClient::send_message",
-      "line": 127,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::new",
-      "line": 140,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::wait_for_call",
-      "line": 149,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::wait_for_call_count",
-      "line": 153,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::release_first_response",
-      "line": 165,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::release_error",
-      "line": 169,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::release_response",
-      "line": 173,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::get_webhook_info",
-      "line": 180,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::get_updates",
-      "line": 184,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "ControlledPollClient::send_message",
-      "line": 202,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "cfg",
-      "line": 207,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "temp_ext_root",
-      "line": 217,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "temp_state_dir",
-      "line": 228,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "agent_id",
-      "line": 232,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "tool",
-      "line": 236,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "bool_args",
-      "line": 246,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "message_args",
-      "line": 253,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "gateway_mode",
-      "line": 260,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "extension",
-      "line": 264,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "process_update",
-      "line": 277,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "expect_tool_finished",
-      "line": 282,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "expect_successful_send",
-      "line": 289,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "expect_tool_error",
-      "line": 307,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "expect_notice",
-      "line": 319,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "expect_delivered",
-      "line": 327,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/tests.rs",
-      "function": "assert_delivered_live_replay_parity",
-      "line": 341,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client/tests.rs",
-      "function": "socket_path",
-      "line": 8,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "UpdateOutcome::from_required_reply",
-      "line": 94,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayConfig::runtime_config",
-      "line": 187,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayArgParser::next_value",
-      "line": 267,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::advance_offset",
-      "line": 399,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::persist",
-      "line": 412,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::disconnect",
-      "line": 1427,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::take_deliveries",
-      "line": 1530,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::remove_pending_for_key",
-      "line": 1549,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::prune_expired",
-      "line": 1583,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketGuard::drop",
-      "line": 1682,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "socket_result",
-      "line": 1792,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "parse_u64_flag",
-      "line": 2042,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "gateway_usage",
-      "line": 2050,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/main.rs",
-      "function": "main",
-      "line": 1,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "FakeGatewayClient::fail_next_sends",
-      "line": 1395,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "FakeGatewayClient::get_webhook_info",
-      "line": 1401,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "FakeGatewayClient::get_updates",
-      "line": 1405,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "GatewayFixture::new",
-      "line": 1446,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "GatewayFixture::with_durable",
-      "line": 1457,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "GatewayFixture::register_route",
-      "line": 1483,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "GatewayFixture::unregister_route",
-      "line": 1498,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "GatewayFixture::take_deliveries",
-      "line": 1517,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "runtime_config",
-      "line": 1528,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "update",
-      "line": 1542,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "message",
-      "line": 1550,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "register_request",
-      "line": 1561,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "test_delivery",
-      "line": 1572,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "successful_response_wire_bytes",
-      "line": 1586,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "assert_delivery_batch_splits_two_records",
-      "line": 1594,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "bounded_gateway_response",
-      "line": 1627,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "read_socket_json",
-      "line": 1634,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "assert_socket_ok",
-      "line": 1643,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/tests.rs",
-      "function": "test_socket_state",
-      "line": 1649,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_main.rs",
-      "function": "main",
-      "line": 1,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "run_stdio",
-      "line": 69,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "run_gateway_from_env",
-      "line": 76,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "run",
-      "line": 82,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "RuntimeConfig::uses_same_update_stream_as",
-      "line": 159,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::clear_config_after_error",
-      "line": 739,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::apply_gateway_response",
-      "line": 778,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::poll_response_matches_config",
-      "line": 814,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::handles_tool",
-      "line": 839,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::fail_active_polling_with_notice",
-      "line": 1028,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::ensure_poller_started_locked",
-      "line": 1051,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::trimmed_message_text",
-      "line": 1256,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::resolve_registered_agent",
-      "line": 1495,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::drop",
-      "line": 1650,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "parse_command",
-      "line": 2334,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "RuntimeConfig::default",
-      "line": 2366,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-ext-test-dummy/src/lib.rs",
       "function": "DummyState::cancel_pending_hold",
       "line": 118,
@@ -54219,15 +52302,6 @@
       "crate": "tau-session-inspect"
     },
     {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "UpdateStreamLock::drop",
-      "line": 139,
-      "cyclomatic": 1.0,
-      "coverage": 83.33333333333334,
-      "crap": 1.0046296296296295,
-      "crate": "tau-ext-telegram"
-    },
-    {
       "file": "/build/source/crates/tau-cli-term/src/bounded_command.rs",
       "function": "spawn_stdin_writer",
       "line": 356,
@@ -54253,15 +52327,6 @@
       "coverage": 84.61538461538461,
       "crap": 1.003641329085116,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::ensure_gateway_heartbeat_started",
-      "line": 754,
-      "cyclomatic": 1.0,
-      "coverage": 85.0,
-      "crap": 1.003375,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-cli/src/print_prompt.rs",
@@ -77041,816 +75106,6 @@
       "coverage": 100.0,
       "crap": 1.0,
       "crate": "tau-ext-std-notifications"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "StreamIdentity::new",
-      "line": 38,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "StreamIdentity::api_base",
-      "line": 46,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "StreamIdentity::fingerprint",
-      "line": 51,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "StreamIdentity::redact_token",
-      "line": 61,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "UpdateStreamLock::covers",
-      "line": 133,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/stream_owner.rs",
-      "function": "open_lock_file",
-      "line": 219,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayArgParser::new",
-      "line": 228,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::status_text",
-      "line": 568,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "Gateway::where_text",
-      "line": 807,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayDurableState::has_recent_update",
-      "line": 991,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayStatus::new",
-      "line": 1050,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::new",
-      "line": 1096,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::set_status",
-      "line": 1117,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::allocate_connection_id",
-      "line": 1127,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::prune_registry",
-      "line": 1132,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::registry_counts",
-      "line": 1140,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::status_response",
-      "line": 1148,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::registry_snapshot",
-      "line": 1180,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::enqueue_delivery",
-      "line": 1188,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketState::active_outbound_chat_id",
-      "line": 1245,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::default",
-      "line": 1310,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::hello",
-      "line": 1325,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewayRegistry::counts",
-      "line": 1560,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "GatewaySocketRequest::default",
-      "line": 1649,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "successful_socket_response",
-      "line": 1846,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "delivery_response_fits",
-      "line": 1861,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "required_request_field",
-      "line": 1928,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "required_message_field",
-      "line": 1936,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "gateway_generation",
-      "line": 1943,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "parse_i64_flag",
-      "line": 2034,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway.rs",
-      "function": "gateway_help_text",
-      "line": 2055,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::new",
-      "line": 38,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::heartbeat_interval",
-      "line": 48,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::heartbeat",
-      "line": 67,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::register_agent",
-      "line": 75,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::unregister_agent",
-      "line": 93,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::send_message",
-      "line": 110,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway_client.rs",
-      "function": "GatewayClient::goodbye",
-      "line": 128,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "GatewayRegistrySnapshot::agents_in_session",
-      "line": 71,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "GatewayRegistrySnapshot::has_registration",
-      "line": 85,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "GatewayRegistrySnapshot::session_label",
-      "line": 92,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "session_alias",
-      "line": 163,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "agent_alias",
-      "line": 168,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "safe_metadata",
-      "line": 189,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/gateway/routing.rs",
-      "function": "telegram_source_label",
-      "line": 200,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "BridgeMode::from",
-      "line": 140,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "RuntimeConfig::stream_identity",
-      "line": 164,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "ToolNames::logical",
-      "line": 196,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "ConfigGeneration::next",
-      "line": 325,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "SharedState::new",
-      "line": 452,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "SharedState::lock",
-      "line": 460,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "SharedState::wait_while",
-      "line": 465,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "SharedState::wait_timeout_while",
-      "line": 475,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "SharedState::notify_all",
-      "line": 492,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "State::mark_coordination_changed",
-      "line": 499,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "State::clear_active_bridge_state",
-      "line": 525,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Output::from",
-      "line": 545,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Output::from",
-      "line": 551,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Output::request_notice",
-      "line": 572,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Output::report_tool_progress",
-      "line": 581,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Output::emit_message_report",
-      "line": 613,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::new",
-      "line": 629,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::with_tool_names",
-      "line": 633,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::gateway_client",
-      "line": 750,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::request_shutdown",
-      "line": 806,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::report_telegram_polling_notice",
-      "line": 1047,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::active_chat",
-      "line": 1210,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "Extension::emit_sent_report",
-      "line": 1545,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "generated_send_message_id",
-      "line": 1573,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "telegram_message_ref",
-      "line": 1584,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "telegram_sender_ref",
-      "line": 1595,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "is_private_message_chat",
-      "line": 1614,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "poll_loop",
-      "line": 1705,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "TelegramExtension::name",
-      "line": 1874,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "TelegramExtension::register",
-      "line": 1878,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "parse_ext_config",
-      "line": 2103,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "telegram_tool_group",
-      "line": 2107,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "telegram_tool_group_for",
-      "line": 2111,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "example_field",
-      "line": 2118,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "example_text",
-      "line": 2122,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "register_tool_spec",
-      "line": 2127,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "register_tool_spec_for",
-      "line": 2131,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "send_tool_spec",
-      "line": 2161,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "send_tool_spec_for",
-      "line": 2165,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "tool_result",
-      "line": 2248,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "tool_error",
-      "line": 2265,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "agent_display_name",
-      "line": 2281,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "help_text",
-      "line": 2343,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "HttpTelegramClient::agent",
-      "line": 2352,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-telegram/src/lib.rs",
-      "function": "HttpTelegramClient::default",
-      "line": 2378,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-telegram"
     },
     {
       "file": "/build/source/crates/tau-ext-test-dummy/src/lib.rs",

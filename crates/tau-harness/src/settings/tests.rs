@@ -477,6 +477,30 @@ fn std_slack_uses_external_executable_without_component_suffix() {
     assert_eq!(slack.config, serde_json::json!({"prefix_agent_id": false}));
 }
 
+/// Ensures the disabled standard Telegram instance launches the separately
+/// installed executable without retaining the removed Tau component suffix.
+#[test]
+fn std_telegram_uses_external_executable_without_component_suffix() {
+    let builtins = builtin_extensions();
+    let telegram = builtins
+        .iter()
+        .find(|extension| extension.name == "std-telegram")
+        .expect("configured Telegram extension");
+
+    assert_eq!(telegram.command, ["tau-ext-telegram"]);
+    assert!(telegram.prefix.is_empty());
+    assert!(telegram.suffix.is_empty());
+    assert!(!telegram.enable);
+    assert!(telegram.require);
+    assert_eq!(
+        telegram.startup_timeout,
+        Duration::from_secs(DEFAULT_EXTENSION_STARTUP_TIMEOUT_SECONDS)
+    );
+    assert_eq!(telegram.role.as_deref(), Some("tool"));
+    assert_eq!(telegram.config, serde_json::json!({}));
+    assert!(telegram.secrets.is_empty());
+}
+
 /// Ensures invalid per-extension readiness deadlines fail resolution rather
 /// than silently weakening or indefinitely extending startup availability.
 #[test]

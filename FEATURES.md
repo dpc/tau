@@ -217,10 +217,12 @@ explicit:
   separately authorized exact-message emoji reactions to authorized routes.
   Install the executable separately and make it available through `PATH` before
   enabling `std-slack`.
-- **Telegram:** the disabled-by-default bot bridge connects allowlisted users
-  to explicitly registered agents. An experimental local gateway can own one
-  bot's polling and route it to multiple Tau sidecars. See the
-  [Telegram README](crates/tau-ext-telegram/README.md).
+- **Telegram:** the separately maintained, disabled-by-default
+  `tau-ext-telegram` bot bridge connects allowlisted users to explicitly
+  registered agents. Its separately provided `tau-telegram-gateway` can own one
+  bot's polling and route it to multiple Tau sidecars. Install the executables
+  separately and make `tau-ext-telegram` available through `PATH` before
+  enabling `std-telegram`.
 - **Zulip:** the separately maintained, disabled-by-default `tau-ext-zulip`
   bridge uses native event queues for allowlisted direct messages and configured
   stream/topic routes, with source-bound replies and reactions. A separate

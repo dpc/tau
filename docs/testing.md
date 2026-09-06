@@ -30,6 +30,17 @@ standalone-process tests. Tau retains a focused settings oracle proving that
 disabled `std-slack` selects the external `tau-ext-slack` command with no Tau
 component suffix.
 
+## Telegram bridge and gateway
+
+The separately maintained `tau-ext-telegram` project owns the bridge and
+gateway's hermetic routing, polling, checkpoint, stream-owner, authentication,
+durability, lifecycle, protocol, standalone-process, and gateway-exit tests.
+Tau retains a focused settings oracle proving that disabled `std-telegram`
+selects the external `tau-ext-telegram` command with no Tau component suffix.
+The standalone project provides and tests both `tau-ext-telegram` and
+`tau-telegram-gateway`; Tau's package and check exports do not build either
+binary.
+
 
 ## Rendering themes
 

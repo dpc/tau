@@ -1076,6 +1076,18 @@ bounded retry body.
 The separately maintained `tau-ext-slack` project owns its Slack-specific
 review triggers, failure/replay invariants, operational guidance, and tests.
 
+The disabled-by-default `std-telegram` bridge is the separately installed
+`tau-ext-telegram` executable, supervised through the same trusted same-user
+stdio extension route. Local-poll mode admits only configured numeric users and
+one configured or allowlisted-user-linked chat; registration grants routes only
+to explicitly registered loaded agents, and sending never accepts a
+model-chosen native destination. Gateway-client mode gives the sidecar only its
+configured socket endpoint and per-instance authentication secret; the
+separately supervised `tau-telegram-gateway` retains bot-token, polling,
+allowlist, chat, durable checkpoint, and outbound-routing authority. The
+standalone project owns Telegram-specific review triggers, replay and
+durability invariants, operational guidance, and tests.
+
 The disabled-by-default `std-zulip` bridge is the separately installed
 `tau-ext-zulip` executable, supervised through Tau's normal trusted same-user
 stdio extension route. It uses bot HTTP Basic authentication and native
@@ -1490,7 +1502,9 @@ from malicious same-UID code or misuse of credentials returned to an authorized
 extension. Secret payloads remain absent from logs, events, journals, generic
 debug output, and errors. See
 [`SPEC-extension-secret-storage`](specs/SPEC-extension-secret-storage.md).
-The Telegram gateway uses one such configured-instance secret for mutual local
+The separately installed `tau-ext-telegram` executable receives gateway-client
+credentials through the same configured-instance secret mechanism. Its
+separately installed `tau-telegram-gateway` peer uses that key for mutual local
 protocol authentication. This removes ambient authority from socket-only peers,
 but does not prevent malicious same-UID code from extracting an authorized
 extension's in-memory key through `/proc`, ptrace, or direct memory access.

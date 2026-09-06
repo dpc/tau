@@ -18,7 +18,6 @@ members = [
   "crates/tau-ext-shell",
   "crates/tau-ext-std-notifications",
   "crates/tau-ext-swarm",
-  "crates/tau-ext-telegram",
   "crates/tau-ext-test-dummy",
   "crates/tau-ext-utils",
   "crates/tau-ext-websearch",
@@ -86,7 +85,6 @@ tau-ext-rhai = { package = "dpc-tau-ext-rhai", path = "crates/tau-ext-rhai" }
 tau-ext-shell = { package = "dpc-tau-ext-shell", path = "crates/tau-ext-shell" }
 tau-ext-std-notifications = { package = "dpc-tau-ext-std-notifications", path = "crates/tau-ext-std-notifications" }
 tau-ext-swarm = { package = "dpc-tau-ext-swarm", path = "crates/tau-ext-swarm" }
-tau-ext-telegram = { package = "dpc-tau-ext-telegram", path = "crates/tau-ext-telegram" }
 tau-ext-test-dummy = { package = "dpc-tau-ext-test-dummy", path = "crates/tau-ext-test-dummy" }
 tau-ext-utils = { package = "dpc-tau-ext-utils", path = "crates/tau-ext-utils" }
 tau-ext-websearch = { package = "dpc-tau-ext-websearch", path = "crates/tau-ext-websearch" }

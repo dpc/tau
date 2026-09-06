@@ -1203,7 +1203,6 @@ dependencies = [
  "dpc-tau-ext-shell",
  "dpc-tau-ext-std-notifications",
  "dpc-tau-ext-swarm",
- "dpc-tau-ext-telegram",
  "dpc-tau-ext-test-dummy",
  "dpc-tau-ext-utils",
  "dpc-tau-ext-websearch",
@@ -1547,28 +1546,6 @@ dependencies = [
  "tau-swarm-iroh",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "dpc-tau-ext-telegram"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "ciborium",
- "dpc-tau-client",
- "dpc-tau-core",
- "dpc-tau-proto",
- "fs2",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "socket2",
- "subtle",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "url",
 ]
 
 [[package]]

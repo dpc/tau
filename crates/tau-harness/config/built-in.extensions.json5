@@ -64,7 +64,7 @@
     },
     {
         name: "std-telegram",
-        suffix: ["component", "ext-telegram"],
+        command: ["tau-ext-telegram"],
         role: "tool",
         enable: false,
         config: {},

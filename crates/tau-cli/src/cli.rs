@@ -259,7 +259,7 @@ pub enum Command {
     Component {
         /// Component name (harness or a bundled extension such as ext-shell,
         /// ext-provider-builtin, ext-websearch, ext-pim, ext-rhai,
-        /// ext-telegram, ext-xmpp, ext-std-notifications, or ext-test-dummy)
+        /// ext-xmpp, ext-std-notifications, or ext-test-dummy)
         name: String,
 
         /// Use stdin/stdout as the initial UI connection before starting
