@@ -1524,11 +1524,25 @@ and the `tau-harness` extension and lifecycle tests.
 
 The default-enabled, policy-authorized `self_info` tool exposes the calling
 model agent's agent/session identifiers, exact prompt-owned model and effort,
-call-time work status, and—only in durable mode—the local session path. Its
-seven-line response enters the transcript as an ordinary tool result and is
-therefore persisted with that agent's normal durable history. Configured
-extensions cannot invoke the tool directly; the harness requires a model-owned
-call and correlates it with the invoking prompt-start fact.
+call-time work status, and—only in durable mode—the local session path. It also
+exposes current provider model metadata, the latest selected-branch
+model-qualified provider input/cache observation, effective role compaction
+configuration, and the validated transient quota snapshot for the prompt
+model's provider when that provider has reported quota capability. Context
+counts are explicitly the latest provider observation, not a reconstructed
+current transcript size. Quota fields contain provider-normalized pool/window
+identifiers, percentages, timestamps/ages, and model applicability, but no
+credentials, account identifiers, plan, balance, raw provider prose, or pacing
+decision.
+
+The line-oriented response enters the transcript as an ordinary tool result and
+is therefore persisted with that agent's normal durable history even though
+provider quota current state is otherwise transient and excluded from semantic
+journals. Configured extensions cannot invoke the tool directly; the harness
+requires a model-owned call and correlates it with the invoking prompt-start
+fact. The tool reads only the calling agent's context baseline and prompt model,
+plus harness-wide provider metadata and quota for that model's provider; it
+does not grant cross-agent transcript access or expose another provider's quota.
 
 Header values use a line-safe byte encoding: printable ASCII remains readable,
 backslash is doubled, and controls, non-ASCII bytes, and invalid path bytes use

@@ -4939,7 +4939,7 @@ impl Harness {
 
     /// Returns whether the provider usage baseline belongs to the selected
     /// transcript branch.
-    pub(super) fn context_usage_baseline_applies(&self, conv: &Agent) -> bool {
+    pub(crate) fn context_usage_baseline_applies(&self, conv: &Agent) -> bool {
         let Some(agent_id) = conv.identity.agent_id.as_deref() else {
             return false;
         };

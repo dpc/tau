@@ -1474,7 +1474,7 @@ impl Harness {
         }
     }
 
-    pub(super) fn role_name_for_agent(&self, conv: &Agent) -> String {
+    pub(crate) fn role_name_for_agent(&self, conv: &Agent) -> String {
         conv.identity
             .role
             .clone()

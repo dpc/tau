@@ -1032,17 +1032,45 @@ fn self_info_uses_prompt_authority_and_current_runtime_status() {
     let recorded = path_std_sync::Arc::new(RecordingSelfInfoTool(path_std_sync::Mutex::new(None)));
     h.install_internal_tool_handlers(vec![recorded.clone()]);
     let cid = ensure_test_user_agent(&mut h);
+    let role_name = h.role_name_for_agent_id(&cid);
+    let role = h
+        .config
+        .available_roles
+        .get_mut(&role_name)
+        .expect("selected role");
+    role.inference_compaction = Some(path_tau_config_settings::RoleCompaction::Disabled);
+    role.compactions.insert(
+        "post-response".to_owned(),
+        path_tau_config_settings::CompactionPolicy {
+            threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(750),
+            enable: true,
+            when: path_tau_config_settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Working]),
+            },
+        },
+    );
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("inspect self".to_owned()))
         .expect("dispatch prompt");
     let prompt = read_nth_prompt_created(&h, 0);
 
-    h.handle_provider_response_finished(provider_tool_response(
+    let mut response = provider_tool_response(
         &prompt,
         "self-info-call",
         "record_self_info",
         CborValue::Map(Vec::new()),
-    ))
-    .expect("run self-info call");
+    );
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: Some(prompt.model.clone()),
+        prompt_sent_tokens: 250,
+        prompt_cached_tokens: 50,
+        prompt_cache_read_ceiling_tokens: None,
+        cache: None,
+        response_received_tokens: 10,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("run self-info call");
 
     let info = recorded
         .0
@@ -1054,6 +1082,35 @@ fn self_info_uses_prompt_authority_and_current_runtime_status() {
     assert_eq!(info.session_id, prompt.session_id);
     assert_eq!(info.model, prompt.model);
     assert_eq!(info.effort, prompt.model_params.effort);
+    assert_eq!(
+        info.context.input_tokens,
+        Some(tau_proto::TokenCount::new(250))
+    );
+    assert_eq!(
+        info.context.cached_tokens,
+        Some(tau_proto::TokenCount::new(50))
+    );
+    assert_eq!(
+        info.context.input_token_limit,
+        Some(tau_proto::TokenCount::new(128_000))
+    );
+    assert_eq!(
+        info.context.context_window,
+        Some(tau_proto::TokenCount::new(128_000))
+    );
+    assert_eq!(info.compaction.inference, "disabled");
+    let post_response = info
+        .compaction
+        .named
+        .iter()
+        .find(|policy| policy.name == "post-response")
+        .expect("custom policy");
+    assert_eq!(
+        post_response.threshold,
+        Some(tau_proto::TokenCount::new(750))
+    );
+    assert_eq!(post_response.state, "unsupported");
+    assert_eq!(info.provider_quota, None);
     assert_eq!(
         info.session_dir,
         Some(tau_config::settings::sessions_dir_of(&state).join(prompt.session_id.as_str()))
@@ -1603,8 +1660,9 @@ fn foreground_settlement_follows_current_working_status() {
     }
 }
 
-/// The intrinsic production handler derives nondurable storage and the current
-/// status reducer value before publishing its exact seven-line tool result.
+/// The intrinsic production handler derives nondurable storage, model context
+/// and compaction state, unavailable quota, and the current status reducer
+/// value before publishing its exact line-oriented tool result.
 #[test]
 fn self_info_production_dispatch_reports_memory_only_current_status() {
     let td = TempDir::new().expect("tempdir");
@@ -1642,14 +1700,14 @@ fn self_info_production_dispatch_reports_memory_only_current_status() {
     assert_eq!(
         result,
         format!(
-            "agent_id: {}\nsession_id: s1\nsession_dir: (none)\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: working\nstatus_task_name: Inspect runtime identity",
+            "agent_id: {}\nsession_id: s1\nsession_dir: (none)\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: working\nstatus_task_name: Inspect runtime identity\ncontext_input_tokens: unavailable (latest_provider_reported)\ncontext_cached_tokens: unavailable (latest_provider_reported)\ncontext_window_tokens: 128000 (provider_advertised_total)\ncontext_input_capacity_tokens: 128000 (effective_input_limit)\ncontext_input_used_percent: unavailable\ncompaction_inference: provider_default; inline=enabled; reactive_context_overflow=unsupported\ncompaction_policy: name=default threshold_tokens=unavailable at=before_inference statuses=any state=unsupported\nprovider_quota: unavailable",
             prompt.agent_id,
             prompt.model,
             prompt.model_params.effort.requested,
             prompt.model_params.effort.effective
         )
     );
-    assert_eq!(result.lines().count(), 8);
+    assert_eq!(result.lines().count(), 16);
     h.shutdown().expect("shutdown");
 }
 

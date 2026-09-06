@@ -1,5 +1,6 @@
 //! Harness-owned runtime self-information tool.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use tau_proto::{AgentWorkStatusPhase, BackgroundSupport, CborValue, ToolName, ToolSpec, ToolType};
@@ -20,7 +21,7 @@ impl SelfInfoTool {
             name: ToolName::new(SELF_INFO_TOOL_NAME),
             model_visible_name: None,
             description: Some(
-                "Return authoritative runtime identity, session, model route, and work-status metadata for the calling agent."
+                "Return authoritative runtime identity, model context and compaction configuration, provider quota state when available, and work status for the calling agent."
                     .to_owned(),
             ),
             tool_type: ToolType::Function,
@@ -129,6 +130,9 @@ fn format_headers(info: &InternalSelfInfo) -> String {
         session_dir,
         model,
         effort,
+        context,
+        compaction,
+        provider_quota,
         work_status,
     } = info;
     let session_dir = session_dir.as_deref().map_or_else(
@@ -137,7 +141,7 @@ fn format_headers(info: &InternalSelfInfo) -> String {
     );
     let task_name = work_status.title().unwrap_or("(none)");
     let model = model.to_string();
-    format!(
+    let mut output = format!(
         "agent_id: {}\nsession_id: {}\nsession_dir: {session_dir}\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: {}\nstatus_task_name: {task_name}",
         agent_id,
         session_id,
@@ -148,7 +152,129 @@ fn format_headers(info: &InternalSelfInfo) -> String {
             .native()
             .map_or_else(|| effort.effective.to_string(), |level| level.to_string()),
         status_name(work_status.phase()),
-    )
+    );
+    append_context(&mut output, context);
+    output.push_str("\ncompaction_inference: ");
+    output.push_str(&compaction.inference);
+    for policy in &compaction.named {
+        use tau_config::settings::ContextPolicyPoint;
+
+        let at = match policy.at {
+            ContextPolicyPoint::AfterResponse => "after_response",
+            ContextPolicyPoint::BeforeInference => "before_inference",
+            ContextPolicyPoint::OuterTurnFinished => "outer_turn_finished",
+        };
+        let statuses = policy.statuses.as_ref().map_or_else(
+            || "any".to_owned(),
+            |statuses| {
+                statuses
+                    .iter()
+                    .map(|status| status_name(*status))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+        let threshold = policy.threshold.map_or_else(
+            || "unavailable".to_owned(),
+            |threshold| threshold.get().to_string(),
+        );
+        let _ = write!(
+            output,
+            "\ncompaction_policy: name={} threshold_tokens={threshold} at={at} statuses={statuses} state={}",
+            escape_header_bytes(policy.name.as_bytes()),
+            policy.state
+        );
+    }
+    append_provider_quota(&mut output, provider_quota.as_ref());
+    output
+}
+
+/// Append current model-qualified provider input accounting.
+fn append_context(output: &mut String, context: &crate::internal_tools::InternalSelfContext) {
+    let input = context
+        .input_tokens
+        .map_or_else(|| "unavailable".to_owned(), |value| value.get().to_string());
+    let cached = context
+        .cached_tokens
+        .map_or_else(|| "unavailable".to_owned(), |value| value.get().to_string());
+    let context_window = context
+        .context_window
+        .map_or_else(|| "unavailable".to_owned(), |value| value.get().to_string());
+    let capacity = context
+        .input_token_limit
+        .map_or_else(|| "unavailable".to_owned(), |value| value.get().to_string());
+    let percent = match (context.input_tokens, context.input_token_limit) {
+        (Some(input), Some(capacity)) if capacity != tau_proto::TokenCount::ZERO => {
+            let basis_points = u128::from(input.get()) * 10_000 / u128::from(capacity.get());
+            format!("{}.{:02}", basis_points / 100, basis_points % 100)
+        }
+        _ => "unavailable".to_owned(),
+    };
+    output.push_str(&format!(
+        "\ncontext_input_tokens: {input} (latest_provider_reported)\ncontext_cached_tokens: {cached} (latest_provider_reported)\ncontext_window_tokens: {context_window} (provider_advertised_total)\ncontext_input_capacity_tokens: {capacity} (effective_input_limit)\ncontext_input_used_percent: {percent}"
+    ));
+}
+
+/// Append bounded provider-neutral quota state when the current provider has
+/// it.
+fn append_provider_quota(
+    output: &mut String,
+    quota: Option<&crate::internal_tools::InternalSelfProviderQuota>,
+) {
+    let Some(quota) = quota else {
+        output.push_str("\nprovider_quota: unavailable");
+        return;
+    };
+    output.push_str("\nprovider_quota: available");
+    let pools = if quota.model_limit_ids.is_empty() {
+        "unavailable".to_owned()
+    } else {
+        quota
+            .model_limit_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let binding_age = optional_u64(quota.model_binding_age_seconds);
+    output.push_str(&format!(
+        "\nprovider_quota_model_binding: pools={pools} observed_age_seconds={binding_age} freshness={}",
+        freshness(quota.model_binding_age_seconds)
+    ));
+    for window in &quota.windows {
+        let observed_age = optional_u64(window.observed_age_seconds);
+        let remaining = window.remaining_seconds.map_or_else(
+            || "unavailable".to_owned(),
+            |remaining| remaining.to_string(),
+        );
+        let reset = optional_u64(window.reset_at_unix_seconds);
+        let _ = write!(
+            output,
+            "\nprovider_quota_window: pool={} window={} used_percent={}.{:02} duration_seconds={} observed_age_seconds={observed_age} freshness={} remaining_seconds={remaining} reset_at_unix_seconds={reset} applies_to_model={}",
+            window.limit_id,
+            window.window_id,
+            window.used_basis_points / 100,
+            window.used_basis_points % 100,
+            window.window_seconds,
+            freshness(window.observed_age_seconds),
+            window.applies_to_model
+        );
+    }
+}
+
+/// Format an optional unsigned scalar without inventing a value.
+fn optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
+}
+
+/// Classify observation age using the existing quota freshness boundaries.
+fn freshness(age_seconds: Option<u64>) -> &'static str {
+    match age_seconds {
+        Some(0..=900) => "fresh",
+        Some(901..=3600) => "stale",
+        Some(_) => "expired",
+        None => "unavailable",
+    }
 }
 
 /// Encode arbitrary bytes as one unambiguous header-line value.

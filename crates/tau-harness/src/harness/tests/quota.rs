@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use super::*;
 use crate::event_log as path_crate_event_log;
 
@@ -173,6 +175,95 @@ fn provider_quota_report_commits_before_canonical_snapshot() {
             ),
         ]
     );
+}
+
+/// Self information reads only the prompt model's provider snapshot and marks
+/// exact model-to-pool applicability without treating another provider as
+/// available.
+#[test]
+fn self_info_quota_snapshot_is_provider_and_model_scoped() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("current unix time")
+        .as_millis() as u64;
+    let mut window = quota_window(1_234);
+    window.usage_observed_at_unix_ms = tau_proto::UnixMillis::new(now.saturating_sub(2_000));
+    window.timing_anchor_observed_at_unix_ms =
+        Some(tau_proto::UnixMillis::new(now.saturating_sub(2_000)));
+    let mut binding = quota_binding();
+    binding.observed_at_unix_ms = tau_proto::UnixMillis::new(now.saturating_sub(3_000));
+    harness
+        .handle_extension_event_inner_with_persist(
+            &crate::test_connection_id("quota-provider"),
+            Event::ProviderQuotaReplaceReported(tau_proto::ProviderQuotaReplace {
+                provider: tau_proto::ProviderName::new("chatgpt"),
+                profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-self-info")
+                    .expect("epoch"),
+                sequence: tau_proto::ProviderQuotaSequence::new(1),
+                establishes_new_epoch: true,
+                windows: vec![window],
+                route_bindings: vec![binding],
+            }),
+            Some(false),
+        )
+        .expect("submit quota report");
+
+    let snapshot = harness
+        .self_provider_quota_info(&"chatgpt/gpt-5.6-sol".into())
+        .expect("current provider quota");
+    assert!(
+        snapshot
+            .model_binding_age_seconds
+            .is_some_and(|age| age <= 4)
+    );
+    assert_eq!(
+        snapshot.model_limit_ids,
+        vec![tau_proto::ProviderQuotaLimitId::parse("codex").expect("pool")]
+    );
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].used_basis_points, 1_234);
+    assert!(snapshot.windows[0].applies_to_model);
+    assert!(
+        snapshot.windows[0]
+            .observed_age_seconds
+            .is_some_and(|age| age <= 3)
+    );
+    assert!(snapshot.windows[0].remaining_seconds.is_some());
+    assert!(
+        harness
+            .self_provider_quota_info(&"other/model".into())
+            .is_none()
+    );
+    harness
+        .handle_extension_event_inner_with_persist(
+            &crate::test_connection_id("quota-provider"),
+            Event::ProviderQuotaClearReported(tau_proto::ProviderQuotaClear {
+                provider: tau_proto::ProviderName::new("chatgpt"),
+                profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-self-info")
+                    .expect("epoch"),
+                sequence: tau_proto::ProviderQuotaSequence::new(2),
+            }),
+            Some(false),
+        )
+        .expect("clear quota state");
+    let cleared = harness
+        .self_provider_quota_info(&"chatgpt/gpt-5.6-sol".into())
+        .expect("retained quota capability");
+    assert!(cleared.windows.is_empty());
+    assert!(cleared.model_limit_ids.is_empty());
+    harness.shutdown().expect("shutdown");
 }
 
 /// Replace, patch, and clear all traverse generic report commit before their

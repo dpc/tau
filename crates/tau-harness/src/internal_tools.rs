@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tau_proto::{
     CborValue, Event, ModelId, SessionAgentWorkStatus, SessionId, StartAgentRequest, ToolCallId,
@@ -222,8 +223,84 @@ pub(crate) struct InternalSelfInfo {
     pub model: ModelId,
     /// Exact reasoning effort captured for the prompt that made the call.
     pub effort: tau_proto::ReasoningSelection,
+    /// Latest model-qualified provider input accounting and effective capacity.
+    pub context: InternalSelfContext,
+    /// Effective inference and named standalone compaction configuration.
+    pub compaction: InternalSelfCompaction,
+    /// Current validated quota state for the prompt model's provider.
+    pub provider_quota: Option<InternalSelfProviderQuota>,
     /// Current canonical harness-owned semantic work status.
     pub work_status: SessionAgentWorkStatus,
+}
+
+/// Model-qualified context accounting exposed to the calling agent.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InternalSelfContext {
+    /// Latest provider-reported input tokens for the selected branch and model.
+    pub input_tokens: Option<tau_proto::TokenCount>,
+    /// Cached portion of the latest provider-reported input tokens.
+    pub cached_tokens: Option<tau_proto::TokenCount>,
+    /// Total context window advertised for the prompt model.
+    pub context_window: Option<tau_proto::TokenCount>,
+    /// Effective legal input capacity published for the prompt model.
+    pub input_token_limit: Option<tau_proto::TokenCount>,
+}
+
+/// Effective compaction configuration exposed to the calling agent.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InternalSelfCompaction {
+    /// Compact description of provider-inline and reactive-overflow behavior.
+    pub inference: String,
+    /// Deterministically ordered named standalone compaction policies.
+    pub named: Vec<InternalSelfCompactionPolicy>,
+}
+
+/// One effective named standalone compaction policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InternalSelfCompactionPolicy {
+    /// Configured policy name.
+    pub name: String,
+    /// Resolved token threshold, absent only when the configured boundary
+    /// cannot be resolved.
+    pub threshold: Option<tau_proto::TokenCount>,
+    /// Lifecycle point at which the policy checks its threshold.
+    pub at: tau_config::settings::ContextPolicyPoint,
+    /// Work statuses accepted by the policy, or every status when absent.
+    pub statuses: Option<Vec<tau_proto::AgentWorkStatusPhase>>,
+    /// Effective policy state.
+    pub state: &'static str,
+}
+
+/// Validated current quota state for the prompt model's provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InternalSelfProviderQuota {
+    /// Age in seconds of the exact model-to-pool binding, when one exists.
+    pub model_binding_age_seconds: Option<u64>,
+    /// Provider-normalized quota pools bound to the exact prompt model.
+    pub model_limit_ids: Vec<tau_proto::ProviderQuotaLimitId>,
+    /// Deterministically ordered current provider quota windows.
+    pub windows: Vec<InternalSelfProviderQuotaWindow>,
+}
+
+/// One provider-neutral quota window prepared for compact self display.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InternalSelfProviderQuotaWindow {
+    /// Provider-normalized quota pool.
+    pub limit_id: tau_proto::ProviderQuotaLimitId,
+    /// Provider-normalized window identifier.
+    pub window_id: tau_proto::ProviderQuotaWindowId,
+    /// Used quota in basis points.
+    pub used_basis_points: u16,
+    /// Provider-declared window duration.
+    pub window_seconds: u64,
+    /// Age of the provider usage observation.
+    pub observed_age_seconds: Option<u64>,
+    /// Provider-declared absolute reset boundary.
+    pub reset_at_unix_seconds: Option<u64>,
+    /// Current remaining seconds derived from existing trusted relative timing.
+    pub remaining_seconds: Option<i64>,
+    /// Whether the exact prompt model is explicitly bound to this pool.
+    pub applies_to_model: bool,
 }
 
 impl AgentOwnedInternalToolCall {
@@ -241,6 +318,168 @@ impl AgentOwnedInternalToolCall {
     pub fn visible_tool_name(&self) -> &ToolName {
         &self.visible_tool_name
     }
+}
+
+impl Harness {
+    /// Resolve the calling role's compaction settings against the prompt model.
+    pub(crate) fn self_compaction_info(
+        &self,
+        model: &ModelId,
+        model_info: Option<&tau_proto::ProviderModelInfo>,
+        role: Option<&tau_config::settings::AgentRole>,
+    ) -> InternalSelfCompaction {
+        use tau_config::settings::{CompactionPolicyThreshold, RoleCompaction};
+
+        let inference_policy = role
+            .and_then(|role| role.inference_compaction.or(role.compaction))
+            .unwrap_or(RoleCompaction::ProviderDefault);
+        let inline = model_info.is_some_and(|info| info.supports_compaction);
+        let standalone = model_info.is_some_and(|info| {
+            info.supports_standalone_compaction && !info.standalone_compaction_generation_negative
+        });
+        let inference = match inference_policy {
+            RoleCompaction::Disabled => "disabled".to_owned(),
+            RoleCompaction::ProviderDefault => format!(
+                "provider_default; inline={}; reactive_context_overflow={}",
+                support_state(inline),
+                support_state(standalone)
+            ),
+            RoleCompaction::Threshold(tokens) => format!(
+                "threshold_tokens={tokens}; inline={}; reactive_context_overflow={}",
+                support_state(inline),
+                support_state(standalone)
+            ),
+            RoleCompaction::Reserve(reserve) => {
+                let threshold =
+                    crate::model::compaction_threshold_from_reserve(model, model_info, reserve)
+                        .ok()
+                        .map(tau_proto::TokenCount::get);
+                format!(
+                    "reserve_tokens={reserve}; threshold_tokens={}; inline={}; reactive_context_overflow={}",
+                    threshold.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
+                    support_state(inline),
+                    support_state(standalone)
+                )
+            }
+        };
+        let named = role
+            .into_iter()
+            .flat_map(|role| role.compactions.iter())
+            .map(|(name, policy)| {
+                let threshold = match policy.threshold {
+                    CompactionPolicyThreshold::ProviderDefault => {
+                        model_info.and_then(|info| info.standalone_compaction_threshold)
+                    }
+                    CompactionPolicyThreshold::Tokens(tokens) => {
+                        Some(tau_proto::TokenCount::new(tokens))
+                    }
+                    CompactionPolicyThreshold::Reserve(reserve) => {
+                        crate::model::compaction_threshold_from_reserve(model, model_info, reserve)
+                            .ok()
+                    }
+                };
+                let state = if !policy.enable {
+                    "disabled"
+                } else if !standalone {
+                    "unsupported"
+                } else if threshold.is_some() {
+                    "enabled"
+                } else {
+                    "threshold_unavailable"
+                };
+                InternalSelfCompactionPolicy {
+                    name: name.clone(),
+                    threshold,
+                    at: policy.when.at,
+                    statuses: policy.when.statuses.clone(),
+                    state,
+                }
+            })
+            .collect();
+        InternalSelfCompaction { inference, named }
+    }
+
+    /// Project the existing validated provider quota cache for the prompt
+    /// model.
+    pub(crate) fn self_provider_quota_info(
+        &self,
+        model: &ModelId,
+    ) -> Option<InternalSelfProviderQuota> {
+        let current = self.current_provider_quota(&model.provider)?;
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+        let binding = current
+            .route_bindings
+            .iter()
+            .find(|binding| binding.model == *model);
+        let mut model_limit_ids = binding
+            .map(|binding| binding.limit_ids.clone())
+            .unwrap_or_default();
+        model_limit_ids.sort();
+        let model_binding_age_seconds = binding
+            .and_then(|binding| elapsed_seconds(binding.observed_at_unix_ms.get(), now_unix_ms));
+        let mut windows = current
+            .windows
+            .iter()
+            .map(|window| InternalSelfProviderQuotaWindow {
+                limit_id: window.key.limit_id.clone(),
+                window_id: window.key.window_id.clone(),
+                used_basis_points: window.used_basis_points,
+                window_seconds: window.window_seconds.get(),
+                observed_age_seconds: elapsed_seconds(
+                    window.usage_observed_at_unix_ms.get(),
+                    now_unix_ms,
+                ),
+                reset_at_unix_seconds: window
+                    .reset_at_unix_seconds
+                    .map(tau_proto::UnixSeconds::get),
+                remaining_seconds: current_relative_remaining_seconds(window, now_unix_ms),
+                applies_to_model: model_limit_ids.contains(&window.key.limit_id),
+            })
+            .collect::<Vec<_>>();
+        windows.sort_by(|left, right| {
+            (&left.limit_id, &left.window_id).cmp(&(&right.limit_id, &right.window_id))
+        });
+        Some(InternalSelfProviderQuota {
+            model_binding_age_seconds,
+            model_limit_ids,
+            windows,
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "internal_tools/tests.rs"]
+mod tests;
+
+/// Return a compact effective capability label.
+fn support_state(supported: bool) -> &'static str {
+    if supported { "enabled" } else { "unsupported" }
+}
+
+/// Return elapsed whole seconds when the provider timestamp is not in the
+/// future.
+fn elapsed_seconds(observed_unix_ms: u64, now_unix_ms: Option<u64>) -> Option<u64> {
+    now_unix_ms?
+        .checked_sub(observed_unix_ms)
+        .map(|millis| millis / 1_000)
+}
+
+/// Advance existing provider-relative quota timing to the self-info
+/// observation.
+fn current_relative_remaining_seconds(
+    window: &tau_proto::ProviderQuotaWindow,
+    now_unix_ms: Option<u64>,
+) -> Option<i64> {
+    let remaining = window.remaining_seconds_at_timing_anchor?.get();
+    let anchor = window.timing_anchor_observed_at_unix_ms?.get();
+    let elapsed = elapsed_seconds(anchor, now_unix_ms)?;
+    if elapsed > 15 * 60 {
+        return None;
+    }
+    remaining.checked_sub(i64::try_from(elapsed).ok()?)
 }
 
 impl<'a> InternalToolHost<'a> {
@@ -703,6 +942,26 @@ impl<'a> InternalToolHost<'a> {
             .agent(agent_id.as_str())?
             .prompt_started(prompt_id)?;
         let model_params = started.model_params?;
+        let model_info = self.harness.provider_model_info(&started.model);
+        let input_token_limit = model_info.map(tau_proto::ProviderModelInfo::input_token_limit);
+        let context_applies = agent.execution.context_usage_model.as_ref() == Some(&started.model)
+            && self.harness.context_usage_baseline_applies(agent);
+        let context = InternalSelfContext {
+            input_tokens: context_applies
+                .then_some(agent.execution.context_input_tokens)
+                .flatten(),
+            cached_tokens: context_applies
+                .then_some(agent.execution.context_cached_tokens)
+                .flatten(),
+            context_window: model_info.map(|info| info.context_window),
+            input_token_limit,
+        };
+        let role_name = self.harness.role_name_for_agent(agent);
+        let role = self.harness.config.available_roles.get(&role_name);
+        let compaction = self
+            .harness
+            .self_compaction_info(&started.model, model_info, role);
+        let provider_quota = self.harness.self_provider_quota_info(&started.model);
         let session_dir = self
             .harness
             .session_runtime
@@ -721,6 +980,9 @@ impl<'a> InternalToolHost<'a> {
             session_dir,
             model: started.model.clone(),
             effort: model_params.effort,
+            context,
+            compaction,
+            provider_quota,
             work_status: SessionAgentWorkStatus::new(
                 agent.turn.work_status.phase(),
                 agent.turn.work_status.title().map(ToOwned::to_owned),

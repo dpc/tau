@@ -22,6 +22,26 @@ pub(super) struct ProviderQuotaTombstone {
 }
 
 impl Harness {
+    /// Return current accepted metadata for one exact provider-qualified model.
+    pub(crate) fn provider_model_info(
+        &self,
+        model: &tau_proto::ModelId,
+    ) -> Option<&tau_proto::ProviderModelInfo> {
+        self.provider_runtime.model_info.get(model)
+    }
+
+    /// Return the current validated quota snapshot for one provider.
+    pub(crate) fn current_provider_quota(
+        &self,
+        provider: &tau_proto::ProviderName,
+    ) -> Option<&tau_proto::HarnessProviderQuotaChanged> {
+        self.provider_runtime
+            .quota
+            .get(provider)
+            .map(|current| &current.snapshot)
+            .or_else(|| self.provider_runtime.quota_capabilities.get(provider))
+    }
+
     /// Validate model entries independently, publish one diagnostic per
     /// rejected entry, and narrow accepted no-tool routes to non-parallel
     /// capability.
