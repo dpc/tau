@@ -7,6 +7,9 @@ temporary staging artifact, or capture enablement.
 ```console
 tau agent cache AGENT --include-descendants
 tau agent cache AGENT --format jsonl --prompt PROMPT
+tau agent cache AGENT --prompt PROMPT --view attribution
+tau agent cache AGENT --view continuity
+tau agent cache AGENT --view geometry
 tau session cache SESSION --format jsonl
 ```
 
@@ -25,11 +28,13 @@ filters prompt session attribution. Each selected agent is validated through the
 existing strict finite-prefix snapshot reader. JSONL records the selected
 per-agent sequence boundary; those boundaries are not cross-agent causal order.
 
-The private capture inventory recognizes current Chat Completions, public
+The private capture reader recognizes current Chat Completions, public
 Responses, and Codex request/response envelopes, Chat/Responses failures, and the
 existing Codex finite-attempt and compact HTTP failure envelopes. It also recognizes
-version-0 scalar cache captures as `diagnostic_files`, while explicitly reporting
-`cache_diagnostic_analysis_unavailable`: inventory is not attempt attribution.
+version-0 scalar cache captures as `diagnostic_files`. Current scalar records are
+deduplicated by provider-instance/process record identity; conflicting reuse is
+corruption rather than last-write-wins. Dispatch and attempt-end records join only by
+their explicit capture-local attempt identity, never by adjacency or timestamps.
 It streams compressed files
 one at a time and retains only typed session/prompt attribution and file counts.
 These are **file counts, not attempt or dispatch counts**. Identical legacy files
@@ -75,9 +80,27 @@ Capture parsing/inventory and in-memory output have separate bounded shares.
 Explicit capture loss and output truncation remain partial results. The source
 directories are never changed.
 
-Attribution, continuity, geometry, shared filters beyond `--prompt`, and disposable
-indexes are subsequent deliveries. Their CLI surfaces are absent rather than
-empty-success placeholders. Exact request/response capture remains **default-on
+`--view attribution` projects the producer's explicit status, entries, raw usage,
+and top-level reconciliation result. Current built-in adapters have no established
+per-item wire table, so they report `unsupported_shape`; the inspector does not
+invent entries from normalized accounting.
+
+`--view continuity` reports actual captured dispatch counts, request form,
+anchor-validation, connection and repair facts, and the typed attempt outcome.
+Missing attempt-end records remain partial. Visible-prefix equality, route equality,
+provider receipt, billing, and residency remain unknown unless separate exact
+evidence establishes them.
+
+`--view geometry` groups attempt-end reads only when a matching scalar dispatch has
+the same observed backend, transport, model, reasoning, tool-choice, tier, and cache
+controls. It reports sorted reads, observed maxima, and a GCD explicitly labeled
+empirical. This is useful for regime/change tracking, not proof of token boundaries
+or provider cache geometry. Non-summary views emit JSONL even when `--format` is
+omitted.
+
+Shared filters beyond `--prompt`, exact-body prefix comparison, and disposable
+indexes remain subsequent work; no empty-success placeholders are exposed. Exact
+request/response capture remains **default-on
 for durable activity**, independently of the metadata setting below. This command
 does not alter capture, retention, inference, retry, refresh, or compaction policy.
 
@@ -159,7 +182,8 @@ rejections before backend entry remain outside coverage. Parsed raw usage is
 retained only while available; discarded socket-publication results can leave
 usage unknown. Nothing here changes refresh eligibility, preemption, scheduling,
 repair, accounting or cache-residency claims. The inspector recognizes operation
-captures but reports `cache_operation_analysis_unavailable` without prompt joins.
+captures for backend continuity without inventing a prompt join. Harness owner
+selection, deadline override, terminal acceptance, and accounting remain unavailable.
 
 Records are capped at 256 KiB inclusive, with each allowlisted identity capped
 at 128 UTF-8 bytes; over-limit identities are omitted whole with fixed flags.

@@ -16,7 +16,7 @@ use std::io;
 
 use ciborium::de::Error as CborDecodeError;
 use inventory::Inventory;
-pub use options::{CacheOptions, CacheScanLimits, CacheScope};
+pub use options::{CacheOptions, CacheScanLimits, CacheScope, CacheView};
 use serde_json::{Value, json};
 use tau_core::{AgentJournalSnapshot, SessionStore};
 use tau_proto::{AgentId, Event};
@@ -215,9 +215,10 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                     CacheScope::Session(session) => json!({"session_id": session}),
                 },
                 "prompt": options.prompt,
+                "view": format!("{:?}", options.view).to_ascii_lowercase(),
                 "limits": options.limits,
                 "content_policy": "content_free_not_public_safe",
-                "capture_policy": "capture_inventory_no_terminal_or_dispatch_join",
+                "capture_policy": "current_scalar_attempt_join_legacy_files_partial",
                 "cache_diagnostic_support": {
                     "codex_inference": "metadata",
                     "public_responses_inference": "metadata",
@@ -228,6 +229,7 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                     "chat_completions_standalone_compaction": "metadata",
                     "other_standalone_compaction": "unavailable",
                     "codex_cache_refresh_backend": "metadata",
+                    "cache_refresh_backend_continuity": "metadata",
                     "cache_refresh_owner_outcome": "unavailable",
                     "raw_attribution": "unavailable"
                 },
@@ -236,17 +238,20 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
             }
         }),
     )?;
-    for agent in snapshot.agent_ids() {
-        project_agent(
-            &snapshot,
-            agent,
-            options,
-            &inventory,
-            &mut report,
-            &mut remaining,
-        )?;
+    if options.view == CacheView::Summary {
+        for agent in snapshot.agent_ids() {
+            project_agent(
+                &snapshot,
+                agent,
+                options,
+                &inventory,
+                &mut report,
+                &mut remaining,
+            )?;
+        }
     }
-    if options.prompt.is_some() && report.responses == 0 {
+    inventory.project(options, &agents, &mut report, &mut remaining)?;
+    if options.view == CacheView::Summary && options.prompt.is_some() && report.responses == 0 {
         *report
             .gaps
             .entry("selected_prompt_without_canonical_response")
@@ -254,6 +259,9 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
     }
     report.partial = !report.gaps.is_empty();
     for (reason, count) in report.gaps.clone() {
+        if !matches!(options.view, CacheView::Summary | CacheView::Gaps) {
+            continue;
+        }
         append(
             &mut report,
             options,
@@ -272,11 +280,21 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
         )?;
     }
     let summary = json!({
-        "canonical": {"response_count": report.responses},
+        "canonical": (options.view == CacheView::Summary).then(|| json!({
+            "response_count": report.responses
+        })),
         "reported": null,
         "derived": {
-            "method": "canonical_occurrence_count_v0",
-            "input_records": "canonical_response_rows",
+            "method": if options.view == CacheView::Summary {
+                "canonical_occurrence_count_v0"
+            } else {
+                "selected_diagnostic_view_v0"
+            },
+            "input_records": if options.view == CacheView::Summary {
+                "canonical_response_rows"
+            } else {
+                "selected_diagnostic_rows"
+            },
             "coverage": if report.partial { "partial" } else { "selected_canonical_prefix" },
             "residency_miss": "unknown",
             "failed_attempt_billing": "unknown",

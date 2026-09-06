@@ -36,10 +36,10 @@ fn prompt_attribution_error_precedence_is_unchanged() {
     }
 }
 
-/// Operation captures are recognized without inventing a prompt join, and
-/// nullable prompt attribution is rejected for other operations.
+/// Operation captures are recognized without inventing a prompt join, while
+/// owner lifecycle remains explicitly outside backend continuity.
 #[test]
-fn operation_capture_has_explicit_unavailable_analysis() {
+fn operation_capture_has_backend_continuity_without_prompt_join() {
     let root = tempfile::tempdir().expect("fixture root");
     capture(
         root.path(),
@@ -58,7 +58,13 @@ fn operation_capture_has_explicit_unavailable_analysis() {
         &CacheScanLimits::default(),
     );
     assert!(inventory.prompts.is_empty());
-    assert_eq!(inventory.gaps["cache_operation_analysis_unavailable"], 1);
+    assert_eq!(
+        inventory.diagnostic_count(),
+        1,
+        "{:?}",
+        inventory.diagnostic_sequences()
+    );
+    assert!(inventory.gaps.is_empty());
     assert!(
         !inventory
             .gaps
@@ -66,17 +72,17 @@ fn operation_capture_has_explicit_unavailable_analysis() {
     );
 }
 
-/// The new capture class is inventoried without pretending Stage-1 performs
-/// attempt attribution, and without misclassifying its schema as stale.
+/// The current capture class is inventoried and admitted for explicit
+/// Stage-3 projections without misclassifying its schema as stale.
 #[test]
-fn scalar_cache_capture_is_recognized_without_claiming_analysis() {
+fn scalar_cache_capture_is_recognized_for_analysis() {
     let root = tempfile::tempdir().expect("fixture root");
     capture(
         root.path(),
         "1-prompt-cache-diagnostic.json.zst",
         br#"{
         "schema":"tau.cache_diagnostic","schema_version":0,"record_kind":"dispatch",
-        "session_id":"session","agent_prompt_id":"prompt","record_seq":1,
+        "session_id":"session","agent_id":"agent","agent_prompt_id":"prompt","record_seq":1,
         "operation":"standalone_compaction",
         "producer_run_id":"0123456789abcdef0123456789abcdef",
         "attempt_id":"fedcba9876543210fedcba9876543210"
@@ -97,9 +103,540 @@ fn scalar_cache_capture_is_recognized_without_claiming_analysis() {
             .diagnostic_files,
         1
     );
-    assert_eq!(inventory.gaps["cache_diagnostic_analysis_unavailable"], 1);
+    assert!(inventory.gaps.is_empty());
     assert!(!inventory.gaps.contains_key("unsupported_capture_schema"));
     assert!(!inventory.gaps.contains_key("legacy_partial"));
+}
+
+/// Exact duplicate scalar records are idempotent while a conflicting duplicate
+/// remains explicit corruption rather than last-write-wins.
+#[test]
+fn scalar_record_identity_deduplicates_exact_values_and_rejects_conflicts() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut row = diagnostic("dispatch", 1);
+    capture_json(root.path(), "1.json.zst", &row);
+    capture_json(root.path(), "2.json.zst", &row);
+    row["wire_dispatch_index"] = 2.into();
+    capture_json(root.path(), "3.json.zst", &row);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &CacheScanLimits::default(),
+    );
+    assert_eq!(inventory.diagnostic_count(), 1);
+    assert!(inventory.gaps["conflicting_cache_diagnostic_record"] > 0);
+}
+
+/// Continuity uses only shared capture-local identities and reports missing
+/// terminal evidence instead of joining by file order or timestamps.
+#[test]
+fn continuity_projection_preserves_capture_local_unknowns() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut dispatch = diagnostic("dispatch", 1);
+    dispatch["wire_dispatch_index"] = 1.into();
+    dispatch["request_form"] = "anchored_suffix".into();
+    dispatch["anchor_validation"] = "matched".into();
+    dispatch["connection_state"] = "reused".into();
+    capture_json(root.path(), "1.json.zst", &dispatch);
+    let options = cache_options(root.path(), CacheView::Continuity);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    let row = report
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl row"))
+        .find(|row| row["record_kind"] == "comparison")
+        .expect("comparison");
+    assert_eq!(row["derived"]["coverage"], "partial_missing_attempt_end");
+    assert_eq!(row["derived"]["visible_prefix_equality"], "unknown");
+    assert_eq!(row["reported"]["dispatch_count_observed"], 1);
+}
+
+/// Geometry groups only identical closed scalar regimes and labels GCD as an
+/// empirical statistic rather than provider cache geometry.
+#[test]
+fn geometry_projection_labels_empirical_reported_distribution() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (sequence, read) in [(1, 384), (3, 640)] {
+        let mut dispatch = diagnostic("dispatch", sequence);
+        dispatch["effective_model"] = "model".into();
+        dispatch["backend"] = "responses".into();
+        dispatch["transport"] = "websocket".into();
+        dispatch["attempt_id"] = format!("{sequence:032x}").into();
+        capture_json(root.path(), &format!("{sequence}.json.zst"), &dispatch);
+        let mut end = diagnostic("attempt_end", sequence + 1);
+        end["attempt_id"] = format!("{sequence:032x}").into();
+        end["reported_usage"] = json!({"read_tokens": read});
+        capture_json(root.path(), &format!("{}.json.zst", sequence + 1), &end);
+    }
+    let options = cache_options(root.path(), CacheView::Geometry);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    let row = report
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl row"))
+        .find(|row| row["record_kind"] == "comparison")
+        .expect("comparison");
+    assert_eq!(row["reported"]["read_tokens"], json!([384, 640]));
+    assert_eq!(row["derived"]["empirical_gcd_read_tokens"], 128);
+    assert_eq!(row["derived"]["exact_cache_geometry"], "unknown");
+}
+
+/// Attribution forwards the producer's explicit unsupported state and never
+/// transforms raw usage into invented per-item evidence.
+#[test]
+fn attribution_projection_preserves_unsupported_shape() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut end = diagnostic("attempt_end", 1);
+    end["reported_usage"] = json!({"input_tokens": 100, "read_tokens": 40});
+    end["attribution_status"] = "unsupported_shape".into();
+    end["attribution_total_check"] = "not_checkable".into();
+    end["attribution"] = json!([]);
+    end["omitted_entries"] = 0.into();
+    capture_json(root.path(), "1.json.zst", &end);
+    let options = cache_options(root.path(), CacheView::Attribution);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    let row = report
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl row"))
+        .find(|row| row["record_kind"] == "attribution")
+        .expect("attribution");
+    assert_eq!(row["reported"]["status"], "unsupported_shape");
+    assert_eq!(row["reported"]["entries"], json!([]));
+    assert_eq!(row["derived"]["coverage"], "reported_unsupported");
+}
+
+/// Agent-scoped projection must not expose another agent's diagnostics merely
+/// because both captures live under the same session directory.
+#[test]
+fn diagnostic_projection_isolates_selected_agents_in_one_session() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (sequence, agent, prompt) in [(1, "agent", "prompt"), (2, "other", "other-prompt")] {
+        let mut row = diagnostic("dispatch", sequence);
+        row["agent_id"] = agent.into();
+        row["agent_prompt_id"] = prompt.into();
+        row["attempt_id"] = format!("{sequence:032x}").into();
+        capture_json(root.path(), &format!("{sequence}.json.zst"), &row);
+    }
+    let options = cache_options(root.path(), CacheView::Continuity);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    let text = report.lines.join("\n");
+    assert!(text.contains("\"agent_prompt_id\":\"prompt\""));
+    assert!(!text.contains("other-prompt"));
+}
+
+/// Retained scalar trees use a conservative allocation charge and stop with an
+/// explicit gap instead of consuming the cumulative decode allowance.
+#[test]
+fn diagnostic_retention_obeys_working_memory_admission() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for sequence in 1..=4 {
+        let mut row = diagnostic("dispatch", sequence);
+        row["attempt_id"] = format!("{sequence:032x}").into();
+        row["unknown_padding"] = "x".repeat(100_000).into();
+        capture_json(root.path(), &format!("{sequence}.json.zst"), &row);
+    }
+    let limits = CacheScanLimits {
+        working_memory_bytes: 64 * 1024 * 1024,
+        ..Default::default()
+    };
+    let mut inventory = Inventory::default();
+    inventory.scan(root.path(), &"session".parse().expect("session"), &limits);
+    assert!(inventory.diagnostic_count() < 4);
+    assert!(
+        inventory
+            .gaps
+            .get("diagnostic_memory_limit")
+            .is_some_and(|count| *count > 0),
+        "{:?}",
+        inventory.gaps
+    );
+}
+
+/// Conflicting duplicate identities are excluded from evidence regardless of
+/// which payload happens to be encountered first.
+#[test]
+fn conflicting_record_identity_is_never_first_observed_evidence() {
+    for reversed in [false, true] {
+        let root = tempfile::tempdir().expect("fixture root");
+        let first = diagnostic("dispatch", 1);
+        let mut second = first.clone();
+        second["wire_dispatch_index"] = 2.into();
+        let values = if reversed {
+            [second, first]
+        } else {
+            [first, second]
+        };
+        for (index, value) in values.iter().enumerate() {
+            capture_json(root.path(), &format!("{index}.json.zst"), value);
+        }
+        let options = cache_options(root.path(), CacheView::Continuity);
+        let mut inventory = Inventory::default();
+        inventory.scan(
+            root.path(),
+            &"session".parse().expect("session"),
+            &options.limits,
+        );
+        let mut report = empty_report();
+        let mut remaining = 1_000_000;
+        inventory
+            .project(
+                &options,
+                &BTreeSet::from(["agent".parse().expect("agent")]),
+                &mut report,
+                &mut remaining,
+            )
+            .expect("project");
+        assert!(report.lines.is_empty());
+        assert_eq!(inventory.gaps["conflicting_cache_diagnostic_record"], 1);
+    }
+}
+
+/// Repair attempts with different dispatch regimes are excluded from geometry
+/// rather than selecting one filesystem-order-dependent dispatch.
+#[test]
+fn geometry_rejects_ambiguous_multi_dispatch_regimes() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (sequence, model) in [(1, "model-a"), (2, "model-b")] {
+        let mut dispatch = diagnostic("dispatch", sequence);
+        dispatch["effective_model"] = model.into();
+        dispatch["wire_dispatch_index"] = sequence.into();
+        capture_json(root.path(), &format!("{sequence}.json.zst"), &dispatch);
+    }
+    let mut end = diagnostic("attempt_end", 3);
+    end["reported_usage"] = json!({"read_tokens": 384});
+    end["dispatch_count"] = 2.into();
+    capture_json(root.path(), "3.json.zst", &end);
+    let options = cache_options(root.path(), CacheView::Geometry);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    assert_eq!(report.gaps["geometry_attempt_regime_ambiguous"], 1);
+    assert!(!report.lines.iter().any(|line| {
+        serde_json::from_str::<Value>(line).expect("row")["record_kind"] == "comparison"
+    }));
+}
+
+/// Continuity requires unique, gap-free dispatch indices matching the
+/// attempt-end count; lossy subsets and duplicates remain partial.
+#[test]
+fn continuity_rejects_missing_duplicate_and_holey_dispatch_evidence() {
+    for (name, indices, count, reason) in [
+        (
+            "missing",
+            vec![1],
+            2,
+            "attempt_dispatch_evidence_incomplete",
+        ),
+        (
+            "duplicate",
+            vec![1, 1],
+            2,
+            "attempt_dispatch_index_duplicate",
+        ),
+        (
+            "hole",
+            vec![1, 3],
+            3,
+            "attempt_dispatch_evidence_incomplete",
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("fixture root");
+        for (offset, index) in indices.into_iter().enumerate() {
+            let mut dispatch = diagnostic("dispatch", offset as u64 + 1);
+            dispatch["wire_dispatch_index"] = index.into();
+            capture_json(root.path(), &format!("{offset}.json.zst"), &dispatch);
+        }
+        let mut end = diagnostic("attempt_end", 10);
+        end["dispatch_count"] = count.into();
+        capture_json(root.path(), "end.json.zst", &end);
+        let options = cache_options(root.path(), CacheView::Continuity);
+        let mut inventory = Inventory::default();
+        inventory.scan(
+            root.path(),
+            &"session".parse().expect("session"),
+            &options.limits,
+        );
+        let mut report = empty_report();
+        let mut remaining = 1_000_000;
+        inventory
+            .project(
+                &options,
+                &BTreeSet::from(["agent".parse().expect("agent")]),
+                &mut report,
+                &mut remaining,
+            )
+            .expect("project");
+        let row = report
+            .lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("row"))
+            .find(|row| row["record_kind"] == "comparison")
+            .expect("comparison");
+        assert_eq!(row["derived"]["coverage"], reason, "{name}");
+        assert_eq!(report.gaps["attempt_continuity_incomplete"], 1, "{name}");
+    }
+}
+
+/// Geometry does not derive from a retained subset when attempt-end reports a
+/// dropped dispatch.
+#[test]
+fn geometry_requires_complete_dispatch_continuity() {
+    let root = tempfile::tempdir().expect("fixture root");
+    capture_json(root.path(), "1.json.zst", &diagnostic("dispatch", 1));
+    let mut end = diagnostic("attempt_end", 2);
+    end["dispatch_count"] = 2.into();
+    end["reported_usage"] = json!({"read_tokens": 384});
+    capture_json(root.path(), "2.json.zst", &end);
+    let options = cache_options(root.path(), CacheView::Geometry);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    assert_eq!(report.gaps["attempt_dispatch_evidence_incomplete"], 1);
+    assert!(!report.lines.iter().any(|line| {
+        serde_json::from_str::<Value>(line).expect("row")["record_kind"] == "comparison"
+    }));
+}
+
+/// Missing and overlong model identities remain unavailable dimensions rather
+/// than one shared null-model geometry group.
+#[test]
+fn geometry_never_groups_unobserved_models() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (base, model) in [(1, None), (3, Some("x".repeat(129)))] {
+        let mut dispatch = diagnostic("dispatch", base);
+        dispatch["attempt_id"] = format!("{base:032x}").into();
+        dispatch["effective_model"] = model.into();
+        capture_json(root.path(), &format!("{base}.json.zst"), &dispatch);
+        let mut end = diagnostic("attempt_end", base + 1);
+        end["attempt_id"] = format!("{base:032x}").into();
+        end["reported_usage"] = json!({"read_tokens": 384});
+        capture_json(root.path(), &format!("{}.json.zst", base + 1), &end);
+    }
+    let options = cache_options(root.path(), CacheView::Geometry);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    assert_eq!(report.gaps["geometry_model_unavailable"], 2);
+    assert!(!report.lines.iter().any(|line| {
+        serde_json::from_str::<Value>(line).expect("row")["record_kind"] == "comparison"
+    }));
+}
+
+/// Geometry comparison references must resolve to the emitted attempt-end row,
+/// not a dispatch row or a filtered ordinal.
+#[test]
+fn geometry_input_reference_resolves_to_attempt_end_source() {
+    let root = tempfile::tempdir().expect("fixture root");
+    capture_json(root.path(), "1.json.zst", &diagnostic("dispatch", 1));
+    let mut end = diagnostic("attempt_end", 2);
+    end["reported_usage"] = json!({"read_tokens": 384});
+    capture_json(root.path(), "2.json.zst", &end);
+    let options = cache_options(root.path(), CacheView::Geometry);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    let rows = report
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("row"))
+        .collect::<Vec<_>>();
+    let end_label = rows
+        .iter()
+        .find(|row| row["record_kind"] == "attempt_end")
+        .and_then(|row| row["derived"]["record_label"].as_str())
+        .expect("attempt-end label");
+    let comparison = rows
+        .iter()
+        .find(|row| row["record_kind"] == "comparison")
+        .expect("comparison");
+    assert_eq!(comparison["derived"]["input_records"], json!([end_label]));
+}
+
+/// Invalid attribution entries cannot retain a producer's complete claim after
+/// sanitization drops them.
+#[test]
+fn malformed_attribution_downgrades_complete_claim() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut end = diagnostic("attempt_end", 1);
+    end["attribution_status"] = "complete".into();
+    end["attribution_total_check"] = "matches".into();
+    end["attribution"] = json!([{"scope":"SECRET","read_tokens":10}]);
+    capture_json(root.path(), "1.json.zst", &end);
+    let options = cache_options(root.path(), CacheView::Attribution);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("project");
+    let row = report
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("row"))
+        .find(|row| row["record_kind"] == "attribution")
+        .expect("attribution");
+    assert_eq!(row["derived"]["coverage"], "sanitized_partial");
+    assert_eq!(row["reported"]["entries"], json!([]));
+    assert_eq!(
+        report.gaps["attribution_evidence_unavailable_or_partial"],
+        1
+    );
+    assert!(!report.lines.join("\n").contains("SECRET"));
+}
+
+/// Attribution requests with only dispatch evidence, or with no selected
+/// diagnostics, return explicit partial gaps rather than empty success.
+#[test]
+fn attribution_reports_missing_attempt_end_and_missing_selection() {
+    let root = tempfile::tempdir().expect("fixture root");
+    capture_json(root.path(), "1.json.zst", &diagnostic("dispatch", 1));
+    let options = cache_options(root.path(), CacheView::Attribution);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    for (agent, reason) in [
+        ("agent", "attribution_attempt_end_missing"),
+        ("other", "selected_cache_diagnostic_missing"),
+    ] {
+        let mut report = empty_report();
+        let mut remaining = 1_000_000;
+        inventory
+            .project(
+                &options,
+                &BTreeSet::from([agent.parse().expect("agent")]),
+                &mut report,
+                &mut remaining,
+            )
+            .expect("project");
+        assert_eq!(report.gaps[reason], 1);
+    }
 }
 
 /// Realized reads, including perfect hits, never invent an eligible ceiling.
@@ -129,6 +666,80 @@ fn capture(root: &std::path::Path, name: &str, body: &[u8]) {
     std::fs::create_dir_all(root.join("provider")).expect("capture directory");
     let bytes = zstd::stream::encode_all(body, 3).expect("compress fixture");
     std::fs::write(root.join("provider").join(name), bytes).expect("write fixture");
+}
+
+/// Writes one strict JSON fixture through the existing compressed capture
+/// helper.
+fn capture_json(root: &std::path::Path, name: &str, value: &Value) {
+    capture(
+        root,
+        name,
+        &serde_json::to_vec(value).expect("encode capture"),
+    );
+}
+
+/// Builds one current prompt-scoped scalar record with stable typed
+/// attribution.
+fn diagnostic(kind: &str, sequence: u64) -> Value {
+    let mut value = json!({
+        "schema": "tau.cache_diagnostic",
+        "schema_version": 0,
+        "record_kind": kind,
+        "producer_run_id": "0123456789abcdef0123456789abcdef",
+        "record_seq": sequence,
+        "attempt_id": "fedcba9876543210fedcba9876543210",
+        "session_id": "session",
+        "agent_id": "agent",
+        "agent_prompt_id": "prompt",
+        "operation": "inference",
+        "operation_id": "prompt",
+        "logical_attempt": 1,
+        "harness_provider_attempt": 1,
+        "backend": "responses",
+        "transport": "websocket",
+        "effective_model": "fixture-model"
+    });
+    if kind == "dispatch" {
+        value["wire_dispatch_index"] = 1.into();
+        value["request_form"] = "full".into();
+        value["anchor_validation"] = "not_applicable".into();
+        value["connection_state"] = "new".into();
+    } else {
+        value["dispatch_count"] = 1.into();
+        value["successful_dispatch_index"] = 1.into();
+        value["outcome"] = "success".into();
+        value["attribution_status"] = "absent".into();
+        value["attribution_total_check"] = "not_checkable".into();
+        value["attribution"] = json!([]);
+        value["omitted_entries"] = 0.into();
+    }
+    value
+}
+
+/// Creates options for a direct inventory projection fixture.
+fn cache_options(root: &std::path::Path, view: CacheView) -> CacheOptions {
+    CacheOptions {
+        state_dir: root.into(),
+        scope: CacheScope::Agent {
+            agent_id: "agent".parse().expect("agent"),
+            include_descendants: false,
+        },
+        prompt: None,
+        view,
+        limits: CacheScanLimits::default(),
+        producer_build: "fixture".into(),
+    }
+}
+
+/// Creates an empty report sink for direct projection tests.
+fn empty_report() -> CacheReport {
+    CacheReport {
+        lines: Vec::new(),
+        partial: false,
+        responses: 0,
+        gaps: BTreeMap::new(),
+        inspected: true,
+    }
 }
 
 /// Multiple same-prompt files remain file counts, never inferred attempt joins.
@@ -251,6 +862,7 @@ fn journal_preflight_produces_partial_without_inspection_or_mutation() {
             include_descendants: false,
         },
         prompt: None,
+        view: CacheView::Summary,
         limits: CacheScanLimits {
             working_memory_bytes: 65536,
             ..Default::default()

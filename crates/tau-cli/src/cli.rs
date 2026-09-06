@@ -353,6 +353,9 @@ pub struct CacheArgs {
     /// Restrict canonical responses to this exact local prompt.
     #[arg(long)]
     pub prompt: Option<tau_proto::AgentPromptId>,
+    /// Select summary, attribution, continuity, geometry, or gap evidence.
+    #[arg(long, value_enum, default_value_t)]
+    pub view: CacheView,
     /// Existing Tau state root; inspection never creates it.
     #[arg(long, default_value_os_t = tau_session_inspect::default_state_dir())]
     pub state_dir: PathBuf,
@@ -368,6 +371,22 @@ pub struct CacheArgs {
     /// Capture parser and report working-memory budget in bytes.
     #[arg(long, default_value_t = 512 * 1024 * 1024)]
     pub max_memory_bytes: u64,
+}
+
+/// Offline cache evidence projection.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum CacheView {
+    /// Canonical accounting and overall capture coverage.
+    #[default]
+    Summary,
+    /// Provider-reported per-item attribution evidence.
+    Attribution,
+    /// Attempt, dispatch, anchor, connection, and repair facts.
+    Continuity,
+    /// Empirical reported-token distributions by scalar regime.
+    Geometry,
+    /// Encountered evidence gaps only.
+    Gaps,
 }
 
 /// Available first-delivery content-free cache report encodings.

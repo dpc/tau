@@ -4,6 +4,22 @@ use std::path::PathBuf;
 
 use tau_proto::{AgentId, AgentPromptId, SessionId};
 
+/// Diagnostic projection selected by the offline cache inspector.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CacheView {
+    /// Canonical responses, capture coverage, and aggregate evidence.
+    #[default]
+    Summary,
+    /// Provider-reported item attribution and its reconciliation status.
+    Attribution,
+    /// Attempt, dispatch, anchor, connection, and repair continuity.
+    Continuity,
+    /// Empirical reported-token distributions within observed regimes.
+    Geometry,
+    /// Encountered missing, malformed, ambiguous, or bounded evidence.
+    Gaps,
+}
+
 /// Durable journals selected by an offline cache invocation.
 #[derive(Clone)]
 pub enum CacheScope {
@@ -50,6 +66,8 @@ pub struct CacheOptions {
     pub scope: CacheScope,
     /// Optional exact local prompt filter.
     pub prompt: Option<AgentPromptId>,
+    /// Requested diagnostic projection.
+    pub view: CacheView,
     /// Capture scan admission limits.
     pub limits: CacheScanLimits,
     /// Inspector source/build identity, supplied by its executable.

@@ -1366,6 +1366,13 @@ fn run_cache_report(
         state_dir: args.state_dir,
         scope,
         prompt: args.prompt,
+        view: match args.view {
+            cli::CacheView::Summary => tau_session_inspect::CacheView::Summary,
+            cli::CacheView::Attribution => tau_session_inspect::CacheView::Attribution,
+            cli::CacheView::Continuity => tau_session_inspect::CacheView::Continuity,
+            cli::CacheView::Geometry => tau_session_inspect::CacheView::Geometry,
+            cli::CacheView::Gaps => tau_session_inspect::CacheView::Gaps,
+        },
         limits: tau_session_inspect::CacheScanLimits {
             compressed_file_bytes: args.max_compressed_bytes,
             decompressed_file_bytes: args.max_decompressed_bytes,
@@ -1376,9 +1383,9 @@ fn run_cache_report(
     };
     let report =
         tau_session_inspect::read_cache_report(&options).map_err(|_| CliError::CacheInvalid)?;
-    line_output::stream_stdout(|writer| match args.format {
-        cli::CacheFormat::Summary => report.write_summary(writer),
-        cli::CacheFormat::Jsonl => report.write_jsonl(writer),
+    line_output::stream_stdout(|writer| match (args.format, args.view) {
+        (cli::CacheFormat::Summary, cli::CacheView::Summary) => report.write_summary(writer),
+        (cli::CacheFormat::Summary, _) | (cli::CacheFormat::Jsonl, _) => report.write_jsonl(writer),
     })?;
     if report.is_partial() {
         Err(CliError::CachePartial)

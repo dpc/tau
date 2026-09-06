@@ -1,15 +1,42 @@
 //! Bounded legacy capture inventory, deliberately not an attempt ledger.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Read as _;
 use std::path::Path;
 
 use serde_json::Value;
-use tau_proto::{AgentPromptId, SessionId};
+use tau_proto::{AgentId, AgentPromptId, SessionId};
 use zstd::stream::read::Decoder;
 
-use super::CacheScanLimits;
+use super::{CacheOptions, CacheReport, CacheScanLimits, CacheView};
+use crate::InspectError;
+
+/// Stable identity of one scalar record inside one provider process run.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct RecordId {
+    /// Provider instance directory, retained only for private in-memory joins.
+    instance: String,
+    /// Process-local random producer identity.
+    run: String,
+    /// Process-local sequence allocated before capture admission.
+    sequence: u64,
+}
+
+/// Validated scalar diagnostic retained without provider bodies or raw IDs.
+#[derive(Clone)]
+struct DiagnosticRecord {
+    /// Exact record identity.
+    id: RecordId,
+    /// Original closed-schema value after strict JSON parsing.
+    value: Value,
+    /// Typed prompt attribution when this is prompt-scoped.
+    prompt: Option<AgentPromptId>,
+    /// Typed provider-owner attribution used for selected-scope isolation.
+    agent: AgentId,
+    /// Random attempt identity shared by related records.
+    attempt: String,
+}
 
 /// Counts of independently observed files, never inferred dispatch counts.
 #[derive(Default, serde::Serialize)]
@@ -31,11 +58,34 @@ pub(super) struct Inventory {
     pub prompts: BTreeMap<(SessionId, AgentPromptId), CaptureCounts>,
     /// Fixed reason codes and encountered occurrence counts.
     pub gaps: BTreeMap<&'static str, u64>,
+    /// Validated and deduplicated current scalar records.
+    diagnostics: Vec<DiagnosticRecord>,
+    /// First value observed for each stable record identity.
+    record_values: BTreeMap<RecordId, usize>,
+    /// Identities whose payloads conflict and cannot support derived evidence.
+    conflicted_records: BTreeSet<RecordId>,
+    /// Conservative retained scalar allocation charge.
+    retained_diagnostic_bytes: u64,
     /// Total decoded bytes consumed, including rejected files.
     decoded: u64,
 }
 
 impl Inventory {
+    /// Returns retained scalar rows for focused in-crate identity tests.
+    #[cfg(test)]
+    pub(super) fn diagnostic_count(&self) -> usize {
+        self.diagnostics.len()
+    }
+
+    /// Returns stable record sequences for focused duplicate diagnostics.
+    #[cfg(test)]
+    pub(super) fn diagnostic_sequences(&self) -> Vec<u64> {
+        self.diagnostics
+            .iter()
+            .map(|record| record.id.sequence)
+            .collect()
+    }
+
     /// Counts a gap without retaining error prose or a source pathname.
     pub fn gap(&mut self, reason: &'static str) {
         *self.gaps.entry(reason).or_default() += 1;
@@ -80,8 +130,9 @@ impl Inventory {
                     self.gap("cumulative_capture_limit");
                     return;
                 }
+                let instance_name = instance.file_name().to_string_lossy().into_owned();
                 match self.read(&file.path(), limits) {
-                    Ok(value) => self.observe(session, value, limits),
+                    Ok(value) => self.observe(session, &instance_name, value, limits),
                     Err(reason) => self.gap(reason),
                 }
             }
@@ -132,7 +183,13 @@ impl Inventory {
 
     /// Projects only recognized envelopes; content and arbitrary metadata die
     /// here.
-    fn observe(&mut self, session: &SessionId, value: Value, limits: &CacheScanLimits) {
+    fn observe(
+        &mut self,
+        session: &SessionId,
+        instance: &str,
+        value: Value,
+        limits: &CacheScanLimits,
+    ) {
         let cache_diagnostic = value.get("schema").and_then(Value::as_str)
             == Some("tau.cache_diagnostic")
             && value.get("schema_version").and_then(Value::as_u64) == Some(0);
@@ -177,11 +234,14 @@ impl Inventory {
                     .get("operation_id")
                     .and_then(Value::as_str)
                     .is_some_and(|id| !id.is_empty() && id.len() <= 128);
-            self.gap(if valid {
-                "cache_operation_analysis_unavailable"
-            } else {
-                "malformed_current_cache_diagnostic"
-            });
+            if !valid {
+                self.gap("malformed_current_cache_diagnostic");
+                return;
+            }
+            match diagnostic_record(instance, &value, None) {
+                Ok(record) => self.admit_diagnostic(record, value, limits),
+                Err(reason) => self.gap(reason),
+            }
             return;
         }
         let Some(prompt) = value.get("agent_prompt_id").and_then(Value::as_str) else {
@@ -196,9 +256,14 @@ impl Inventory {
             self.gap("capture_session_mismatch");
             return;
         }
-        if cache_diagnostic && !cache_diagnostic_header(&value) {
-            self.gap("malformed_current_cache_diagnostic");
-            return;
+        if cache_diagnostic {
+            match diagnostic_record(instance, &value, Some(prompt.clone())) {
+                Ok(record) => self.admit_diagnostic(record, value.clone(), limits),
+                Err(reason) => {
+                    self.gap(reason);
+                    return;
+                }
+            }
         }
         if known_failure {
             let valid = match value.get("capture_kind").and_then(Value::as_str) {
@@ -254,27 +319,743 @@ impl Inventory {
             2 => counts.failure_files += 1,
             _ => counts.diagnostic_files += 1,
         }
-        if cache_diagnostic {
-            self.gap("cache_diagnostic_analysis_unavailable");
-        } else {
+        if !cache_diagnostic {
             self.gap("legacy_partial");
         }
     }
+
+    /// Deduplicates one validated record or exposes conflicting reuse.
+    fn admit_diagnostic(
+        &mut self,
+        record: DiagnosticRecord,
+        value: Value,
+        limits: &CacheScanLimits,
+    ) {
+        if let Some(previous) = self.record_values.get(&record.id).copied() {
+            if self.diagnostics[previous].value != value {
+                self.gap("conflicting_cache_diagnostic_record");
+                self.conflicted_records.insert(record.id);
+            }
+            return;
+        }
+        let charge = serde_json::to_vec(&value)
+            .map(|bytes| {
+                (bytes.len() as u64)
+                    .saturating_mul(128)
+                    .saturating_add(2048)
+            })
+            .unwrap_or(u64::MAX);
+        if self.retained_diagnostic_bytes.saturating_add(charge) > limits.working_memory_bytes / 2 {
+            self.gap("diagnostic_memory_limit");
+            return;
+        }
+        self.retained_diagnostic_bytes = self.retained_diagnostic_bytes.saturating_add(charge);
+        self.record_values
+            .insert(record.id.clone(), self.diagnostics.len());
+        self.diagnostics.push(record);
+    }
+
+    /// Projects current scalar records without changing canonical accounting.
+    pub(super) fn project(
+        &self,
+        options: &CacheOptions,
+        selected_agents: &BTreeSet<AgentId>,
+        report: &mut CacheReport,
+        remaining: &mut u64,
+    ) -> Result<(), InspectError> {
+        match options.view {
+            CacheView::Summary | CacheView::Gaps => Ok(()),
+            CacheView::Attribution => {
+                self.project_attribution(options, selected_agents, report, remaining)
+            }
+            CacheView::Continuity => {
+                self.project_continuity(options, selected_agents, report, remaining)
+            }
+            CacheView::Geometry => {
+                self.project_geometry(options, selected_agents, report, remaining)
+            }
+        }
+    }
+
+    /// Emits provider attribution exactly as retained, including explicit
+    /// unsupported, malformed, and truncated states.
+    fn project_attribution(
+        &self,
+        options: &CacheOptions,
+        selected_agents: &BTreeSet<AgentId>,
+        report: &mut CacheReport,
+        remaining: &mut u64,
+    ) -> Result<(), InspectError> {
+        let selected = self.selected(options, selected_agents);
+        let attempt_ends = selected
+            .iter()
+            .copied()
+            .filter(|record| record.value["record_kind"] == "attempt_end")
+            .collect::<Vec<_>>();
+        if attempt_ends.is_empty() {
+            *report
+                .gaps
+                .entry(if selected.is_empty() {
+                    "selected_cache_diagnostic_missing"
+                } else {
+                    "attribution_attempt_end_missing"
+                })
+                .or_default() += 1;
+        }
+        for (ordinal, record) in attempt_ends.into_iter().enumerate() {
+            let label = record_label(ordinal);
+            append_scalar_record(report, options, remaining, record, &label)?;
+            let (entries, sanitized_partial) = safe_attribution(&record.value);
+            let coverage = attribution_coverage(&record.value, sanitized_partial);
+            if coverage != "reported_complete" {
+                *report
+                    .gaps
+                    .entry("attribution_evidence_unavailable_or_partial")
+                    .or_default() += 1;
+            }
+            super::append(
+                report,
+                options,
+                remaining,
+                "attribution",
+                serde_json::json!({
+                    "agent_prompt_id": record.prompt,
+                    "canonical": null,
+                    "reported": {
+                        "status": closed(&record.value, "attribution_status",
+                            &["absent", "complete", "truncated", "malformed", "unsupported_shape"]),
+                        "total_check": closed(&record.value, "attribution_total_check",
+                            &["matches", "mismatch", "not_checkable"]),
+                        "entries": entries,
+                        "omitted_entries": unsigned(&record.value, "omitted_entries"),
+                        "usage": safe_usage(&record.value),
+                    },
+                    "derived": {
+                        "method": "reported_attribution_projection_v0",
+                        "input_records": [label],
+                        "coverage": coverage,
+                        "nested_content_not_summed": true
+                    }
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Emits exact capture-local attempt continuity without timestamp or
+    /// adjacency inference.
+    fn project_continuity(
+        &self,
+        options: &CacheOptions,
+        selected_agents: &BTreeSet<AgentId>,
+        report: &mut CacheReport,
+        remaining: &mut u64,
+    ) -> Result<(), InspectError> {
+        let mut attempts: BTreeMap<(&str, &str, &str), Vec<&DiagnosticRecord>> = BTreeMap::new();
+        for record in self.selected(options, selected_agents) {
+            attempts
+                .entry((&record.id.instance, &record.id.run, &record.attempt))
+                .or_default()
+                .push(record);
+        }
+        for (attempt_ordinal, records) in attempts.values().enumerate() {
+            let labels = (0..records.len())
+                .map(|record_ordinal| {
+                    format!(
+                        "attempt-{}-record-{}",
+                        attempt_ordinal.saturating_add(1),
+                        record_ordinal.saturating_add(1)
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (record, label) in records.iter().zip(&labels) {
+                append_scalar_record(report, options, remaining, record, label)?;
+            }
+            let dispatches: Vec<_> = records
+                .iter()
+                .copied()
+                .filter(|record| record.value["record_kind"] == "dispatch")
+                .collect();
+            let ends: Vec<_> = records
+                .iter()
+                .copied()
+                .filter(|record| record.value["record_kind"] == "attempt_end")
+                .collect();
+            let coverage = if records
+                .iter()
+                .any(|record| !scalar_projection_valid(&record.value))
+            {
+                "sanitized_partial"
+            } else if ends.is_empty() {
+                "partial_missing_attempt_end"
+            } else if ends.len() > 1 {
+                "ambiguous_multiple_attempt_end"
+            } else {
+                match dispatch_continuity(&dispatches, ends[0]) {
+                    Ok(()) => "capture_local",
+                    Err(reason) => reason,
+                }
+            };
+            if coverage != "capture_local" {
+                *report
+                    .gaps
+                    .entry("attempt_continuity_incomplete")
+                    .or_default() += 1;
+            }
+            let end = ends.first();
+            super::append(
+                report,
+                options,
+                remaining,
+                "comparison",
+                serde_json::json!({
+                    "agent_prompt_id": records.first().and_then(|record| record.prompt.as_ref()),
+                    "canonical": null,
+                    "reported": {
+                        "operation": closed(&records[0].value, "operation",
+                            &["inference", "standalone_compaction", "cache_refresh"]),
+                        "logical_attempt": unsigned(&records[0].value, "logical_attempt"),
+                        "harness_provider_attempt": unsigned(&records[0].value, "harness_provider_attempt"),
+                        "dispatch_count_observed": dispatches.len(),
+                        "attempt_end_dispatch_count": end.and_then(|record|
+                            unsigned(&record.value, "dispatch_count")),
+                        "outcome": end.map(|record| closed(&record.value, "outcome",
+                            &["success", "error", "canceled", "pre_dispatch_failure"])),
+                        "request_forms": dispatches.iter().map(|record| closed(&record.value,
+                            "request_form", &["full", "anchored_suffix", "repair_full", "other"])).collect::<Vec<_>>(),
+                        "anchor_validation": dispatches.iter().map(|record| closed(&record.value,
+                            "anchor_validation", &["matched", "mismatched", "unavailable", "not_applicable"])).collect::<Vec<_>>(),
+                        "connection_state": dispatches.iter().map(|record| closed(&record.value,
+                            "connection_state", &["new", "reused", "replaced", "not_applicable", "unknown"])).collect::<Vec<_>>(),
+                        "repair_used": end.and_then(|record| record.value.get("repair_used")).and_then(Value::as_bool),
+                        "chain_strip_count": end.and_then(|record| record.value.get("chain_strip_count")).and_then(Value::as_u64),
+                    },
+                    "derived": {
+                        "method": "capture_local_attempt_continuity_v0",
+                        "input_records": labels,
+                        "coverage": coverage,
+                        "visible_prefix_equality": "unknown",
+                        "route_equality": "unknown",
+                        "provider_residency": "unknown"
+                    }
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Emits empirical reported-read distributions grouped by closed scalar
+    /// request controls; it does not claim provider cache block geometry.
+    fn project_geometry(
+        &self,
+        options: &CacheOptions,
+        selected_agents: &BTreeSet<AgentId>,
+        report: &mut CacheReport,
+        remaining: &mut u64,
+    ) -> Result<(), InspectError> {
+        let selected = self.selected(options, selected_agents);
+        let mut labels = BTreeMap::new();
+        for (ordinal, record) in selected.iter().copied().enumerate() {
+            let label = record_label(ordinal);
+            append_scalar_record(report, options, remaining, record, &label)?;
+            labels.insert(record.id.clone(), label);
+        }
+        let mut dispatch_by_attempt: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for record in selected
+            .iter()
+            .copied()
+            .filter(|record| record.value["record_kind"] == "dispatch")
+        {
+            dispatch_by_attempt
+                .entry((&record.id.instance, &record.id.run, &record.attempt))
+                .or_default()
+                .push(record);
+        }
+        let mut groups: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        let mut references: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut displayed_regimes = BTreeMap::new();
+        let mut model_labels = BTreeMap::new();
+        for end in selected
+            .iter()
+            .copied()
+            .filter(|record| record.value["record_kind"] == "attempt_end")
+        {
+            let Some(dispatches) =
+                dispatch_by_attempt.get(&(&end.id.instance, &end.id.run, &end.attempt))
+            else {
+                *report.gaps.entry("geometry_dispatch_missing").or_default() += 1;
+                continue;
+            };
+            if let Err(reason) = dispatch_continuity(dispatches, end) {
+                *report.gaps.entry(reason).or_default() += 1;
+                continue;
+            }
+            let keys = dispatches
+                .iter()
+                .filter(|dispatch| scalar_projection_valid(&dispatch.value))
+                .map(|dispatch| geometry_regime_key(&dispatch.value))
+                .collect::<BTreeSet<_>>();
+            if keys.len() != 1
+                || dispatches
+                    .iter()
+                    .any(|record| !scalar_projection_valid(&record.value))
+            {
+                *report
+                    .gaps
+                    .entry("geometry_attempt_regime_ambiguous")
+                    .or_default() += 1;
+                continue;
+            }
+            let dispatch = dispatches[0];
+            let Some(model) = dispatch
+                .value
+                .get("effective_model")
+                .and_then(Value::as_str)
+                .filter(|model| !model.is_empty() && model.len() <= 128)
+            else {
+                *report.gaps.entry("geometry_model_unavailable").or_default() += 1;
+                continue;
+            };
+            if !scalar_projection_valid(&end.value) {
+                continue;
+            }
+            let Some(read) = end
+                .value
+                .pointer("/reported_usage/read_tokens")
+                .and_then(Value::as_u64)
+            else {
+                continue;
+            };
+            let key = keys.into_iter().next().expect("one regime");
+            let next_model = model_labels.len().saturating_add(1);
+            let model_label = Some(
+                model_labels
+                    .entry(model.to_owned())
+                    .or_insert_with(|| format!("model-{next_model}"))
+                    .clone(),
+            );
+            displayed_regimes
+                .entry(key.clone())
+                .or_insert_with(|| geometry_display_regime(&dispatch.value, model_label));
+            groups.entry(key.clone()).or_default().push(read);
+            references
+                .entry(key)
+                .or_default()
+                .push(labels[&end.id].clone());
+        }
+        for (key, mut reads) in groups {
+            reads.sort_unstable();
+            let empirical_gcd = reads.iter().copied().reduce(gcd);
+            super::append(
+                report,
+                options,
+                remaining,
+                "comparison",
+                serde_json::json!({
+                    "canonical": null,
+                    "reported": {"read_tokens": reads},
+                    "derived": {
+                        "method": "empirical_reported_read_distribution_v0",
+                        "input_records": references.remove(&key).unwrap_or_default(),
+                        "coverage": "scalar_regime_only",
+                        "regime": displayed_regimes.remove(&key).expect("display regime"),
+                        "observed_max_read_tokens": reads.last(),
+                        "empirical_gcd_read_tokens": empirical_gcd,
+                        "visible_prefix_equality": "unknown",
+                        "exact_cache_geometry": "unknown"
+                    }
+                }),
+            )?;
+        }
+        if !selected.is_empty() {
+            *report
+                .gaps
+                .entry("exact_request_geometry_unavailable")
+                .or_default() += 1;
+        }
+        Ok(())
+    }
+
+    /// Iterates records selected by the exact prompt filter.
+    fn selected<'a>(
+        &'a self,
+        options: &'a CacheOptions,
+        selected_agents: &'a BTreeSet<AgentId>,
+    ) -> Vec<&'a DiagnosticRecord> {
+        let mut selected = self
+            .diagnostics
+            .iter()
+            .filter(move |record| {
+                selected_agents.contains(&record.agent)
+                    && !self.conflicted_records.contains(&record.id)
+                    && options
+                        .prompt
+                        .as_ref()
+                        .is_none_or(|prompt| record.prompt.as_ref() == Some(prompt))
+            })
+            .collect::<Vec<_>>();
+        selected.sort_by(|left, right| left.id.cmp(&right.id));
+        selected
+    }
 }
 
-/// Recognize only the minimal current scalar header, without interpreting
-/// dispatch facts or promoting inventory to an attempt reader.
+/// Parses the strict current scalar identity and closed record kind.
+fn diagnostic_record(
+    instance: &str,
+    value: &Value,
+    prompt: Option<AgentPromptId>,
+) -> Result<DiagnosticRecord, &'static str> {
+    if !matches!(
+        value.get("record_kind").and_then(Value::as_str),
+        Some("dispatch" | "attempt_end")
+    ) {
+        return Err("malformed_current_cache_diagnostic");
+    }
+    let sequence = value
+        .get("record_seq")
+        .and_then(Value::as_u64)
+        .ok_or("malformed_current_cache_diagnostic")?;
+    let run = diagnostic_id(value, "producer_run_id")?;
+    let attempt = diagnostic_id(value, "attempt_id")?;
+    let agent = value
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .and_then(|id| AgentId::parse(id).ok())
+        .ok_or("malformed_current_cache_diagnostic")?;
+    Ok(DiagnosticRecord {
+        id: RecordId {
+            instance: instance.to_owned(),
+            run,
+            sequence,
+        },
+        value: value.clone(),
+        prompt,
+        agent,
+        attempt,
+    })
+}
+
+/// Recognizes the common scalar identity needed by operation-scoped records.
 fn cache_diagnostic_header(value: &Value) -> bool {
     matches!(
         value.get("record_kind").and_then(Value::as_str),
         Some("dispatch" | "attempt_end")
     ) && value.get("record_seq").and_then(Value::as_u64).is_some()
-        && ["attempt_id", "producer_run_id"].iter().all(|field| {
-            value.get(field).and_then(Value::as_str).is_some_and(|id| {
-                id.len() == 32
-                    && id
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            })
+        && diagnostic_id(value, "producer_run_id").is_ok()
+        && diagnostic_id(value, "attempt_id").is_ok()
+}
+
+/// Reads one lowercase 128-bit diagnostic identity.
+fn diagnostic_id(value: &Value, field: &str) -> Result<String, &'static str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|id| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+        .map(str::to_owned)
+        .ok_or("malformed_current_cache_diagnostic")
+}
+
+/// Produces a report-local content-free source label.
+fn record_label(ordinal: usize) -> String {
+    format!("scalar-record-{}", ordinal.saturating_add(1))
+}
+
+/// Emits one sanitized scalar source row addressable by later derived records.
+fn append_scalar_record(
+    report: &mut CacheReport,
+    options: &CacheOptions,
+    remaining: &mut u64,
+    record: &DiagnosticRecord,
+    label: &str,
+) -> Result<(), InspectError> {
+    let kind = match record.value["record_kind"].as_str() {
+        Some("dispatch") => "dispatch",
+        Some("attempt_end") => "attempt_end",
+        _ => unreachable!("validated scalar record kind"),
+    };
+    let reported = if kind == "dispatch" {
+        serde_json::json!({
+            "operation": closed(&record.value, "operation",
+                &["inference", "standalone_compaction", "cache_refresh"]),
+            "logical_attempt": unsigned(&record.value, "logical_attempt"),
+            "harness_provider_attempt": unsigned(&record.value, "harness_provider_attempt"),
+            "wire_dispatch_index": unsigned(&record.value, "wire_dispatch_index"),
+            "backend": closed(&record.value, "backend", &["responses", "chat_completions"]),
+            "transport": closed(&record.value, "transport",
+                &["websocket", "http_sse", "http-sse"]),
+            "model_observed": record.value.get("effective_model")
+                .is_some_and(|model| model.as_str().is_some_and(|model| model.len() <= 128)),
+            "request_form": closed(&record.value, "request_form",
+                &["full", "anchored_suffix", "repair_full", "other"]),
+            "previous_response_present": record.value.get("previous_response_present")
+                .and_then(Value::as_bool),
+            "anchor_validation": closed(&record.value, "anchor_validation",
+                &["matched", "mismatched", "unavailable", "not_applicable"]),
+            "connection_state": closed(&record.value, "connection_state",
+                &["new", "reused", "replaced", "not_applicable", "unknown"]),
+            "repair_used": record.value.get("repair_used").and_then(Value::as_bool),
+        })
+    } else {
+        serde_json::json!({
+            "operation": closed(&record.value, "operation",
+                &["inference", "standalone_compaction", "cache_refresh"]),
+            "logical_attempt": unsigned(&record.value, "logical_attempt"),
+            "harness_provider_attempt": unsigned(&record.value, "harness_provider_attempt"),
+            "dispatch_count": unsigned(&record.value, "dispatch_count"),
+            "successful_dispatch_index": unsigned(&record.value, "successful_dispatch_index"),
+            "outcome": closed(&record.value, "outcome",
+                &["success", "error", "canceled", "pre_dispatch_failure"]),
+            "semantic_progress": record.value.get("semantic_progress").and_then(Value::as_bool),
+            "repair_used": record.value.get("repair_used").and_then(Value::as_bool),
+            "reconnect_count": unsigned(&record.value, "reconnect_count"),
+            "chain_strip_count": unsigned(&record.value, "chain_strip_count"),
+            "usage": safe_usage(&record.value),
+            "attribution_status": closed(&record.value, "attribution_status",
+                &["absent", "complete", "truncated", "malformed", "unsupported_shape"]),
+        })
+    };
+    let coverage = if scalar_projection_valid(&record.value) {
+        "capture_local"
+    } else {
+        *report
+            .gaps
+            .entry("malformed_cache_diagnostic_projection")
+            .or_default() += 1;
+        "sanitized_partial"
+    };
+    super::append(
+        report,
+        options,
+        remaining,
+        kind,
+        serde_json::json!({
+            "agent_prompt_id": record.prompt,
+            "canonical": null,
+            "reported": reported,
+            "derived": {
+                "method": "sanitized_scalar_capture_v0",
+                "record_label": label,
+                "coverage": coverage
+            }
+        }),
+    )
+}
+
+/// Retains one closed string value or projects unknown/malformed as null.
+fn closed(value: &Value, field: &str, allowed: &[&str]) -> Value {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|candidate| allowed.contains(candidate))
+        .map_or(Value::Null, |candidate| candidate.into())
+}
+
+/// Produces an internal equality key; it is never emitted.
+fn geometry_regime_key(value: &Value) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "backend": closed(value, "backend", &["responses", "chat_completions"]),
+        "transport": closed(value, "transport", &["websocket", "http_sse", "http-sse"]),
+        "model": value.get("effective_model").and_then(Value::as_str)
+            .filter(|model| model.len() <= 128),
+        "reasoning": closed(value, "reasoning_selector",
+            &["none", "minimal", "low", "medium", "high", "xhigh"]),
+        "tool_choice": closed(value, "tool_choice", &["auto", "none", "required"]),
+        "service_tier": closed(value, "service_tier",
+            &["auto", "default", "flex", "priority", "scale"]),
+        "cache_mode": closed(value, "cache_mode", &["none", "ephemeral", "retained"]),
+        "cache_ttl_seconds": unsigned(value, "cache_ttl_seconds"),
+    }))
+    .expect("closed scalar regime serializes")
+}
+
+/// Produces the public regime with a report-local model label.
+fn geometry_display_regime(value: &Value, model_label: Option<String>) -> Value {
+    serde_json::json!({
+        "backend": closed(value, "backend", &["responses", "chat_completions"]),
+        "transport": closed(value, "transport", &["websocket", "http_sse", "http-sse"]),
+        "model": model_label,
+        "reasoning": closed(value, "reasoning_selector",
+            &["none", "minimal", "low", "medium", "high", "xhigh"]),
+        "tool_choice": closed(value, "tool_choice", &["auto", "none", "required"]),
+        "service_tier": closed(value, "service_tier",
+            &["auto", "default", "flex", "priority", "scale"]),
+        "cache_mode": closed(value, "cache_mode", &["none", "ephemeral", "retained"]),
+        "cache_ttl_seconds": unsigned(value, "cache_ttl_seconds"),
+    })
+}
+
+/// Retains one optional unsigned counter.
+fn unsigned(value: &Value, field: &str) -> Option<u64> {
+    value.get(field).and_then(Value::as_u64)
+}
+
+/// Projects only the approved provider usage counter names and unsigned values.
+fn safe_usage(value: &Value) -> Value {
+    let usage = value.get("reported_usage").unwrap_or(&Value::Null);
+    serde_json::json!({
+        "input_tokens": unsigned(usage, "input_tokens"),
+        "read_tokens": unsigned(usage, "read_tokens"),
+        "write_tokens": unsigned(usage, "write_tokens"),
+        "output_tokens": unsigned(usage, "output_tokens"),
+        "reasoning_output_tokens": unsigned(usage, "reasoning_output_tokens"),
+        "miss_tokens": unsigned(usage, "miss_tokens"),
+        "storage_token_micros": unsigned(usage, "storage_token_micros"),
+    })
+}
+
+/// Projects bounded structural attribution and counters without arbitrary
+/// provider keys, strings, or nested payloads.
+fn safe_attribution(value: &Value) -> (Vec<Value>, bool) {
+    let Some(entries) = value.get("attribution").and_then(Value::as_array) else {
+        return (
+            Vec::new(),
+            value
+                .get("attribution")
+                .is_some_and(|value| !value.is_null()),
+        );
+    };
+    let mut sanitized_partial = entries.len() > 4096;
+    let retained = entries
+        .iter()
+        .take(4096)
+        .filter_map(|entry| {
+            let scope = closed(entry, "scope", &["item", "request_field", "content"]);
+            if scope.is_null() || !entry.is_object() {
+                sanitized_partial = true;
+                None
+            } else {
+                for field in [
+                    "parent_index",
+                    "observed_ordinal",
+                    "input_tokens",
+                    "read_tokens",
+                    "write_tokens",
+                    "output_tokens",
+                ] {
+                    if entry
+                        .get(field)
+                        .is_some_and(|value| !value.is_null() && value.as_u64().is_none())
+                    {
+                        sanitized_partial = true;
+                    }
+                }
+                if entry.get("mapping").is_some_and(|value| {
+                    !value.is_null() && closed(entry, "mapping", &["exact", "unresolved"]).is_null()
+                }) {
+                    sanitized_partial = true;
+                }
+                Some(serde_json::json!({
+                    "scope": scope,
+                    "parent_index": unsigned(entry, "parent_index"),
+                    "observed_ordinal": unsigned(entry, "observed_ordinal"),
+                    "mapping": closed(entry, "mapping", &["exact", "unresolved"]),
+                    "input_tokens": unsigned(entry, "input_tokens"),
+                    "read_tokens": unsigned(entry, "read_tokens"),
+                    "write_tokens": unsigned(entry, "write_tokens"),
+                    "output_tokens": unsigned(entry, "output_tokens"),
+                }))
+            }
+        })
+        .collect();
+    (retained, sanitized_partial)
+}
+
+/// Preserves the producer's explicit attribution evidence grade.
+fn attribution_coverage(value: &Value, sanitized_partial: bool) -> &'static str {
+    if sanitized_partial {
+        return "sanitized_partial";
+    }
+    if value
+        .get("malformed_fields")
+        .and_then(Value::as_array)
+        .is_some_and(|fields| !fields.is_empty())
+    {
+        return "reported_malformed";
+    }
+    match value.get("attribution_status").and_then(Value::as_str) {
+        Some("complete") => "reported_complete",
+        Some("truncated") => "reported_truncated",
+        Some("malformed") => "reported_malformed",
+        Some("unsupported_shape") => "reported_unsupported",
+        _ => "reported_absent",
+    }
+}
+
+/// Checks the fields consumed by sanitized projections without requiring
+/// unavailable optional evidence.
+fn scalar_projection_valid(value: &Value) -> bool {
+    let operation = closed(
+        value,
+        "operation",
+        &["inference", "standalone_compaction", "cache_refresh"],
+    );
+    if operation.is_null() {
+        return false;
+    }
+    match value.get("record_kind").and_then(Value::as_str) {
+        Some("dispatch") => {
+            unsigned(value, "wire_dispatch_index").is_some()
+                && !closed(value, "backend", &["responses", "chat_completions"]).is_null()
+                && !closed(value, "transport", &["websocket", "http_sse", "http-sse"]).is_null()
+        }
+        Some("attempt_end") => {
+            unsigned(value, "dispatch_count").is_some()
+                && !closed(
+                    value,
+                    "outcome",
+                    &["success", "error", "canceled", "pre_dispatch_failure"],
+                )
+                .is_null()
+                && !closed(
+                    value,
+                    "attribution_status",
+                    &[
+                        "absent",
+                        "complete",
+                        "truncated",
+                        "malformed",
+                        "unsupported_shape",
+                    ],
+                )
+                .is_null()
+        }
+        _ => false,
+    }
+}
+
+/// Greatest common divisor for empirical reported-token samples.
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
+/// Requires one complete, unique `1..=dispatch_count` capture-local dispatch
+/// set before continuity or geometry can claim complete evidence.
+fn dispatch_continuity(
+    dispatches: &[&DiagnosticRecord],
+    attempt_end: &DiagnosticRecord,
+) -> Result<(), &'static str> {
+    let count =
+        unsigned(&attempt_end.value, "dispatch_count").ok_or("attempt_dispatch_count_malformed")?;
+    let mut indices = dispatches
+        .iter()
+        .map(|record| unsigned(&record.value, "wire_dispatch_index"))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("attempt_dispatch_index_malformed")?;
+    indices.sort_unstable();
+    if indices.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("attempt_dispatch_index_duplicate");
+    }
+    if indices.len() as u64 != count || indices.iter().copied().ne((1..=count).collect::<Vec<_>>())
+    {
+        return Err("attempt_dispatch_evidence_incomplete");
+    }
+    Ok(())
 }

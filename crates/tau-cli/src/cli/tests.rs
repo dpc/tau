@@ -4,10 +4,10 @@ use clap::{CommandFactory, Parser};
 
 use super::{Cli, Command, DevCommand};
 
-/// Offline cache scopes parse typed identities and expose no placeholder future
-/// views.
+/// Offline cache scopes parse typed identities and expose implemented views,
+/// while the deferred disposable index remains absent.
 #[test]
-fn offline_cache_scopes_parse_without_future_placeholder_options() {
+fn offline_cache_scopes_parse_with_current_views_without_index_placeholder() {
     assert!(
         Cli::try_parse_from([
             "tau",
@@ -37,7 +37,7 @@ fn offline_cache_scopes_parse_without_future_placeholder_options() {
     assert!(
         Cli::try_parse_from(["tau", "agent", "cache", "agent", "--index", "/tmp/index"]).is_err()
     );
-    assert!(Cli::try_parse_from(["tau", "agent", "cache", "agent", "--view", "geometry"]).is_err());
+    assert!(Cli::try_parse_from(["tau", "agent", "cache", "agent", "--view", "geometry"]).is_ok());
 }
 
 /// Useful partial evidence and incompatible sources retain distinct process

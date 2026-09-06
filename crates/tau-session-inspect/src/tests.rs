@@ -1915,6 +1915,7 @@ fn cache_report_projects_only_canonical_facts_and_preserves_unknowns() {
             include_descendants: false,
         },
         prompt: None,
+        view: crate::CacheView::Summary,
         limits: Default::default(),
         producer_build: "fixture".into(),
     };
@@ -1947,6 +1948,7 @@ fn cache_report_projects_only_canonical_facts_and_preserves_unknowns() {
             "chat_completions_standalone_compaction": "metadata",
             "other_standalone_compaction": "unavailable",
             "codex_cache_refresh_backend": "metadata",
+            "cache_refresh_backend_continuity": "metadata",
             "cache_refresh_owner_outcome": "unavailable",
             "raw_attribution": "unavailable"
         })
@@ -2080,6 +2082,7 @@ fn cache_session_options(root: &std::path::Path) -> crate::CacheOptions {
         state_dir: root.into(),
         scope: crate::CacheScope::Session("cache-session".parse().expect("session")),
         prompt: None,
+        view: crate::CacheView::Summary,
         limits: Default::default(),
         producer_build: "fixture".into(),
     }
