@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+UI lifetime controls are directed messages, not events: `ui_quit_request` carries
+ordinary quit versus explicit daemon-lifetime detach intent, and
+`ui_quit_result` reports the harness's disposition. Unconditional shutdown retains
+`ui_shutdown_request`. Protocol revision 2.0 rejects older UIs whose local-only
+detach could otherwise trigger the restored automatic-shutdown policy.
+See [SPEC-tau-cli-command-mode](../../tau-cli/specs/SPEC-tau-cli-command-mode.md).
+
 `SessionId` and `AgentPromptId` are controlled wire and journal identifiers.
 Both accept 1 through 128 bytes containing only ASCII letters, digits, `_`, and
 `-`. Construction and deserialization validate that grammar; invalid protocol

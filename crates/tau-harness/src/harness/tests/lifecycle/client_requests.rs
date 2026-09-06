@@ -2,6 +2,184 @@
 
 use super::*;
 
+/// Build a correlated quit control for the focused lifetime oracles.
+fn quit_request(detach: bool) -> HarnessInputMessage {
+    HarnessInputMessage::UiQuitRequest(tau_proto::UiQuitRequest {
+        request_id: "quit-1".to_owned(),
+        detach,
+    })
+}
+
+/// Expected directed reply, including the original request correlation.
+fn quit_reply(disposition: tau_proto::UiQuitDisposition) -> HarnessOutputMessage {
+    HarnessOutputMessage::UiQuitResult(tau_proto::UiQuitResult {
+        request_id: "quit-1".to_owned(),
+        disposition,
+    })
+}
+
+/// The auto-shutdown flag is dormant before the first admitted UI, ignores
+/// partial socket admission, and survives the departure of a non-final UI.
+#[test]
+fn auto_shutdown_waits_for_first_and_last_authenticated_ui() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+    h.session_runtime.exact_socket_session_required = true;
+    h.update_ui_disconnect_policy();
+    assert!(!h.ui_runtime.ever_attached);
+    assert!(!h.ui_runtime.shutdown_requested);
+
+    let (pending, _peer) = UnixStream::pair().expect("pending socket");
+    let pending_id = h.accept_client(pending).expect("accept pending socket");
+    h.update_ui_disconnect_policy();
+    assert!(!h.ui_runtime.ever_attached);
+    h.handle_disconnect(&pending_id);
+
+    let (creator, _creator_reader) = connect_socket_ui(&mut h);
+    let (attached, _attached_reader) = connect_socket_ui(&mut h);
+    // This focused loop oracle begins after successful exact Hello admission.
+    h.ui_runtime.pending_socket_admission.remove(&creator);
+    h.ui_runtime.pending_socket_admission.remove(&attached);
+    h.update_ui_disconnect_policy();
+    assert!(h.ui_runtime.ever_attached);
+    h.handle_runtime_disconnect(creator, &mut 0)
+        .expect("creator EOF");
+    h.update_ui_disconnect_policy();
+    assert!(!h.ui_runtime.shutdown_requested);
+    h.handle_runtime_disconnect(attached, &mut 0)
+        .expect("last UI EOF");
+    h.update_ui_disconnect_policy();
+    assert!(h.ui_runtime.shutdown_requested);
+}
+
+/// Detach clears policy before its directed acknowledgment, without publication
+/// or replay mutation. Reconnecting and quitting cannot rearm the flag.
+#[test]
+fn explicit_detach_is_acknowledged_and_sticky_across_reconnection() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    let baseline_seq = h.runtime_io.event_log.next_seq();
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(ui_id.clone(), quit_request(true)),
+        &mut 0,
+    )
+    .expect("detach");
+    assert!(!h.ui_runtime.exit_on_disconnect);
+    assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
+    assert_eq!(
+        ui.read_message().expect("reply"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    h.handle_runtime_disconnect(ui_id, &mut 0)
+        .expect("disconnect");
+    let (reattached_id, mut reattached) = connect_socket_ui(&mut h);
+    let reconnect_seq = h.runtime_io.event_log.next_seq();
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(reattached_id.clone(), quit_request(false)),
+        &mut 0,
+    )
+    .expect("ordinary quit");
+    assert_eq!(h.runtime_io.event_log.next_seq(), reconnect_seq);
+    assert_eq!(
+        reattached.read_message().expect("reply"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    h.handle_runtime_disconnect(reattached_id, &mut 0)
+        .expect("disconnect");
+    h.update_ui_disconnect_policy();
+    assert!(!h.ui_runtime.shutdown_requested);
+}
+
+/// Concurrent quits release lifetime participation at the serialized decision,
+/// not eventual EOF, so the final quitter receives Terminating rather than both
+/// UIs falsely receiving Detached.
+#[test]
+fn final_quit_selects_canonical_shutdown_before_transport_eof() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+    let (first_id, mut first) = connect_socket_ui(&mut h);
+    let (last_id, mut last) = connect_socket_ui(&mut h);
+    let request = quit_request(false);
+    h.handle_ui_quit_request(&first_id, &request);
+    assert_eq!(
+        first.read_message().expect("first reply"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    h.handle_ui_quit_request(&last_id, &request);
+    assert_eq!(
+        last.read_message().expect("last reply"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Terminating))
+    );
+    assert!(h.ui_runtime.shutdown_requested);
+    assert_eq!(h.ui_runtime.client_writers.len(), 2);
+    // A late detach cannot reverse a shutdown decision.
+    h.handle_ui_quit_request(&first_id, &quit_request(true));
+    assert!(h.ui_runtime.shutdown_requested);
+    h.shutdown().expect("canonical shutdown");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::SessionShutdown(_)))
+            .count(),
+        1
+    );
+}
+
+/// Startup detach has the same authority and ordering as runtime detach, and
+/// acknowledged UI loss must not turn a deliberate background launch into a
+/// fatal startup-handshake failure.
+#[test]
+fn startup_detach_is_authoritative_before_disconnect() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    h.ui_runtime.exit_on_disconnect = true;
+    connect_test_client_with_origin(
+        &mut h,
+        "tool-detach",
+        tau_proto::ClientKind::Tool,
+        ConnectionOrigin::Socket,
+    );
+    let tool_id = crate::test_connection_id("tool-detach");
+    let request = quit_request(true);
+    h.handle_startup_from_connection(&tool_id, request.clone())
+        .expect("deny non-UI");
+    assert!(h.ui_runtime.exit_on_disconnect);
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    h.handle_startup_from_connection(&ui_id, request)
+        .expect("startup detach");
+    assert!(!h.ui_runtime.exit_on_disconnect);
+    assert_eq!(
+        ui.read_message().expect("reply"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    h.handle_startup_disconnect(&ui_id)
+        .expect("acknowledged startup departure");
+    h.update_ui_disconnect_policy();
+    assert!(!h.ui_runtime.shutdown_requested);
+}
+
+/// Headless sessions never acquire automatic-shutdown policy merely because
+/// a UI connects and then requests ordinary quit.
+#[test]
+fn headless_session_survives_attached_quit() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    h.handle_ui_quit_request(&ui_id, &quit_request(false));
+    assert_eq!(
+        ui.read_message().expect("reply"),
+        Some(quit_reply(tau_proto::UiQuitDisposition::Detached))
+    );
+    h.handle_runtime_disconnect(ui_id, &mut 0)
+        .expect("disconnect");
+    h.update_ui_disconnect_policy();
+    assert!(!h.ui_runtime.shutdown_requested);
+}
+
 /// A frame that fails decoding because it uses a removed session-control
 /// encoding retires only that UI connection and publishes no session facts.
 #[test]
@@ -477,12 +655,19 @@ fn shutdown_request_is_silently_denied_for_other_client_origins() {
     let connection_id = crate::test_connection_id("socket-tool-shutdown");
     let baseline_seq = h.runtime_io.event_log.next_seq();
     let mut served_clients = 0;
+    h.ui_runtime.exit_on_disconnect = true;
 
     h.handle_runtime_event(
-        HarnessEvent::from_connection_for_test(connection_id, shutdown_request()),
+        HarnessEvent::from_connection_for_test(connection_id.clone(), shutdown_request()),
         &mut served_clients,
     )
     .expect("silently deny shutdown request");
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(connection_id, quit_request(true)),
+        &mut served_clients,
+    )
+    .expect("silently deny detach request");
+    assert!(h.ui_runtime.exit_on_disconnect);
 
     assert!(!h.ui_runtime.shutdown_requested);
     assert_eq!(served_clients, 0);

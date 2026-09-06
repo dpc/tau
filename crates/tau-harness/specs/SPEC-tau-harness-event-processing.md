@@ -254,6 +254,18 @@ interception, subscriptions, semantic persistence, or replay. It remains
 visible as a point-to-point input frame in local debug JSONL and is metered as
 `message.ui_shutdown_request`.
 
+Ordinary UI quit and explicit detach use `ui_quit_request`, with the same exact
+attached-socket-UI authority and non-publication boundary. The harness clears
+automatic shutdown before acknowledging an explicit detach, then releases the
+requester's lifetime participation. `ui_quit_result` reports `detached` or
+`terminating`; the latter means shutdown was selected, not completed. Concurrent
+quits serialize this decision without waiting for socket EOF, and a selected
+shutdown cannot be reversed. The flag is daemon-local and never restored from
+history. New immediately-UI-attached launches enable it; ordinary reconnects do
+not. Unexpected final-UI loss follows the same policy. Startup detach uses the
+same authority and permits the acknowledged UI to leave during initialization.
+Unacknowledged initial UI loss remains a startup failure.
+
 After the terminal commits, all attached UI writers receive one concurrent
 100-millisecond best-effort delivery grace. Tau then cancels their socket I/O
 and continues cleanup, so a paused or non-reading UI cannot block shutdown.

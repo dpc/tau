@@ -50,6 +50,7 @@ use crate::daemon::{
 };
 use crate::event_renderer::selection_intent::{EmptyUiTarget, SelectionIntent, UiTarget};
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
+use crate::peer_exit::PeerExit;
 use crate::prompt_history::{PromptHistoryAdmission, PromptHistoryStore};
 use crate::tool_render::ui_dir_block;
 use crate::ui_prompt::{
@@ -427,12 +428,12 @@ fn handle_ui_shutdown_command_text(
     Ok(Some(InputLoopExit::QuitSession))
 }
 
-/// Consume `:detach` as a UI-local alias for `:quit`.
+/// Select explicit, daemon-lifetime detach; the exit handshake commits it.
 fn handle_ui_detach_command_text(text: &str) -> Option<InputLoopExit> {
     if text != ":detach" {
         return None;
     }
-    Some(InputLoopExit::Quit)
+    Some(InputLoopExit::Detach)
 }
 
 /// Wrap an event in the interactive UI's durable-by-default Emit message.
@@ -689,13 +690,14 @@ fn parse_agent_picker_command(
 
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     (":quit", "Quit this UI"),
+    (":q", "Alias for :quit"),
     (":quit-session", "Quit the session and every attached UI"),
     (":cancel", "Cancel the current in-flight prompt"),
     (
         ":retry",
         "Run the selected agent's delayed provider retry now",
     ),
-    (":detach", "Quit this UI (alias for :quit)"),
+    (":detach", "Disconnect this UI and keep the session running"),
     (
         ":pick-agent",
         "Pick a currently active agent with optional fzf",
@@ -1246,6 +1248,12 @@ fn run_chat_session(
     let socket_input_shutdown = input_shutdown_handle.clone();
     let remote_disconnected = Arc::new(AtomicBool::new(false));
     let socket_remote_disconnected = remote_disconnected.clone();
+    let peer_exit = match &shutdown {
+        UiTransportShutdown::Socket(stream) => PeerExit::from_socket(stream).ok(),
+        UiTransportShutdown::InitialStdio(_) => None,
+    };
+    let (quit_result_tx, quit_result_rx) = mpsc::channel();
+    let quit_result_rx = Arc::new(Mutex::new(quit_result_rx));
     let socket_ui_io_meter = ui_io_meter.clone();
     let local_disconnect_started = Arc::new(AtomicBool::new(false));
     let socket_local_disconnect_started = local_disconnect_started.clone();
@@ -1266,6 +1274,7 @@ fn run_chat_session(
         socket_ui_io_meter,
         socket_local_disconnect_started,
         socket_delivery_memory,
+        quit_result_tx,
     );
 
     // Terminal setup.
@@ -1478,6 +1487,7 @@ fn run_chat_session(
         &writer,
         &mut active_session_id,
         TerminalInputLoopCtx {
+            quit_results: quit_result_rx.clone(),
             fast_service_tier_state,
             current_role_state,
             routing: input_routing,
@@ -1488,7 +1498,7 @@ fn run_chat_session(
             dirs: dirs.clone(),
             prompt_symbol: settings.prompt_symbol,
             agent_in_progress,
-            remote_disconnected,
+            remote_disconnected: remote_disconnected.clone(),
             renderer_tx: event_tx,
             active_session_state,
             editor_context,
@@ -1504,17 +1514,17 @@ fn run_chat_session(
     let mut foreground_restoration_diagnostic = None;
     let (exit, attachment_error) = match input_result {
         Ok(exit) => (exit, None),
-        Err(CliError::ForegroundOwnershipUnconfirmed {
-            message,
-            diagnostic,
-        }) => {
-            foreground_restoration_diagnostic = Some(diagnostic);
-            (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message))
+        Err(error) => {
+            let exit = match &error {
+                CliError::ForegroundOwnershipUnconfirmed { diagnostic, .. } => {
+                    foreground_restoration_diagnostic = Some(*diagnostic);
+                    InputLoopExit::ForegroundOwnershipUnconfirmed
+                }
+                CliError::TerminalOutputFailed(_) => InputLoopExit::TerminalOutputFailed,
+                _ => InputLoopExit::Quit,
+            };
+            (exit, Some(error))
         }
-        Err(CliError::TerminalOutputFailed(message)) => {
-            (InputLoopExit::TerminalOutputFailed, Some(message))
-        }
-        Err(error) => return Err(error),
     };
 
     tool_timer.stop();
@@ -1535,6 +1545,12 @@ fn run_chat_session(
         ui_logging.write_foreground_restoration_failure(diagnostic);
     }
 
+    let disposition = request_ui_exit(
+        exit,
+        &writer,
+        &locked(&quit_result_rx),
+        remote_disconnected.load(Ordering::Acquire),
+    );
     let reason = shutdown_ui_connection(
         writer,
         shutdown,
@@ -1543,24 +1559,19 @@ fn run_chat_session(
         exit,
         local_disconnect_started,
     );
-    finish_daemon_for_exit(exit, daemon);
+    // HighTerm owns raw mode and performs its final repaint on Drop. Joining
+    // renderer workers alone does not restore the terminal.
+    drop(term);
+    let outcome = finish_daemon_for_exit(disposition, daemon, peer_exit);
+    // Renderer joins and raw-terminal cleanup precede the sole final status line.
+    match outcome {
+        Ok(message) => eprintln!("{message}"),
+        Err(message) => eprintln!("Session exit unconfirmed: {message}"),
+    }
 
     tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
 
-    match (exit, attachment_error) {
-        (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message)) => {
-            Err(CliError::ForegroundOwnershipUnconfirmed {
-                message,
-                diagnostic: foreground_restoration_diagnostic
-                    .expect("foreground fail-stop must retain a diagnostic"),
-            })
-        }
-        (InputLoopExit::TerminalOutputFailed, Some(message)) => {
-            Err(CliError::TerminalOutputFailed(message))
-        }
-        (_, None) => Ok(()),
-        _ => Ok(()),
-    }
+    attachment_error.map_or(Ok(()), Err)
 }
 
 /// Runs optional attach-roster metadata work away from terminal and renderer
@@ -1834,6 +1845,7 @@ fn spawn_socket_reader(
     socket_ui_io_meter: UiIoMeter,
     socket_local_disconnect_started: Arc<AtomicBool>,
     socket_delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
+    quit_result_tx: mpsc::Sender<tau_proto::UiQuitResult>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut cold_attach_stager = if attach {
@@ -1971,6 +1983,13 @@ fn spawn_socket_reader(
                                 socket_delivery_memory.as_deref(),
                             )
                         }
+                        HarnessOutputMessage::UiQuitResult(disposition) => {
+                            let _ = quit_result_tx.send(disposition);
+                            if let Some(memory) = &socket_delivery_memory {
+                                memory.release(delivery_id);
+                            }
+                            continue;
+                        }
                         HarnessOutputMessage::Disconnect(d) => {
                             if socket_local_disconnect_started.load(Ordering::Acquire) {
                                 if let Some(memory) = &socket_delivery_memory {
@@ -2061,10 +2080,12 @@ fn await_ui_session_admission(
 /// How the input loop ended. Controls daemon disposition on exit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputLoopExit {
-    /// User typed `:quit`, hit Ctrl-D, or the socket dropped. Only this UI
-    /// disconnects; the fixed-session daemon continues serving other or future
-    /// UIs.
+    /// User typed `:quit`/`:q`, hit Ctrl-D, or the socket dropped; the
+    /// harness's current lifetime policy decides whether the session
+    /// survives.
     Quit,
+    /// Explicit detach has been acknowledged before leaving the input loop.
+    Detach,
     /// User typed `:quit-session` and sent the canonical shutdown request.
     QuitSession,
     /// Foreground ownership is unconfirmed, so only this attachment may exit.
@@ -2077,19 +2098,18 @@ impl InputLoopExit {
     fn reason(self) -> &'static str {
         match self {
             Self::Quit => "quit",
+            Self::Detach => "detach",
             Self::QuitSession => "quit-session",
             Self::ForegroundOwnershipUnconfirmed => "foreground-ownership-unconfirmed",
             Self::TerminalOutputFailed => "terminal-output-failed",
         }
     }
 
-    fn daemon_disposition(self) -> DaemonDisposition {
-        match self {
-            Self::QuitSession => DaemonDisposition::WaitRequestedOwned,
-            Self::Quit | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed => {
-                DaemonDisposition::KeepRunning
-            }
-        }
+    fn detaches(self) -> bool {
+        matches!(
+            self,
+            Self::Detach | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed
+        )
     }
 }
 
@@ -2120,28 +2140,82 @@ fn join_ui_thread(handle: std::thread::JoinHandle<()>, name: &str) {
     }
 }
 
-fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
-    // Ordinary UI exit leaves the fixed-session daemon to explicit shutdown,
-    // supervisor/process termination, fatal harness failure, or an explicit
-    // max-clients bound. Session quit waits boundedly for canonical shutdown,
-    // then releases local ownership rather than force-killing the process.
-    match exit.daemon_disposition() {
-        DaemonDisposition::WaitRequestedOwned => {
-            daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
+fn request_ui_exit(
+    exit: InputLoopExit,
+    writer: &WriterHandle,
+    results: &mpsc::Receiver<tau_proto::UiQuitResult>,
+    disconnected: bool,
+) -> Option<tau_proto::UiQuitDisposition> {
+    if exit == InputLoopExit::Detach {
+        return Some(tau_proto::UiQuitDisposition::Detached);
+    }
+    if exit == InputLoopExit::QuitSession {
+        // The unconditional request was sent once by the command handler.
+        return Some(tau_proto::UiQuitDisposition::Terminating);
+    }
+    if disconnected {
+        return None;
+    }
+    request_ui_quit(writer, results, exit.detaches())
+}
+
+/// Request a serialized harness decision; absence of a reply conveys no
+/// authority to claim that detach succeeded.
+fn request_ui_quit(
+    writer: &WriterHandle,
+    results: &mpsc::Receiver<tau_proto::UiQuitResult>,
+    detach: bool,
+) -> Option<tau_proto::UiQuitDisposition> {
+    let request_id = crate::mint_short_id("quit");
+    send_frame(
+        writer,
+        &HarnessInputMessage::UiQuitRequest(tau_proto::UiQuitRequest {
+            request_id: request_id.clone(),
+            detach,
+        }),
+    )
+    .ok()?;
+    let deadline = Instant::now() + crate::daemon::REQUESTED_DAEMON_EXIT_WAIT;
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let result = results.recv_timeout(remaining).ok()?;
+        if result.request_id == request_id {
+            return Some(result.disposition);
         }
-        DaemonDisposition::KeepRunning => daemon.leak(),
+        // A timed-out explicit detach may reply after the operator retries or
+        // chooses another command. It cannot acknowledge that later request.
     }
 }
 
-/// Daemon action selected after the terminal input loop ends.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DaemonDisposition {
-    /// Wait boundedly for explicitly requested owned-daemon shutdown, then
-    /// leak.
-    WaitRequestedOwned,
-    /// Leave daemon lifetime to explicit shutdown, supervision, fatal failure,
-    /// or an explicit completed-client bound.
-    KeepRunning,
+/// Render an authoritative detach decision or confirmed process termination,
+/// never successful termination inferred from an EOF or a request write.
+fn finish_daemon_for_exit(
+    disposition: Option<tau_proto::UiQuitDisposition>,
+    daemon: DaemonHandle,
+    peer_exit: Option<PeerExit>,
+) -> Result<&'static str, &'static str> {
+    if disposition == Some(tau_proto::UiQuitDisposition::Detached) {
+        daemon.leak();
+        return Ok("Session detached");
+    }
+    if matches!(&daemon, DaemonHandle::Owned { .. }) {
+        match daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT) {
+            Some(status) if status.success() => return Ok("Session terminated"),
+            Some(_) => return Err("daemon exited with an error"),
+            None => return Err("daemon did not confirm termination before the deadline"),
+        }
+    }
+    daemon.leak();
+    match peer_exit {
+        Some(peer)
+            if peer
+                .wait(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT)
+                .unwrap_or(false) =>
+        {
+            Ok("Session terminated")
+        }
+        _ => Err("no confirmed detach acknowledgment or daemon termination"),
+    }
 }
 
 fn tool_timer_loop(state: Arc<(Mutex<ToolTimerState>, Condvar)>, renderer_tx: LocalRendererSender) {
@@ -2266,6 +2340,8 @@ struct RendererQueueFrame {
 }
 
 struct TerminalInputLoopCtx {
+    /// Directed quit acknowledgments, consumed before explicit detach exits.
+    quit_results: Arc<Mutex<mpsc::Receiver<tau_proto::UiQuitResult>>>,
     fast_service_tier_state: Arc<path_std_sync::atomic::AtomicBool>,
     current_role_state: Arc<Mutex<Option<String>>>,
     routing: InputRoutingState,
@@ -3179,7 +3255,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_session_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        if text == ":quit" {
+        if matches!(text, ":quit" | ":q") {
             return Ok(CommandOutcome::Exit(InputLoopExit::Quit));
         }
         if let Some(exit) = handle_ui_shutdown_command_text(text, self.writer)? {
@@ -3204,7 +3280,22 @@ impl<'a> TerminalInputSession<'a> {
             return Ok(CommandOutcome::Continue);
         }
         if let Some(exit) = handle_ui_detach_command_text(text) {
-            return Ok(CommandOutcome::Exit(exit));
+            let disposition = request_ui_quit(self.writer, &locked(&self.ctx.quit_results), true);
+            return Ok(match disposition {
+                Some(tau_proto::UiQuitDisposition::Detached) => CommandOutcome::Exit(exit),
+                Some(tau_proto::UiQuitDisposition::Terminating) => {
+                    CommandOutcome::Exit(InputLoopExit::QuitSession)
+                }
+                None if self.ctx.remote_disconnected.load(Ordering::Acquire) => {
+                    CommandOutcome::Exit(InputLoopExit::Quit)
+                }
+                None => {
+                    self.output.command_feedback(
+                        "Detach was not confirmed; this UI remains connected. Retry :detach.",
+                    );
+                    CommandOutcome::Continue
+                }
+            });
         }
         if text == ":session" || text.starts_with(":session ") {
             self.handle_session_namespace(text)?;
@@ -4842,6 +4933,7 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
     matches!(
         command,
         ":quit"
+            | ":q"
             | ":quit-session"
             | ":cancel"
             | ":retry"

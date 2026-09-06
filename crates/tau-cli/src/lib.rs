@@ -22,6 +22,7 @@ mod list_sessions;
 mod markdown_render;
 mod message_fact_render;
 mod papercut;
+mod peer_exit;
 mod print_prompt;
 mod print_tools;
 mod prompt_history;

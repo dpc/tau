@@ -1386,6 +1386,42 @@ pub struct UiDebugEventStatsRequest {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiShutdownRequest {}
 
+/// Requests an authoritative disposition for this UI's impending disconnection.
+///
+/// This point-to-point control never enters session history or extension
+/// delivery.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiQuitRequest {
+    /// Opaque requester correlation, echoed only to this connection.
+    pub request_id: String,
+    /// Permanently disable automatic shutdown for this daemon incarnation
+    /// before releasing this UI's lifetime participation.
+    pub detach: bool,
+}
+
+/// Harness decision after releasing the requesting UI's lifetime participation.
+///
+/// `Terminating` is intent, not confirmation that cleanup or process exit
+/// finished.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiQuitDisposition {
+    /// The UI may disconnect; the daemon remains available at this decision.
+    Detached,
+    /// Canonical shutdown has been selected and cannot be undone by
+    /// reconnection.
+    Terminating,
+}
+
+/// Directed acknowledgment of one exact UI quit request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiQuitResult {
+    /// Correlation copied from the accepted request.
+    pub request_id: String,
+    /// Harness-selected lifetime disposition, not a process-exit certificate.
+    pub disposition: UiQuitDisposition,
+}
+
 /// Dedicated UI input requesting an agent's user-facing prompt rewind anchors.
 ///
 /// The harness consumes this request directly and replies only to the
@@ -1478,6 +1514,7 @@ pub enum HarnessInputMessage {
     UnloadSessionAgent(UnloadSessionAgent),
     UiDebugEventStatsRequest(UiDebugEventStatsRequest),
     UiShutdownRequest(UiShutdownRequest),
+    UiQuitRequest(UiQuitRequest),
     UiTreeRequest(UiTreeRequest),
     ProviderDebugCapture(ProviderDebugCapture),
     ExtensionDataRequest(ExtensionDataRequest),
@@ -1518,6 +1555,7 @@ pub enum HarnessOutputMessage {
     Configure(Configure),
     SessionAccepted(SessionAccepted),
     Disconnect(Disconnect),
+    UiQuitResult(UiQuitResult),
     Deliver(EventDelivery),
     InterceptRequest(InterceptRequest),
     AgentPromptCreatedResult(Box<AgentPromptCreatedResult>),

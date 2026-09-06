@@ -61,6 +61,15 @@ pub(crate) struct UiRuntimeState {
     pub(crate) pending_socket_admission: HashSet<tau_proto::ConnectionId>,
     /// Authorized UI request for unconditional canonical harness shutdown.
     pub(super) shutdown_requested: bool,
+    /// Initial-UI launches shut down after their last participating UI leaves.
+    /// Explicit detach clears this for the daemon lifetime; it is never
+    /// persisted.
+    pub(crate) exit_on_disconnect: bool,
+    /// Prevent an auto-shutdown before the first authenticated UI attaches.
+    pub(super) ever_attached: bool,
+    /// UIs that received a quit disposition no longer keep the daemon alive,
+    /// even while their reply writer is draining.
+    pub(super) quitting_uis: HashSet<tau_proto::ConnectionId>,
 }
 
 impl Default for UiRuntimeState {
@@ -83,6 +92,9 @@ impl Default for UiRuntimeState {
             runtime_probe_peers: HashSet::new(),
             pending_socket_admission: HashSet::new(),
             shutdown_requested: false,
+            exit_on_disconnect: false,
+            ever_attached: false,
+            quitting_uis: HashSet::new(),
         }
     }
 }

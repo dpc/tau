@@ -88,6 +88,7 @@ enum TestMessage {
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
     PeerSessionProbeResult(tau_proto::PeerSessionProbeResult),
+    UiQuitResult(tau_proto::UiQuitResult),
 }
 
 /// Configure deterministic receiver authority directly for focused harness
@@ -164,6 +165,9 @@ impl TestProtocolItem {
             HarnessOutputMessage::PeerSessionProbeResult(message) => {
                 Self::Message(TestMessage::PeerSessionProbeResult(message))
             }
+            HarnessOutputMessage::UiQuitResult(disposition) => {
+                Self::Message(TestMessage::UiQuitResult(disposition))
+            }
         }
     }
 
@@ -215,6 +219,7 @@ impl TestMessage {
             | Self::ExtensionDataResult(_)
             | Self::ExternalAgentMessageResult(_)
             | Self::ExternalAgentMessageAuthResult(_)
+            | Self::UiQuitResult(_)
             | Self::PeerSessionProbeResult(_) => {
                 panic!("test frame shim cannot send harness-output message as input")
             }

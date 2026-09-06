@@ -128,8 +128,13 @@ The metadata slice covers request-to-canonical publication; rejection outcomes
 remain unspecified and preserve silent rejection.
 UI extension-counter inspection uses the dedicated
 `ui_debug_event_stats_request` message with attached-socket-UI authority and a
-directed, non-published notice result. UI disconnect and `:detach` have no
-session-lifetime authority. Unconditional UI-requested shutdown uses the
+directed, non-published notice result. Immediate-UI launches enable a process-local
+last-UI-disconnection shutdown policy, guarded against firing before the first
+authenticated UI. Headless launches leave it disabled. A directed
+`ui_quit_request` releases the requesting UI's lifetime participation and returns
+the authoritative disposition; explicit detach clears the policy before that
+reply. Reconnections cannot rearm it, and runtime probes or incomplete admission
+never keep a session alive. Unconditional UI-requested shutdown uses the
 payload-free `ui_shutdown_request` with the same attached-socket-UI authority;
 it enters the same canonical lifecycle as signal or policy shutdown and does
 not itself become an event. UI tree inspection uses `ui_tree_request` and

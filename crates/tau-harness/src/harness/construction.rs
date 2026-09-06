@@ -571,6 +571,7 @@ impl Harness {
                 storage_mode,
             },
             HarnessStartupInputs {
+                exit_on_disconnect: false,
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: false,
@@ -605,6 +606,7 @@ impl Harness {
                 storage_mode,
             },
             HarnessStartupInputs {
+                exit_on_disconnect: false,
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: true,
@@ -650,6 +652,7 @@ impl Harness {
         tracing::debug!(target: "tau_harness::startup", eager_session_id, "constructing harness from config");
         let state_dir = state_dir.into();
         let HarnessStartupInputs {
+            exit_on_disconnect,
             initial_client,
             internal_tool_handlers,
             ignore_startup_environment,
@@ -672,6 +675,7 @@ impl Harness {
             },
         )?;
         harness.extensions.stderr_mirror = extension_stderr_mirror;
+        harness.ui_runtime.exit_on_disconnect = exit_on_disconnect;
         harness.install_internal_tool_handlers(internal_tool_handlers);
 
         let session_start_reason = harness.session_runtime.current_session_start_reason;

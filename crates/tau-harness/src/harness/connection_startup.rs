@@ -344,6 +344,7 @@ impl Harness {
                 if shutdown_requested {
                     self.ui_runtime.shutdown_requested = true;
                 }
+                self.handle_ui_quit_request(connection_id, &message);
                 let disposition = self.handle_client_message_disposition(connection_id, message)?;
                 let close = match disposition {
                     ClientMessageDisposition::Continue => false,
@@ -416,8 +417,9 @@ impl Harness {
             self.maybe_finish_extension_activation(Some(connection_id))?;
             return Ok(());
         }
+        let quit_acknowledged = self.ui_runtime.quitting_uis.contains(connection_id);
         self.handle_disconnect(connection_id);
-        if was_socket {
+        if was_socket && !quit_acknowledged {
             return Err(HarnessError::Participant(format!(
                 "{name} disconnected during startup"
             )));

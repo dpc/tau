@@ -2498,6 +2498,10 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             agent_id: agent_id("agent-1"),
         }),
         HarnessInputMessage::UiShutdownRequest(UiShutdownRequest {}),
+        HarnessInputMessage::UiQuitRequest(UiQuitRequest {
+            request_id: "quit-1".to_owned(),
+            detach: true,
+        }),
         HarnessInputMessage::UiTreeRequest(UiTreeRequest {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
@@ -4118,6 +4122,39 @@ fn ui_shutdown_request_uses_dedicated_input_message() {
     assert!(decode_message_from_slice::<Event>(&bytes).is_err());
 }
 
+/// Quit disposition is a directed control exchange, never a semantic event;
+/// both ordinary quit and policy-clearing detach retain their wire intent.
+#[test]
+fn ui_quit_control_roundtrips_without_event_authority() {
+    for detach in [false, true] {
+        let input = HarnessInputMessage::UiQuitRequest(UiQuitRequest {
+            request_id: "quit-1".to_owned(),
+            detach,
+        });
+        let json = serde_json::to_value(&input).expect("serialize quit");
+        assert_eq!(json["message"], "ui_quit_request");
+        assert_eq!(json["payload"]["detach"], detach);
+        let bytes = encode_harness_input_to_vec(&input).expect("encode quit");
+        assert_eq!(
+            decode_harness_input_from_slice(&bytes).expect("decode quit"),
+            input
+        );
+        assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+    }
+    for disposition in [UiQuitDisposition::Detached, UiQuitDisposition::Terminating] {
+        let output = HarnessOutputMessage::UiQuitResult(UiQuitResult {
+            request_id: "quit-1".to_owned(),
+            disposition,
+        });
+        let bytes = encode_harness_output_to_vec(&output).expect("encode result");
+        assert_eq!(
+            decode_harness_output_from_slice(&bytes).expect("decode result"),
+            output
+        );
+        assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+    }
+}
+
 /// UI tree inspection uses a flat dedicated input message and cannot decode as
 /// an event or harness output.
 #[test]
@@ -4270,7 +4307,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 1, "minor": 1})
+        serde_json::json!({"major": 2, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {

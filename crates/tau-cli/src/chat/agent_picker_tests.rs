@@ -1,9 +1,6 @@
 use std::cell as path_std_cell;
 
-use super::{
-    AgentPickerResolution, DaemonDisposition, InputLoopExit, resolve_agent_picker,
-    with_agent_roster,
-};
+use super::{AgentPickerResolution, InputLoopExit, resolve_agent_picker, with_agent_roster};
 use crate::estimated_cost::AgentCostSnapshot;
 use crate::list_agents as path_crate_list_agents;
 
@@ -216,5 +213,5 @@ fn foreground_restoration_fail_stop_keeps_daemon_running() {
     let exit = InputLoopExit::ForegroundOwnershipUnconfirmed;
 
     assert_eq!(exit.reason(), "foreground-ownership-unconfirmed");
-    assert_eq!(exit.daemon_disposition(), DaemonDisposition::KeepRunning);
+    assert!(exit.detaches());
 }

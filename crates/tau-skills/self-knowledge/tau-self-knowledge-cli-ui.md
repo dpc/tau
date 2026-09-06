@@ -102,10 +102,14 @@ includes currently loaded agents, not messages whose endpoints already unloaded.
 
 Type `:` as the first non-whitespace character to enter command mode and open command/action completion. Type `::text` to submit literal prompt text beginning with `:`, while `/` remains available for absolute and token-level path completion. Built-in commands include session and agent management, model/role switching, `:name <display name>` to rename the currently selected agent, `:skill <name> [args]` for explicit user-invocable skill injection, `:theme <name>` to switch only the current CLI UI's theme for this run, `:set`, `:tree`, `:fast`, `:detach`, `:quit`, and `:quit-session`. Extension-provided actions can add dynamic commands and argument completions at runtime. `:skill:<name> [args]` is accepted as a compact form; arguments are appended after the skill body without placeholder substitution.
 
-`:quit` and `:detach` are UI-local aliases: each exits only the invoking UI and
-emits no harness frame. The fixed-session daemon keeps running after its last UI
-disconnects. `:quit-session` requests unconditional canonical session shutdown
-and therefore disconnects every attached UI.
+`:quit` (alias `:q`) asks the harness to release this UI. Plain `tau` and interactive
+`tau resume` enable automatic shutdown when their last UI leaves. `:detach`
+disables that policy for the entire daemon incarnation before disconnecting;
+later reconnections and ordinary quits cannot re-enable it. Headless launches
+start with automatic shutdown disabled. `:quit-session` requests unconditional
+canonical shutdown and disconnects every attached UI. Final stderr says
+`Session detached` or `Session terminated` after terminal cleanup; unconfirmed
+termination gets an explicit diagnostic instead.
 
 `:theme` completion lists built-in selectors (`tau-plain-dark`, `tau-plain-light`, and `tau-dpc`) plus valid user themes from `<config_dir>/themes/*.json5`. It is intentionally not persistent: it does not edit `cli.yaml`, update `cli.json`, or affect another attached UI.
 

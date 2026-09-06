@@ -204,6 +204,10 @@ impl From<SessionLaunchStatus> for tau_proto::SessionDirStatus {
 /// Serve-loop options for daemon mode.
 #[derive(Clone, Debug, Eq, PartialEq, bon::Builder)]
 pub struct ServeOptions {
+    /// Shut down after the last authenticated UI disconnects, once any UI has
+    /// attached. Explicit UI detach clears this for the entire daemon lifetime.
+    #[builder(default)]
+    pub exit_on_disconnect: bool,
     /// Hard cap on total served clients before the serve loop exits.
     /// Used mainly in tests to bound a run. `None` = unbounded.
     pub max_clients: Option<usize>,
@@ -239,6 +243,7 @@ pub struct ServeOptions {
 impl Default for ServeOptions {
     fn default() -> Self {
         Self {
+            exit_on_disconnect: false,
             max_clients: None,
             session_status: SessionLaunchStatus::New,
             dirs: None,
@@ -918,6 +923,7 @@ pub fn run_daemon_with_internal_tools(
             storage_mode: options.storage_mode,
         },
         HarnessStartupInputs {
+            exit_on_disconnect: options.exit_on_disconnect,
             initial_client: None,
             internal_tool_handlers,
             ignore_startup_environment: options.ignore_startup_environment,
@@ -1010,6 +1016,7 @@ fn run_daemon_with_echo_on_listener_handle(
         HarnessSessionLaunchMode::from_status(options.session_status).reason(),
         options.storage_mode,
     )?;
+    harness.ui_runtime.exit_on_disconnect = options.exit_on_disconnect;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
 
@@ -1706,6 +1713,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
                 storage_mode: options.storage_mode,
             },
             HarnessStartupInputs {
+                exit_on_disconnect: options.exit_on_disconnect,
                 initial_client,
                 internal_tool_handlers,
                 ignore_startup_environment: false,
@@ -2074,6 +2082,7 @@ fn run_component_with_internal_tools_and_initial_client(
             &config,
             &eager_session_id,
             ServeOptions {
+                exit_on_disconnect: launch.uses_spawned_transport(),
                 session_status,
                 storage_mode,
                 ..Default::default()

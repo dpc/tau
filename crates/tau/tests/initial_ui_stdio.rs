@@ -35,6 +35,24 @@ impl Drop for InitialUiChild {
     }
 }
 
+/// Require automatic EOF shutdown to finish normally without depending on a
+/// fixed scheduling sleep; stop the isolated child if the bounded oracle fails.
+fn wait_for_clean_exit(child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().expect("query child exit") {
+            assert!(status.success(), "initial-UI daemon failed: {status}");
+            return;
+        }
+        if deadline <= Instant::now() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("initial-UI daemon did not shut down after disconnect");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Builds an initial-UI harness command isolated from the test runner's
 /// configuration and launch environment.
 fn initial_ui_stdio_command(
@@ -181,13 +199,7 @@ fn initial_ui_introduction_notice_requires_conversational_launch() {
             .expect("write disconnect");
         writer.flush().expect("flush disconnect");
         drop(writer);
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(
-            child.try_wait().expect("query child").is_none(),
-            "conversational daemon must survive its initial UI disconnect"
-        );
-        child.kill().expect("stop persistent daemon");
-        let _ = child.wait().expect("reap child");
+        wait_for_clean_exit(&mut child);
         reader_thread.join().expect("reader thread");
     }
 }
@@ -429,16 +441,7 @@ fn resumed_configured_harness_process_creates_relay_log() {
         });
     drop(writer);
     shutdown.unwrap_or_else(|error| panic!("{error}"));
-    std::thread::sleep(Duration::from_millis(100));
-    assert!(
-        child
-            .process
-            .try_wait()
-            .expect("query resumed harness")
-            .is_none(),
-        "resumed conversational daemon must survive its initial UI disconnect"
-    );
-    child.stop();
+    wait_for_clean_exit(&mut child.process);
     reader_thread.join().expect("reader thread");
 }
 

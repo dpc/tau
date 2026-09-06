@@ -1652,6 +1652,9 @@ pub(crate) enum InitialClient {
 
 /// Process-local inputs captured before configured harness startup.
 pub(crate) struct HarnessStartupInputs {
+    /// Initial daemon-lifetime UI disconnection policy, installed before
+    /// admission.
+    pub(crate) exit_on_disconnect: bool,
     /// Optional UI transport accepted during startup.
     pub(crate) initial_client: Option<InitialClient>,
     /// Harness-owned tool handlers whose names must be reserved before
@@ -3138,6 +3141,7 @@ impl Harness {
             // Lifecycle behavior is applied only by runtime routing after exact
             // attached-socket-UI authorization.
             HarnessInputMessage::UiShutdownRequest(_) => Ok(ClientMessageDisposition::Continue),
+            HarnessInputMessage::UiQuitRequest(_) => Ok(ClientMessageDisposition::Continue),
             HarnessInputMessage::UiTreeRequest(request) => {
                 self.handle_ui_tree_request(client_id, request);
                 Ok(ClientMessageDisposition::Continue)

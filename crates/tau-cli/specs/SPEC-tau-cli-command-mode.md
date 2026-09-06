@@ -9,11 +9,34 @@ behavior coherently.
 
 The terminal input loop has multiple command owners. CLI-owned commands
 such as `:quit`, `:quit-session`, `:session`, `:agent`, `:name`, `:role`,
-`:model`, `:set`, and `:theme` are handled locally. `:quit` closes only its
-invoking UI; the fixed-session daemon continues serving zero or more other UIs.
-`:quit-session` sends the dedicated
-shutdown request before closing its UI, causing the harness to run canonical
-session shutdown. Dynamic extension actions are parsed against the
+`:model`, `:set`, and `:theme` are handled locally. `:quit` (alias `:q`) releases
+the invoking UI through a harness-authoritative quit handshake. A daemon launched
+with an immediate UI automatically shuts down when its last participating UI
+leaves, including unexpected disconnection. `:detach` first disables that policy
+for the entire daemon incarnation and only then disconnects the UI. Reattachment
+never rearms it; headless launches start with it disabled. This is a last-UI rule,
+not special lifetime authority attached to the creating UI.
+`:quit-session` sends the unconditional dedicated shutdown request, regardless of
+policy or other UIs, causing canonical session shutdown.
+
+Quit decisions serialize at the harness: an acknowledged quitter no longer
+participates in the last-UI count even while its transport drains. Explicit
+detach cannot undo already-selected shutdown. Following terminal cleanup, normal
+exit prints exactly one stderr line, `Session detached` after an authoritative
+survival decision or `Session terminated` after confirming the original daemon
+has exited. A request write, shutdown fact, or socket EOF alone is not termination
+confirmation. Failed or unconfirmed termination produces an explicit diagnostic
+instead, never a successful termination line. Process exit does not certify
+successful persistence cleanup.
+If explicit detach receives no acknowledgment while its connection remains live,
+the input loop stays connected and reports that detach was not confirmed. It
+must not turn an unconfirmed policy clear into automatic shutdown by closing
+the transport. Process-killed UIs cannot print a final status; their EOF still
+follows harness policy.
+Replies echo a request correlation, so a late acknowledgment of a timed-out
+detach cannot decide a subsequent quit.
+
+Dynamic extension actions are parsed against the
 current published action schema and dispatched as `ActionInvoke` events.
 Harness-owned prompt commands, currently `:skill <name> ...` and
 `:skill:<name> ...`, are completed and echoed by the CLI but must still be

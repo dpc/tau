@@ -509,6 +509,7 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
     match message {
         HarnessOutputMessage::Deliver(delivery) => delivery.event().name().to_string(),
         HarnessOutputMessage::Disconnect(_) => "message.disconnect".to_owned(),
+        HarnessOutputMessage::UiQuitResult(_) => "message.ui_quit_result".to_owned(),
         HarnessOutputMessage::Configure(_) => "message.configure".to_owned(),
         HarnessOutputMessage::SessionAccepted(_) => "message.session_accepted".to_owned(),
         HarnessOutputMessage::InterceptRequest(_) => "message.intercept_request".to_owned(),
@@ -568,6 +569,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::UnloadSessionAgent(_) => "unload_session_agent",
         HarnessInputMessage::UiDebugEventStatsRequest(_) => "ui_debug_event_stats_request",
         HarnessInputMessage::UiShutdownRequest(_) => "ui_shutdown_request",
+        HarnessInputMessage::UiQuitRequest(_) => "ui_quit_request",
         HarnessInputMessage::UiTreeRequest(_) => "ui_tree_request",
         HarnessInputMessage::ProviderDebugCapture(_) => "provider_debug_capture",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",

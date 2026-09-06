@@ -42,10 +42,22 @@ literally through the ordinary authenticated local UI create path, and never
 printed. Admission ends at correlated `Created` plus `Queued`; the bootstrap UI
 disconnects while the foreground service remains available.
 
-Interactive UI exit and session shutdown are separate. `:quit` and `:detach`
-are local aliases that close only the invoking UI. The daemon survives with no
-attached UIs. `:quit-session` sends the sole attached-UI shutdown request, then
-exits; the harness performs canonical shutdown and disconnects every other UI.
+Interactive UI exit is governed by a daemon-lifetime policy. An immediate-UI
+launch enables automatic shutdown after its last UI leaves. `:quit`/`:q` uses
+the harness's current decision, whereas `:detach` authoritatively clears the
+policy before closing its transport. The clear survives reconnections, not a
+cold daemon restart. Headless launches begin with the policy disabled.
+`:quit-session` requests unconditional canonical shutdown, disconnecting every UI.
+See [SPEC-tau-cli-command-mode](SPEC-tau-cli-command-mode.md) for the shared exit
+contract. Normal final stderr status follows terminal cleanup and worker joins.
+Owned launches confirm termination by waiting boundedly for their child's exit;
+Linux socket attachments pin the admitted peer with `SO_PEERPIDFD` and poll that
+exact process handle. Older kernels and other platforms without this facility
+report unconfirmed termination rather than infer it from PID reuse, socket
+removal, or session rediscovery. These observers never signal a daemon.
+The public `detach_attach_cli` PTY oracles protect ordinary quit/alias/EOF,
+sticky detach across reconnections, creator-versus-last-UI lifetime, unexpected
+UI process loss, and exactly-once status after the final terminal cleanup bytes.
 `:session new` is not an in-daemon operation; another top-level Tau invocation
 creates and serves another session.
 
@@ -102,8 +114,8 @@ fit, the status line stays empty rather than wrapping or clipping it.
 The reusable fitting and grouping behavior comes from
 [ARCH-tau-term-screen](../../tau-term-screen/specs/ARCH-tau-term-screen.md).
 Authoritative `session.started` events reconcile the displayed context and the
-input loop's routing session, including transitions initiated by another
-attached UI.
+input loop's routing session with the exact admitted identity; another attached
+UI cannot switch this daemon to a different session.
 
 Tool-call headers use the same adaptive single-row layout and preserve their
 existing visual field order. Their importance bands are tool identity `0`,

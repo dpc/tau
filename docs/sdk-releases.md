@@ -21,7 +21,8 @@ and `tau_client`.
 ## Package and protocol versions
 
 The initial SDK package set is `0.1.0` and currently advertises extension
-protocol revision `1.1`.
+protocol revision `2.0`. This deliberately rejects older UIs: their former
+local-only `:detach` cannot safely interoperate with automatic session shutdown.
 
 Cargo package versions describe Rust source API compatibility. During the
 pre-1.0 series, compatible releases remain within `0.1.x`; a source-incompatible

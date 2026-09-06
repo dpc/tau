@@ -297,6 +297,7 @@ fn raw_secret_source_error_prevents_provider_start() {
                 storage_mode: crate::HarnessStorageMode::Durable,
             },
             HarnessStartupInputs {
+                exit_on_disconnect: false,
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: false,

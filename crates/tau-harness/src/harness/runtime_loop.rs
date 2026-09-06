@@ -525,6 +525,7 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let mut served_clients = 0_usize;
         loop {
+            self.update_ui_disconnect_policy();
             if self.ui_runtime.shutdown_requested {
                 break;
             }
@@ -963,6 +964,7 @@ impl Harness {
                 if self.is_authorized_ui_shutdown_request(&connection_id, &message) {
                     self.ui_runtime.shutdown_requested = true;
                 }
+                self.handle_ui_quit_request(&connection_id, &message);
                 let disposition =
                     self.handle_client_message_disposition(&connection_id, *message)?;
                 let close = match disposition {
@@ -1003,12 +1005,91 @@ impl Harness {
             && self.is_attached_socket_ui(connection_id)
     }
 
+    /// Apply the last-authenticated-UI rule without letting probes or pending
+    /// connections acquire session-lifetime authority.
+    pub(super) fn update_ui_disconnect_policy(&mut self) {
+        let any_ui = self.has_participating_ui_except(None);
+        self.ui_runtime.ever_attached |= any_ui;
+        if self.ui_runtime.exit_on_disconnect && self.ui_runtime.ever_attached && !any_ui {
+            self.ui_runtime.shutdown_requested = true;
+        }
+    }
+
+    /// Count only admitted UI participants, never probes or acknowledged exits.
+    fn has_participating_ui_except(&self, excluded: Option<&ConnectionId>) -> bool {
+        self.ui_runtime.client_writers.keys().any(|id| {
+            self.is_attached_socket_ui(id)
+                && Some(id) != excluded
+                && !self.ui_runtime.pending_socket_admission.contains(id)
+                && !self.ui_runtime.quitting_uis.contains(id)
+        })
+    }
+
+    /// Authoritative ordinary-quit classification for an admitted UI, shared by
+    /// execution and any read-only presentation of the current policy.
+    pub(super) fn ui_quit_disposition(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> tau_proto::UiQuitDisposition {
+        if self.ui_runtime.shutdown_requested
+            || (self.ui_runtime.exit_on_disconnect
+                && !self.has_participating_ui_except(Some(connection_id)))
+        {
+            tau_proto::UiQuitDisposition::Terminating
+        } else {
+            tau_proto::UiQuitDisposition::Detached
+        }
+    }
+
+    /// Atomically release one UI's participation and return the harness's
+    /// disposition. Explicit detach clears policy before any acknowledgment.
+    pub(super) fn handle_ui_quit_request(
+        &mut self,
+        connection_id: &ConnectionId,
+        message: &HarnessInputMessage,
+    ) {
+        let HarnessInputMessage::UiQuitRequest(request) = message else {
+            return;
+        };
+        if !self.is_attached_socket_ui(connection_id)
+            || self
+                .ui_runtime
+                .pending_socket_admission
+                .contains(connection_id)
+        {
+            return;
+        }
+        self.ui_runtime.ever_attached = true;
+        if request.detach {
+            self.ui_runtime.exit_on_disconnect = false;
+        }
+        let disposition = self.ui_quit_disposition(connection_id);
+        self.ui_runtime.quitting_uis.insert(connection_id.clone());
+        self.ui_runtime.shutdown_requested |=
+            disposition == tau_proto::UiQuitDisposition::Terminating;
+        let _ = self.runtime_io.bus.send_to(
+            connection_id,
+            None,
+            HarnessOutputMessage::UiQuitResult(tau_proto::UiQuitResult {
+                request_id: request.request_id.clone(),
+                disposition,
+            }),
+        );
+    }
+
     pub(super) fn handle_runtime_disconnect(
         &mut self,
         connection_id: ConnectionId,
         served_clients: &mut usize,
     ) -> Result<(), HarnessError> {
         let was_provider = self.is_provider_extension(&connection_id);
+        // Remember participation before removing the final UI; startup and
+        // runtime EOF can arrive before the next policy checkpoint.
+        self.ui_runtime.ever_attached |= self.is_attached_socket_ui(&connection_id)
+            && !self
+                .ui_runtime
+                .pending_socket_admission
+                .contains(&connection_id);
         let was_runtime_probe = self.ui_runtime.runtime_probe_peers.remove(&connection_id);
         let was_socket = self
             .runtime_io

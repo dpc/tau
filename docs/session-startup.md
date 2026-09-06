@@ -17,6 +17,18 @@ a new daemon for it. An unavailable attach target suggests `tau resume
 SESSION`; a missing resume target reports that no persisted session exists.
 Invalid session IDs fail before daemon startup.
 
+Plain `tau` and interactive `tau resume` enable automatic shutdown when the last
+UI disconnects. Thus `:quit` (or `:q`) normally terminates the session as a
+foreground program would. `:detach` deliberately keeps it running: the harness
+clears automatic shutdown before acknowledging the UI's departure. That choice
+survives every later reconnection and ordinary quit for this daemon's lifetime.
+An attached UI never rearms the policy. With multiple UIs, ordinary quit leaves
+the daemon alive until the last UI leaves, unless detach already disabled the
+policy. `:quit-session` always requests shutdown, including every attached UI.
+After terminal cleanup the UI prints `Session detached` or `Session terminated`
+to stderr according to the actual outcome. Failed or unconfirmed termination
+gets a diagnostic instead of a success line.
+
 `serve` is the foreground supervisor entrypoint for one fixed persisted session.
 It starts no terminal UI, remains alive across attachment
 disconnects, and publishes the ordinary runtime socket and metadata, so `tau

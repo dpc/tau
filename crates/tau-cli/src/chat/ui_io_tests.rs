@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{atomic as path_std_sync_atomic, mpsc};
 
 use tau_cli_term::RendererDeliveryId;
@@ -1408,30 +1410,119 @@ fn quit_session_command_sends_dedicated_request_frame() {
             tau_proto::UiShutdownRequest {},
         ))
     );
-    assert_eq!(
-        InputLoopExit::QuitSession.daemon_disposition(),
-        DaemonDisposition::WaitRequestedOwned
-    );
+    assert!(!InputLoopExit::QuitSession.detaches());
 }
 
-/// `:quit` and `:detach` are UI-local aliases. Neither writes a harness frame,
-/// and both leave the fixed-session daemon running.
+/// Command parsing must distinguish explicit detach from ordinary quit so the
+/// common teardown handshake can clear daemon policy before disconnecting.
 #[test]
-fn quit_and_detach_are_frame_free_local_exits() {
+fn detach_selects_policy_clearing_exit() {
     let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
     let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
 
     assert_eq!(
         handle_ui_detach_command_text(":detach"),
-        Some(InputLoopExit::Quit)
+        Some(InputLoopExit::Detach)
     );
-    assert_eq!(
-        InputLoopExit::Quit.daemon_disposition(),
-        DaemonDisposition::KeepRunning
-    );
+    assert!(!InputLoopExit::Quit.detaches());
+    assert!(InputLoopExit::Detach.detaches());
     drop(writer);
     let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
     assert_eq!(reader.read_message().expect("read EOF"), None);
+}
+
+/// UI teardown must send explicit detach before waiting for its authoritative
+/// reply; an ordinary quit uses the same exchange without clearing the policy.
+#[test]
+fn exit_handshake_distinguishes_detach_and_waits_for_authority() {
+    for (exit, detach) in [(InputLoopExit::Quit, false), (InputLoopExit::Detach, true)] {
+        let (ui, harness) = UnixStream::pair().expect("socket pair");
+        let writer = Arc::new(Mutex::new(UiWriter::new(ui, UiIoMeter::default())));
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness));
+            let Some(HarnessInputMessage::UiQuitRequest(request)) =
+                reader.read_message().expect("request")
+            else {
+                panic!("expected quit request");
+            };
+            assert_eq!(request.detach, detach);
+            // A stale reply from a timed-out request cannot decide this quit.
+            reply_tx
+                .send(tau_proto::UiQuitResult {
+                    request_id: "stale-quit".to_owned(),
+                    disposition: tau_proto::UiQuitDisposition::Terminating,
+                })
+                .expect("stale reply");
+            reply_tx
+                .send(tau_proto::UiQuitResult {
+                    request_id: request.request_id,
+                    disposition: tau_proto::UiQuitDisposition::Detached,
+                })
+                .expect("ack");
+        });
+        assert_eq!(
+            request_ui_quit(&writer, &reply_rx, exit.detaches()),
+            Some(tau_proto::UiQuitDisposition::Detached)
+        );
+        peer.join().expect("peer");
+    }
+}
+
+/// EOF or a failed acknowledgment channel cannot be upgraded into a successful
+/// detach decision by the UI.
+#[test]
+fn exit_handshake_without_acknowledgment_is_unconfirmed() {
+    let (ui, _harness) = UnixStream::pair().expect("socket pair");
+    let writer = Arc::new(Mutex::new(UiWriter::new(ui, UiIoMeter::default())));
+    let (tx, rx) = mpsc::channel();
+    drop(tx);
+    assert_eq!(request_ui_quit(&writer, &rx, true), None);
+    assert_eq!(
+        request_ui_exit(InputLoopExit::Quit, &writer, &rx, true),
+        None
+    );
+}
+
+/// A failed owned shutdown must not print the same success status as a clean
+/// process exit, even though the child has definitely stopped.
+#[test]
+fn failed_owned_daemon_exit_is_not_successful_termination() {
+    let mut child = Command::new("sh")
+        .args(["-c", "exit 9"])
+        .spawn()
+        .expect("spawn isolated failing child");
+    child.wait().expect("reap isolated child");
+    let daemon = DaemonHandle::Owned {
+        child: Some(child),
+        harness_path: PathBuf::from("unused-test-harness"),
+        initial_ui: None,
+    };
+    assert_eq!(
+        finish_daemon_for_exit(
+            Some(tau_proto::UiQuitDisposition::Terminating),
+            daemon,
+            None
+        ),
+        Err("daemon exited with an error"),
+    );
+}
+
+/// An attached UI without an exact process observer cannot certify termination
+/// merely because it sent a shutdown request or observed socket EOF.
+#[test]
+fn attached_exit_without_observer_is_unconfirmed() {
+    let daemon = DaemonHandle::Attached {
+        harness_path: PathBuf::from("unused-test-harness"),
+    };
+    assert!(
+        finish_daemon_for_exit(
+            Some(tau_proto::UiQuitDisposition::Terminating),
+            daemon,
+            None
+        )
+        .is_err()
+    );
 }
 
 /// Bare `:tree`'s production command boundary writes exactly one dedicated

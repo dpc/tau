@@ -71,9 +71,9 @@ impl DaemonHandle {
 
     /// Consume the handle without killing the child.
     ///
-    /// Used after every interactive UI exit: daemon lifetime belongs to its
-    /// immutable session or an explicit shutdown request rather than direct
-    /// client-process ownership. For `Owned` this
+    /// Used when the harness acknowledges survival or termination remains
+    /// unconfirmed. The harness's own lifetime policy controls ordinary EOF;
+    /// dropping this process handle never kills it. For `Owned` this
     /// `mem::forget`s the `Child` — on Linux its parent becomes init
     /// on our exit, which is exactly what we want for a long-lived
     /// daemon when policy keeps it running.
@@ -89,30 +89,32 @@ impl DaemonHandle {
     /// the child to exit.
     ///
     /// A child still running after `timeout` is detached so its harness-owned
-    /// cleanup may continue independently.
-    pub(crate) fn wait_requested_exit_or_leak(mut self, timeout: Duration) {
+    /// cleanup may continue independently. Returns a confirmed child exit
+    /// status, or `None` for an attached daemon, timeout, or wait failure.
+    pub(crate) fn wait_requested_exit_or_leak(
+        mut self,
+        timeout: Duration,
+    ) -> Option<std::process::ExitStatus> {
         let Self::Owned {
             child, initial_ui, ..
         } = &mut self
         else {
-            return;
+            return None;
         };
         drop(initial_ui.take());
-        let Some(mut child) = child.take() else {
-            return;
-        };
+        let mut child = child.take()?;
         let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => {
-                    return;
+                Ok(Some(status)) => {
+                    return Some(status);
                 }
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(OWNED_DAEMON_EXIT_CHECK_INTERVAL);
                 }
                 Ok(None) | Err(_) => {
                     std::mem::forget(child);
-                    return;
+                    return None;
                 }
             }
         }
@@ -129,8 +131,6 @@ impl Drop for DaemonHandle {
     }
 }
 
-/// Stops a CLI-owned daemon, preferring its normal disconnect cleanup while
-/// retaining a bounded forced-termination fallback.
 /// Resolves an explicit or interactively selected persisted session.
 pub(crate) fn resolve_resume_session_id(
     requested: Option<&tau_proto::SessionId>,

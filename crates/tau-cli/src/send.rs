@@ -119,7 +119,7 @@ fn event_for_test_line(session_id: &str, line: &str) -> Option<Event> {
 }
 
 fn event_for_line(session_id: &tau_proto::SessionId, text: &str) -> Option<Event> {
-    if text == ":quit" || text == ":quit-session" || text == ":detach" {
+    if matches!(text, ":quit" | ":q" | ":quit-session" | ":detach") {
         return None;
     }
     if text == ":cancel" {
@@ -190,6 +190,7 @@ fn valid_headless_noop(text: &str) -> bool {
     matches!(
         args.as_slice(),
         [":quit"
+            | ":q"
             | ":quit-session"
             | ":detach"
             | ":fast"

@@ -2013,6 +2013,27 @@ impl PtyChild {
         while self.output.try_recv().is_ok() {}
     }
 
+    /// Require exactly one final status after terminal cleanup, rather than a
+    /// status rendered inside the alternate screen or followed by cleanup
+    /// bytes.
+    fn assert_final_session_status(&mut self, expected: &str) {
+        self.wait_for_text(expected);
+        while let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(50)) {
+            self.accumulated_output.extend(bytes);
+        }
+        let output = String::from_utf8_lossy(&self.accumulated_output);
+        assert_eq!(
+            output.matches("Session detached").count()
+                + output.matches("Session terminated").count(),
+            1,
+            "{output}"
+        );
+        // Terminal feature-reset controls may precede the stderr line without
+        // moving the cursor. Nothing, including cleanup controls, may follow it.
+        assert!(output.trim_end().ends_with(expected), "{output}");
+        assert!(!output.contains("Session exit unconfirmed"), "{output}");
+    }
+
     /// Waits until terminal output after the last clear contains exact text.
     fn wait_for_text(&mut self, text: &str) {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2032,7 +2053,7 @@ impl PtyChild {
     }
 
     /// Requires the CLI to exit successfully within a tight lifecycle bound.
-    fn wait_success(mut self, state_home: &Path) {
+    fn wait_success(&mut self, state_home: &Path) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match self.child.try_wait().expect("query CLI process") {
@@ -2113,6 +2134,7 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
 
     owner.line(":detach");
     owner.wait_success(&environment.state_home);
+    owner.assert_final_session_status("Session detached");
     assert!(metadata.exists(), "detach removed live metadata");
     assert!(socket.exists(), "detach removed live socket");
 
@@ -2138,8 +2160,9 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
         attached.args(["attach", &session_id]);
         let mut attached = PtyChild::spawn(attached);
         environment.wait_for_ready_uis(cycle + 2);
-        attached.line(":detach");
+        attached.line([":quit", ":q", ":detach"][cycle]);
         attached.wait_success(&environment.state_home);
+        attached.assert_final_session_status("Session detached");
         assert!(metadata.exists(), "reattach cycle replaced daemon metadata");
         assert!(socket.exists(), "reattach cycle removed daemon socket");
     }
@@ -2151,6 +2174,7 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
     environment.wait_for_ready_uis(5);
     shutdown.line(":quit-session");
     shutdown.wait_success(&environment.state_home);
+    shutdown.assert_final_session_status("Session terminated");
     environment.wait_for_runtime_pair_gone(&metadata, &socket);
 }
 
@@ -2227,18 +2251,14 @@ fn session_discovery_crosses_pid_and_proc_namespaces() {
     environment.wait_for_runtime_pair_gone(&claim, &socket);
 }
 
-/// Ctrl-D closes only the owning UI; the fixed session remains available until
-/// an explicit attached UI requests canonical shutdown.
+/// Ctrl-D preserves the immediate-UI launch policy and must therefore stop the
+/// daemon rather than silently leaving a background session behind.
 #[test]
-fn owned_cli_eof_preserves_daemon_until_explicit_shutdown() {
+fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
     let environment = TestEnvironment::new();
     let mut owner = PtyChild::spawn(environment.command());
     let claim = environment.wait_for_metadata();
     environment.wait_for_ready_uis(1);
-    let claim_value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&claim).expect("read runtime claim"))
-            .expect("parse runtime claim");
-    let session_id = claim_value["session_id"].as_str().expect("session id");
     let socket = environment.socket_for_claim(&claim);
 
     owner
@@ -2247,15 +2267,64 @@ fn owned_cli_eof_preserves_daemon_until_explicit_shutdown() {
         .expect("write terminal EOF");
     owner.controller.flush().expect("flush terminal EOF");
     owner.wait_success(&environment.state_home);
-    assert!(claim.exists(), "EOF retired the live session claim");
-    assert!(socket.exists(), "EOF retired the live session socket");
+    owner.assert_final_session_status("Session terminated");
+    environment.wait_for_runtime_pair_gone(&claim, &socket);
+}
 
-    let mut attached = environment.command();
-    attached.args(["attach", session_id]);
-    let mut attached = PtyChild::spawn(attached);
+/// Both spellings of normal quit must make plain `tau` behave like a foreground
+/// program and report confirmed termination after restoring the terminal.
+#[test]
+fn owned_cli_quit_and_q_stop_the_session() {
+    for command in [":quit", ":q"] {
+        let environment = TestEnvironment::new();
+        let mut owner = PtyChild::spawn(environment.command());
+        let claim = environment.wait_for_metadata();
+        let socket = environment.socket_for_claim(&claim);
+        environment.wait_for_ready_uis(1);
+        owner.line(command);
+        owner.wait_success(&environment.state_home);
+        owner.assert_final_session_status("Session terminated");
+        environment.wait_for_runtime_pair_gone(&claim, &socket);
+    }
+}
+
+/// The policy follows the last UI, not creator ownership. The attached final
+/// quitter must confirm the original daemon's death without owning its Child.
+#[test]
+fn creator_quit_survives_until_last_attached_ui_quits() {
+    let environment = TestEnvironment::new();
+    let mut owner = PtyChild::spawn(environment.command());
+    let claim = environment.wait_for_metadata();
+    let socket = environment.socket_for_claim(&claim);
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&claim).expect("claim")).expect("claim JSON");
+    let session_id = value["session_id"].as_str().expect("session");
+    environment.wait_for_ready_uis(1);
+    let mut command = environment.command();
+    command.args(["attach", session_id]);
+    let mut attached = PtyChild::spawn(command);
     environment.wait_for_ready_uis(2);
-    attached.line(":quit-session");
+    owner.line(":quit");
+    owner.wait_success(&environment.state_home);
+    owner.assert_final_session_status("Session detached");
+    assert!(claim.exists());
+    attached.line(":q");
     attached.wait_success(&environment.state_home);
+    attached.assert_final_session_status("Session terminated");
+    environment.wait_for_runtime_pair_gone(&claim, &socket);
+}
+
+/// Abrupt creator loss cannot rely on a graceful quit request. The daemon must
+/// apply its final-UI EOF policy and clean discovery on its own.
+#[test]
+fn unexpected_initial_ui_process_loss_stops_session() {
+    let environment = TestEnvironment::new();
+    let mut owner = PtyChild::spawn(environment.command());
+    let claim = environment.wait_for_metadata();
+    let socket = environment.socket_for_claim(&claim);
+    environment.wait_for_ready_uis(1);
+    owner.child.kill().expect("kill isolated test UI");
+    owner.child.wait().expect("reap isolated test UI");
     environment.wait_for_runtime_pair_gone(&claim, &socket);
 }
 

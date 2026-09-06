@@ -76,6 +76,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         now: Instant,
     ) {
+        self.ui_runtime.quitting_uis.remove(connection_id);
         self.runtime_io
             .protocol_version_skew_warned
             .remove(connection_id);
