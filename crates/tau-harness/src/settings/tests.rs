@@ -443,6 +443,23 @@ fn extension_startup_timeout_defaults_and_overrides() {
     );
 }
 
+/// Ensures the disabled standard Zulip instance launches the separately
+/// installed executable without retaining the removed Tau component suffix.
+#[test]
+fn std_zulip_uses_external_executable_without_component_suffix() {
+    let builtins = builtin_extensions();
+    let zulip = builtins
+        .iter()
+        .find(|extension| extension.name == "std-zulip")
+        .expect("configured Zulip extension");
+
+    assert_eq!(zulip.command, ["tau-ext-zulip"]);
+    assert!(zulip.suffix.is_empty());
+    assert!(!zulip.enable);
+    assert_eq!(zulip.role.as_deref(), Some("tool"));
+    assert_eq!(zulip.config, serde_json::json!({}));
+}
+
 /// Ensures invalid per-extension readiness deadlines fail resolution rather
 /// than silently weakening or indefinitely extending startup availability.
 #[test]

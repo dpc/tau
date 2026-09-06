@@ -5,7 +5,13 @@ description: Use for Tau std-zulip setup, event queues, stream/topic and DM rout
 
 # Tau std-zulip extension self-knowledge
 
-`std-zulip` is Tau's disabled-by-default first-party Zulip bridge. It uses bot email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll `GET /api/v1/events`; it does not use webhooks.
+`std-zulip` is Tau's disabled-by-default configuration for the separately
+maintained `tau-ext-zulip` executable. Tau does not bundle or install that
+executable; install it separately and ensure `tau-ext-zulip` is available
+through `PATH` before enabling the instance. Tau still starts it through the
+normal supervised stdio extension route. The bridge uses bot email/API-key HTTP
+Basic authentication, `POST /api/v1/register`, and long-poll
+`GET /api/v1/events`; it does not use webhooks.
 
 Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_secret`, a nonempty numeric `allowed_user_ids`, optional sender aliases, optional `direct_messages: { receive: all_messages }`, optional `proactive_direct_messages` aliases with one fixed recipient each, and name-based stream/topic routes. Keep the identity key stable across API-key rotation; changing it deliberately starts a new opaque sender/conversation/message namespace. `allowed_user_ids` admits inbound senders only; it does not authorize proactive DMs. Routes independently select `receive: mentions_only|all_messages` and `proactive_send`; every configured channel name resolves to a private native ID before queue registration, and `all_messages` subscribes the bot idempotently before that registration without later unsubscribing. Exact proactive stream names remain the default, while `agent_chosen_topic: true` on a proactive name without `topic` explicitly grants agent topic choice within that configured channel. Production requires HTTPS.
 
@@ -47,4 +53,5 @@ or unavailable category and adds only the operation, HTTP status, and a
 or oversized codes show as `unknown`; no response message/body, request data,
 headers, URL data, or credentials appear.
 
-See `crates/tau-ext-zulip/README.md`, `SECURITY.md`, `testing.md`, and local specs for complete behavior.
+The separately maintained `tau-ext-zulip` project owns the complete operational,
+security, testing, architecture, and routing documentation.

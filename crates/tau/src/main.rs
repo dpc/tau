@@ -36,11 +36,6 @@ fn main() -> std::process::ExitCode {
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
-            name: "ext-zulip",
-            runner: tau_ext_zulip::run_stdio,
-            logging: tau_cli::ComponentLogging::RunnerManaged,
-        },
-        tau_cli::Component {
             name: "ext-std-notifications",
             runner: tau_ext_std_notifications::run_stdio,
             logging: tau_cli::ComponentLogging::RunnerManaged,

@@ -71,7 +71,7 @@
     },
     {
         name: "std-zulip",
-        suffix: ["component", "ext-zulip"],
+        command: ["tau-ext-zulip"],
         role: "tool",
         enable: false,
         config: {},

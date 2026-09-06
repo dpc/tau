@@ -138,6 +138,22 @@ timestamp; inspect the current following timeline with
 cannot recover the exact announced batch.
 
 
+## Zulip
+
+The separately maintained `std-zulip` instance is disabled by default. Tau does
+not bundle its source or executable: install `tau-ext-zulip` separately and
+ensure it is available through `PATH` before enabling the instance. The default
+configuration launches that executable through Tau's normal supervised stdio
+extension route.
+
+Tau retains the `std-zulip` instance name, empty default configuration,
+managed-secret delivery, per-instance state and checkpoint locations, publisher
+identity, tool prefixing, and role policy. Enabling the instance requires an
+explicit Zulip site, bot credentials, stable identity key, and route policy.
+Running a separate executable does not widen its ingress, reply, reaction,
+proactive-send, or catch-up authority.
+
+
 ## Tau Swarm
 
 The bundled `std-swarm` instance is disabled by default and optional

@@ -24,7 +24,6 @@ members = [
   "crates/tau-ext-utils",
   "crates/tau-ext-websearch",
   "crates/tau-ext-xmpp",
-  "crates/tau-ext-zulip",
   "crates/tau-harness",
   "crates/tau-harness-tools",
   "crates/tau-proto",
@@ -94,7 +93,6 @@ tau-ext-test-dummy = { package = "dpc-tau-ext-test-dummy", path = "crates/tau-ex
 tau-ext-utils = { package = "dpc-tau-ext-utils", path = "crates/tau-ext-utils" }
 tau-ext-websearch = { package = "dpc-tau-ext-websearch", path = "crates/tau-ext-websearch" }
 tau-ext-xmpp = { package = "dpc-tau-ext-xmpp", path = "crates/tau-ext-xmpp" }
-tau-ext-zulip = { package = "dpc-tau-ext-zulip", path = "crates/tau-ext-zulip" }
 tau-harness = { package = "dpc-tau-harness", path = "crates/tau-harness" }
 tau-harness-tools = { package = "dpc-tau-harness-tools", path = "crates/tau-harness-tools" }
 tau-proto = { package = "dpc-tau-proto", path = "crates/tau-proto", version = "0.1.0" }

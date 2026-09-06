@@ -1241,7 +1241,6 @@ dependencies = [
  "dpc-tau-ext-utils",
  "dpc-tau-ext-websearch",
  "dpc-tau-ext-xmpp",
- "dpc-tau-ext-zulip",
  "dpc-tau-harness",
  "dpc-tau-proto",
  "dpc-tau-socket",
@@ -1683,25 +1682,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xmpp-parsers",
-]
-
-[[package]]
-name = "dpc-tau-ext-zulip"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake3",
- "dpc-tau-client",
- "dpc-tau-core",
- "dpc-tau-proto",
- "fs2",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "url",
 ]
 
 [[package]]

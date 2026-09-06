@@ -204,8 +204,8 @@ See [Providers](docs/providers.md), [Agent roles](docs/agent-roles.md), and the
 
 ## Personal-information and messaging integrations
 
-First-party extensions connect Tau to services while keeping routing and
-authorization explicit:
+Tau extensions connect to services while keeping routing and authorization
+explicit:
 
 - **Email and calendars:** `std-pim` offers gated email reading and sending,
   calendar search and free/busy queries, approved calendar mutations, OAuth
@@ -220,11 +220,12 @@ authorization explicit:
   to explicitly registered agents. An experimental local gateway can own one
   bot's polling and route it to multiple Tau sidecars. See the
   [Telegram README](crates/tau-ext-telegram/README.md).
-- **Zulip:** the disabled-by-default bot bridge uses native event queues for
-  allowlisted direct messages and configured stream/topic routes, with
-  source-bound replies and reactions. A separate send-only mode can expose one
-  fixed proactive DM without registering any receive queue. See the
-  [Zulip README](crates/tau-ext-zulip/README.md).
+- **Zulip:** the separately maintained, disabled-by-default `tau-ext-zulip`
+  bridge uses native event queues for allowlisted direct messages and configured
+  stream/topic routes, with source-bound replies and reactions. A separate
+  send-only mode can expose one fixed proactive DM without registering any
+  receive queue. Install the executable separately and make it available through
+  `PATH` before enabling `std-zulip`.
 - **XMPP:** the disabled-by-default bridge supports fixed recipients or
   per-agent MUC rooms with allowlisted senders and TLS transport. See the
   [XMPP README](crates/tau-ext-xmpp/README.md).

@@ -1072,23 +1072,25 @@ bounded retry body.
 Slack-specific review triggers and failure/replay invariants are recorded in
 [`crates/tau-ext-slack/SECURITY.md`](crates/tau-ext-slack/SECURITY.md).
 
-The disabled-by-default Zulip bridge uses bot HTTP Basic authentication and
-native event-queue long polling. Exact numeric sender allowlists and configured
-DM or stream/topic policies gate ingress; separately configured proactive-DM
-aliases fix outbound recipient authority. Queue identifiers and native
-participant, stream, topic, and message routes remain extension-local authority;
-model tools accept only current configured aliases or bounded Tau-issued source
-references. Opt-in send-only mode declares only the send tool for one fixed
-proactive-DM alias and rejects every inbound route, allowlist, queue, reply,
-reaction, and catch-up surface. With the default
+The disabled-by-default `std-zulip` bridge is the separately installed
+`tau-ext-zulip` executable, supervised through Tau's normal trusted same-user
+stdio extension route. It uses bot HTTP Basic authentication and native
+event-queue long polling. Exact numeric sender allowlists and configured DM or
+stream/topic policies gate ingress; separately configured proactive-DM aliases
+fix outbound recipient authority. Queue identifiers and native participant,
+stream, topic, and message routes remain extension-local authority; model tools
+accept only current configured aliases or bounded Tau-issued source references.
+Opt-in send-only mode declares only the send tool for one fixed proactive-DM
+alias and rejects every inbound route, allowlist, queue, reply, reaction, and
+catch-up surface. With the default
 `offline_message_catch_up: false`, queue expiry
 reconnects at a fresh live tip and warns about a possible gap rather than
 fetching missed backlog. Opting into `offline_message_catch_up: true` uses the
 extension-local `CheckpointRuntime` to recover bounded newly created messages
 after its durable position. Successful sends report before
 their tool result, while ambiguous provider outcomes are not automatically
-retried. Zulip-specific review triggers are recorded in
-[`crates/tau-ext-zulip/SECURITY.md`](crates/tau-ext-zulip/SECURITY.md).
+retried. The separately maintained `tau-ext-zulip` project owns its detailed
+architecture, routing, testing, and security documentation.
 
 ## Standalone compaction recovery reliability
 

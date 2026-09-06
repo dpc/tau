@@ -14,6 +14,14 @@ Add deterministic feed/follow-snapshot fixtures when changing source selection;
 do not rely on a live Rostra broadcast because it is only a lossy wake hint.
 
 
+## Zulip bridge
+
+The separately maintained `tau-ext-zulip` project owns the bridge's hermetic
+fake-server, routing, checkpoint, publication-order, and standalone-process
+tests. Tau retains a focused settings oracle proving that disabled `std-zulip`
+selects the external `tau-ext-zulip` command with no Tau component suffix.
+
+
 ## Rendering themes
 
 Rendering and theme behavior tests should use artificial fixture themes with
