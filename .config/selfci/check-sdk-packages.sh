@@ -123,7 +123,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(1, 1));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(3, 0));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 EOF
