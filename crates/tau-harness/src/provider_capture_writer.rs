@@ -79,12 +79,14 @@ pub(crate) fn enqueue(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
-    let filename = ProviderDebugCaptureFilename::new(
+    let Some(filename) = ProviderDebugCaptureFilename::attributed(
         timestamp_micros,
-        &capture.agent_prompt_id,
+        &capture.attribution,
         capture.class,
-    );
-    let agent_prompt_id = capture.agent_prompt_id.clone();
+    ) else {
+        return;
+    };
+    let attribution = capture.attribution.clone();
     let job = CaptureWriteJob {
         session_dir,
         provider_instance,
@@ -109,12 +111,12 @@ pub(crate) fn enqueue(
         Ok(()) => {}
         Err(CaptureSubmitError::Full) => tracing::warn!(
             target: "tau_harness::provider_capture",
-            agent_prompt_id = %agent_prompt_id,
+            attribution = ?attribution,
             "provider capture writer queue is full; dropping capture"
         ),
         Err(CaptureSubmitError::Disconnected) => tracing::warn!(
             target: "tau_harness::provider_capture",
-            agent_prompt_id = %agent_prompt_id,
+            attribution = ?attribution,
             "provider capture writer stopped; dropping capture"
         ),
     }

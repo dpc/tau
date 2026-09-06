@@ -1333,7 +1333,9 @@ fn provider_debug_captures_are_not_logged() {
             tau_proto::ConnectionId::parse("provider").expect("connection"),
             HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
                 session_id: SessionId::parse("session").expect("session"),
-                agent_prompt_id: AgentPromptId::parse("prompt").expect("prompt"),
+                attribution: tau_proto::ProviderCaptureAttribution::Prompt(
+                    AgentPromptId::parse("prompt").expect("prompt"),
+                ),
                 class,
                 zstd: b"opaque-sensitive-capture".to_vec(),
             }),

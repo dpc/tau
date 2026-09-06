@@ -544,6 +544,8 @@ fn canceled_fresh_connect_releases_pool_reservation_at_every_boundary() {
 /// best-effort work skips without creating another socket.
 #[test]
 fn shared_prewarm_skips_busy_same_key_without_waiting() {
+    use crate::cache_diagnostic::tests as capture_tests;
+    use crate::cache_diagnostic::warm::WarmObservation;
     let (addr, _server) = spawn_fake_codex_server();
     let config = Arc::new(make_config(
         &format!("http://{addr}/backend-api"),
@@ -582,16 +584,27 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
                 session_id: &session_id,
                 agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
                 share_user_cache_key: false,
-                debug_provider_requests: false,
+                debug_provider_requests: true,
             };
             let mut abort = crate::NeverAbort;
-            let result = run_prewarm_through_shared_pool(
-                &pool,
-                &config,
-                "same-session",
-                &request,
-                &mut abort,
-            );
+            let mut observation =
+                WarmObservation::new(&request, None, true).expect("durable warm observation");
+            let (result, rows) = capture_tests::capture(|| {
+                let result = run_prewarm_through_shared_pool_observed(
+                    &pool,
+                    &config,
+                    "same-session",
+                    &request,
+                    &mut abort,
+                    Some(&mut observation),
+                );
+                observation.finish(&config, &result);
+                result
+            });
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["outcome"], "pre_dispatch_failure");
+            assert_eq!(rows[0]["dispatch_count"], 0);
+            assert!(rows[0]["agent_prompt_id"].is_null());
             tx.send(result.is_ok()).expect("send prewarm result");
         })
     };

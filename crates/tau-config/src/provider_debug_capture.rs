@@ -27,6 +27,37 @@ pub struct ProviderDebugCaptureFilename {
 }
 
 impl ProviderDebugCaptureFilename {
+    /// Construct an operation-only scalar filename, distinct from prompt
+    /// grammar.
+    #[must_use]
+    pub fn cache_operation(timestamp_micros: u128, id: tau_proto::CacheOperationId) -> Self {
+        Self {
+            basename: format!(
+                "{timestamp_micros}.cache-operation.{}.cache-diagnostic.json.zst",
+                id.to_hex()
+            ),
+        }
+    }
+
+    /// Validate the closed class/attribution pairing before choosing a
+    /// basename.
+    pub fn attributed(
+        timestamp_micros: u128,
+        attribution: &tau_proto::ProviderCaptureAttribution,
+        class: ProviderDebugCaptureClass,
+    ) -> Option<Self> {
+        if !attribution.permits(class) {
+            return None;
+        }
+        Some(match attribution {
+            tau_proto::ProviderCaptureAttribution::Prompt(id) => {
+                Self::new(timestamp_micros, id, class)
+            }
+            tau_proto::ProviderCaptureAttribution::CacheOperation(id) => {
+                Self::cache_operation(timestamp_micros, *id)
+            }
+        })
+    }
     /// Construct one timestamped basename from validated protocol identity.
     #[must_use]
     pub fn new(
@@ -46,6 +77,12 @@ impl ProviderDebugCaptureFilename {
     /// Parse an exact compressed provider capture basename.
     #[must_use]
     pub fn parse(basename: &str) -> Option<Self> {
+        if let Some((timestamp, rest)) = basename.split_once(".cache-operation.") {
+            let id = rest.strip_suffix(".cache-diagnostic.json.zst")?;
+            let id = tau_proto::CacheOperationId::parse(id)?;
+            let filename = Self::cache_operation(timestamp.parse().ok()?, id);
+            return (filename.as_str() == basename).then_some(filename);
+        }
         let stem = basename.strip_suffix(".json.zst")?;
         let (prefix, class) = [
             ProviderDebugCaptureClass::HttpSseRequest,

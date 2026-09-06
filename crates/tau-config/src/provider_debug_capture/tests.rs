@@ -78,3 +78,35 @@ fn filename_parser_rejects_unrelated_and_malformed_names() {
     let max = format!("{}-prompt-http-sse-request.json.zst", u128::MAX);
     assert!(ProviderDebugCaptureFilename::parse(&max).is_some());
 }
+/// Operation filenames use a separate grammar, never synthetic prompt IDs;
+/// canonical parsing and class pairing still bound managed cleanup discovery.
+#[test]
+fn operation_filename_roundtrip_and_class_rejection() {
+    let id = tau_proto::CacheOperationId::from_bytes([0xab; 16]);
+    let filename = super::ProviderDebugCaptureFilename::cache_operation(17, id);
+    assert_eq!(
+        super::ProviderDebugCaptureFilename::parse(filename.as_str()),
+        Some(filename.clone())
+    );
+    assert!(filename.as_str().starts_with("17.cache-operation."));
+    assert!(
+        super::ProviderDebugCaptureFilename::parse(&filename.as_str().replacen("17", "017", 1))
+            .is_none()
+    );
+    assert!(
+        super::ProviderDebugCaptureFilename::parse(
+            &filename
+                .as_str()
+                .replace("cache-diagnostic", "websocket-request")
+        )
+        .is_none()
+    );
+    assert!(
+        super::ProviderDebugCaptureFilename::attributed(
+            17,
+            &tau_proto::ProviderCaptureAttribution::CacheOperation(id),
+            tau_proto::ProviderDebugCaptureClass::WebsocketRequest
+        )
+        .is_none()
+    );
+}

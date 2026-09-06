@@ -223,14 +223,19 @@ most 64 records / 16 MiB including in-flight serialized data, with a 256-KiB
 per-record cap. Sequence holes and known-loss counters never prove complete
 capture history. Neither capture failures nor metadata observations affect
 provider execution, canonical accounting, or cache eligibility.
+Codex warm backend calls use scalar-only operation captures, with no prompt
+identity and no retained exact request/response. Their closed operation
+attribution is permitted only for cache diagnostics and uses a distinct managed
+filename. Backend completion is not authenticated refresh-terminal acceptance.
 Disabled-by-default cache refreshes resend an exact previously successful
 Provider-visible prefix. The harness keeps that content in process memory and
 sends refresh/cancel requests point-to-point only to the captured configured
 Provider generation. Sensitive requests are excluded from broadcast,
 interception, journals, replay, debug JSONL, generic Debug output, watchers, and
 UI projection. Content-free terminal reports and canonical facts may remain
-observable. Provider-specific private request capture can still contain the
-upstream refresh request when the operator separately enables that capture.
+observable. The Codex warm path receives the prefix through trusted directed IPC
+and sends it upstream, but retains no exact warm request or response capture.
+Its private scalar operation evidence does not retain prefix content.
 The distinct deterministic and live/VCR test-fixture boundaries are documented
 in [`tau-e2e-tests/SECURITY.md`](crates/tau-e2e-tests/SECURITY.md).
 The disabled-by-default test-dummy extension's capability and worker-lifecycle

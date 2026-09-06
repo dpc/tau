@@ -43,6 +43,11 @@ impl std::fmt::Debug for DiagnosticId {
 }
 
 impl DiagnosticId {
+    /// Project the same private random identity into operation capture
+    /// transport.
+    pub fn operation_id(self) -> tau_proto::CacheOperationId {
+        tau_proto::CacheOperationId::from_bytes(self.0)
+    }
     /// Generate 128 random bits; entropy failure disables this diagnostic.
     pub fn random() -> Option<Self> {
         let mut bytes = [0; 16];

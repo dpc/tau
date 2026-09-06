@@ -147,6 +147,11 @@ deadline. The shipped defaults are respectively `0/0/5000`,
 capture basename contract shared by provider writers and harness retention:
 canonical decimal microsecond timestamp, validated `AgentPromptId`, one valid
 transport/direction class, and exact compressed `.json.zst` extension.
+Operation-only scalar captures instead use
+`<micros>.cache-operation.<32-lowercase-hex>.cache-diagnostic.json.zst`.
+This distinct grammar never overloads a prompt identifier and rejects operation
+attribution for any other capture class. Both forms are canonical and share
+managed diagnostic retention.
 
 The recognized current classes include
 `responses-attempt-failure.json.zst` and `cache-diagnostic.json.zst`. They use the same eligibility, path

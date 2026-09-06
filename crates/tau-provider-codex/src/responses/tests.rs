@@ -704,7 +704,10 @@ fn debug_request_producer_submits_typed_compressed_capture_job() {
 
     let capture = submitted.expect("capture submitted");
     assert_eq!(capture.session_id(), &session_id);
-    assert_eq!(capture.agent_prompt_id().as_str(), "prompt-test");
+    assert_eq!(
+        capture.agent_prompt_id().expect("prompt capture").as_str(),
+        "prompt-test"
+    );
     assert_eq!(
         capture.class(),
         tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest

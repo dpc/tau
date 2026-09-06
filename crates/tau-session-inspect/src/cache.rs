@@ -225,7 +225,8 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                     "other_adapters": "unavailable",
                     "codex_standalone_compaction": "metadata",
                     "other_standalone_compaction": "unavailable",
-                    "cache_refresh": "unavailable",
+                    "codex_cache_refresh_backend": "metadata",
+                    "cache_refresh_owner_outcome": "unavailable",
                     "raw_attribution": "unavailable"
                 },
                 "snapshot_policy": "strict_finite_agent_prefix_membership_rechecked"

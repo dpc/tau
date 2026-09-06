@@ -214,13 +214,17 @@ Streaming readers reject a single encoded protocol message larger than 16 MiB
 before higher-level connection or activation queues receive it.
 
 Provider debug captures use the dedicated `provider_debug_capture` input
-message, not `Emit`. The message carries typed session/prompt attribution,
+message, not `Emit`. The message carries typed session attribution and a closed
+`Prompt(AgentPromptId)` or `CacheOperation(Id128)` attribution,
 capture class, and opaque zstd bytes. It is non-journaled, debug-redacted, and
 accepted only from an authenticated configured Provider; the harness owns path
 selection and never parses or decompresses the payload.
 The closed `cache_diagnostic` capture class adds only private scalar observations
 under this same opaque, best-effort transport. It creates no event, journal or
 canonical accounting fields.
+Operation attribution is allowed only for `cache_diagnostic`, not exact/raw
+classes. Its strictly validated lowercase-hex identity is private and has no
+prompt, routing or terminal authority; generic Debug redacts it.
 
 Provider-visible images are transport-neutral binary values attached to tool
 results, separate from message authorship. CBOR is the durable/IPC byte

@@ -244,6 +244,8 @@ Lifecycle-aware cache refresh requests arrive only through trusted configured
 extension IPC and can contain the complete previously sent prompt prefix. The
 built-in Provider does not log or rebroadcast that payload. It correlates
 cancellation by validated refresh id, applies a receipt-relative fail-safe
-deadline, and reports only a closed content-free status. Separately enabled
-private Provider request capture remains an explicit exception and may contain
-the exact upstream refresh request.
+deadline, and reports only a closed content-free status. The prompt prefix
+crosses trusted directed IPC and backend execution, but the Codex warm path
+retains no exact request or response capture. Its private scalar operation
+records omit that content and describe backend execution only, not authenticated
+refresh-terminal acceptance.

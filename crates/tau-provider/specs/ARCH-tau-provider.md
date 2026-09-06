@@ -17,7 +17,7 @@ selection constructs no carrier and takes no observation clock.
 The shared provider debug-capture writer accepts already-serialized request and
 response metadata through one bounded process-wide nonblocking FIFO. Its
 detached worker zstd-compresses records and synchronously flushes a dedicated
-non-journaled protocol message containing typed session/prompt attribution and
+non-journaled protocol message containing typed session and closed prompt/operation attribution and
 opaque bytes. The complete encoded message uses the shared 16 MiB protocol
 ceiling. Overload, compression/protocol failure, and process exit may omit
 captures. Capture compression and harness filesystem work remain detached from
@@ -34,6 +34,8 @@ abandoned and failed provider-side records increment a saturating known-loss
 counter. Harness-side loss remains unobserved. This budget does not change
 existing raw-capture limits. The executable supplies its existing build identity
 locally; no normal extension/configuration wire field is introduced.
+Operation captures use a separate constructor that admits only scalar metadata;
+they expose no prompt identity and cannot create a new raw-capture class.
 
 The harness authenticates the configured Provider instance, accepts only known
 durable-session attribution, derives

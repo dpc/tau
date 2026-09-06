@@ -3714,6 +3714,7 @@ where
                 runtime,
                 config,
                 request: prewarm,
+                refresh_id: None,
                 debug_provider_requests,
                 abort,
             });
@@ -3815,6 +3816,7 @@ where
                 runtime,
                 config,
                 request: refresh.prompt,
+                refresh_id: Some(refresh_id.clone()),
                 debug_provider_requests,
                 abort,
             });
@@ -5774,6 +5776,8 @@ struct PrewarmExecution {
     config: ResolvedConfig,
     /// Owned prefix request received from the harness.
     request: tau_proto::AgentPromptPrewarmRequested,
+    /// Existing refresh identity, absent for ordinary prompt prewarm.
+    refresh_id: Option<tau_proto::ProviderCacheRefreshId>,
     /// Whether this durable session permits provider request captures.
     debug_provider_requests: bool,
     /// Supervisor-owned cancellation source.
@@ -7616,6 +7620,7 @@ fn production_prewarm_executor() -> PrewarmExecutor {
             &execution.request,
             &execution.config,
             &execution.runtime,
+            execution.refresh_id.as_ref(),
             execution.debug_provider_requests,
             &mut execution.abort,
         )
@@ -8605,6 +8610,7 @@ fn handle_resolved_prewarm(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     config: &ResolvedConfig,
     codex_runtime: &CodexRuntime,
+    refresh_id: Option<&tau_proto::ProviderCacheRefreshId>,
     debug_provider_requests: bool,
     abort: &mut impl TurnAbort,
 ) -> tau_proto::ProviderCacheRefreshStatus {
@@ -8624,7 +8630,7 @@ fn handle_resolved_prewarm(
         debug_provider_requests,
     };
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
-    match codex_runtime.prewarm(config, session_id_str, &request, abort) {
+    match codex_runtime.prewarm_operation(config, session_id_str, &request, refresh_id, abort) {
         PrewarmOutcome::Installed => {
             tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm");
             tau_proto::ProviderCacheRefreshStatus::Succeeded

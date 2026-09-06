@@ -36,6 +36,8 @@ mod prompt_envelope;
 mod prompt_fragment;
 mod prompt_submission;
 mod provider_cache_policy;
+mod provider_capture_attribution;
+pub use provider_capture_attribution::{CacheOperationId, ProviderCaptureAttribution};
 mod provider_cache_privacy;
 mod provider_cache_quota;
 mod provider_cache_usage;

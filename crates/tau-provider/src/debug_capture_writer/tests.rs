@@ -33,8 +33,11 @@ fn cache_metadata_worker_retains_reservation_until_send_finishes() {
         .map(|_| Reservation::acquire().expect("reservation below bound"))
         .collect();
     let (sender, receiver) = mpsc::sync_channel(1);
-    let mut job = job("prompt", b"{}");
-    job.capture.class = tau_proto::ProviderDebugCaptureClass::CacheDiagnostic;
+    let mut job = CaptureJob::new(ProviderDebugCapture::cache_operation(
+        tau_proto::SessionId::parse("session-test").expect("session"),
+        tau_proto::CacheOperationId::from_bytes([0xab; 16]),
+        b"{}".to_vec(),
+    ));
     job.metadata_reservation = Some(reservation);
     assert!(sender.try_send(job).is_ok());
     drop(sender);
@@ -76,7 +79,14 @@ fn production_queue_bound_rejects_new_capture_without_blocking() {
         panic!("queue should reject the capture because it is full");
     };
     assert_eq!(rejected.capture.session_id.as_str(), "session-test");
-    assert_eq!(rejected.capture.agent_prompt_id.as_str(), "rejected");
+    assert_eq!(
+        rejected
+            .capture
+            .agent_prompt_id()
+            .expect("prompt capture")
+            .as_str(),
+        "rejected"
+    );
     assert_eq!(
         rejected.capture.class,
         tau_proto::ProviderDebugCaptureClass::HttpSseRequest
@@ -94,7 +104,12 @@ fn transport_failure_isolated_from_later_capture() {
     let attempted = Arc::new(Mutex::new(Vec::new()));
     let worker_attempted = Arc::clone(&attempted);
     run_worker(receiver, move |job| {
-        let prompt = job.capture.agent_prompt_id.as_str().to_owned();
+        let prompt = job
+            .capture
+            .agent_prompt_id()
+            .expect("prompt capture")
+            .as_str()
+            .to_owned();
         worker_attempted
             .lock()
             .expect("attempts")
@@ -124,7 +139,10 @@ fn compression_builds_opaque_attributed_protocol_message() {
         panic!("dedicated capture message");
     };
     assert_eq!(capture.session_id.as_str(), "session-test");
-    assert_eq!(capture.agent_prompt_id.as_str(), "prompt");
+    assert_eq!(
+        capture.attribution,
+        tau_proto::ProviderCaptureAttribution::Prompt("prompt".parse().expect("prompt"))
+    );
     assert_eq!(
         capture.class,
         tau_proto::ProviderDebugCaptureClass::HttpSseResponse
@@ -134,6 +152,33 @@ fn compression_builds_opaque_attributed_protocol_message() {
         json
     );
     assert!(!format!("{capture:?}").contains("secret"));
+}
+
+/// Operation capture preserves its random attribution through compression while
+/// exposing no prompt identity and retaining the metadata-only admission class.
+#[test]
+fn operation_compression_preserves_non_prompt_attribution() {
+    let id = tau_proto::CacheOperationId::from_bytes([0xab; 16]);
+    let capture = ProviderDebugCapture::cache_operation(
+        tau_proto::SessionId::parse("operation-session").expect("session"),
+        id,
+        b"{}".to_vec(),
+    );
+    assert!(capture.agent_prompt_id().is_none());
+    assert!(super::cache_capture_fits_bound(&capture));
+    let message = compressed_message(&CaptureJob::new(capture)).expect("compress");
+    let tau_proto::HarnessInputMessage::ProviderDebugCapture(capture) = message else {
+        panic!("dedicated capture");
+    };
+    assert_eq!(
+        capture.attribution,
+        tau_proto::ProviderCaptureAttribution::CacheOperation(id)
+    );
+    assert_eq!(
+        zstd::stream::decode_all(&capture.zstd[..]).expect("opaque decode"),
+        b"{}"
+    );
+    assert!(!format!("{capture:?}").contains(&id.to_hex()));
 }
 
 /// Proves the raw payload bound is inclusive at the established protocol

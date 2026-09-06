@@ -1793,6 +1793,9 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         capture: &tau_proto::ProviderDebugCapture,
     ) -> Option<(PathBuf, tau_proto::ExtensionName)> {
+        if !capture.attribution.permits(capture.class) {
+            return None;
+        }
         if capture.session_id != self.session_runtime.current_session_id {
             tracing::warn!(
                 source_id = %source_id,

@@ -592,6 +592,12 @@ validation/cancellation, compact-attempt ordinals, and absent exact-response
 capability without retaining raw compact output. The closed-writer oracle
 asserts identical attempted-enqueue correlation in exact and scalar request
 captures for both inference and compaction.
+Operation-capture protocol tests reject malformed IDs and raw-class pairing;
+filename, opaque writer and cleanup oracles pin the separate private operation
+grammar. Warm loopback tests cover backend success, repair, replacement-upgrade
+failure, null prompt/ordinals, existing versus random operation IDs, opt-out and
+pre-dispatch cancellation without extra provider traffic. The busy-pool oracle
+retains reservation ownership and records a zero-dispatch backend summary.
 The shared opaque writer and retention tests exercise the new class without
 parsing it. Stage-1 inventory tests recognize it while preserving unavailable
 analysis rather than treating file counts as attempts.

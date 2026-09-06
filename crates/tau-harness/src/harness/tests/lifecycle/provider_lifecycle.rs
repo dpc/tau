@@ -21,7 +21,9 @@ fn provider_capture_rejects_another_existing_session() {
     path_std_fs::create_dir_all(&other_session_dir).expect("other durable session");
     let capture = tau_proto::ProviderDebugCapture {
         session_id: test_session_id("s2"),
-        agent_prompt_id: tau_proto::AgentPromptId::parse("other-prompt").expect("prompt"),
+        attribution: tau_proto::ProviderCaptureAttribution::Prompt(
+            tau_proto::AgentPromptId::parse("other-prompt").expect("prompt"),
+        ),
         class: tau_proto::ProviderDebugCaptureClass::HttpSseResponse,
         zstd: vec![1, 2, 3],
     };
@@ -409,7 +411,9 @@ fn provider_capture_target_requires_durable_storage() {
             .expect("ready provider");
         let capture = tau_proto::ProviderDebugCapture {
             session_id: test_session_id("s1"),
-            agent_prompt_id: tau_proto::AgentPromptId::parse("prompt").expect("prompt"),
+            attribution: tau_proto::ProviderCaptureAttribution::Prompt(
+                tau_proto::AgentPromptId::parse("prompt").expect("prompt"),
+            ),
             class: tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
             zstd: vec![1],
         };
@@ -439,7 +443,9 @@ fn provider_capture_target_rejects_unknown_or_unauthorized_attribution() {
         .expect("ready provider");
     let capture = tau_proto::ProviderDebugCapture {
         session_id: test_session_id("s1"),
-        agent_prompt_id: tau_proto::AgentPromptId::parse("prompt").expect("prompt"),
+        attribution: tau_proto::ProviderCaptureAttribution::Prompt(
+            tau_proto::AgentPromptId::parse("prompt").expect("prompt"),
+        ),
         class: tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
         zstd: vec![1],
     };
@@ -473,6 +479,23 @@ fn provider_capture_target_rejects_unknown_or_unauthorized_attribution() {
         .get_mut(&provider)
         .expect("entry")
         .state = ExtensionState::Ready;
+    let mut operation = capture.clone();
+    operation.attribution = tau_proto::ProviderCaptureAttribution::CacheOperation(
+        tau_proto::CacheOperationId::from_bytes([0xab; 16]),
+    );
+    assert!(
+        harness
+            .provider_debug_capture_target(&provider, &operation)
+            .is_none(),
+        "operation attribution cannot authorize raw captures"
+    );
+    operation.class = tau_proto::ProviderDebugCaptureClass::CacheDiagnostic;
+    assert!(
+        harness
+            .provider_debug_capture_target(&provider, &operation)
+            .is_some(),
+        "authenticated durable scalar operation capture has no prompt requirement"
+    );
     let unknown = tau_proto::ProviderDebugCapture {
         session_id: test_session_id("unknown"),
         ..capture

@@ -60,6 +60,7 @@ use super::{
     load_provider_stream_cassette_candidates, projected_retained_state_bytes,
     record_provider_raw_event_after, stream_idle_timeout_error,
 };
+use crate::cache_diagnostic::warm::WarmObservation;
 use crate::common::{LlmError, PromptPayload, StreamState};
 use crate::decoded_event::DecodedEvent;
 use crate::responses::ws_runtime;
@@ -764,7 +765,9 @@ impl WsConn {
                         reasoning_selector: envelope.body.reasoning.as_ref().and_then(|r| r.effort),
                         service_tier: envelope.body.service_tier,
                     },
-                    correlation,
+                    correlation.repair_used,
+                    correlation.repair_reason,
+                    correlation.connection_state,
                 ),
             })
         });
@@ -866,6 +869,18 @@ impl WsConn {
         abort: &mut impl TurnAbort,
         deadline: Option<Instant>,
     ) -> Result<StreamState, LlmError> {
+        self.run_prewarm_observed(config, request, abort, deadline, None)
+    }
+
+    /// Retain only scalar observations at the unchanged warm enqueue boundary.
+    pub(crate) fn run_prewarm_observed(
+        &mut self,
+        config: &ResponsesConfig,
+        request: &PromptPayload<'_>,
+        abort: &mut impl TurnAbort,
+        deadline: Option<Instant>,
+        observation: Option<&mut WarmObservation>,
+    ) -> Result<StreamState, LlmError> {
         let envelope = build_ws_envelope(config, request, None, Some(false));
         let baseline_shape = prewarm_shape(&envelope);
         let response_timeout = deadline
@@ -877,11 +892,34 @@ impl WsConn {
                 "websocket prewarm response timeout".to_owned(),
             ));
         }
-        let state = self.run_envelope_with_timeouts(
+        let dispatch = observation.as_ref().map(|observation| {
+            if self.diagnostic_epoch.is_none() {
+                self.diagnostic_epoch = next_diagnostic_epoch();
+            }
+            observation.dispatch(
+                config,
+                request,
+                crate::cache_diagnostic::RequestShape {
+                    input_count: envelope.body.input.len(),
+                    previous_response_present: envelope.body.previous_response_id.is_some(),
+                    anchor_was_available: false,
+                    connection_epoch: self.diagnostic_epoch,
+                    reasoning_selector: envelope.body.reasoning.as_ref().and_then(|r| r.effort),
+                    service_tier: envelope.body.service_tier,
+                },
+            )
+        });
+        let mut on_dispatch = |bytes| {
+            if let Some(dispatch) = &dispatch {
+                dispatch.dispatched(bytes);
+            }
+        };
+        let mut parsed = false;
+        let result = self.run_envelope_with_timeouts(
             "<prewarm>",
             &envelope,
             EnvelopeExecution {
-                on_transport_dispatch: None,
+                on_transport_dispatch: Some(&mut on_dispatch),
                 after_transport_dispatch: None,
                 recording_stream: None,
                 evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
@@ -893,9 +931,15 @@ impl WsConn {
             },
             abort,
             &mut |_| {},
-            &mut |_| {},
+            &mut |state| {
+                parsed |= state.has_semantic_progress();
+            },
             &mut None,
-        )?;
+        );
+        if let Some(observation) = observation {
+            observation.progress(parsed);
+        }
+        let state = result?;
         self.cached_response_anchor = None;
         self.prewarm_baseline = state.response_id.clone().map(|response_id| {
             Box::new(PrewarmBaseline {

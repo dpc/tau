@@ -17,8 +17,8 @@ const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 pub struct ProviderDebugCapture {
     /// Validated durable-session identity.
     session_id: tau_proto::SessionId,
-    /// Validated prompt identity retained in the basename.
-    agent_prompt_id: tau_proto::AgentPromptId,
+    /// Closed prompt or private operation attribution retained in the basename.
+    attribution: tau_proto::ProviderCaptureAttribution,
     /// Valid transport/direction class.
     class: ProviderDebugCaptureClass,
     /// Uncompressed serialized JSON metadata.
@@ -36,7 +36,7 @@ impl ProviderDebugCapture {
     ) -> Self {
         Self {
             session_id,
-            agent_prompt_id,
+            attribution: tau_proto::ProviderCaptureAttribution::Prompt(agent_prompt_id),
             class,
             json,
         }
@@ -48,10 +48,28 @@ impl ProviderDebugCapture {
         &self.session_id
     }
 
-    /// Return the validated prompt identity.
+    /// Construct a scalar operation capture without inventing a prompt
+    /// identity.
+    pub fn cache_operation(
+        session_id: tau_proto::SessionId,
+        operation_id: tau_proto::CacheOperationId,
+        json: Vec<u8>,
+    ) -> Self {
+        Self {
+            session_id,
+            attribution: tau_proto::ProviderCaptureAttribution::CacheOperation(operation_id),
+            class: ProviderDebugCaptureClass::CacheDiagnostic,
+            json,
+        }
+    }
+
+    /// Return existing prompt attribution; operation captures have none.
     #[must_use]
-    pub fn agent_prompt_id(&self) -> &tau_proto::AgentPromptId {
-        &self.agent_prompt_id
+    pub fn agent_prompt_id(&self) -> Option<&tau_proto::AgentPromptId> {
+        match &self.attribution {
+            tau_proto::ProviderCaptureAttribution::Prompt(id) => Some(id),
+            tau_proto::ProviderCaptureAttribution::CacheOperation(_) => None,
+        }
     }
 
     /// Return the valid transport/direction class.
@@ -133,14 +151,14 @@ fn submit(job: CaptureJob) {
         Err(mpsc::TrySendError::Full(job)) => {
             tracing::warn!(
                 target: "tau_provider::debug_capture_writer",
-                agent_prompt_id = %job.capture.agent_prompt_id,
+                attribution = ?job.capture.attribution,
                 "provider debug capture queue is full; dropping capture"
             );
         }
         Err(mpsc::TrySendError::Disconnected(job)) => {
             tracing::warn!(
                 target: "tau_provider::debug_capture_writer",
-                agent_prompt_id = %job.capture.agent_prompt_id,
+                attribution = ?job.capture.attribution,
                 "provider debug capture worker stopped; dropping capture"
             );
         }
@@ -202,7 +220,7 @@ pub fn submit_provider_debug_capture(capture: ProviderDebugCapture) {
     if !capture_fits_raw_bound(&capture) {
         tracing::warn!(
             target: "tau_provider::debug_capture_writer",
-            agent_prompt_id = %capture.agent_prompt_id,
+            attribution = ?capture.attribution,
             json_bytes = capture.json.len(),
             "provider debug capture exceeds the protocol bound; dropping capture"
         );
@@ -247,7 +265,7 @@ fn run_worker(
         if let Err(error) = write(&job) {
             tracing::warn!(
                 target: "tau_provider::debug_capture_writer",
-                agent_prompt_id = %job.capture.agent_prompt_id,
+                attribution = ?job.capture.attribution,
                 %error,
                 "failed to send compressed provider debug capture"
             );
@@ -271,7 +289,7 @@ fn compressed_message(job: &CaptureJob) -> io::Result<tau_proto::HarnessInputMes
     let message =
         tau_proto::HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
             session_id: job.capture.session_id.clone(),
-            agent_prompt_id: job.capture.agent_prompt_id.clone(),
+            attribution: job.capture.attribution.clone(),
             class: job.capture.class,
             zstd,
         });

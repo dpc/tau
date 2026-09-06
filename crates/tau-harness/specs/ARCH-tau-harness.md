@@ -332,7 +332,7 @@ rename parents have synchronized the detached staging boundary; successful
 recursive removal synchronizes the staging parent again.
 
 Opaque Provider debug captures arrive through a dedicated non-event protocol
-message with Provider-supplied session/prompt attribution. The harness accepts
+message with Provider-supplied session and closed prompt/operation attribution. The harness accepts
 them only from the current authenticated Provider connection and a known
 durable session, derives the configured-instance path itself, and queues exact
 zstd bytes on a bounded filesystem worker without parsing or decompression.
@@ -341,6 +341,9 @@ session roots, overload, failures, and shutdown omit the best-effort artifact.
 The writer creates capture directories with owner-only access and capture files
 with owner read/write access, tightening existing capture-directory modes before
 each write.
+Operation attribution is accepted only for the scalar cache-diagnostic class and
+uses the separate managed operation filename grammar. It does not fabricate a
+prompt association, change lifecycle authority, or permit raw operation capture.
 
 Live provider retry updates may carry bounded provider detail, but the
 non-authoritative `events.jsonl` projection replaces it with only retry

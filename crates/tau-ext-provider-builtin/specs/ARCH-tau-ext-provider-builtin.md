@@ -73,8 +73,16 @@ inference. Native Codex standalone compaction also has scalar coverage.
 Credential reload and subsequent initialization cannot change this selection.
 It does not disable or opt in existing default-on exact captures. Public
 Responses forwards its owner-supplied provider attempt only as local diagnostic
-correlation; public Responses and Chat Completions local-summary compaction remain excluded. Other adapters,
-prewarm and cache refresh remain unsupported for scalar cache diagnostics.
+correlation; public Responses and Chat Completions local-summary compaction remain excluded.
+Entered Codex prewarm/cache-refresh backend calls have scalar operation coverage:
+prompt attribution and logical/harness-attempt ordinals are null, both exact-body
+capabilities are false, and available parsed counters never become canonical usage.
+Explicit refresh preserves its existing operation ID through local worker inputs;
+ordinary prewarm receives a random operation-local ID. The summary follows the
+backend result after socket publication, not a later worker deadline override or
+authenticated harness terminal. Pre-backend profile/cooldown/supervisor rejections
+and other adapters remain outside coverage. These observations do not change
+refresh eligibility, preemption, scheduling, repair or lifecycle authority.
 The executable passes its existing build identity in process, never through
 prompt/configuration IPC.
 

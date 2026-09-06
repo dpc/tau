@@ -7435,7 +7435,9 @@ fn extension_data_debug_redacts_secret_payload_bytes() {
 fn provider_capture_round_trips_with_redacted_debug() {
     let message = crate::HarnessInputMessage::ProviderDebugCapture(crate::ProviderDebugCapture {
         session_id: crate::SessionId::parse("session").expect("session"),
-        agent_prompt_id: crate::AgentPromptId::parse("prompt").expect("prompt"),
+        attribution: crate::ProviderCaptureAttribution::Prompt(
+            crate::AgentPromptId::parse("prompt").expect("prompt"),
+        ),
         class: crate::ProviderDebugCaptureClass::CompactHttpFailure,
         zstd: b"raw-sensitive-bytes".to_vec(),
     });

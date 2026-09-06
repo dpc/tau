@@ -385,7 +385,10 @@ snapshot even on later failure, without merging, summing or normalizing repeated
 usage members. Its cache counters follow exact-route compatibility selection;
 its local-summary compaction also retains exact captures only.
 Per-item attribution, other adapters
-and cache refresh remain unsupported. `tau agent/session cache`
+remain unsupported. Entered Codex warm backend calls have scalar-only
+`cache_refresh` records: prompt/attempt ordinals are null, exact bodies are not
+retained, and backend outcomes are distinct from worker/harness refresh status.
+`tau agent/session cache`
 recognizes the new files but does not yet join or analyze their scalar records;
 it reports that analysis as unavailable. See `docs/agent-cache.md`.
 

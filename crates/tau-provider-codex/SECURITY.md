@@ -108,6 +108,11 @@ allowlisted raw usage, never provider IDs, routes, headers, error prose or body
 content. Missing eligibility and unsupported attribution remain unavailable.
 Normal inference, retry/repair, cancellation, billing and canonical accounting
 have no dependence on metadata admission or delivery.
+Entered non-generating warm calls similarly retain only operation-scoped scalar
+evidence. No prompt or retry ordinal is fabricated, no exact warm bodies are
+captured, and backend outcome never becomes refresh eligibility or owner-terminal
+authority. Worker deadline overrides and stale-terminal filtering remain outside
+this diagnostic boundary.
 
 Raw provider captures are private sensitive test artifacts and may contain
 prompts, credentials, identifiers, reasoning, tool output, or host paths. They

@@ -1109,13 +1109,41 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> PrewarmOutcome {
-        match responses::pool::run_prewarm_through_shared_pool(
+        self.prewarm_operation(config, session_id, request, None, abort)
+    }
+
+    /// Observe an entered warm backend call without claiming prompt or
+    /// owner-terminal attribution. Explicit refresh supplies its existing
+    /// operation identity.
+    pub fn prewarm_operation(
+        &self,
+        config: &ResolvedConfig,
+        session_id: &str,
+        request: &Prompt<'_>,
+        refresh_id: Option<&tau_proto::ProviderCacheRefreshId>,
+        abort: &mut impl TurnAbort,
+    ) -> PrewarmOutcome {
+        let metadata_enabled = self
+            .cache_diagnostics
+            .get_or_init(BTreeMap::new)
+            .get(&config.wire().profile_namespace)
+            .copied()
+            .unwrap_or_default()
+            == CacheDiagnostics::Metadata;
+        use cache_diagnostic::warm::WarmObservation;
+        let mut observation = WarmObservation::new(request, refresh_id, metadata_enabled);
+        let result = responses::pool::run_prewarm_through_shared_pool_observed(
             &self.ws_pool,
             config.wire(),
             session_id,
             request,
             abort,
-        ) {
+            observation.as_mut(),
+        );
+        if let Some(observation) = observation {
+            observation.finish(config.wire(), &result);
+        }
+        match result {
             Ok(Some(_)) => PrewarmOutcome::Installed,
             Ok(None) => PrewarmOutcome::SkippedBusy,
             Err(common::LlmError::Canceled) => PrewarmOutcome::Canceled,

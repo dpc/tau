@@ -1944,7 +1944,8 @@ fn cache_report_projects_only_canonical_facts_and_preserves_unknowns() {
             "other_adapters": "unavailable",
             "codex_standalone_compaction": "metadata",
             "other_standalone_compaction": "unavailable",
-            "cache_refresh": "unavailable",
+            "codex_cache_refresh_backend": "metadata",
+            "cache_refresh_owner_outcome": "unavailable",
             "raw_attribution": "unavailable"
         })
     );

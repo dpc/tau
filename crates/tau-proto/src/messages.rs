@@ -1430,8 +1430,8 @@ pub enum ProviderDebugCaptureClass {
 pub struct ProviderDebugCapture {
     /// Durable session identity copied from the harness dispatch.
     pub session_id: SessionId,
-    /// Prompt correlation copied from the harness dispatch.
-    pub agent_prompt_id: crate::AgentPromptId,
+    /// Prompt correlation or a private operation identity with no prompt claim.
+    pub attribution: crate::ProviderCaptureAttribution,
     /// Typed transport and direction used in the harness-owned filename.
     pub class: ProviderDebugCaptureClass,
     /// Opaque zstd bytes. The harness never parses or decompresses this value.
@@ -1444,7 +1444,7 @@ impl fmt::Debug for ProviderDebugCapture {
         formatter
             .debug_struct("ProviderDebugCapture")
             .field("session_id", &self.session_id)
-            .field("agent_prompt_id", &self.agent_prompt_id)
+            .field("attribution", &self.attribution)
             .field("class", &self.class)
             .field("zstd_len", &self.zstd.len())
             .finish()

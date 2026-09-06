@@ -1861,7 +1861,7 @@ fn debug_capture_producers_submit_typed_http_sse_jobs() {
     let mut submitted = Vec::new();
     let mut record = |capture: tau_provider::debug_capture_writer::ProviderDebugCapture| {
         assert_eq!(capture.session_id(), &prompt.session_id);
-        assert_eq!(capture.agent_prompt_id(), &prompt.agent_prompt_id);
+        assert_eq!(capture.agent_prompt_id(), Some(&prompt.agent_prompt_id));
         submitted.push((
             capture.class(),
             serde_json::from_slice::<serde_json::Value>(capture.json()).expect("capture JSON"),

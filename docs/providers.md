@@ -16,7 +16,7 @@ default in provider profiles; `"off"` disables only scalar cache observations
 after restart. Exact request/response capture remains default-on for durable
 activity. Scalar capture uses existing private storage and diagnostic retention
 and does not alter prompts, provider traffic, retries or accounting. Other
-adapters, public local-summary compaction, prewarm/cache refresh and per-item attribution are not yet
+adapters, public local-summary compaction and per-item attribution are not yet
 supported. See [Private runtime metadata](agent-cache.md#private-runtime-metadata).
 
 Tau keeps each backend's provider-visible request meaning stable whenever only

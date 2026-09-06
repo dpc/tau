@@ -12,6 +12,23 @@ use crate::attempt_context::AttemptOperation;
 
 #[cfg(test)]
 pub(crate) mod tests;
+pub(crate) mod warm;
+
+/// Distinguishes actual prompt attribution from non-generating operation
+/// identity.
+enum CaptureScope {
+    /// Existing prompt and finite ordinal supplied to inference or compaction.
+    Prompt {
+        /// Actual prompt identity, not a fabricated refresh prompt.
+        prompt_id: tau_proto::AgentPromptId,
+        /// Existing finite-attempt ordinal.
+        logical_attempt: u64,
+        /// Adapter-selected prompt operation.
+        operation: AttemptOperation,
+    },
+    /// Refresh ID supplied by its owner, or random ordinary-prewarm identity.
+    Warm(String),
+}
 
 /// Capture-local lifetime of one finite inference or compaction attempt.
 pub(crate) struct CacheAttempt {
@@ -23,12 +40,8 @@ pub(crate) struct CacheAttempt {
     session_id: tau_proto::SessionId,
     /// Existing typed agent attribution.
     agent_id: tau_proto::AgentId,
-    /// Existing typed prompt attribution, also the operation identity.
-    prompt_id: tau_proto::AgentPromptId,
-    /// Existing finite-attempt ordinal, not a harness retry counter.
-    logical_attempt: u64,
-    /// Existing adapter operation; never inferred from prompt content.
-    operation: AttemptOperation,
+    /// Operation ownership, without inventing a prompt or finite retry ordinal.
+    scope: CaptureScope,
     /// Metadata selection independent of existing exact captures.
     enabled: bool,
     /// Monotonic attempt entry observation.
@@ -60,9 +73,11 @@ impl CacheAttempt {
             run_id: tau_provider::cache_diagnostic::producer_run_id()?,
             session_id: request.session_id.clone(),
             agent_id: request.agent_id.clone(),
-            prompt_id: tau_proto::AgentPromptId::parse(prompt_id).ok()?,
-            logical_attempt,
-            operation: AttemptOperation::Inference,
+            scope: CaptureScope::Prompt {
+                prompt_id: tau_proto::AgentPromptId::parse(prompt_id).ok()?,
+                logical_attempt,
+                operation: AttemptOperation::Inference,
+            },
             enabled,
             started: Instant::now(),
             dispatched: AtomicU64::new(0),
@@ -71,8 +86,35 @@ impl CacheAttempt {
 
     /// Select native compaction without changing its existing attempt ordinal.
     pub(crate) fn standalone_compaction(mut self) -> Self {
-        self.operation = AttemptOperation::Compact;
+        if let CaptureScope::Prompt { operation, .. } = &mut self.scope {
+            *operation = AttemptOperation::Compact;
+        }
         self
+    }
+
+    /// Start metadata-only warm execution; there is no exact-capture baseline.
+    fn warm(
+        request: &crate::Prompt<'_>,
+        refresh_id: Option<&tau_proto::ProviderCacheRefreshId>,
+        enabled: bool,
+    ) -> Option<Self> {
+        if !enabled || !request.debug_provider_requests {
+            return None;
+        }
+        let operation_id = match refresh_id {
+            Some(id) => id.as_str().to_owned(),
+            None => DiagnosticId::random()?.operation_id().to_hex(),
+        };
+        Some(Self {
+            id: DiagnosticId::random()?,
+            run_id: tau_provider::cache_diagnostic::producer_run_id()?,
+            session_id: request.session_id.clone(),
+            agent_id: request.agent_id.clone(),
+            scope: CaptureScope::Warm(operation_id),
+            enabled,
+            started: Instant::now(),
+            dispatched: AtomicU64::new(0),
+        })
     }
 
     /// Return attempted dispatches, not checkout/lowering or accepted-send
@@ -83,23 +125,40 @@ impl CacheAttempt {
 
     /// Allocate common metadata after reserving capacity.
     fn common(&self, reservation: &Reservation, kind: &'static str) -> Value {
+        let (prompt_id, logical_attempt, operation, operation_id, exact_request, exact_response) =
+            match &self.scope {
+                CaptureScope::Prompt {
+                    prompt_id,
+                    logical_attempt,
+                    operation,
+                } => (
+                    Some(prompt_id),
+                    Some(*logical_attempt),
+                    if *operation == AttemptOperation::Inference {
+                        "inference"
+                    } else {
+                        "standalone_compaction"
+                    },
+                    prompt_id.as_str(),
+                    true,
+                    *operation == AttemptOperation::Inference,
+                ),
+                CaptureScope::Warm(id) => (None, None, "cache_refresh", id.as_str(), false, false),
+            };
         json!({
             "schema": "tau.cache_diagnostic", "schema_version": 0,
             "producer_build": tau_provider::cache_diagnostic::producer_build(),
             "record_kind": kind, "producer_run_id": self.run_id,
             "record_seq": reservation.sequence(), "attempt_id": self.id,
             "session_id": self.session_id, "agent_id": self.agent_id,
-            "agent_prompt_id": self.prompt_id, "operation": match self.operation {
-                AttemptOperation::Inference => "inference",
-                AttemptOperation::Compact => "standalone_compaction",
-            },
-            "operation_id": self.prompt_id, "logical_attempt": self.logical_attempt,
+            "agent_prompt_id": prompt_id, "operation": operation,
+            "operation_id": operation_id, "logical_attempt": logical_attempt,
             "harness_provider_attempt": null,
             "recorded_at_unix_micros": micros(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()),
             "elapsed_us_since_attempt_start": micros(self.started.elapsed()),
             "dropped_records_total": reservation.dropped_records_total(),
-            "capabilities": {"exact_request": true,
-                "exact_response": self.operation == AttemptOperation::Inference,
+            "capabilities": {"exact_request": exact_request,
+                "exact_response": exact_response,
                 "raw_attribution": false, "chain_facts": true},
             "malformed_fields": [], "omitted_identity_fields": []
         })
@@ -228,15 +287,20 @@ impl CacheAttempt {
         let Ok(json) = serde_json::to_vec(&record) else {
             return;
         };
-        tau_provider::debug_capture_writer::submit_cache_diagnostic(
-            ProviderDebugCapture::new(
+        let capture = match &self.scope {
+            CaptureScope::Prompt { prompt_id, .. } => ProviderDebugCapture::new(
                 self.session_id.clone(),
-                self.prompt_id.clone(),
+                prompt_id.clone(),
                 ProviderDebugCaptureClass::CacheDiagnostic,
                 json,
             ),
-            reservation,
-        );
+            CaptureScope::Warm(_) => ProviderDebugCapture::cache_operation(
+                self.session_id.clone(),
+                self.id.operation_id(),
+                json,
+            ),
+        };
+        tau_provider::debug_capture_writer::submit_cache_diagnostic(capture, reservation);
     }
 }
 
@@ -330,7 +394,9 @@ pub(crate) fn dispatch_fields(
     config: &crate::responses::ResponsesConfig,
     request: &crate::Prompt<'_>,
     shape: RequestShape,
-    correlation: &crate::attempt_failure::DispatchCorrelation,
+    repair_used: bool,
+    repair_reason: &'static str,
+    connection_state: &'static str,
 ) -> Value {
     let mut omitted = Vec::new();
     let model = identity(
@@ -347,13 +413,13 @@ pub(crate) fn dispatch_fields(
         "tool_choice": request.tool_choice, "service_tier": shape.service_tier,
         "cache_mode": null, "cache_ttl_seconds": null,
         "context_item_count": null, "input_item_count": shape.input_count, "tool_count": request.tools.len(),
-        "request_form": if correlation.repair_used { "repair_full" } else if shape.previous_response_present { "anchored_suffix" } else { "full" },
+        "request_form": if repair_used { "repair_full" } else if shape.previous_response_present { "anchored_suffix" } else { "full" },
         "previous_response_present": shape.previous_response_present,
         "anchor_validation": if shape.previous_response_present { "matched" } else if shape.anchor_was_available { "mismatched" } else { "not_applicable" },
         "connection_epoch": shape.connection_epoch,
-        "connection_state": correlation.connection_state,
-        "repair_reason": correlation.repair_reason,
-        "repair_used": correlation.repair_used,
+        "connection_state": connection_state,
+        "repair_reason": repair_reason,
+        "repair_used": repair_used,
         "omitted_identity_fields": omitted
     })
 }

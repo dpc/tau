@@ -347,7 +347,7 @@ fn debug_response_producer_submits_typed_compressed_capture_job() {
 
     let capture = submitted.expect("capture submitted");
     assert_eq!(capture.session_id().as_str(), "session-test");
-    assert_eq!(capture.agent_prompt_id(), &response.agent_prompt_id);
+    assert_eq!(capture.agent_prompt_id(), Some(&response.agent_prompt_id));
     assert_eq!(
         capture.class(),
         tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
@@ -1509,6 +1509,194 @@ fn cache_diagnostics_ordinary_success_and_repair_preserve_transport_work() {
             assert!(
                 !text.contains(secret),
                 "metadata leaked private provider data"
+            );
+        }
+    }
+}
+
+/// Non-generating backend warm calls retain private operation attribution and
+/// observed usage without inventing prompts, ordinals, raw captures or traffic.
+#[test]
+fn cache_diagnostics_warm_operation_has_no_prompt_or_exact_capture() {
+    for (mode, dispatches, success, repair) in [
+        (LoopbackResponseMode::OrdinarySuccess, 1, true, false),
+        (LoopbackResponseMode::RepairThenSuccess, 2, true, true),
+        (
+            LoopbackResponseMode::RepairThenUpgradeFailure,
+            1,
+            false,
+            true,
+        ),
+        (LoopbackResponseMode::Upgrade426, 0, false, false),
+        (
+            LoopbackResponseMode::DirectContextWindowExceeded,
+            1,
+            false,
+            false,
+        ),
+    ] {
+        for explicit in [false, true] {
+            let server = spawn_loopback_server(mode);
+            let mut config = ResolvedConfig {
+                inner: test_config(server.base_url()),
+            };
+            config.inner.api_key = "PRIVATE_WARM_TOKEN".to_owned();
+            let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+            let session = tau_proto::SessionId::parse("warm-session").expect("session");
+            let agent = tau_proto::AgentId::parse("warm-agent").expect("agent");
+            let context = tau_proto::PromptContext::default();
+            let mut request = test_prompt_payload(&session, &agent, &context);
+            request.debug_provider_requests = true;
+            let refresh =
+                tau_proto::ProviderCacheRefreshId::parse("pcr-existing-refresh").expect("refresh");
+            let (outcome, rows) = cache_capture_tests::capture(|| {
+                runtime.prewarm_operation(
+                    &config,
+                    session.as_str(),
+                    &request,
+                    explicit.then_some(&refresh),
+                    &mut NeverAbort,
+                )
+            });
+            assert_eq!(matches!(outcome, PrewarmOutcome::Installed), success);
+            assert_eq!(rows.len(), dispatches + 1);
+            let end = rows.last().expect("backend attempt end");
+            assert_eq!(end["dispatch_count"], dispatches);
+            assert_eq!(end["repair_used"], repair);
+            assert_eq!(
+                end["outcome"],
+                if success {
+                    "success"
+                } else if dispatches == 0 {
+                    "pre_dispatch_failure"
+                } else {
+                    "error"
+                }
+            );
+            for row in &rows {
+                assert_eq!(row["operation"], "cache_refresh");
+                assert!(row["agent_prompt_id"].is_null());
+                assert!(row["logical_attempt"].is_null());
+                assert!(row["harness_provider_attempt"].is_null());
+                assert_eq!(row["capabilities"]["exact_request"], false);
+                assert_eq!(row["capabilities"]["exact_response"], false);
+                assert_eq!(row["attempt_id"], end["attempt_id"]);
+                if explicit {
+                    assert_eq!(row["operation_id"], refresh.as_str());
+                } else {
+                    assert!(
+                        tau_proto::CacheOperationId::parse(
+                            row["operation_id"].as_str().expect("operation")
+                        )
+                        .is_some()
+                    );
+                }
+            }
+            if success {
+                assert_eq!(end["reported_usage"]["read_tokens"], 60);
+                assert_eq!(end["reported_usage"]["input_tokens"], 100);
+                assert_eq!(end["attribution_status"], "unsupported_shape");
+            }
+            for (index, row) in rows[..dispatches].iter().enumerate() {
+                assert_eq!(row["wire_dispatch_index"], index + 1);
+                assert_eq!(row["previous_response_present"], false);
+            }
+            assert_eq!(
+                server
+                    .counts()
+                    .ws_upgrade_requests
+                    .load(path_std_sync_atomic::Ordering::SeqCst),
+                if repair { 2 } else { 1 }
+            );
+            assert_eq!(
+                server
+                    .counts()
+                    .http_post_requests
+                    .load(path_std_sync_atomic::Ordering::SeqCst),
+                0
+            );
+            let text = serde_json::to_string(&rows).expect("scalar records");
+            for private in [
+                "PRIVATE_RESPONSE_ID",
+                "PRIVATE_WARM_TOKEN",
+                "PRIVATE_ERROR",
+                config.inner.base_url.as_str(),
+            ] {
+                assert!(!text.contains(private), "warm metadata leaked private data");
+            }
+        }
+    }
+}
+
+/// Warm metadata honors durability and frozen opt-out; cancellation before
+/// connection remains a zero-dispatch backend outcome, without new traffic.
+#[test]
+fn cache_diagnostics_warm_policy_and_cancellation() {
+    /// Local fixed abort authority, unrelated to diagnostic state.
+    struct FixedAbort(bool);
+    impl TurnAbort for FixedAbort {
+        fn is_aborted(&mut self) -> bool {
+            self.0
+        }
+        fn register_waker(
+            &mut self,
+            _: Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn TurnAbortWaker> {
+            Box::new(NeverAbortWaker)
+        }
+    }
+    for (durable, enabled, canceled) in [
+        (true, true, true),
+        (true, false, false),
+        (false, true, false),
+    ] {
+        let server = spawn_loopback_server(LoopbackResponseMode::OrdinarySuccess);
+        let config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        runtime.initialize_cache_diagnostics(BTreeMap::from([(
+            config.inner.profile_namespace.clone(),
+            if enabled {
+                CacheDiagnostics::Metadata
+            } else {
+                CacheDiagnostics::Off
+            },
+        )]));
+        let session = tau_proto::SessionId::parse("warm-policy-session").expect("session");
+        let agent = tau_proto::AgentId::parse("warm-policy-agent").expect("agent");
+        let context = tau_proto::PromptContext::default();
+        let mut request = test_prompt_payload(&session, &agent, &context);
+        request.debug_provider_requests = durable;
+        let (outcome, rows) = cache_capture_tests::capture(|| {
+            runtime.prewarm(
+                &config,
+                session.as_str(),
+                &request,
+                &mut FixedAbort(canceled),
+            )
+        });
+        if canceled {
+            assert!(matches!(outcome, PrewarmOutcome::Canceled));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["outcome"], "canceled");
+            assert_eq!(rows[0]["dispatch_count"], 0);
+            assert_eq!(
+                server
+                    .counts()
+                    .ws_upgrade_requests
+                    .load(path_std_sync_atomic::Ordering::SeqCst),
+                0
+            );
+        } else {
+            assert!(matches!(outcome, PrewarmOutcome::Installed));
+            assert!(rows.is_empty());
+            assert_eq!(
+                server
+                    .counts()
+                    .ws_upgrade_requests
+                    .load(path_std_sync_atomic::Ordering::SeqCst),
+                1
             );
         }
     }

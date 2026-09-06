@@ -34,6 +34,7 @@ use super::ResponsesConfig;
 use super::ws::{ResponseMode, WsConn};
 #[cfg(test)]
 use crate::NeverAbort;
+use crate::cache_diagnostic::warm::WarmObservation;
 use crate::common::{LlmError, PromptPayload};
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
@@ -1403,6 +1404,20 @@ pub fn run_prewarm_through_shared_pool(
     request: &crate::common::PromptPayload<'_>,
     abort: &mut impl TurnAbort,
 ) -> Result<Option<crate::common::StreamState>, LlmError> {
+    run_prewarm_through_shared_pool_observed(pool, config, session_id, request, abort, None)
+}
+
+/// Observe entered backend work only; metadata cannot participate in
+/// reservation publication, cancellation, or the existing immediate repair
+/// decision.
+pub(crate) fn run_prewarm_through_shared_pool_observed(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    session_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+    abort: &mut impl TurnAbort,
+    mut observation: Option<&mut WarmObservation>,
+) -> Result<Option<crate::common::StreamState>, LlmError> {
     let key = PoolKey::for_request(config, request);
 
     let cached = if let TryCheckout::Reserved(cached) = pool
@@ -1438,11 +1453,20 @@ pub fn run_prewarm_through_shared_pool(
     }
 
     let repair_after_fresh = cached.is_none();
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.socket(cached.is_some());
+    }
     let mut deadline = None;
     if let Some(mut conn) = cached {
         let attempt_deadline = path_std_time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT;
         deadline = Some(attempt_deadline);
-        match conn.run_prewarm(config, request, abort, deadline) {
+        match conn.run_prewarm_observed(
+            config,
+            request,
+            abort,
+            deadline,
+            observation.as_deref_mut(),
+        ) {
             Ok(state) => {
                 if abort.is_aborted() {
                     return Err(LlmError::Canceled);
@@ -1453,6 +1477,9 @@ pub fn run_prewarm_through_shared_pool(
                 return Ok(Some(state));
             }
             Err(err) if is_recoverable_ws_error(&err) => {
+                if let Some(observation) = observation.as_deref_mut() {
+                    observation.repair();
+                }
                 pool.bump_silent_reconnects()
                     .map_err(WsTurnError::into_llm_error)?;
                 tracing::info!(
@@ -1489,7 +1516,7 @@ pub fn run_prewarm_through_shared_pool(
         .map_err(WsTurnError::into_llm_error)?;
     let deadline = deadline
         .or_else(|| Some(path_std_time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT));
-    match conn.run_prewarm(config, request, abort, deadline) {
+    match conn.run_prewarm_observed(config, request, abort, deadline, observation.as_deref_mut()) {
         Ok(state) => {
             if abort.is_aborted() {
                 return Err(LlmError::Canceled);
@@ -1500,6 +1527,9 @@ pub fn run_prewarm_through_shared_pool(
             Ok(Some(state))
         }
         Err(err) if repair_after_fresh && is_recoverable_ws_error(&err) => {
+            if let Some(observation) = observation.as_deref_mut() {
+                observation.repair();
+            }
             drop(conn);
             pool.bump_silent_reconnects()
                 .map_err(WsTurnError::into_llm_error)?;
@@ -1523,7 +1553,13 @@ pub fn run_prewarm_through_shared_pool(
                 .map_err(WsTurnError::into_llm_error)?;
             pool.record_fresh_open()
                 .map_err(WsTurnError::into_llm_error)?;
-            let state = replacement.run_prewarm(config, request, abort, Some(deadline))?;
+            let state = replacement.run_prewarm_observed(
+                config,
+                request,
+                abort,
+                Some(deadline),
+                observation,
+            )?;
             reservation
                 .publish(replacement, cancel_guard, abort)
                 .map_err(WsTurnError::into_llm_error)?;

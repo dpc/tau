@@ -5,6 +5,67 @@ use std::io::Write as _;
 
 use super::*;
 
+/// Operation recognition must not reorder existing prompt-attribution failures,
+/// even when the same old-format capture also names another session.
+#[test]
+fn prompt_attribution_error_precedence_is_unchanged() {
+    for (body, reason) in [
+        (
+            br#"{"session_id":"other"}"#.as_slice(),
+            "capture_attribution_unavailable",
+        ),
+        (
+            br#"{"session_id":"other","agent_prompt_id":"../invalid"}"#.as_slice(),
+            "capture_attribution_malformed",
+        ),
+        (
+            br#"{"session_id":"other","agent_prompt_id":"prompt"}"#.as_slice(),
+            "capture_session_mismatch",
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("fixture root");
+        capture(root.path(), "1.json.zst", body);
+        let mut inventory = Inventory::default();
+        inventory.scan(
+            root.path(),
+            &"session".parse().expect("session"),
+            &CacheScanLimits::default(),
+        );
+        assert_eq!(inventory.gaps.len(), 1);
+        assert_eq!(inventory.gaps[reason], 1);
+    }
+}
+
+/// Operation captures are recognized without inventing a prompt join, and
+/// nullable prompt attribution is rejected for other operations.
+#[test]
+fn operation_capture_has_explicit_unavailable_analysis() {
+    let root = tempfile::tempdir().expect("fixture root");
+    capture(
+        root.path(),
+        "1.cache-operation.0123456789abcdef0123456789abcdef.cache-diagnostic.json.zst",
+        br#"{"schema":"tau.cache_diagnostic","schema_version":0,"record_kind":"dispatch",
+        "session_id":"session","agent_id":"agent","agent_prompt_id":null,"record_seq":1,
+        "operation":"cache_refresh","operation_id":"local-operation",
+        "logical_attempt":null,"harness_provider_attempt":null,
+        "producer_run_id":"0123456789abcdef0123456789abcdef",
+        "attempt_id":"0123456789abcdef0123456789abcdef"}"#,
+    );
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &CacheScanLimits::default(),
+    );
+    assert!(inventory.prompts.is_empty());
+    assert_eq!(inventory.gaps["cache_operation_analysis_unavailable"], 1);
+    assert!(
+        !inventory
+            .gaps
+            .contains_key("capture_attribution_unavailable")
+    );
+}
+
 /// The new capture class is inventoried without pretending Stage-1 performs
 /// attempt attribution, and without misclassifying its schema as stale.
 #[test]

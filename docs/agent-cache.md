@@ -137,9 +137,25 @@ later failure, without merging or normalizing repeated members. Its raw cache
 counters follow the exact route's selected OpenAI or DeepSeek schema; unselected
 schemas do not become evidence. Its exact captures share the actual dispatch's
 attempt identity and index. Local-summary compaction retains exact captures only.
-Prewarm and cache refresh do not implement this capture
-adapter. The inspector reports those capabilities as unavailable rather than
-inventing inference ordinals or complete coverage.
+Entered Codex prewarm/cache-refresh backend calls produce scalar-only
+`operation: "cache_refresh"` records. This label does not prove the automatic
+refresh scheduler selected the work. Explicit refresh keeps its existing
+`operation_id`; ordinary prewarm gets a random operation-local identity.
+`agent_prompt_id`, `logical_attempt` and `harness_provider_attempt` are null.
+Both exact-capture capabilities are false: no warm request or response body is
+newly retained. The separate managed filename is
+`<micros>.cache-operation.<attempt-id>.cache-diagnostic.json.zst`, not a synthetic
+prompt filename.
+
+Warm `attempt_end` describes the backend result after socket publication: installed
+is success, busy is a zero-dispatch pre-dispatch failure, and cancellation/error
+retains its backend meaning. A later worker deadline override or rejected/stale
+harness terminal does not rewrite it. Profile resolution, cooldown and supervisor
+rejections before backend entry remain outside coverage. Parsed raw usage is
+retained only while available; discarded socket-publication results can leave
+usage unknown. Nothing here changes refresh eligibility, preemption, scheduling,
+repair, accounting or cache-residency claims. The inspector recognizes operation
+captures but reports `cache_operation_analysis_unavailable` without prompt joins.
 
 Records are capped at 256 KiB inclusive, with each allowlisted identity capped
 at 128 UTF-8 bytes; over-limit identities are omitted whole with fixed flags.

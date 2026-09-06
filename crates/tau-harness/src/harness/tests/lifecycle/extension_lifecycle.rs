@@ -3074,7 +3074,9 @@ fn ready_provider_capture_is_legal_operational_traffic() {
             &provider,
             HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
                 session_id: test_session_id("missing-session"),
-                agent_prompt_id: test_agent_prompt_id("ready-capture"),
+                attribution: tau_proto::ProviderCaptureAttribution::Prompt(test_agent_prompt_id(
+                    "ready-capture",
+                )),
                 class: tau_proto::ProviderDebugCaptureClass::WebsocketRequest,
                 zstd: vec![1, 2, 3],
             }),

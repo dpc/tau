@@ -240,6 +240,7 @@ fn cleanup_applies_exact_shared_cutoff_to_every_diagnostic_class() {
         "debug/provider-requests/1-prompt-websocket-response.json.zst",
         "debug/provider-requests/1-prompt-compact-http-failure.json.zst",
         "debug/provider-requests/instance/1-prompt-cache-diagnostic.json.zst",
+        "debug/provider-requests/instance/1.cache-operation.0123456789abcdef0123456789abcdef.cache-diagnostic.json.zst",
     ] {
         for (label, age, removed) in [
             ("exact", retention, true),

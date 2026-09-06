@@ -156,6 +156,34 @@ impl Inventory {
             self.gap("capture_attribution_unavailable");
             return;
         };
+        if cache_diagnostic
+            && value.get("operation").and_then(Value::as_str) == Some("cache_refresh")
+        {
+            if captured_session != session.as_str() {
+                self.gap("capture_session_mismatch");
+                return;
+            }
+            let valid = cache_diagnostic_header(&value)
+                && value.get("agent_prompt_id").is_some_and(Value::is_null)
+                && value.get("logical_attempt").is_some_and(Value::is_null)
+                && value
+                    .get("harness_provider_attempt")
+                    .is_some_and(Value::is_null)
+                && value
+                    .get("agent_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| tau_proto::AgentId::parse(id).is_ok())
+                && value
+                    .get("operation_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty() && id.len() <= 128);
+            self.gap(if valid {
+                "cache_operation_analysis_unavailable"
+            } else {
+                "malformed_current_cache_diagnostic"
+            });
+            return;
+        }
         let Some(prompt) = value.get("agent_prompt_id").and_then(Value::as_str) else {
             self.gap("capture_attribution_unavailable");
             return;

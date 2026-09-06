@@ -302,9 +302,22 @@ and reports the final typed outcome after output validation and cancellation,
 including pre-dispatch admission failures. Its exact requests and retry-failure
 captures share the diagnostic identity. Successful raw compact responses remain
 unretained (`exact_response=false`); scalar usage is projected before the existing
-terminal event is dropped. Prewarm/cache-refresh has no scalar adapter and does
-not borrow inference ordinals. The shared provider worker owns capacity,
+terminal event is dropped. Entered prewarm/cache-refresh backend calls emit only
+scalar operation captures: prompt attribution and both attempt ordinals are null,
+and both exact-capture capabilities are false. Explicit refresh preserves its
+existing operation ID; ordinary prewarm receives a random operation-local ID.
+The shared provider worker owns capacity,
 process correlation and loss; the harness remains the opaque persistence owner.
+
+Warm summaries follow backend socket publication, not a later worker deadline
+override or authenticated harness terminal acceptance. Busy maps to a
+zero-dispatch pre-dispatch failure; installed maps to success without claiming
+residency. Profile/cooldown/supervisor rejections before backend entry remain
+outside coverage. Available parsed usage is projected without retaining raw
+responses; discarded publication results can leave usage unknown. Observation
+does not participate in refresh eligibility, preemption, admission, repair,
+accounting, or the lifecycle in
+[SPEC-provider-cache-refresh-lifecycle](../../../specs/SPEC-provider-cache-refresh-lifecycle.md).
 
 The retired unary compact HTTP path submitted one private
 schema-v0 `compact-http-failure` capture while provider diagnostics are enabled.

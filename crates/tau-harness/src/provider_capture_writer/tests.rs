@@ -70,13 +70,15 @@ fn cache_diagnostics_inherit_private_opaque_capture_storage() {
     let session = temp.path().join("session");
     fs::create_dir(&session).expect("session root");
     let mut capture = job(&session, b"opaque cache bytes");
-    capture.filename = ProviderDebugCaptureFilename::new(
+    capture.filename = ProviderDebugCaptureFilename::cache_operation(
         1,
-        &tau_proto::AgentPromptId::parse("prompt").expect("prompt identity"),
-        tau_proto::ProviderDebugCaptureClass::CacheDiagnostic,
+        tau_proto::CacheOperationId::from_bytes([0xab; 16]),
     );
+    let basename = capture.filename.as_str().to_owned();
     write_capture(&capture).expect("opaque capture write");
-    let path = session.join("debug/provider-requests/provider/1-prompt-cache-diagnostic.json.zst");
+    let path = session
+        .join("debug/provider-requests/provider")
+        .join(basename);
     assert_eq!(
         fs::read(&path).expect("capture contents"),
         b"opaque cache bytes"
