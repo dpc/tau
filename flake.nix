@@ -617,10 +617,7 @@
         legacyPackages = multiBuild;
 
         devShells = flakeboxLib.mkShells {
-          channel = "latest";
-          components = flakeboxLib.config.toolchain.components ++ [
-            "rustc-codegen-cranelift-preview"
-          ];
+          channel = "stable";
           NEXTEST_SHOW_PROGRESS = "none";
           NEXTEST_STATUS_LEVEL = "none";
           packages = [

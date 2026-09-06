@@ -8,7 +8,7 @@ homepage.workspace = true
 readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-rust-version.workspace = true
+rust-version = "1.91"
 license.workspace = true
 
 [lints]

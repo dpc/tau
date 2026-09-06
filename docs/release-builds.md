@@ -19,6 +19,10 @@ not remove the guard while the universal component graph remains in one
 executable. The recorded adoption limits and re-evaluation triggers below are
 evidence for the current profile rather than permanent product requirements.
 
+Ordinary workspace builds require stable Rust 1.97 or newer. The Flakebox
+development shell selects its pinned stable channel and does not require a
+nightly compiler or alternate code-generation backend.
+
 `packages.tau` and `packages.default` use the pinned Nixpkgs
 `rustPlatform.buildRustPackage` toolchain. The specialized Crane graph remains
 under `legacyPackages` and supplies CI and cross-built release archives. The

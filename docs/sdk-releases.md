@@ -10,6 +10,9 @@ extensions:
 | `tau-proto` | `tau-actions` |
 | `tau-client` | `tau-blocking-notify-channel`, `tau-proto` |
 
+These four SDK packages retain Rust 1.91 support even though the complete Tau
+workspace requires stable Rust 1.97 or newer.
+
 Publish `tau-actions` and `tau-blocking-notify-channel` first, followed by
 `tau-proto`, then `tau-client`.
 
