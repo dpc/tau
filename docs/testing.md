@@ -100,7 +100,7 @@ in `~/.config/tau/testing.yaml`. It exercises the current process; it is not a
 cold-resume test and must not become a credentialed CI gate.
 
 ```sh
-cargo build -p tau --bin tau
+cargo build -p dpc-tau --bin tau
 scratch_parent=$(mktemp -d "${TMPDIR:-/tmp}/tau-s8-tmux.XXXXXX")
 scratch_root="$scratch_parent/root"
 tmux_session=tau-s8-smoke
@@ -417,9 +417,9 @@ Direct workspace runs intentionally skip this test when
 from `PATH`. Run it manually only after building and pinning the candidate:
 
 ```sh
-cargo build -p tau-ext-provider-builtin
+cargo build -p dpc-tau-ext-provider-builtin
 TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/debug/tau-ext-provider-builtin" \
-  cargo nextest run -p tau-e2e-tests --test provider_builtin_retry
+  cargo nextest run -p dpc-tau-e2e-tests --test provider_builtin_retry
 ```
 
 The mandatory Nix post-check verifies that exact current-profile path and

@@ -1,5 +1,5 @@
 [package]
-name = "tau-delivery-memory"
+name = "dpc-tau-delivery-memory"
 version.workspace = true
 edition.workspace = true
 description = "Process-local content-free decoded delivery memory estimates."
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_delivery_memory"
 
 [lints]
 workspace = true

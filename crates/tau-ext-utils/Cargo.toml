@@ -1,9 +1,12 @@
 [package]
-name = "tau-ext-utils"
+name = "dpc-tau-ext-utils"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[lib]
+name = "tau_ext_utils"
 
 [lints]
 workspace = true
@@ -15,3 +18,6 @@ serde_json.workspace = true
 tau-client.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
+[[bin]]
+name = "tau-ext-utils"
+path = "src/main.rs"

@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-rhai"
+name = "dpc-tau-ext-rhai"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_ext_rhai"
 
 [lints]
 workspace = true
@@ -27,3 +30,6 @@ tracing.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tracing-subscriber.workspace = true
+[[bin]]
+name = "tau-ext-rhai"
+path = "src/main.rs"

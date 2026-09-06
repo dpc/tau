@@ -215,7 +215,7 @@ proptest! {
 /// Runs a deeper reusable fuzz workload over both arbitrary Unicode and
 /// delimiter-heavy Markdown. Ordinary nextest and selfci runs compile this
 /// ignored test but do not execute it; run
-/// `TAU_MARKDOWN_FUZZ_CASES=20000 cargo test -p tau-cli
+/// `TAU_MARKDOWN_FUZZ_CASES=20000 cargo test -p dpc-tau-cli
 /// markdown_heavy_fuzz_harness -- --ignored` locally when deliberately
 /// stress-testing the renderer. The default is 1,000 cases.
 #[test]

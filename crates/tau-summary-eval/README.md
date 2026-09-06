@@ -9,10 +9,10 @@ The binary has no provider, credential, HTTP, or runtime dependency. Both
 commands are offline:
 
 ```console
-cargo run -p tau-summary-eval -- validate-corpus \
+cargo run -p dpc-tau-summary-eval -- validate-corpus \
   crates/tau-summary-eval/fixtures/corpus-v1.json
 
-cargo run -p tau-summary-eval -- score \
+cargo run -p dpc-tau-summary-eval -- score \
   --corpus crates/tau-summary-eval/fixtures/corpus-v1.json \
   --candidates crates/tau-summary-eval/fixtures/offline-candidates-v1.json \
   --output /tmp/tau-summary-result.json

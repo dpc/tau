@@ -4,17 +4,17 @@ slow-timeout = { period = "10s", terminate-after = 1 }
 [[profile.default.overrides]]
 # Two barrier-synchronized preview stacks each own a CLI, harness, and up to
 # five configured extension children.
-filter = "package(tau) & binary(dev_previews) & test(/^previews_omit_durable_session_artifacts_across_success_failure_and_concurrency$/)"
+filter = "package(dpc-tau) & binary(dev_previews) & test(/^previews_omit_durable_session_artifacts_across_success_failure_and_concurrency$/)"
 threads-required = 8
 
 [[profile.default.overrides]]
 # Ordinary preview tests own one nested CLI/harness/configured-extension stack.
-filter = "package(tau) & binary(dev_previews)"
+filter = "package(dpc-tau) & binary(dev_previews)"
 threads-required = 4
 
 [[profile.default.overrides]]
 # Each stdio fixture owns one harness plus its configured extension processes.
-filter = "package(tau) & binary(initial_ui_stdio)"
+filter = "package(dpc-tau) & binary(initial_ui_stdio)"
 threads-required = 4
 
 [[profile.default.overrides]]
@@ -22,27 +22,27 @@ threads-required = 4
 # UI processes. Eight scheduler slots limit concurrent process stacks under
 # CPU-constrained Nix builders without weakening the fixtures' 10-second
 # synchronization deadlines.
-filter = "package(tau) & binary(detach_attach_cli)"
+filter = "package(dpc-tau) & binary(detach_attach_cli)"
 threads-required = 8
 
 [[profile.default.overrides]]
-filter = "package(tau-e2e-tests) & binary(deterministic_provider)"
+filter = "package(dpc-tau-e2e-tests) & binary(deterministic_provider)"
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-filter = "package(tau-e2e-tests) & binary(core_resume)"
+filter = "package(dpc-tau-e2e-tests) & binary(core_resume)"
 slow-timeout = { period = "30s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-filter = "package(tau-e2e-tests) & binary(core_shell_resume)"
+filter = "package(dpc-tau-e2e-tests) & binary(core_shell_resume)"
 slow-timeout = { period = "30s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-filter = "package(tau-e2e-tests) & binary(cancellation_liveness)"
+filter = "package(dpc-tau-e2e-tests) & binary(cancellation_liveness)"
 slow-timeout = { period = "15s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-filter = "package(tau-e2e-tests) & binary(provider_builtin_retry)"
+filter = "package(dpc-tau-e2e-tests) & binary(provider_builtin_retry)"
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 # LLVM coverage instrumentation makes the same test binaries materially slower.
@@ -52,21 +52,21 @@ inherits = "default"
 slow-timeout = { period = "20s", terminate-after = 1 }
 
 [[profile.coverage.overrides]]
-filter = "package(tau-e2e-tests) & binary(deterministic_provider)"
+filter = "package(dpc-tau-e2e-tests) & binary(deterministic_provider)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 [[profile.coverage.overrides]]
-filter = "package(tau-e2e-tests) & binary(core_resume)"
+filter = "package(dpc-tau-e2e-tests) & binary(core_resume)"
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 [[profile.coverage.overrides]]
-filter = "package(tau-e2e-tests) & binary(core_shell_resume)"
+filter = "package(dpc-tau-e2e-tests) & binary(core_shell_resume)"
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 [[profile.coverage.overrides]]
-filter = "package(tau-e2e-tests) & binary(cancellation_liveness)"
+filter = "package(dpc-tau-e2e-tests) & binary(cancellation_liveness)"
 slow-timeout = { period = "30s", terminate-after = 1 }
 
 [[profile.coverage.overrides]]
-filter = "package(tau-e2e-tests) & binary(provider_builtin_retry)"
+filter = "package(dpc-tau-e2e-tests) & binary(provider_builtin_retry)"
 slow-timeout = { period = "120s", terminate-after = 1 }

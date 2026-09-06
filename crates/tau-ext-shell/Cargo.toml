@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-shell"
+name = "dpc-tau-ext-shell"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_ext_shell"
 
 [lints]
 workspace = true
@@ -53,3 +56,6 @@ rustix-v1 = { workspace = true, features = ["alloc", "fs", "pty", "termios"] }
 [dev-dependencies]
 serde_yaml_ng.workspace = true
 tau-core.workspace = true
+[[bin]]
+name = "tau-ext-shell"
+path = "src/main.rs"

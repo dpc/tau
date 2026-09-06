@@ -166,11 +166,11 @@
 
           cargoBuildFlags = [
             "--package"
-            "tau-ext-telegram"
+            "dpc-tau-ext-telegram"
           ];
           cargoTestFlags = [
             "--package"
-            "tau-ext-telegram"
+            "dpc-tau-ext-telegram"
           ];
 
           doCheck = true;
@@ -182,7 +182,7 @@
             inherit (tauPackage) src cargoDeps;
             cargoBuildFlags = [
               "--package"
-              "tau-ext-telegram"
+              "dpc-tau-ext-telegram"
               "--bin"
               "tau-telegram-gateway"
             ];
@@ -315,7 +315,7 @@
                    --cargo-profile $CARGO_PROFILE \
                    --no-tests=fail \
                    ${nextestReporterArgs} \
-                   -E 'package(tau-provider-codex) & test(/curated_provider_vcr_replay_only_lane/)'
+                   -E 'package(dpc-tau-provider-codex) & test(/curated_provider_vcr_replay_only_lane/)'
                 unset TAU_VCR TAU_VCR_DIR TAU_CURATED_VCR_LANE
 
                 # Poison every ambient startup transport. The fixture must ignore
@@ -331,7 +331,7 @@
                      --cargo-profile $CARGO_PROFILE \
                      --no-tests=fail \
                      ${nextestReporterArgs} \
-                     -E 'package(tau-e2e-tests) & (binary(deterministic_provider) | binary(cancellation_liveness))'
+                     -E 'package(dpc-tau-e2e-tests) & (binary(deterministic_provider) | binary(cancellation_liveness))'
                  if test "$(uname -s)" = Linux; then
                    # The provider-builtin retry gate runs its exact Cargo-built
                    # executable against a fixture-owned loopback HTTP/SSE server.
@@ -350,7 +350,7 @@
                       --cargo-profile $CARGO_PROFILE \
                       --no-tests=fail \
                       ${nextestReporterArgs} \
-                      -E 'package(tau-e2e-tests) & binary(provider_builtin_retry)'
+                      -E 'package(dpc-tau-e2e-tests) & binary(provider_builtin_retry)'
                    unset TAU_E2E_PROVIDER_BUILTIN_BIN TAU_E2E_PROVIDER_CA_BUNDLE
                  fi
                  # The PTY gate must spawn the exact universal binary from this
@@ -362,7 +362,7 @@
                     --cargo-profile $CARGO_PROFILE \
                     --no-tests=fail \
                     ${nextestReporterArgs} \
-                    -E 'package(tau-e2e-tests) & (binary(core_resume) | binary(core_shell_resume))'
+                    -E 'package(dpc-tau-e2e-tests) & (binary(core_resume) | binary(core_shell_resume))'
               '';
             };
 
@@ -511,14 +511,14 @@
             '';
 
             tauDeps = craneLib.buildDepsOnly {
-              cargoExtraArgs = "-p tau";
+              cargoExtraArgs = "-p dpc-tau";
             };
 
             tau = replaceTauBuildInfo (
               craneLib.buildPackage (
                 {
                   cargoArtifacts = tauDeps;
-                  cargoExtraArgs = "-p tau";
+                  cargoExtraArgs = "-p dpc-tau";
                 }
                 // pkgs.lib.optionalAttrs (craneLib.cargoProfile == "release") {
                   # Keep the final command, wall time, and peak RSS visible in

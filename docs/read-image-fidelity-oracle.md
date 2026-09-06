@@ -18,7 +18,7 @@ private cassette directory. The test rejects replay mode, a non-empty cassette
 directory, and an unpinned binary:
 
 ```sh
-cargo build -p tau
+cargo build -p dpc-tau
 trial="$(date -u +%Y%m%dT%H%M%S)-sol-01"
 mkdir "/private/path/read-image-oracle-$trial"
 TAU_IMAGE_FIDELITY_ORACLE=1 \
@@ -27,7 +27,7 @@ TAU_VCR=record-if-missing \
 TAU_VCR_DIR="/private/path/read-image-oracle-$trial" \
 TAU_E2E_MODEL=<profile/model> \
 TAU_E2E_TAU_BIN="$(pwd)/target/debug/tau" \
-cargo test -p tau-e2e-tests --test image_fidelity -- --nocapture
+cargo test -p dpc-tau-e2e-tests --test image_fidelity -- --nocapture
 ```
 
 Cassettes contain provider traffic and must be handled as private test data.

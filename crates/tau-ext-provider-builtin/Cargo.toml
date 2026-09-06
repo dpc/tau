@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-provider-builtin"
+name = "dpc-tau-ext-provider-builtin"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_ext_provider_builtin"
 
 [lints]
 workspace = true
@@ -44,3 +47,6 @@ proptest.workspace = true
 tau-core.workspace = true
 tau-provider-codex = { workspace = true, features = ["test-support"] }
 tracing-subscriber.workspace = true
+[[bin]]
+name = "tau-ext-provider-builtin"
+path = "src/main.rs"

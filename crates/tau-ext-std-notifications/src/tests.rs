@@ -285,8 +285,8 @@ fn idle_occurrences_remain_debug_below_the_info_baseline() {
 /// Install a `tracing` subscriber for tests. Pick up `TAU_LOG` (same
 /// env var the extension uses in production); default to off so a
 /// plain `cargo test` is silent. Run a hanging test like
-/// `TAU_LOG=trace cargo test -p tau-ext-std-notifications $name -- --nocapture`
-/// to see every frame the extension received and every event the
+/// `TAU_LOG=trace cargo test -p dpc-tau-ext-std-notifications $name --
+/// --nocapture` to see every frame the extension received and every event the
 /// test side read or skipped.
 fn init_test_tracing() {
     static ONCE: Once = Once::new();

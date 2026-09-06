@@ -108,7 +108,7 @@ either remains. On each target's matching host (or an explicitly configured
 emulator), run `tau --version` and compare
 `tau component __missing_component_for_discovery_test__` with the expected
 registry. The profile-independent source registry gate is
-`cargo test --profile ci -p tau --test component_registry`; it does not execute
+`cargo test --profile ci -p dpc-tau --test component_registry`; it does not execute
 each archived target.
 
 The recorded session-replay result belongs to the reference revision. Current

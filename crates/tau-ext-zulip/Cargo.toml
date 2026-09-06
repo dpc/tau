@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-zulip"
+name = "dpc-tau-ext-zulip"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_ext_zulip"
 
 [lints]
 workspace = true
@@ -32,3 +35,6 @@ workspace = true
 [dev-dependencies]
 tau-core.workspace = true
 tracing-subscriber.workspace = true
+[[bin]]
+name = "tau-ext-zulip"
+path = "src/main.rs"

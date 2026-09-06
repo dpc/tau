@@ -1,4 +1,4 @@
-# tau-blocking-notify-channel
+# dpc-tau-blocking-notify-channel
 
 A small coalescing notification channel with multiple senders and one receiver.
 

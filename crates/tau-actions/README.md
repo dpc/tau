@@ -1,6 +1,6 @@
-# tau-actions
+# dpc-tau-actions
 
-`tau-actions` defines the serializable action schemas published by Tau
+`dpc-tau-actions` defines the serializable action schemas published by Tau
 extensions and parses command-mode action invocations.
 
 The crate stays dependency-light so extensions, clients, and the Tau harness

@@ -511,7 +511,7 @@ fn exact_tau_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     };
     let candidate = candidate.canonicalize().map_err(|error| {
         format!(
-            "exact Tau binary unavailable at {} ({error}); build `cargo build -p tau --bin tau` \
+            "exact Tau binary unavailable at {} ({error}); build `cargo build -p dpc-tau --bin tau` \
              or set TAU_E2E_TAU_BIN",
             candidate.display()
         )

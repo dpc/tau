@@ -1,5 +1,5 @@
 [package]
-name = "tau-term-screen"
+name = "dpc-tau-term-screen"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -11,13 +11,16 @@ categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "tau_term_screen"
+
 [lints]
 workspace = true
 
 [dependencies]
 bon.workspace = true
 crossterm.workspace = true
-tau-proto = { path = "../tau-proto" }
+tau-proto = { package = "dpc-tau-proto", path = "../tau-proto" }
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 

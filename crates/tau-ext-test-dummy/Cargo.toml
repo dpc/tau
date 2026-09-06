@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-test-dummy"
+name = "dpc-tau-ext-test-dummy"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -11,6 +11,9 @@ categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "tau_ext_test_dummy"
+
 [lints]
 workspace = true
 
@@ -21,3 +24,6 @@ serde_json.workspace = true
 tau-client.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
+[[bin]]
+name = "tau-ext-test-dummy"
+path = "src/main.rs"

@@ -1,5 +1,5 @@
 [package]
-name = "tau-cli-picker"
+name = "dpc-tau-cli-picker"
 description = "Synchronous single-select terminal list picker used by Tau CLIs."
 version.workspace = true
 edition.workspace = true
@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
+
+[lib]
+name = "tau_cli_picker"
 
 [lints]
 workspace = true

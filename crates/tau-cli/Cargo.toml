@@ -1,5 +1,5 @@
 [package]
-name = "tau-cli"
+name = "dpc-tau-cli"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_cli"
 
 [lints]
 workspace = true
@@ -56,3 +59,6 @@ tau-cli-term-raw = { workspace = true, features = ["redraw-test-counter"] }
 tau-test-support.workspace = true
 tempfile.workspace = true
 vt100.workspace = true
+[[bin]]
+name = "tau-cli"
+path = "src/main.rs"

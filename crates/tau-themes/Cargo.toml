@@ -1,5 +1,5 @@
 [package]
-name = "tau-themes"
+name = "dpc-tau-themes"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -14,6 +14,9 @@ rust-version.workspace = true
 [dependencies]
 json5 = { workspace = true }
 serde = { workspace = true }
+
+[lib]
+name = "tau_themes"
 
 [lints]
 workspace = true

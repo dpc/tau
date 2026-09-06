@@ -1,5 +1,5 @@
 [package]
-name = "tau-summary-eval"
+name = "dpc-tau-summary-eval"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_summary_eval"
 
 [lints]
 workspace = true
@@ -22,3 +25,6 @@ sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+[[bin]]
+name = "tau-summary-eval"
+path = "src/main.rs"

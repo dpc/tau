@@ -64,7 +64,7 @@ You can also import it as a flake input.
 Tau is a Rust project and can be installed directly from Git:
 
 ```sh
-cargo install --git https://github.com/dpc/tau tau
+cargo install --git https://github.com/dpc/tau --package dpc-tau
 ```
 
 ### via other means

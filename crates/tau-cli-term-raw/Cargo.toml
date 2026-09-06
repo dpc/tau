@@ -1,5 +1,5 @@
 [package]
-name = "tau-cli-term-raw"
+name = "dpc-tau-cli-term-raw"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_cli_term_raw"
 
 [lints]
 workspace = true

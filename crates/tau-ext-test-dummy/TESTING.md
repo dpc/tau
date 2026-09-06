@@ -3,8 +3,8 @@
 Run lightweight validation with:
 
 ```sh
-cargo test -p tau-ext-test-dummy
-cargo clippy -p tau-ext-test-dummy --all-targets -- -D warnings
+cargo test -p dpc-tau-ext-test-dummy
+cargo clippy -p dpc-tau-ext-test-dummy --all-targets -- -D warnings
 ```
 
 Regression coverage should include:

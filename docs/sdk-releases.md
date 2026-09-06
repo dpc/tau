@@ -5,16 +5,18 @@ extensions:
 
 | Package | Direct internal package dependencies |
 | --- | --- |
-| `tau-actions` | none |
-| `tau-blocking-notify-channel` | none |
-| `tau-proto` | `tau-actions` |
-| `tau-client` | `tau-blocking-notify-channel`, `tau-proto` |
+| `dpc-tau-actions` | none |
+| `dpc-tau-blocking-notify-channel` | none |
+| `dpc-tau-proto` | `dpc-tau-actions` |
+| `dpc-tau-client` | `dpc-tau-blocking-notify-channel`, `dpc-tau-proto` |
 
 These four SDK packages retain Rust 1.91 support even though the complete Tau
 workspace requires stable Rust 1.97 or newer.
 
-Publish `tau-actions` and `tau-blocking-notify-channel` first, followed by
-`tau-proto`, then `tau-client`.
+Publish `dpc-tau-actions` and `dpc-tau-blocking-notify-channel` first, followed
+by `dpc-tau-proto`, then `dpc-tau-client`. Rust source continues to import
+these packages as `tau_actions`, `tau_blocking_notify_channel`, `tau_proto`,
+and `tau_client`.
 
 ## Package and protocol versions
 
@@ -51,8 +53,8 @@ patches to stand in for the unpublished packages.
 
 After publication is authorized, dry-run and upload in dependency order:
 `cargo publish --dry-run` immediately precedes publishing each leaf package,
-then `tau-proto`, then `tau-client`. Do not upload a package whose current
-dry-run fails.
+then `dpc-tau-proto`, then `dpc-tau-client`. Do not upload a package whose
+current dry-run fails.
 
 After the complete set is available, run
 `./.config/selfci/check-sdk-packages.sh --registry` to repeat the exact-version

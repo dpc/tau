@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-websearch"
+name = "dpc-tau-ext-websearch"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_ext_websearch"
 
 [lints]
 workspace = true
@@ -22,3 +25,6 @@ tau-proto.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 url.workspace = true
+[[bin]]
+name = "tau-ext-websearch"
+path = "src/main.rs"

@@ -1,5 +1,5 @@
 [package]
-name = "tau-client"
+name = "dpc-tau-client"
 version.workspace = true
 edition.workspace = true
 description = "Client runtime for standalone Tau extensions and UI protocol peers."
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version = "1.91"
 license.workspace = true
+
+[lib]
+name = "tau_client"
 
 [lints]
 workspace = true

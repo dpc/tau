@@ -1,5 +1,5 @@
 [package]
-name = "tau-util-fs-err"
+name = "dpc-tau-util-fs-err"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_util_fs_err"
 
 [lints]
 workspace = true

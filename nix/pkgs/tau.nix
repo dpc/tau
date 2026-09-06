@@ -33,7 +33,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   cargoBuildFlags = [
     "--package"
-    "tau"
+    "dpc-tau"
   ];
 
   nativeBuildInputs = [ bbe ];

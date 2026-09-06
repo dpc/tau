@@ -24,7 +24,7 @@ larger generated cases. Run a deeper local workload deliberately:
 
 ```sh
 TAU_MARKDOWN_FUZZ_CASES=20000 \
-  cargo test -p tau-cli markdown_heavy_fuzz_harness -- --ignored
+  cargo test -p dpc-tau-cli markdown_heavy_fuzz_harness -- --ignored
 ```
 
 Input-loop routing tests cover emitted notices and harness events or prompts,

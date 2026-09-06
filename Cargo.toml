@@ -76,47 +76,47 @@ rostra-client-db = "0.1.3"
 rostra-core = "0.1.3"
 winapi-util = "0.1.11"
 # Internal crates
-tau-actions = { path = "crates/tau-actions", version = "0.1.0" }
-tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel", version = "0.1.0" }
-tau-cli = { path = "crates/tau-cli" }
-tau-cli-picker = { path = "crates/tau-cli-picker" }
-tau-cli-term = { path = "crates/tau-cli-term" }
-tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
-tau-client = { path = "crates/tau-client", version = "0.1.0" }
-tau-config = { path = "crates/tau-config" }
-tau-core = { path = "crates/tau-core" }
-tau-delivery-memory = { path = "crates/tau-delivery-memory" }
-tau-ext-pim = { path = "crates/tau-ext-pim" }
-tau-ext-provider-builtin = { path = "crates/tau-ext-provider-builtin" }
-tau-ext-rhai = { path = "crates/tau-ext-rhai" }
-tau-ext-rostra = { path = "crates/tau-ext-rostra" }
-tau-ext-shell = { path = "crates/tau-ext-shell" }
-tau-ext-slack = { path = "crates/tau-ext-slack" }
-tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
-tau-ext-swarm = { path = "crates/tau-ext-swarm" }
-tau-ext-telegram = { path = "crates/tau-ext-telegram" }
-tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
-tau-ext-utils = { path = "crates/tau-ext-utils" }
-tau-ext-websearch = { path = "crates/tau-ext-websearch" }
-tau-ext-xmpp = { path = "crates/tau-ext-xmpp" }
-tau-ext-zulip = { path = "crates/tau-ext-zulip" }
-tau-harness = { path = "crates/tau-harness" }
-tau-harness-tools = { path = "crates/tau-harness-tools" }
-tau-proto = { path = "crates/tau-proto", version = "0.1.0" }
-tau-provider = { path = "crates/tau-provider" }
-tau-provider-chat-completions = { path = "crates/tau-provider-chat-completions" }
-tau-provider-codex = { path = "crates/tau-provider-codex" }
-tau-provider-responses = { path = "crates/tau-provider-responses" }
-tau-session-inspect = { path = "crates/tau-session-inspect" }
-tau-skills = { path = "crates/tau-skills" }
-tau-socket = { path = "crates/tau-socket" }
-tau-summary-eval = { path = "crates/tau-summary-eval" }
-tau-supervisor = { path = "crates/tau-supervisor" }
-tau-term-screen = { path = "crates/tau-term-screen" }
-tau-test-support = { path = "crates/tau-test-support" }
-tau-themes = { path = "crates/tau-themes" }
-tau-util-fs-err = { path = "crates/tau-util-fs-err" }
-tau-vcr = { path = "crates/tau-vcr" }
+tau-actions = { package = "dpc-tau-actions", path = "crates/tau-actions", version = "0.1.0" }
+tau-blocking-notify-channel = { package = "dpc-tau-blocking-notify-channel", path = "crates/tau-blocking-notify-channel", version = "0.1.0" }
+tau-cli = { package = "dpc-tau-cli", path = "crates/tau-cli" }
+tau-cli-picker = { package = "dpc-tau-cli-picker", path = "crates/tau-cli-picker" }
+tau-cli-term = { package = "dpc-tau-cli-term", path = "crates/tau-cli-term" }
+tau-cli-term-raw = { package = "dpc-tau-cli-term-raw", path = "crates/tau-cli-term-raw" }
+tau-client = { package = "dpc-tau-client", path = "crates/tau-client", version = "0.1.0" }
+tau-config = { package = "dpc-tau-config", path = "crates/tau-config" }
+tau-core = { package = "dpc-tau-core", path = "crates/tau-core" }
+tau-delivery-memory = { package = "dpc-tau-delivery-memory", path = "crates/tau-delivery-memory" }
+tau-ext-pim = { package = "dpc-tau-ext-pim", path = "crates/tau-ext-pim" }
+tau-ext-provider-builtin = { package = "dpc-tau-ext-provider-builtin", path = "crates/tau-ext-provider-builtin" }
+tau-ext-rhai = { package = "dpc-tau-ext-rhai", path = "crates/tau-ext-rhai" }
+tau-ext-rostra = { package = "dpc-tau-ext-rostra", path = "crates/tau-ext-rostra" }
+tau-ext-shell = { package = "dpc-tau-ext-shell", path = "crates/tau-ext-shell" }
+tau-ext-slack = { package = "dpc-tau-ext-slack", path = "crates/tau-ext-slack" }
+tau-ext-std-notifications = { package = "dpc-tau-ext-std-notifications", path = "crates/tau-ext-std-notifications" }
+tau-ext-swarm = { package = "dpc-tau-ext-swarm", path = "crates/tau-ext-swarm" }
+tau-ext-telegram = { package = "dpc-tau-ext-telegram", path = "crates/tau-ext-telegram" }
+tau-ext-test-dummy = { package = "dpc-tau-ext-test-dummy", path = "crates/tau-ext-test-dummy" }
+tau-ext-utils = { package = "dpc-tau-ext-utils", path = "crates/tau-ext-utils" }
+tau-ext-websearch = { package = "dpc-tau-ext-websearch", path = "crates/tau-ext-websearch" }
+tau-ext-xmpp = { package = "dpc-tau-ext-xmpp", path = "crates/tau-ext-xmpp" }
+tau-ext-zulip = { package = "dpc-tau-ext-zulip", path = "crates/tau-ext-zulip" }
+tau-harness = { package = "dpc-tau-harness", path = "crates/tau-harness" }
+tau-harness-tools = { package = "dpc-tau-harness-tools", path = "crates/tau-harness-tools" }
+tau-proto = { package = "dpc-tau-proto", path = "crates/tau-proto", version = "0.1.0" }
+tau-provider = { package = "dpc-tau-provider", path = "crates/tau-provider" }
+tau-provider-chat-completions = { package = "dpc-tau-provider-chat-completions", path = "crates/tau-provider-chat-completions" }
+tau-provider-codex = { package = "dpc-tau-provider-codex", path = "crates/tau-provider-codex" }
+tau-provider-responses = { package = "dpc-tau-provider-responses", path = "crates/tau-provider-responses" }
+tau-session-inspect = { package = "dpc-tau-session-inspect", path = "crates/tau-session-inspect" }
+tau-skills = { package = "dpc-tau-skills", path = "crates/tau-skills" }
+tau-socket = { package = "dpc-tau-socket", path = "crates/tau-socket" }
+tau-summary-eval = { package = "dpc-tau-summary-eval", path = "crates/tau-summary-eval" }
+tau-supervisor = { package = "dpc-tau-supervisor", path = "crates/tau-supervisor" }
+tau-term-screen = { package = "dpc-tau-term-screen", path = "crates/tau-term-screen" }
+tau-test-support = { package = "dpc-tau-test-support", path = "crates/tau-test-support" }
+tau-themes = { package = "dpc-tau-themes", path = "crates/tau-themes" }
+tau-util-fs-err = { package = "dpc-tau-util-fs-err", path = "crates/tau-util-fs-err" }
+tau-vcr = { package = "dpc-tau-vcr", path = "crates/tau-vcr" }
 
 # External crates
 async-imap = { version = "0.11", default-features = false, features = [

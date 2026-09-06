@@ -963,7 +963,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             id: "run-command".to_owned(),
             title: Some("Run a command".to_owned()),
             arguments: CborValue::Map(vec![
-                example_field("command", example_text("cargo test -p tau-core")),
+                example_field("command", example_text("cargo test -p dpc-tau-core")),
                 example_field("timeout", example_int(300)),
             ]),
             note: Some("For file edits, prefer apply_patch when available.".to_owned()),
@@ -1012,7 +1012,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             id: "run-command".to_owned(),
             title: Some("Run a command".to_owned()),
             arguments: CborValue::Map(vec![
-                example_field("command", example_text("cargo test -p tau-core")),
+                example_field("command", example_text("cargo test -p dpc-tau-core")),
                 example_field("timeout", example_int(300)),
             ]),
             note: Some("For file edits, prefer apply_patch when available.".to_owned()),

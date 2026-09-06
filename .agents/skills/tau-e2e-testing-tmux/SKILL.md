@@ -11,7 +11,7 @@ checks, not an automated test framework.
 
 1. Build the current checkout:
    ```sh
-   cargo build -p tau
+   cargo build -p dpc-tau
    ```
 2. Start an isolated tmux session. When `--scratch-root` / `--root` is omitted,
    the helper generates a unique temporary scratch root and prints it in the

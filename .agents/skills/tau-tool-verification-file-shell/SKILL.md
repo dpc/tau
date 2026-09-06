@@ -95,7 +95,7 @@ protected overlay wins over inherited values and `shell.extra_env` by exposing
 Run every focused internal regression:
 
 ```console
-cargo nextest run -p tau-ext-shell -E 'test(non_interactive_pager_overlay_has_final_precedence_and_narrow_scope) or test(shell_isolation_preserves_inherited_term_by_default) or test(model_and_user_shells_share_protected_pager_environment) or test(protected_pager)'
+cargo nextest run -p dpc-tau-ext-shell -E 'test(non_interactive_pager_overlay_has_final_precedence_and_narrow_scope) or test(shell_isolation_preserves_inherited_term_by_default) or test(model_and_user_shells_share_protected_pager_environment) or test(protected_pager)'
 ```
 
 Then verify the live surfaces. Configure every listed variable to a distinct

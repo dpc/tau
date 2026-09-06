@@ -8,7 +8,7 @@ description: Run and diagnose Tau's always-on deterministic fake-provider end-to
 Run the hermetic headless acceptance lane with:
 
 ```sh
-cargo nextest run -p tau-e2e-tests --test deterministic_provider --no-tests=fail
+cargo nextest run -p dpc-tau-e2e-tests --test deterministic_provider --no-tests=fail
 ```
 
 Run the network-denied CI-equivalent lane with:

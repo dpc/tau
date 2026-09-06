@@ -525,7 +525,7 @@ consumption, and bounded cleanup.
 Finally run an opt-in warm-process manual UI smoke:
 
 ```sh
-cargo build -p tau --bin tau
+cargo build -p dpc-tau --bin tau
 scratch_parent=$(mktemp -d "${TMPDIR:-/tmp}/tau-s8-tmux.XXXXXX")
 scratch_root="$scratch_parent/root"
 tmux_session=tau-s8-smoke

@@ -1337,6 +1337,774 @@ dependencies = [
 ]
 
 [[package]]
+name = "dpc-tau"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-cli",
+ "dpc-tau-core",
+ "dpc-tau-ext-pim",
+ "dpc-tau-ext-provider-builtin",
+ "dpc-tau-ext-rhai",
+ "dpc-tau-ext-rostra",
+ "dpc-tau-ext-shell",
+ "dpc-tau-ext-slack",
+ "dpc-tau-ext-std-notifications",
+ "dpc-tau-ext-swarm",
+ "dpc-tau-ext-telegram",
+ "dpc-tau-ext-test-dummy",
+ "dpc-tau-ext-utils",
+ "dpc-tau-ext-websearch",
+ "dpc-tau-ext-xmpp",
+ "dpc-tau-ext-zulip",
+ "dpc-tau-harness",
+ "dpc-tau-proto",
+ "dpc-tau-socket",
+ "fs2",
+ "nix",
+ "rostra-core",
+ "rustix 1.1.4",
+ "rustix-openpty",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-actions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "dpc-tau-blocking-notify-channel"
+version = "0.1.0"
+dependencies = [
+ "static_assertions",
+]
+
+[[package]]
+name = "dpc-tau-cli"
+version = "0.1.0"
+dependencies = [
+ "built",
+ "ciborium",
+ "clap",
+ "crossterm",
+ "dirs",
+ "dpc-tau-actions",
+ "dpc-tau-blocking-notify-channel",
+ "dpc-tau-cli-picker",
+ "dpc-tau-cli-term",
+ "dpc-tau-cli-term-raw",
+ "dpc-tau-client",
+ "dpc-tau-config",
+ "dpc-tau-delivery-memory",
+ "dpc-tau-ext-provider-builtin",
+ "dpc-tau-ext-utils",
+ "dpc-tau-harness",
+ "dpc-tau-harness-tools",
+ "dpc-tau-proto",
+ "dpc-tau-session-inspect",
+ "dpc-tau-term-screen",
+ "dpc-tau-test-support",
+ "dpc-tau-themes",
+ "fs2",
+ "libc",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "serde_toon_format",
+ "socket2",
+ "tempfile",
+ "time",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width",
+ "vt100",
+]
+
+[[package]]
+name = "dpc-tau-cli-picker"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "dpc-tau-term-screen",
+]
+
+[[package]]
+name = "dpc-tau-cli-term"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "dpc-tau-cli-term-raw",
+ "dpc-tau-term-screen",
+ "dpc-tau-themes",
+ "nix",
+ "nucleo-matcher",
+ "tempfile",
+ "tracing",
+ "which",
+]
+
+[[package]]
+name = "dpc-tau-cli-term-raw"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bon",
+ "crossterm",
+ "dpc-tau-blocking-notify-channel",
+ "dpc-tau-term-screen",
+ "tracing",
+ "unicode-segmentation",
+ "vt100",
+]
+
+[[package]]
+name = "dpc-tau-client"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "dpc-tau-blocking-notify-channel",
+ "dpc-tau-proto",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpc-tau-config"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "dirs",
+ "dpc-tau-proto",
+ "fs2",
+ "indexmap",
+ "libc",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "dpc-tau-actions",
+ "dpc-tau-proto",
+ "fs2",
+ "image",
+ "libc",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "winapi-util",
+]
+
+[[package]]
+name = "dpc-tau-delivery-memory"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "dpc-tau-proto",
+ "serde",
+ "serde_bytes",
+]
+
+[[package]]
+name = "dpc-tau-e2e-tests"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "dpc-tau-cli",
+ "dpc-tau-client",
+ "dpc-tau-config",
+ "dpc-tau-core",
+ "dpc-tau-ext-test-dummy",
+ "dpc-tau-harness",
+ "dpc-tau-harness-tools",
+ "dpc-tau-proto",
+ "dpc-tau-socket",
+ "dpc-tau-test-support",
+ "dpc-tau-util-fs-err",
+ "dpc-tau-vcr",
+ "fs2",
+ "image",
+ "nix",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vt100",
+]
+
+[[package]]
+name = "dpc-tau-ext-pim"
+version = "0.1.0"
+dependencies = [
+ "async-imap",
+ "base64",
+ "blake3",
+ "calcard",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "dpc-tau-client",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "futures-util",
+ "globset",
+ "lettre",
+ "mail-parser",
+ "parse_datetime",
+ "rand 0.8.6",
+ "regex",
+ "rrule",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "tempfile",
+ "time",
+ "time-tz",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "ureq",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
+name = "dpc-tau-ext-provider-builtin"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "dialoguer",
+ "dirs",
+ "dpc-tau-client",
+ "dpc-tau-config",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "dpc-tau-provider",
+ "dpc-tau-provider-chat-completions",
+ "dpc-tau-provider-codex",
+ "dpc-tau-provider-responses",
+ "dpc-tau-term-screen",
+ "fs2",
+ "libc",
+ "proptest",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpc-tau-ext-rhai"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "dpc-tau-client",
+ "dpc-tau-proto",
+ "libc",
+ "rhai",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpc-tau-ext-rostra"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ciborium",
+ "dpc-tau-client",
+ "dpc-tau-proto",
+ "rostra-client",
+ "rostra-client-db",
+ "rostra-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpc-tau-ext-shell"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "ciborium",
+ "dirs",
+ "dpc-tau-actions",
+ "dpc-tau-client",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "dpc-tau-skills",
+ "dpc-tau-vcr",
+ "fs2",
+ "globset",
+ "ignore",
+ "image",
+ "libc",
+ "regex",
+ "regex-syntax",
+ "rustix 1.1.4",
+ "rustix-openpty",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "similar",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "dpc-tau-ext-slack"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "dpc-tau-client",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "futures-util",
+ "rand 0.8.6",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "url",
+]
+
+[[package]]
+name = "dpc-tau-ext-std-notifications"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-client",
+ "dpc-tau-proto",
+ "handlebars",
+ "libc",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpc-tau-ext-swarm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "dpc-tau-client",
+ "dpc-tau-proto",
+ "iroh",
+ "libc",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tau-swarm-api",
+ "tau-swarm-client",
+ "tau-swarm-client-api",
+ "tau-swarm-core",
+ "tau-swarm-iroh",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dpc-tau-ext-telegram"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "dpc-tau-client",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "fs2",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "socket2",
+ "subtle",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "url",
+]
+
+[[package]]
+name = "dpc-tau-ext-test-dummy"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-client",
+ "dpc-tau-proto",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "dpc-tau-ext-utils"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-client",
+ "dpc-tau-proto",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "dpc-tau-ext-websearch"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-client",
+ "dpc-tau-proto",
+ "serde",
+ "serde_json",
+ "tracing",
+ "ureq",
+ "url",
+]
+
+[[package]]
+name = "dpc-tau-ext-xmpp"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "dpc-tau-client",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "futures-util",
+ "handlebars",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-xmpp",
+ "tracing",
+ "tracing-subscriber",
+ "xmpp-parsers",
+]
+
+[[package]]
+name = "dpc-tau-ext-zulip"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "dpc-tau-client",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "fs2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "url",
+]
+
+[[package]]
+name = "dpc-tau-harness"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bon",
+ "built",
+ "ciborium",
+ "dirs",
+ "dpc-tau-actions",
+ "dpc-tau-client",
+ "dpc-tau-config",
+ "dpc-tau-core",
+ "dpc-tau-delivery-memory",
+ "dpc-tau-ext-shell",
+ "dpc-tau-proto",
+ "dpc-tau-session-inspect",
+ "dpc-tau-skills",
+ "dpc-tau-socket",
+ "dpc-tau-util-fs-err",
+ "fs2",
+ "handlebars",
+ "image",
+ "json5",
+ "libc",
+ "listenfd",
+ "proptest",
+ "rand 0.8.6",
+ "rustix 0.38.44",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpc-tau-harness-tools"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-harness",
+ "dpc-tau-proto",
+ "dpc-tau-skills",
+ "serde_json",
+]
+
+[[package]]
+name = "dpc-tau-proto"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "dpc-tau-actions",
+ "indexmap",
+ "rand 0.8.6",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dpc-tau-provider"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "dirs",
+ "dpc-tau-client",
+ "dpc-tau-config",
+ "dpc-tau-proto",
+ "httpdate",
+ "ipnet",
+ "rand 0.8.6",
+ "rcgen",
+ "reqwest 0.12.28",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-platform-verifier 0.7.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zstd",
+]
+
+[[package]]
+name = "dpc-tau-provider-chat-completions"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dpc-tau-proto",
+ "dpc-tau-provider",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpc-tau-provider-codex"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "dpc-tau-proto",
+ "dpc-tau-provider",
+ "dpc-tau-vcr",
+ "futures-util",
+ "lru 0.18.0",
+ "rand 0.8.6",
+ "rcgen",
+ "reqwest 0.12.28",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "dpc-tau-provider-responses"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-proto",
+ "dpc-tau-provider",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite",
+ "zstd",
+]
+
+[[package]]
+name = "dpc-tau-session-inspect"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "ciborium",
+ "dpc-tau-config",
+ "dpc-tau-core",
+ "dpc-tau-proto",
+ "libc",
+ "opentelemetry-proto",
+ "rand 0.8.6",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "serde_toon_format",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
+name = "dpc-tau-skills"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-proto",
+ "serde_yaml_ng",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-socket"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-proto",
+ "socket2",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-summary-eval"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-supervisor"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-proto",
+ "rustix 0.38.44",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-term-screen"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "crossterm",
+ "dpc-tau-proto",
+ "unicode-segmentation",
+ "unicode-width",
+ "vt100",
+]
+
+[[package]]
+name = "dpc-tau-test-support"
+version = "0.1.0"
+dependencies = [
+ "dpc-tau-config",
+ "dpc-tau-core",
+ "dpc-tau-ext-provider-builtin",
+ "dpc-tau-harness",
+ "dpc-tau-proto",
+ "dpc-tau-session-inspect",
+ "dpc-tau-socket",
+ "serde_json",
+ "socket2",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-themes"
+version = "0.1.0"
+dependencies = [
+ "json5",
+ "serde",
+]
+
+[[package]]
+name = "dpc-tau-util-fs-err"
+version = "0.1.0"
+dependencies = [
+ "fs-err",
+ "tempfile",
+]
+
+[[package]]
+name = "dpc-tau-vcr"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5660,718 +6428,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
-name = "tau"
-version = "0.1.0"
-dependencies = [
- "fs2",
- "nix",
- "rostra-core",
- "rustix 1.1.4",
- "rustix-openpty",
- "serde_json",
- "tau-cli",
- "tau-core",
- "tau-ext-pim",
- "tau-ext-provider-builtin",
- "tau-ext-rhai",
- "tau-ext-rostra",
- "tau-ext-shell",
- "tau-ext-slack",
- "tau-ext-std-notifications",
- "tau-ext-swarm",
- "tau-ext-telegram",
- "tau-ext-test-dummy",
- "tau-ext-utils",
- "tau-ext-websearch",
- "tau-ext-xmpp",
- "tau-ext-zulip",
- "tau-harness",
- "tau-proto",
- "tau-socket",
- "tempfile",
-]
-
-[[package]]
-name = "tau-actions"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "tau-blocking-notify-channel"
-version = "0.1.0"
-dependencies = [
- "static_assertions",
-]
-
-[[package]]
-name = "tau-cli"
-version = "0.1.0"
-dependencies = [
- "built",
- "ciborium",
- "clap",
- "crossterm",
- "dirs",
- "fs2",
- "libc",
- "proptest",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "serde_toon_format",
- "socket2",
- "tau-actions",
- "tau-blocking-notify-channel",
- "tau-cli-picker",
- "tau-cli-term",
- "tau-cli-term-raw",
- "tau-client",
- "tau-config",
- "tau-delivery-memory",
- "tau-ext-provider-builtin",
- "tau-ext-utils",
- "tau-harness",
- "tau-harness-tools",
- "tau-proto",
- "tau-session-inspect",
- "tau-term-screen",
- "tau-test-support",
- "tau-themes",
- "tempfile",
- "time",
- "tracing",
- "tracing-subscriber",
- "unicode-segmentation",
- "unicode-width",
- "vt100",
-]
-
-[[package]]
-name = "tau-cli-picker"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "tau-term-screen",
-]
-
-[[package]]
-name = "tau-cli-term"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "nix",
- "nucleo-matcher",
- "tau-cli-term-raw",
- "tau-term-screen",
- "tau-themes",
- "tempfile",
- "tracing",
- "which",
-]
-
-[[package]]
-name = "tau-cli-term-raw"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bon",
- "crossterm",
- "tau-blocking-notify-channel",
- "tau-term-screen",
- "tracing",
- "unicode-segmentation",
- "vt100",
-]
-
-[[package]]
-name = "tau-client"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "serde",
- "serde_json",
- "tau-blocking-notify-channel",
- "tau-proto",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tau-config"
-version = "0.1.0"
-dependencies = [
- "config",
- "dirs",
- "fs2",
- "indexmap",
- "libc",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tau-proto",
- "tempfile",
-]
-
-[[package]]
-name = "tau-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "ciborium",
- "fs2",
- "image",
- "libc",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "tau-actions",
- "tau-proto",
- "tempfile",
- "winapi-util",
-]
-
-[[package]]
-name = "tau-delivery-memory"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "serde",
- "serde_bytes",
- "tau-proto",
-]
-
-[[package]]
-name = "tau-e2e-tests"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "fs2",
- "image",
- "nix",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "tau-cli",
- "tau-client",
- "tau-config",
- "tau-core",
- "tau-ext-test-dummy",
- "tau-harness",
- "tau-harness-tools",
- "tau-proto",
- "tau-socket",
- "tau-test-support",
- "tau-util-fs-err",
- "tau-vcr",
- "tempfile",
- "vt100",
-]
-
-[[package]]
-name = "tau-ext-pim"
-version = "0.1.0"
-dependencies = [
- "async-imap",
- "base64",
- "blake3",
- "calcard",
- "chrono",
- "chrono-tz",
- "ciborium",
- "futures-util",
- "globset",
- "lettre",
- "mail-parser",
- "parse_datetime",
- "rand 0.8.6",
- "regex",
- "rrule",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2 0.10.9",
- "tau-client",
- "tau-core",
- "tau-proto",
- "tempfile",
- "time",
- "time-tz",
- "tokio",
- "tokio-rustls",
- "tracing",
- "ureq",
- "url",
- "webpki-roots",
-]
-
-[[package]]
-name = "tau-ext-provider-builtin"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "dialoguer",
- "dirs",
- "fs2",
- "libc",
- "proptest",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tau-client",
- "tau-config",
- "tau-core",
- "tau-proto",
- "tau-provider",
- "tau-provider-chat-completions",
- "tau-provider-codex",
- "tau-provider-responses",
- "tau-term-screen",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tau-ext-rhai"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "libc",
- "rhai",
- "serde",
- "serde_json",
- "tau-client",
- "tau-proto",
- "tempfile",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tau-ext-rostra"
-version = "0.1.0"
-dependencies = [
- "base64",
- "ciborium",
- "rostra-client",
- "rostra-client-db",
- "rostra-core",
- "serde",
- "serde_json",
- "tau-client",
- "tau-proto",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tau-ext-shell"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake3",
- "ciborium",
- "dirs",
- "fs2",
- "globset",
- "ignore",
- "image",
- "libc",
- "regex",
- "regex-syntax",
- "rustix 1.1.4",
- "rustix-openpty",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "similar",
- "tau-actions",
- "tau-client",
- "tau-core",
- "tau-proto",
- "tau-skills",
- "tau-vcr",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "tau-ext-slack"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake3",
- "futures-util",
- "rand 0.8.6",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "tau-client",
- "tau-core",
- "tau-proto",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "url",
-]
-
-[[package]]
-name = "tau-ext-std-notifications"
-version = "0.1.0"
-dependencies = [
- "handlebars",
- "libc",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "tau-client",
- "tau-proto",
- "tempfile",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tau-ext-swarm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bincode",
- "iroh",
- "libc",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "tau-client",
- "tau-proto",
- "tau-swarm-api",
- "tau-swarm-client",
- "tau-swarm-client-api",
- "tau-swarm-core",
- "tau-swarm-iroh",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tau-ext-telegram"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "ciborium",
- "fs2",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "socket2",
- "subtle",
- "tau-client",
- "tau-core",
- "tau-proto",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "url",
-]
-
-[[package]]
-name = "tau-ext-test-dummy"
-version = "0.1.0"
-dependencies = [
- "rand 0.8.6",
- "serde",
- "serde_json",
- "tau-client",
- "tau-proto",
- "tracing",
-]
-
-[[package]]
-name = "tau-ext-utils"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "serde",
- "serde_json",
- "tau-client",
- "tau-proto",
- "tracing",
-]
-
-[[package]]
-name = "tau-ext-websearch"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tau-client",
- "tau-proto",
- "tracing",
- "ureq",
- "url",
-]
-
-[[package]]
-name = "tau-ext-xmpp"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "futures-util",
- "handlebars",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "tau-client",
- "tau-core",
- "tau-proto",
- "tokio",
- "tokio-xmpp",
- "tracing",
- "tracing-subscriber",
- "xmpp-parsers",
-]
-
-[[package]]
-name = "tau-ext-zulip"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake3",
- "fs2",
- "serde",
- "serde_json",
- "tau-client",
- "tau-core",
- "tau-proto",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "url",
-]
-
-[[package]]
-name = "tau-harness"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "bon",
- "built",
- "ciborium",
- "dirs",
- "fs2",
- "handlebars",
- "image",
- "json5",
- "libc",
- "listenfd",
- "proptest",
- "rand 0.8.6",
- "rustix 0.38.44",
- "serde",
- "serde_json",
- "signal-hook",
- "tau-actions",
- "tau-client",
- "tau-config",
- "tau-core",
- "tau-delivery-memory",
- "tau-ext-shell",
- "tau-proto",
- "tau-session-inspect",
- "tau-skills",
- "tau-socket",
- "tau-util-fs-err",
- "tempfile",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tau-harness-tools"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tau-harness",
- "tau-proto",
- "tau-skills",
-]
-
-[[package]]
-name = "tau-proto"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "indexmap",
- "rand 0.8.6",
- "serde",
- "serde_bytes",
- "serde_json",
- "tau-actions",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "tau-provider"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "dirs",
- "httpdate",
- "ipnet",
- "rand 0.8.6",
- "rcgen",
- "reqwest 0.12.28",
- "rustls",
- "rustls-pemfile",
- "rustls-platform-verifier 0.7.0",
- "serde",
- "serde_json",
- "tau-client",
- "tau-config",
- "tau-proto",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "zstd",
-]
-
-[[package]]
-name = "tau-provider-chat-completions"
-version = "0.1.0"
-dependencies = [
- "base64",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tau-proto",
- "tau-provider",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tau-provider-codex"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake3",
- "futures-util",
- "lru 0.18.0",
- "rand 0.8.6",
- "rcgen",
- "reqwest 0.12.28",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2 0.10.9",
- "tau-proto",
- "tau-provider",
- "tau-vcr",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "tungstenite",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "tau-provider-responses"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tau-proto",
- "tau-provider",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "tungstenite",
- "zstd",
-]
-
-[[package]]
-name = "tau-session-inspect"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blake3",
- "ciborium",
- "libc",
- "opentelemetry-proto",
- "rand 0.8.6",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "serde_toon_format",
- "tau-config",
- "tau-core",
- "tau-proto",
- "tempfile",
- "zstd",
-]
-
-[[package]]
-name = "tau-skills"
-version = "0.1.0"
-dependencies = [
- "serde_yaml_ng",
- "tau-proto",
- "tempfile",
-]
-
-[[package]]
-name = "tau-socket"
-version = "0.1.0"
-dependencies = [
- "socket2",
- "tau-proto",
- "tempfile",
-]
-
-[[package]]
-name = "tau-summary-eval"
-version = "0.1.0"
-dependencies = [
- "clap",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
-]
-
-[[package]]
-name = "tau-supervisor"
-version = "0.1.0"
-dependencies = [
- "rustix 0.38.44",
- "tau-proto",
- "tempfile",
-]
-
-[[package]]
 name = "tau-swarm-api"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6426,62 +6482,6 @@ dependencies = [
  "tau-swarm-client-api",
  "tau-swarm-core",
  "tokio",
-]
-
-[[package]]
-name = "tau-term-screen"
-version = "0.1.0"
-dependencies = [
- "bon",
- "crossterm",
- "tau-proto",
- "unicode-segmentation",
- "unicode-width",
- "vt100",
-]
-
-[[package]]
-name = "tau-test-support"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "socket2",
- "tau-config",
- "tau-core",
- "tau-ext-provider-builtin",
- "tau-harness",
- "tau-proto",
- "tau-session-inspect",
- "tau-socket",
- "tempfile",
-]
-
-[[package]]
-name = "tau-themes"
-version = "0.1.0"
-dependencies = [
- "json5",
- "serde",
-]
-
-[[package]]
-name = "tau-util-fs-err"
-version = "0.1.0"
-dependencies = [
- "fs-err",
- "tempfile",
-]
-
-[[package]]
-name = "tau-vcr"
-version = "0.1.0"
-dependencies = [
- "fs2",
- "libc",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tempfile",
 ]
 
 [[package]]

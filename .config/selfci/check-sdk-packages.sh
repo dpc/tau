@@ -16,10 +16,10 @@ if (($# != 0)); then
 fi
 
 packages=(
-  tau-actions
-  tau-blocking-notify-channel
-  tau-proto
-  tau-client
+  dpc-tau-actions
+  dpc-tau-blocking-notify-channel
+  dpc-tau-proto
+  dpc-tau-client
 )
 msrv_nixpkgs=github:NixOS/nixpkgs/b6018f87da91d19d0ab4cf979885689b469cdd41
 
@@ -97,20 +97,20 @@ rust-version = "1.91"
 publish = false
 
 [dependencies]
-tau-actions = "=${versions[tau-actions]}"
-tau-blocking-notify-channel = "=${versions[tau-blocking-notify-channel]}"
-tau-client = "=${versions[tau-client]}"
-tau-proto = "=${versions[tau-proto]}"
+tau-actions = { package = "dpc-tau-actions", version = "=${versions[dpc-tau-actions]}" }
+tau-blocking-notify-channel = { package = "dpc-tau-blocking-notify-channel", version = "=${versions[dpc-tau-blocking-notify-channel]}" }
+tau-client = { package = "dpc-tau-client", version = "=${versions[dpc-tau-client]}" }
+tau-proto = { package = "dpc-tau-proto", version = "=${versions[dpc-tau-proto]}" }
 EOF
 
 if [[ "$registry_consumer" == false ]]; then
   cat >>"$tmp/consumer/Cargo.toml" <<EOF
 
 [patch.crates-io]
-tau-actions = { path = "$tmp/packages/tau-actions-${versions[tau-actions]}" }
-tau-blocking-notify-channel = { path = "$tmp/packages/tau-blocking-notify-channel-${versions[tau-blocking-notify-channel]}" }
-tau-client = { path = "$tmp/packages/tau-client-${versions[tau-client]}" }
-tau-proto = { path = "$tmp/packages/tau-proto-${versions[tau-proto]}" }
+dpc-tau-actions = { path = "$tmp/packages/dpc-tau-actions-${versions[dpc-tau-actions]}" }
+dpc-tau-blocking-notify-channel = { path = "$tmp/packages/dpc-tau-blocking-notify-channel-${versions[dpc-tau-blocking-notify-channel]}" }
+dpc-tau-client = { path = "$tmp/packages/dpc-tau-client-${versions[dpc-tau-client]}" }
+dpc-tau-proto = { path = "$tmp/packages/dpc-tau-proto-${versions[dpc-tau-proto]}" }
 EOF
 fi
 

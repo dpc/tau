@@ -1,6 +1,6 @@
-# tau-proto
+# dpc-tau-proto
 
-`tau-proto` defines Tau's harness-peer wire messages, extension-visible event
+`dpc-tau-proto` defines Tau's harness-peer wire messages, extension-visible event
 schemas, identifiers, and CBOR codec helpers.
 
 The crate also exports `PROTOCOL_VERSION`, the protocol revision compiled into

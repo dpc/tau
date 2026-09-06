@@ -1,5 +1,5 @@
 [package]
-name = "tau"
+name = "dpc-tau"
 default-run = "tau"
 version.workspace = true
 edition.workspace = true
@@ -47,6 +47,10 @@ tau-harness.workspace = true
 tau-proto.workspace = true
 tau-socket.workspace = true
 tempfile.workspace = true
+
+[[bin]]
+name = "tau"
+path = "src/main.rs"
 
 [[test]]
 name = "owned_process_group_sigterm_stdin_canary"

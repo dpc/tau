@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-pim"
+name = "dpc-tau-ext-pim"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_ext_pim"
 
 [lints]
 workspace = true
@@ -49,3 +52,6 @@ webpki-roots.workspace = true
 serde_yaml_ng.workspace = true
 tau-core.workspace = true
 tempfile.workspace = true
+[[bin]]
+name = "tau-ext-pim"
+path = "src/main.rs"

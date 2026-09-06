@@ -9,9 +9,9 @@ The separate provider-builtin acceptance cases run the exact
 profile. Build and pin that binary before running it:
 
 ```sh
-cargo build -p tau-ext-provider-builtin
+cargo build -p dpc-tau-ext-provider-builtin
 TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/debug/tau-ext-provider-builtin" \
-  cargo nextest run -p tau-e2e-tests --test provider_builtin_retry
+  cargo nextest run -p dpc-tau-e2e-tests --test provider_builtin_retry
 ```
 
 It uses a bounded `127.0.0.1` HTTP/SSE server to prove a 429 retry parks,
@@ -34,11 +34,11 @@ access, or VCR cassette is involved. Most cases use no shell; the listed
 exceptions described below:
 
 ```sh
-cargo nextest run -p tau-e2e-tests --test deterministic_provider
-cargo nextest run -p tau-e2e-tests --test cancellation_liveness
-cargo build -p tau --bin tau
-cargo nextest run -p tau-e2e-tests --test core_resume
-TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p tau-e2e-tests --test core_shell_resume
+cargo nextest run -p dpc-tau-e2e-tests --test deterministic_provider
+cargo nextest run -p dpc-tau-e2e-tests --test cancellation_liveness
+cargo build -p dpc-tau --bin tau
+cargo nextest run -p dpc-tau-e2e-tests --test core_resume
+TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p dpc-tau-e2e-tests --test core_shell_resume
 ```
 
 The acceptance cases cover streaming/final text, a successful tool round

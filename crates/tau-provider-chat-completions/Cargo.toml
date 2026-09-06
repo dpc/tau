@@ -1,5 +1,5 @@
 [package]
-name = "tau-provider-chat-completions"
+name = "dpc-tau-provider-chat-completions"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "tau_provider_chat_completions"
 
 [lints]
 workspace = true
