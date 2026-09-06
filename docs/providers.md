@@ -770,13 +770,15 @@ Private ChatGPT cached-input counts remain provider-reported usage. Tau no
 longer synthesizes an exact cache-read ceiling for Sol, Terra, or Luna because
 the backend's observed cache boundaries no longer match the former fixed
 geometry. When no exact ceiling is available, the CLI marks cache efficiency
-with `?`. For consecutive `gpt-6-astra` turns on the private Responses
-WebSocket route, that uncertain display uses an empirical 128-token,
-one-block-less estimate based only on the preceding input count; it preserves
-the provider counters and falls back to the generic estimate when route/model
-continuity is unavailable. This presentation rule should be reverified when
-the provider exposes usable cache diagnostics or controlled boundary probes
-become available.
+with `?`. On consecutive supported private Responses WebSocket turns, the CLI
+can passively learn one of the observed 128-token or shifted 1,024-token
+reported-read regimes after two consecutive matching predecessor/read
+observations, then apply that provisional geometry to the following turn. It
+requires unchanged typed model controls and route/model continuity, stays
+within the prefix sizes covered by the observations, and falls back to the
+generic estimate when evidence is missing, ambiguous, stale, or changes regime.
+The current read never becomes its own calibrated denominator, and the estimate
+does not alter provider counters or publish an exact ceiling.
 
 DeepSeek Chat Completions routes must explicitly select both
 `compat.stream_options: true` and `compat.cache_usage: deep_seek`. The first

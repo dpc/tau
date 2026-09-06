@@ -4,8 +4,11 @@ use tau_cli_term::RendererDeliveryId;
 
 use super::super::event_renderer::{ToolTimerNotifier, UiIoStats, unix_time_millis};
 use super::*;
-use crate::tool_render::format_turn_stats_line_with_context;
-use crate::turn_stats_projection::CacheEstimateContext;
+use crate::tool_render::format_turn_stats_line_with_projection;
+use crate::turn_stats_projection::{
+    CacheEstimateCalibration, CacheEstimateContext, CacheEstimateGeometry, CacheEstimateModel,
+    PreviousTurnUsageProjection,
+};
 
 /// Live and attach-reconstructed blocks must use the same mode projection when
 /// they move between visible and detached agent transcripts.
@@ -6394,109 +6397,144 @@ fn format_turn_stats_line_estimates_unknown_cache_ceiling() {
     assert_eq!(line, "Δ99%? 120.3k/121.3k? ↑0 ↓0 Σ↑0/0 ↓0");
 }
 
-/// Ensures consecutive private ChatGPT Astra responses use the provisional
-/// one-block-less 128-token input boundary while remaining visibly estimated.
-#[test]
-fn format_turn_stats_line_estimates_astra_cache_boundary() {
-    let usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 121_300,
-        prompt_cached_tokens: 119_808,
-        ..Default::default()
-    };
-    let previous_usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 120_031,
-        response_received_tokens: 1_300,
-        ..Default::default()
-    };
-
-    let line = format_turn_stats_line_with_context(
-        &usage,
-        CacheEstimateContext::AstraChatGptResponses,
-        Some(&previous_usage),
-        CacheEstimateContext::AstraChatGptResponses,
-        None,
-        None,
-    );
-
-    assert_eq!(line, "Δ100%? 119.8k/119.8k? ↑1.4k ↓0 Σ↑0/0 ↓0");
+fn private_cache_context(model: CacheEstimateModel) -> CacheEstimateContext {
+    CacheEstimateContext::private(model, tau_proto::ModelParams::default())
 }
 
-/// Ensures the provisional Astra estimate saturates at zero for a predecessor
-/// smaller than one cache block.
-#[test]
-fn format_turn_stats_line_saturates_small_astra_predecessor() {
-    let usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 200,
-        ..Default::default()
-    };
-    let previous_usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 127,
-        ..Default::default()
-    };
-
-    let line = format_turn_stats_line_with_context(
-        &usage,
-        CacheEstimateContext::AstraChatGptResponses,
-        Some(&previous_usage),
-        CacheEstimateContext::AstraChatGptResponses,
-        None,
-        None,
-    );
-
-    assert_eq!(line, "Δ—? 0/0? ↑200 ↓0 Σ↑0/0 ↓0");
+fn calibrated_predecessor(
+    sent: u64,
+    received: u64,
+    context: CacheEstimateContext,
+    geometry: CacheEstimateGeometry,
+) -> PreviousTurnUsageProjection {
+    PreviousTurnUsageProjection {
+        prompt_sent_tokens: sent,
+        response_received_tokens: received,
+        cache_estimate_context: context,
+        cache_estimate_calibration: CacheEstimateCalibration::Confirmed(geometry),
+    }
 }
 
-/// Ensures an observed cache read above the provisional Astra boundary raises
-/// the uncertain denominator instead of rendering an impossible percentage.
+/// Ensures calibration stays within the observed prefix range and preserves
+/// the distinct later and earlier 1,024-token phases.
 #[test]
-fn format_turn_stats_line_bounds_astra_estimate_by_observed_read() {
-    let usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 2_000,
-        prompt_cached_tokens: 1_900,
-        ..Default::default()
-    };
-    let previous_usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 2_000,
-        ..Default::default()
-    };
-
-    let line = format_turn_stats_line_with_context(
-        &usage,
-        CacheEstimateContext::AstraChatGptResponses,
-        Some(&previous_usage),
-        CacheEstimateContext::AstraChatGptResponses,
-        None,
-        None,
+fn cache_estimate_geometries_preserve_evidence_boundaries() {
+    assert_eq!(CacheEstimateGeometry::Step128Lag182.estimate(9_999), None);
+    assert_eq!(
+        CacheEstimateGeometry::Step1024Residue256.estimate(23_757),
+        Some(22_784)
     );
-
-    assert_eq!(line, "Δ100%? 1.9k/1.9k? ↑100 ↓0 Σ↑0/0 ↓0");
+    assert_eq!(
+        CacheEstimateGeometry::Step1024Residue512.estimate(23_757),
+        Some(23_040)
+    );
 }
 
-/// Ensures a route/model discontinuity does not apply Astra's specialized
-/// boundary to an unrelated preceding response.
+/// Ensures the motivating Sol row uses a previously observed 128-token regime
+/// while retaining the uncertainty marker.
 #[test]
-fn format_turn_stats_line_uses_generic_estimate_across_astra_discontinuity() {
+fn format_turn_stats_line_uses_calibrated_sol_regime() {
+    let context = private_cache_context(CacheEstimateModel::Sol);
     let usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 2_300,
-        prompt_cached_tokens: 1_792,
-        ..Default::default()
-    };
-    let previous_usage = tau_proto::ProviderTokenUsage {
-        prompt_sent_tokens: 2_031,
-        response_received_tokens: 269,
+        prompt_sent_tokens: 23_962,
+        prompt_cached_tokens: 23_552,
         ..Default::default()
     };
 
-    let line = format_turn_stats_line_with_context(
+    let line = format_turn_stats_line_with_projection(
         &usage,
-        CacheEstimateContext::AstraChatGptResponses,
-        Some(&previous_usage),
-        CacheEstimateContext::Generic,
-        None,
-        None,
+        context,
+        Some(calibrated_predecessor(
+            23_757,
+            166,
+            context,
+            CacheEstimateGeometry::Step128Lag182,
+        )),
     );
 
-    assert_eq!(line, "Δ77%? 1.7k/2.3k? ↑0 ↓0 Σ↑0/0 ↓0");
+    assert_eq!(line, "Δ100%? 23.5k/23.5k? ↑410 ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures the calibrated 1,024/256 regime remains distinct from the Sol
+/// 128-token geometry.
+#[test]
+fn format_turn_stats_line_uses_calibrated_terra_plateau() {
+    let context = private_cache_context(CacheEstimateModel::Terra);
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 23_962,
+        prompt_cached_tokens: 22_784,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line_with_projection(
+        &usage,
+        context,
+        Some(calibrated_predecessor(
+            23_757,
+            166,
+            context,
+            CacheEstimateGeometry::Step1024Residue256,
+        )),
+    );
+
+    assert_eq!(line, "Δ100%? 22.7k/22.7k? ↑1.1k ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures a same-model regime change invalidates the inherited calibration
+/// instead of making the current read its own 100-percent denominator.
+#[test]
+fn format_turn_stats_line_falls_back_when_same_model_regime_changes() {
+    let context = private_cache_context(CacheEstimateModel::Sol);
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 30_600,
+        prompt_cached_tokens: 30_208,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line_with_projection(
+        &usage,
+        context,
+        Some(calibrated_predecessor(
+            30_423,
+            100,
+            context,
+            CacheEstimateGeometry::Step1024Residue256,
+        )),
+    );
+
+    assert_eq!(line, "Δ98%? 30.2k/30.5k? ↑77 ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures a model/control discontinuity does not apply a calibrated boundary
+/// to an unrelated preceding response.
+#[test]
+fn format_turn_stats_line_uses_generic_estimate_across_scope_discontinuity() {
+    let previous_context = private_cache_context(CacheEstimateModel::Sol);
+    let current_context = CacheEstimateContext::private(
+        CacheEstimateModel::Sol,
+        tau_proto::ModelParams {
+            service_tier: Some(tau_proto::ServiceTier::Fast),
+            ..Default::default()
+        },
+    );
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 23_962,
+        prompt_cached_tokens: 23_552,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line_with_projection(
+        &usage,
+        current_context,
+        Some(calibrated_predecessor(
+            23_757,
+            166,
+            previous_context,
+            CacheEstimateGeometry::Step128Lag182,
+        )),
+    );
+
+    assert_eq!(line, "Δ98%? 23.5k/23.9k? ↑39 ↓0 Σ↑0/0 ↓0");
 }
 
 /// Ensures a nonzero reusable prefix with no provider cache read remains a

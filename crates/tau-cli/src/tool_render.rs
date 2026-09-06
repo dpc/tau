@@ -8,9 +8,12 @@ use std::time::Duration;
 
 use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 
+#[cfg(test)]
+use crate::turn_stats_projection::CacheEstimateContext;
 use crate::turn_stats_projection::{
-    CacheEstimateContext, CacheReadCeilingProjection, CumulativeTurnUsageProjection,
-    PreviousTurnUsageProjection, TurnStatsPresentationProjection, TurnStatsUsageProjection,
+    CacheEstimateCalibration, CacheEstimateGeometry, CacheReadCeilingProjection,
+    CumulativeTurnUsageProjection, PreviousTurnUsageProjection, TurnStatsPresentationProjection,
+    TurnStatsUsageProjection,
 };
 
 #[cfg(test)]
@@ -22,9 +25,9 @@ pub(crate) fn format_turn_stats_line(
 ) -> String {
     format_turn_stats_line_with_context(
         usage,
-        CacheEstimateContext::Generic,
+        CacheEstimateContext::default(),
         previous_usage,
-        CacheEstimateContext::Generic,
+        CacheEstimateContext::default(),
         turn_latency,
         total_latency,
     )
@@ -49,6 +52,25 @@ pub(crate) fn format_turn_stats_line_with_context(
         previous_cache_estimate_context,
         turn_latency,
         total_latency,
+    )
+    .into_iter()
+    .map(|part| part.text)
+    .collect()
+}
+
+/// Formats one turn-stat line from an explicit retained predecessor projection.
+#[cfg(test)]
+pub(crate) fn format_turn_stats_line_with_projection(
+    usage: &tau_proto::ProviderTokenUsage,
+    cache_estimate_context: CacheEstimateContext,
+    previous_usage: Option<PreviousTurnUsageProjection>,
+) -> String {
+    turn_stats_parts(
+        TurnStatsUsageProjection::from(usage).with_estimate_context(cache_estimate_context),
+        CumulativeTurnUsageProjection::from(usage.stats.total),
+        previous_usage,
+        None,
+        None,
     )
     .into_iter()
     .map(|part| part.text)
@@ -87,9 +109,9 @@ pub(crate) fn render_provider_turn_stats_block_with_cumulative_usage(
         turn_stats_parts_from_provider(
             usage,
             cumulative_usage,
-            CacheEstimateContext::Generic,
+            CacheEstimateContext::default(),
             previous_usage,
-            CacheEstimateContext::Generic,
+            CacheEstimateContext::default(),
             turn_latency,
             total_latency,
         ),
@@ -326,32 +348,35 @@ fn reusable_prompt_prefix_tokens(
     previous_usage: Option<PreviousTurnUsageProjection>,
 ) -> u64 {
     let cache_estimate_context = usage.estimate_context();
-    let astra_continuation = previous_usage.is_some_and(|previous| {
-        cache_estimate_context == CacheEstimateContext::AstraChatGptResponses
-            && previous.cache_estimate_context == CacheEstimateContext::AstraChatGptResponses
+    let generic = previous_usage.map_or(0, |previous| {
+        previous
+            .prompt_sent_tokens
+            .saturating_add(previous.response_received_tokens)
     });
-    let estimated = previous_usage.map_or(0, |previous| {
-        if astra_continuation {
-            // Empirical UI-only estimate from observed Astra usage. Keep this
-            // visibly uncertain until provider diagnostics or controlled probes
-            // establish the exact boundary contract.
-            const ASTRA_CACHE_BLOCK_TOKENS: u64 = 128;
-            previous
-                .prompt_sent_tokens
-                .saturating_sub(ASTRA_CACHE_BLOCK_TOKENS)
-                / ASTRA_CACHE_BLOCK_TOKENS
-                * ASTRA_CACHE_BLOCK_TOKENS
-        } else {
-            previous
-                .prompt_sent_tokens
-                .saturating_add(previous.response_received_tokens)
-        }
-    });
-    let estimated = if astra_continuation {
-        estimated.max(usage.prompt_cached_tokens.min(usage.prompt_sent_tokens))
-    } else {
-        estimated
-    };
+    let estimated = previous_usage
+        .filter(|previous| cache_estimate_context.continues(previous.cache_estimate_context))
+        .and_then(|previous| {
+            let CacheEstimateCalibration::Confirmed(geometry) = previous.cache_estimate_calibration
+            else {
+                return None;
+            };
+            let calibrated = geometry.estimate(previous.prompt_sent_tokens)?;
+            let observed_geometry = CacheEstimateGeometry::infer(
+                previous.prompt_sent_tokens,
+                usage.prompt_cached_tokens,
+            );
+            // A newly observed incompatible regime invalidates inherited
+            // calibration immediately. A shorter read remains a meaningful miss
+            // against the retained envelope rather than silently recalibrating it.
+            if observed_geometry.is_some_and(|observed| observed != geometry)
+                || usage.prompt_cached_tokens > calibrated
+            {
+                None
+            } else {
+                Some(calibrated)
+            }
+        })
+        .unwrap_or(generic);
     estimated.min(usage.prompt_sent_tokens)
 }
 

@@ -1,16 +1,143 @@
 //! Minimal retained presentation state for completed-turn statistics.
 
+use std::num::NonZeroU16;
 use std::time::Duration;
 
-/// Presentation-only cache geometry used when the provider supplied no exact
-/// cache-read ceiling.
+/// Private ChatGPT model family eligible for passive UI calibration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CacheEstimateModel {
+    /// Private Sol model.
+    Sol,
+    /// Private Terra model.
+    Terra,
+    /// Private Luna model.
+    Luna,
+    /// Private Astra model.
+    Astra,
+}
+
+/// Typed request scope used to qualify a provisional cache estimate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum CacheEstimateContext {
-    /// Generic same-agent preceding-turn estimate.
+pub(crate) struct CacheEstimateContext {
+    /// Packed exact private model/control identity, or none for generic
+    /// fallback.
+    key: Option<NonZeroU16>,
+}
+
+impl CacheEstimateContext {
+    /// Creates one exact private-route scope from observed model and controls.
+    pub(crate) fn private(model: CacheEstimateModel, model_params: tau_proto::ModelParams) -> Self {
+        use tau_proto::{EffectiveReasoningEffort, ServiceTier};
+
+        let model = match model {
+            CacheEstimateModel::Sol => 1,
+            CacheEstimateModel::Terra => 2,
+            CacheEstimateModel::Luna => 3,
+            CacheEstimateModel::Astra => 4,
+        };
+        // Only the frozen effective effort affects the provider request. The
+        // portable requested intent may differ while lowering to the same wire
+        // control, so it must not split an otherwise identical cache scope.
+        let (effective_kind, effective_level) = match model_params.effort.effective {
+            EffectiveReasoningEffort::ProviderDefault(None) => (0, 0),
+            EffectiveReasoningEffort::ProviderDefault(Some(level)) => (1, level as u16),
+            EffectiveReasoningEffort::Native(level) => (2, level as u16),
+            EffectiveReasoningEffort::Fixed(level) => (3, level as u16),
+            EffectiveReasoningEffort::Unsupported => (4, 0),
+        };
+        let service_tier = match model_params.service_tier {
+            None => 0,
+            Some(ServiceTier::Fast) => 1,
+            Some(ServiceTier::Flex) => 2,
+        };
+        let packed = model
+            | effective_kind << 3
+            | effective_level << 6
+            | u16::from(model_params.verbosity.as_u8()) << 9
+            | u16::from(model_params.thinking_summary.as_u8()) << 11
+            | service_tier << 13;
+        Self {
+            key: NonZeroU16::new(packed),
+        }
+    }
+
+    /// Returns whether both contexts identify the same qualified request scope.
+    pub(crate) fn continues(self, previous: Self) -> bool {
+        self.key.is_some() && self == previous
+    }
+}
+
+/// Empirical reported-read geometry learned from an earlier qualified turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CacheEstimateGeometry {
+    /// Recent 128-token boundary with a 182-token effective lag.
+    Step128Lag182,
+    /// 1,024-token boundary whose reported counts are 256 modulo 1,024.
+    Step1024Residue256,
+    /// Earlier 1,024-token boundary whose reported counts are 512 modulo 1,024.
+    Step1024Residue512,
+}
+
+/// Confidence retained for one passively observed cache geometry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CacheEstimateCalibration {
+    /// No usable observation is retained.
     #[default]
-    Generic,
-    /// Empirical private ChatGPT Responses geometry for `gpt-6-astra`.
-    AstraChatGptResponses,
+    Uncalibrated,
+    /// One exact observation; another matching turn is required before use.
+    Candidate(CacheEstimateGeometry),
+    /// At least two consecutive exact observations support this regime.
+    Confirmed(CacheEstimateGeometry),
+}
+
+impl CacheEstimateGeometry {
+    /// Smallest predecessor input covered by the passive calibration evidence.
+    const MIN_OBSERVED_PREFIX_TOKENS: u64 = 10_000;
+
+    /// Estimates the reported-read envelope for one observed predecessor input.
+    pub(crate) fn estimate(self, predecessor_input: u64) -> Option<u64> {
+        if predecessor_input < Self::MIN_OBSERVED_PREFIX_TOKENS {
+            return None;
+        }
+        match self {
+            Self::Step128Lag182 => Some(
+                predecessor_input
+                    .saturating_sub(182)
+                    .div_euclid(128)
+                    .saturating_mul(128),
+            ),
+            Self::Step1024Residue256 => Some(
+                predecessor_input
+                    .saturating_sub(438)
+                    .div_euclid(1_024)
+                    .saturating_mul(1_024)
+                    .saturating_add(256),
+            ),
+            Self::Step1024Residue512 => Some(
+                predecessor_input
+                    .saturating_sub(591)
+                    .div_euclid(1_024)
+                    .saturating_mul(1_024)
+                    .saturating_add(512),
+            ),
+        }
+    }
+
+    /// Learns a unique known regime from one qualified predecessor/read pair.
+    pub(crate) fn infer(predecessor_input: u64, cached_input: u64) -> Option<Self> {
+        if cached_input == 0 {
+            return None;
+        }
+        let mut matched = [
+            Self::Step128Lag182,
+            Self::Step1024Residue256,
+            Self::Step1024Residue512,
+        ]
+        .into_iter()
+        .filter(|geometry| geometry.estimate(predecessor_input) == Some(cached_input));
+        let geometry = matched.next()?;
+        matched.next().is_none().then_some(geometry)
+    }
 }
 
 /// Exact provider ceiling or the presentation context for an uncertain
@@ -48,10 +175,10 @@ impl From<&tau_proto::ProviderTokenUsage> for TurnStatsUsageProjection {
             prompt_sent_tokens: usage.prompt_sent_tokens,
             prompt_cached_tokens: usage.prompt_cached_tokens,
             cache_read_ceiling: usage.prompt_cache_read_ceiling_tokens.map_or(
-                CacheReadCeilingProjection::Estimated(CacheEstimateContext::Generic),
+                CacheReadCeilingProjection::Estimated(CacheEstimateContext::default()),
                 |ceiling| CacheReadCeilingProjection::Exact {
                     ceiling,
-                    context: CacheEstimateContext::Generic,
+                    context: CacheEstimateContext::default(),
                 },
             ),
             response_received_tokens: usage.response_received_tokens,
@@ -68,6 +195,8 @@ pub(crate) struct PreviousTurnUsageProjection {
     pub(crate) response_received_tokens: u64,
     /// Route/model context that qualified the preceding estimate.
     pub(crate) cache_estimate_context: CacheEstimateContext,
+    /// Regime confidence learned from preceding qualified responses.
+    pub(crate) cache_estimate_calibration: CacheEstimateCalibration,
 }
 
 impl From<(TurnStatsUsageProjection, CacheEstimateContext)> for PreviousTurnUsageProjection {
@@ -78,6 +207,38 @@ impl From<(TurnStatsUsageProjection, CacheEstimateContext)> for PreviousTurnUsag
             prompt_sent_tokens: usage.prompt_sent_tokens,
             response_received_tokens: usage.response_received_tokens,
             cache_estimate_context,
+            cache_estimate_calibration: CacheEstimateCalibration::Uncalibrated,
+        }
+    }
+}
+
+impl PreviousTurnUsageProjection {
+    /// Retains one completed turn and passively calibrates its qualified
+    /// regime.
+    pub(crate) fn from_completed(usage: TurnStatsUsageProjection, previous: Option<Self>) -> Self {
+        let cache_estimate_context = usage.estimate_context();
+        let cache_estimate_calibration = previous
+            .filter(|previous| cache_estimate_context.continues(previous.cache_estimate_context))
+            .map_or(CacheEstimateCalibration::Uncalibrated, |previous| {
+                let observed = CacheEstimateGeometry::infer(
+                    previous.prompt_sent_tokens,
+                    usage.prompt_cached_tokens,
+                );
+                match (previous.cache_estimate_calibration, observed) {
+                    (
+                        CacheEstimateCalibration::Candidate(expected)
+                        | CacheEstimateCalibration::Confirmed(expected),
+                        Some(observed),
+                    ) if expected == observed => CacheEstimateCalibration::Confirmed(observed),
+                    (_, Some(observed)) => CacheEstimateCalibration::Candidate(observed),
+                    _ => CacheEstimateCalibration::Uncalibrated,
+                }
+            });
+        Self {
+            prompt_sent_tokens: usage.prompt_sent_tokens,
+            response_received_tokens: usage.response_received_tokens,
+            cache_estimate_context,
+            cache_estimate_calibration,
         }
     }
 }

@@ -1938,11 +1938,10 @@ fn turn_stats_retain_only_scalar_projection_with_exact_legacy_rendering() {
     assert!(cold_vt.screen_contains(100, "Δ! 1k/?"));
 }
 
-/// Ensures renderer wiring retains Astra route/model classification across an
-/// exact-ceiling turn so the next adjacent uncertain turn uses the empirical
-/// 128-token estimate.
+/// Ensures renderer wiring requires two matching qualified observations before
+/// applying a regime to the following adjacent uncertain turn.
 #[test]
-fn astra_turn_stats_keep_route_context_across_exact_ceiling() {
+fn cache_turn_stats_calibrate_after_exact_ceiling_observation() {
     let backend = || tau_proto::ProviderBackend {
         kind: tau_proto::ProviderBackendKind::Responses,
         base_url: "https://chatgpt.com/backend-api".to_owned(),
@@ -1966,36 +1965,93 @@ fn astra_turn_stats_keep_route_context_across_exact_ceiling() {
     renderer.switch_agent(agent_id("main"));
     renderer.apply_setting("show-turn-stats", "true");
 
-    let mut first_prompt = agent_prompt_created("astra-exact", "s1");
-    first_prompt.model = "chatgpt-fedi/gpt-6-astra".parse().expect("Astra model");
+    let mut first_prompt = agent_prompt_created("sol-before-observation", "s1");
+    first_prompt.model = "chatgpt-fedi/gpt-5.6-sol".parse().expect("Sol model");
     renderer.handle(&Event::AgentPromptCreated(first_prompt));
-    let mut first = finished_response("astra-exact", Vec::new());
+    let mut first = finished_response("sol-before-observation", Vec::new());
     first.backend = Some(backend());
-    first.usage = Some(usage(2_031, 1_900, Some(2_000), 269));
+    first.usage = Some(usage(23_757, 0, None, 166));
     renderer.handle(&Event::ProviderResponseFinished(first));
 
-    let mut second_prompt = agent_prompt_created("astra-estimated", "s1");
-    second_prompt.model = "chatgpt-fedi/gpt-6-astra".parse().expect("Astra model");
+    let mut second_prompt = agent_prompt_created("sol-observation", "s1");
+    second_prompt.model = "chatgpt-fedi/gpt-5.6-sol".parse().expect("Sol model");
     renderer.handle(&Event::AgentPromptCreated(second_prompt));
-    let mut second = finished_response("astra-estimated", Vec::new());
+    let mut second = finished_response("sol-observation", Vec::new());
     second.backend = Some(backend());
-    second.usage = Some(usage(2_300, 1_792, None, 0));
+    second.usage = Some(usage(23_962, 23_552, Some(23_552), 138));
     renderer.handle(&Event::ProviderResponseFinished(second));
 
+    let mut third_prompt = agent_prompt_created("sol-calibrated", "s1");
+    third_prompt.model = "chatgpt-fedi/gpt-5.6-sol".parse().expect("Sol model");
+    renderer.handle(&Event::AgentPromptCreated(third_prompt));
+    let mut third = finished_response("sol-calibrated", Vec::new());
+    third.backend = Some(backend());
+    third.usage = Some(usage(24_100, 23_680, None, 0));
+    renderer.handle(&Event::ProviderResponseFinished(third));
+
+    let mut fourth_prompt = agent_prompt_created("sol-calibrated-use", "s1");
+    fourth_prompt.model = "chatgpt-fedi/gpt-5.6-sol".parse().expect("Sol model");
+    renderer.handle(&Event::AgentPromptCreated(fourth_prompt));
+    let mut fourth = finished_response("sol-calibrated-use", Vec::new());
+    fourth.backend = Some(backend());
+    fourth.usage = Some(usage(24_300, 23_808, None, 0));
+    renderer.handle(&Event::ProviderResponseFinished(fourth));
+
+    let mut reconnect_prompt = agent_prompt_created("sol-reconnect", "s1");
+    reconnect_prompt.model = "chatgpt-fedi/gpt-5.6-sol".parse().expect("Sol model");
+    renderer.handle(&Event::AgentPromptCreated(reconnect_prompt));
+    let mut reconnect = finished_response("sol-reconnect", Vec::new());
+    reconnect.backend = Some(backend());
+    reconnect.ws_pool_delta = Some(tau_proto::WsPoolDelta {
+        upgrades: 1,
+        silent_reconnects: 0,
+    });
+    reconnect.usage = Some(usage(24_500, 24_064, None, 100));
+    renderer.handle(&Event::ProviderResponseFinished(reconnect));
+
+    let mut after_reconnect_prompt = agent_prompt_created("sol-after-reconnect", "s1");
+    after_reconnect_prompt.model = "chatgpt-fedi/gpt-5.6-sol".parse().expect("Sol model");
+    renderer.handle(&Event::AgentPromptCreated(after_reconnect_prompt));
+    let mut after_reconnect = finished_response("sol-after-reconnect", Vec::new());
+    after_reconnect.backend = Some(backend());
+    after_reconnect.usage = Some(usage(24_700, 24_192, None, 0));
+    renderer.handle(&Event::ProviderResponseFinished(after_reconnect));
+
     let retained = renderer.retained_turn_stats_blocks_for_test();
-    let line = retained[1]
+    let candidate_line = retained[2]
         .content
         .spans()
         .iter()
         .map(|span| span.text.as_str())
         .collect::<String>();
-    assert!(line.starts_with("Δ100%? 1.7k/1.7k? ↑508"));
+    assert!(candidate_line.starts_with("Δ98%? 23.6k/24.1k? ↑0"));
+    let line = retained[3]
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert!(line.starts_with("Δ100%? 23.8k/23.8k? ↑492"));
+    let reconnect_line = retained[4]
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert!(reconnect_line.starts_with("Δ99%? 24k/24.3k? ↑200"));
+    let after_reconnect_line = retained[5]
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert!(after_reconnect_line.starts_with("Δ98%? 24.1k/24.6k? ↑100"));
 }
 
 /// Ensures an intervening usage-less ordinary or standalone terminal breaks
-/// Astra predecessor continuity instead of reaching past the gap.
+/// calibrated predecessor continuity instead of reaching past the gap.
 #[test]
-fn astra_turn_stats_do_not_reach_past_usage_less_terminal() {
+fn calibrated_turn_stats_do_not_reach_past_usage_less_terminal() {
     for standalone in [false, true] {
         let (_term, handle, _vt) = setup(100, 30);
         let mut renderer = EventRenderer::new(

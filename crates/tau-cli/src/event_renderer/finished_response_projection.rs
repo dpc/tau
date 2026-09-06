@@ -1,7 +1,7 @@
 //! Stages and atomically publishes selected transcript provider finals.
 
 use super::*;
-use crate::turn_stats_projection::TurnStatsUsageProjection;
+use crate::turn_stats_projection::{PreviousTurnUsageProjection, TurnStatsUsageProjection};
 
 /// Expensive, immutable presentation work prepared before a final is published.
 pub(super) struct FinishedResponseProjection {
@@ -142,6 +142,7 @@ impl EventRenderer {
             .map(|started_at| started_at.elapsed());
         let cache_estimate_context = cache_estimate_context(
             prompt_state.and_then(|state| state.model.as_ref()),
+            prompt_state.and_then(|state| state.model_params),
             finished,
         );
         let retain_thinking = self.presentation.show_thinking || !self.presentation.verbose_mode;
@@ -486,8 +487,9 @@ impl EventRenderer {
             .saturating_add(projection.usage.response_received_tokens);
         let bid = self.resources.handle.print_output("turn-stats", block);
         let usage = projection.usage;
-        self.transcript.history.turn_stats_predecessor =
-            Some((usage, usage.estimate_context()).into());
+        self.transcript.history.turn_stats_predecessor = Some(
+            PreviousTurnUsageProjection::from_completed(usage, projection.previous_usage),
+        );
         self.transcript
             .history
             .turn_stats_history
@@ -796,33 +798,46 @@ impl EventRenderer {
     }
 }
 
-/// Classifies the narrow route/model combination with an empirical Astra cache
-/// estimate. Missing prompt provenance, stale-chain repair, or any route/model
-/// mismatch retains the generic uncertain estimate.
+/// Classifies one private route/model/control scope eligible for passive cache
+/// calibration. Missing prompt provenance, controls, stale-chain repair, or any
+/// route/model mismatch retains the generic uncertain estimate.
 fn cache_estimate_context(
     model: Option<&tau_proto::ModelId>,
+    model_params: Option<tau_proto::ModelParams>,
     finished: &tau_proto::ProviderResponseFinished,
 ) -> crate::turn_stats_projection::CacheEstimateContext {
     use tau_proto::{ProviderBackendKind, ProviderBackendTransport};
 
-    use crate::turn_stats_projection::CacheEstimateContext;
+    use crate::turn_stats_projection::{CacheEstimateContext, CacheEstimateModel};
 
     let Some(model) = model else {
-        return CacheEstimateContext::Generic;
+        return CacheEstimateContext::default();
+    };
+    let Some(model_params) = model_params else {
+        return CacheEstimateContext::default();
     };
     let Some(backend) = finished.backend.as_ref() else {
-        return CacheEstimateContext::Generic;
+        return CacheEstimateContext::default();
     };
-    if model.model.as_str() == "gpt-6-astra"
-        && backend.kind == ProviderBackendKind::Responses
-        && backend.base_url == "https://chatgpt.com/backend-api"
-        && backend.transport == ProviderBackendTransport::Websocket
-        && !backend.stale_chain_fallback
+    if backend.kind != ProviderBackendKind::Responses
+        || backend.base_url != "https://chatgpt.com/backend-api"
+        || backend.transport != ProviderBackendTransport::Websocket
+        || backend.stale_chain_fallback
+        || finished.provider_attempt != tau_proto::ProviderAttempt::ONE
+        || finished
+            .ws_pool_delta
+            .is_some_and(|delta| delta.upgrades != 0 || delta.silent_reconnects != 0)
     {
-        CacheEstimateContext::AstraChatGptResponses
-    } else {
-        CacheEstimateContext::Generic
+        return CacheEstimateContext::default();
     }
+    let model = match model.model.as_str() {
+        "gpt-5.6-sol" => CacheEstimateModel::Sol,
+        "gpt-5.6-terra" => CacheEstimateModel::Terra,
+        "gpt-5.6-luna" => CacheEstimateModel::Luna,
+        "gpt-6-astra" => CacheEstimateModel::Astra,
+        _ => return CacheEstimateContext::default(),
+    };
+    CacheEstimateContext::private(model, model_params)
 }
 
 /// Project assistant text while turning validated semantic citation ranges into

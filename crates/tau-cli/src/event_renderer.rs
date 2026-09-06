@@ -903,6 +903,8 @@ struct PromptState {
     is_standalone_compaction: bool,
     /// Model selected for this prompt, when its start fact reached the CLI.
     model: Option<tau_proto::ModelId>,
+    /// Exact model controls selected for this prompt, when available.
+    model_params: Option<tau_proto::ModelParams>,
     /// Live agent-response block. `None` until the first provider update
     /// allocates a response/progress block.
     response_block_id: Option<tau_cli_term::BlockId>,
@@ -7403,6 +7405,7 @@ impl EventRenderer {
                 .entry(prompt.agent_prompt_id.clone())
                 .or_default();
             state.model = Some(prompt.model.clone());
+            state.model_params = prompt.model_params;
             if is_standalone_compaction {
                 state.is_standalone_compaction = true;
             }
@@ -9613,6 +9616,7 @@ impl EventRenderer {
                 true
             }
             Event::AgentCompacted(compacted) => {
+                self.transcript.history.turn_stats_predecessor = None;
                 let prompt_id = compacted.compact_prompt_id.as_ref().cloned().or_else(|| {
                     compacted
                         .transaction_id
