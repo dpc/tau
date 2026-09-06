@@ -273,6 +273,11 @@ pub enum Command {
 pub enum SessionCommand {
     /// Inspect durable cache accounting and private capture coverage offline.
     Cache(SessionCacheArgs),
+    /// Gracefully shut down one exact running session.
+    Kill {
+        /// Exact session identifier to shut down
+        session_id: tau_proto::SessionId,
+    },
     /// List currently running sessions.
     List(SessionListArgs),
 

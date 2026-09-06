@@ -48,6 +48,11 @@ the harness's current decision, whereas `:detach` authoritatively clears the
 policy before closing its transport. The clear survives reconnections, not a
 cold daemon restart. Headless launches begin with the policy disabled.
 `:quit-session` requests unconditional canonical shutdown, disconnecting every UI.
+`tau session kill SESSION` performs the same request through exact-session UI
+admission without starting an interactive terminal. It reports successful
+termination only after the socket-bound process observer confirms exit, and it
+does not signal processes, infer ownership from a PID or path, delete history,
+or bypass socket access policy.
 See [SPEC-tau-cli-command-mode](SPEC-tau-cli-command-mode.md) for the shared exit
 contract. Normal final stderr status follows terminal cleanup and worker joins.
 Owned launches confirm termination by waiting boundedly for their child's exit;

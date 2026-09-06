@@ -144,6 +144,14 @@ fn session_commands_parse_nested_operations() {
             command: super::super::cli::SessionCommand::Show { session_id, .. },
         }) if session_id.as_str() == "s1"
     ));
+
+    let kill = path_super_cli::Cli::parse_from(["tau", "session", "kill", "s1"]);
+    assert!(matches!(
+        kill.command,
+        Some(super::super::cli::Command::Session {
+            command: super::super::cli::SessionCommand::Kill { session_id },
+        }) if session_id.as_str() == "s1"
+    ));
 }
 /// Missing paths and non-directory paths fail in clap's exit-2 value-validation
 /// path instead of becoming successful empty list filters.

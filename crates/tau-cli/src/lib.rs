@@ -16,6 +16,7 @@ mod daemon;
 mod dev_tmux;
 mod estimated_cost;
 mod event_renderer;
+mod kill_session;
 mod line_output;
 mod list_agents;
 mod list_sessions;
@@ -918,6 +919,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             DispatchCommand::Other(cli::Command::Session { command }) => {
                 let command_name = match command {
                     cli::SessionCommand::List(_) => "session list",
+                    cli::SessionCommand::Kill { .. } => "session kill",
                     cli::SessionCommand::Show { .. } => "session show",
                     cli::SessionCommand::Stats { .. } => "session stats",
                     cli::SessionCommand::Cache(_) => "session cache",
@@ -1072,6 +1074,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         ephemeral,
                     )
                 }
+            }
+
+            DispatchCommand::Other(cli::Command::Session {
+                command: cli::SessionCommand::Kill { session_id },
+            }) => {
+                reject_harness_config_overrides(&harness_config_overrides, "session kill")?;
+                kill_session::run(&session_id)
             }
 
             DispatchCommand::Other(cli::Command::Session {

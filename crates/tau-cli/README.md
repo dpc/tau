@@ -109,6 +109,12 @@ required `session_id` and `project_root` strings; empty results are `[]`, and
 duplicate records are retained when multiple responsive harnesses report the
 same identity.
 
+`tau session kill SESSION` connects to that exact running session as an
+ordinary admitted UI and requests the same graceful canonical shutdown as
+interactive `:quit-session`. It preserves durable history and reports success
+only after confirming that the connected daemon process exited. It never sends
+a signal, deletes session data, or bypasses runtime socket access policy.
+
 Relative `--dir` values resolve from the caller's current directory. Missing,
 inaccessible, and non-directory values are CLI errors with exit status 2.
 Zero, one, and multiple matches are successful complete snapshots, and a closed

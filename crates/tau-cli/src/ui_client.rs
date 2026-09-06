@@ -16,6 +16,7 @@ use tau_proto::{
 };
 
 use crate::daemon::DaemonHandle;
+use crate::peer_exit::PeerExit;
 
 pub(crate) type UiInputReader = PeerInputReader<Box<dyn Read + Send>>;
 pub(crate) type UiOutputWriter = PeerOutputWriter<BufWriter<Box<dyn Write + Send>>>;
@@ -37,6 +38,28 @@ pub(crate) fn connect_ui_client(
         Some(shutdown_stream),
         UI_SESSION_ADMISSION_TIMEOUT,
     )
+}
+
+/// Connects an exact-session UI client and pins the admitted daemon process
+/// identity for read-only exit confirmation.
+pub(crate) fn connect_ui_client_with_peer_exit(
+    socket_path: &Path,
+    client_name: impl AsRef<str>,
+    expected_session_id: &tau_proto::SessionId,
+) -> io::Result<(UiInputReader, UiOutputWriter, Option<PeerExit>)> {
+    let stream = UnixStream::connect(socket_path)?;
+    let peer_exit = PeerExit::from_socket(&stream).ok();
+    let read_stream = stream.try_clone()?;
+    let shutdown_stream = stream.try_clone()?;
+    let (reader, writer) = connect_ui_streams_with_shutdown(
+        read_stream,
+        stream,
+        client_name,
+        Some(expected_session_id),
+        Some(shutdown_stream),
+        UI_SESSION_ADMISSION_TIMEOUT,
+    )?;
+    Ok((reader, writer, peer_exit))
 }
 
 pub(crate) fn connect_ui_client_until(
