@@ -76,13 +76,13 @@ rostra-client-db = "0.1.3"
 rostra-core = "0.1.3"
 winapi-util = "0.1.11"
 # Internal crates
-tau-actions = { path = "crates/tau-actions" }
-tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }
+tau-actions = { path = "crates/tau-actions", version = "0.1.0" }
+tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel", version = "0.1.0" }
 tau-cli = { path = "crates/tau-cli" }
 tau-cli-picker = { path = "crates/tau-cli-picker" }
 tau-cli-term = { path = "crates/tau-cli-term" }
 tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
-tau-client = { path = "crates/tau-client" }
+tau-client = { path = "crates/tau-client", version = "0.1.0" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-delivery-memory = { path = "crates/tau-delivery-memory" }
@@ -102,7 +102,7 @@ tau-ext-xmpp = { path = "crates/tau-ext-xmpp" }
 tau-ext-zulip = { path = "crates/tau-ext-zulip" }
 tau-harness = { path = "crates/tau-harness" }
 tau-harness-tools = { path = "crates/tau-harness-tools" }
-tau-proto = { path = "crates/tau-proto" }
+tau-proto = { path = "crates/tau-proto", version = "0.1.0" }
 tau-provider = { path = "crates/tau-provider" }
 tau-provider-chat-completions = { path = "crates/tau-provider-chat-completions" }
 tau-provider-codex = { path = "crates/tau-provider-codex" }

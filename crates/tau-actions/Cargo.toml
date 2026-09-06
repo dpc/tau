@@ -2,10 +2,10 @@
 name = "tau-actions"
 version.workspace = true
 edition.workspace = true
-description.workspace = true
+description = "Shared action schemas and command parser for Tau extensions."
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true

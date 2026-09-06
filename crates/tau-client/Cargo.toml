@@ -2,10 +2,10 @@
 name = "tau-client"
 version.workspace = true
 edition.workspace = true
-description.workspace = true
+description = "Client runtime for standalone Tau extensions and UI protocol peers."
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
