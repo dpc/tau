@@ -56,21 +56,21 @@ fn capture(filter: EnvFilter, emit: impl FnOnce()) -> String {
 /// extension's default.
 #[test]
 fn explicit_tau_log_filter_replaces_the_extension_default() {
-    let filter = filter_from_env("tau_ext_rostra=info,warn", |name| {
+    let filter = filter_from_env("tau_ext_example=info,warn", |name| {
         assert_eq!(name, "TAU_LOG");
         Ok("warn".to_owned())
     });
     let output = capture(filter, || {
-        tracing::info!(target: "rostra", "hidden Rostra info");
+        tracing::info!(target: "example_dependency", "hidden dependency info");
         tracing::warn!(target: "unrelated", "global warning fallback");
     });
-    let default_output = capture(EnvFilter::new("tau_ext_rostra=info,warn"), || {
-        tracing::info!(target: "tau_ext_rostra", "default Rostra info");
+    let default_output = capture(EnvFilter::new("tau_ext_example=info,warn"), || {
+        tracing::info!(target: "tau_ext_example", "default component info");
     });
 
-    assert!(!output.contains("hidden Rostra info"));
+    assert!(!output.contains("hidden dependency info"));
     assert!(output.contains("global warning fallback"));
-    assert!(default_output.contains("default Rostra info"));
+    assert!(default_output.contains("default component info"));
 }
 
 /// Ensures missing and malformed operator filters both select the component's
@@ -81,9 +81,9 @@ fn absent_or_invalid_tau_log_uses_the_component_fallback() {
         Err(VarError::NotPresent),
         Ok("[invalid directive".to_owned()),
     ] {
-        let filter = filter_from_env("tau_ext_rostra=info,warn", |_| configured);
+        let filter = filter_from_env("tau_ext_example=info,warn", |_| configured);
         let output = capture(filter, || {
-            tracing::info!(target: "tau_ext_rostra", "component baseline");
+            tracing::info!(target: "tau_ext_example", "component baseline");
             tracing::info!(target: "dependency", "private dependency info");
             tracing::warn!(target: "dependency", "dependency warning");
         });
@@ -98,32 +98,31 @@ fn absent_or_invalid_tau_log_uses_the_component_fallback() {
 /// and disables both the component baseline and global warning fallback.
 #[test]
 fn empty_tau_log_is_a_complete_off_replacement() {
-    let filter = filter_from_env("tau_ext_rostra=info,warn", |_| Ok(String::new()));
+    let filter = filter_from_env("tau_ext_example=info,warn", |_| Ok(String::new()));
     let output = capture(filter, || {
-        tracing::info!(target: "tau_ext_rostra", "component baseline");
+        tracing::info!(target: "tau_ext_example", "component baseline");
         tracing::warn!(target: "dependency", "dependency warning");
     });
 
     assert!(output.is_empty());
 }
 
-/// Ensures the published `rostra=debug,warn` directive reaches both the
-/// extension target and the upstream Rostra-client target while retaining
-/// warnings from every other target.
+/// Ensures an operator can enable one extension and its dependency prefix while
+/// retaining warnings from every other target.
 #[test]
-fn rostra_debug_prefix_and_global_warn_fallback_are_effective() {
-    let filter = filter_from_env("tau_ext_rostra=info,warn", |_| {
-        Ok("tau_ext_rostra=debug,rostra=debug,warn".to_owned())
+fn dependency_debug_prefix_and_global_warn_fallback_are_effective() {
+    let filter = filter_from_env("tau_ext_example=info,warn", |_| {
+        Ok("tau_ext_example=debug,example_dependency=debug,warn".to_owned())
     });
     let output = capture(filter, || {
-        tracing::debug!(target: "rostra::tools::write", "extension debug");
-        tracing::debug!(target: "rostra_client::publisher", "upstream debug");
+        tracing::debug!(target: "tau_ext_example::tools::write", "extension debug");
+        tracing::debug!(target: "example_dependency::publisher", "dependency debug");
         tracing::debug!(target: "unrelated", "hidden unrelated debug");
         tracing::warn!(target: "unrelated", "global warning fallback");
     });
 
     assert!(output.contains("extension debug"));
-    assert!(output.contains("upstream debug"));
+    assert!(output.contains("dependency debug"));
     assert!(!output.contains("hidden unrelated debug"));
     assert!(output.contains("global warning fallback"));
 }

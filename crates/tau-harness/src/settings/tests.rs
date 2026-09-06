@@ -189,13 +189,19 @@ fn builtins() -> Vec<BuiltinExtension> {
             true,
             serde_json::json!({ "agent_start": [], "agent_end": [], "agent_idle": [], "agent_idle_all": [] }),
         ),
-        builtin(
-            "std-rostra",
-            "ext-rostra",
-            "tool",
-            false,
-            serde_json::json!({}),
-        ),
+        BuiltinExtension {
+            name: "std-rostra".to_owned(),
+            prefix: Vec::new(),
+            command: vec!["tau-ext-rostra".into()],
+            suffix: Vec::new(),
+            role: Some("tool".into()),
+            cwd: None,
+            enable: false,
+            require: true,
+            startup_timeout: Duration::from_secs(10),
+            config: serde_json::json!({}),
+            secrets: BTreeMap::new(),
+        },
         builtin(
             "std-websearch",
             "ext-websearch",
@@ -387,20 +393,19 @@ fn resolve_extensions_returns_builtins_when_user_config_empty() {
     assert_eq!(resolved[3].name, "std-websearch");
 }
 
-/// Ensures ordinary extensions retain the two-second default while the bundled
-/// Rostra client receives its approved migration-aware deadline and users can
-/// replace that value for one configured instance.
+/// Ensures ordinary extensions retain the two-second default while the external
+/// Rostra client keeps its migration-aware deadline and executable boundary,
+/// and users can replace the deadline for one configured instance.
 #[test]
 fn extension_startup_timeout_defaults_and_overrides() {
     let builtins = builtin_extensions();
-    assert_eq!(
-        builtins
-            .iter()
-            .find(|extension| extension.name == "std-rostra")
-            .expect("bundled Rostra extension")
-            .startup_timeout,
-        Duration::from_secs(10)
-    );
+    let rostra = builtins
+        .iter()
+        .find(|extension| extension.name == "std-rostra")
+        .expect("configured Rostra extension");
+    assert_eq!(rostra.command, ["tau-ext-rostra"]);
+    assert!(rostra.suffix.is_empty());
+    assert_eq!(rostra.startup_timeout, Duration::from_secs(10));
 
     let mut settings = HarnessSettings::built_in();
     settings.extensions.insert(

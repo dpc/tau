@@ -42,8 +42,9 @@ unknown timeout/cancellation outcomes can have taken effect. Its only inbound
 model-visible path is the separately opted-in, bounded following-notification
 report: it projects hostile Rostra content into an extension-owned checkpointed
 batch and has no arbitrary inbound message or reply route. It has no identity
-creation, direct-IP public mode, shared database, or memory-only fallback. See
-[`ARCH-tau-ext-rostra`](crates/tau-ext-rostra/specs/ARCH-tau-ext-rostra.md).
+creation, direct-IP public mode, shared database, or memory-only fallback. The
+separately maintained `tau-ext-rostra` project owns its detailed architecture
+and security documentation.
 
 The optional `std-swarm` configured extension is a trusted same-user local
 executable. Its remote Iroh peer is cooperative but authenticated and

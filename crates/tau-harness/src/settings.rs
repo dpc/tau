@@ -123,9 +123,10 @@ pub struct ExtensionConfig {
     pub tau_runtime_socket_access: path_tau_config_settings::TauRuntimeSocketAccess,
 }
 
-/// Built-in extension shipped with `tau`. Used by
-/// [`resolve_extensions`] to seed the table before applying user
-/// overrides. argv = `prefix ++ command ++ suffix`.
+/// Extension configuration supplied by Tau. Used by [`resolve_extensions`] to
+/// seed the table before applying user overrides. The executable can be either
+/// a bundled Tau component or a separately installed command. argv =
+/// `prefix ++ command ++ suffix`.
 pub struct BuiltinExtension {
     pub name: String,
     pub prefix: Vec<String>,
@@ -787,14 +788,13 @@ pub(crate) fn parse_extension_cli_overrides_transport(
     })
 }
 
-/// The set of extensions the harness ships with by default.
+/// The set of extension configurations the harness supplies by default.
 ///
-/// Each entry's `command` is `[<current-exe>]` and `suffix` is
-/// `["component", <name>]`, so a fresh `tau` install with no
-/// `harness.yaml` runs the in-binary provider and tool extensions out
-/// of the box. Users can override individual fields
-/// (or set `enable: false`) per entry in `harness.yaml` under
-/// `extensions: { name: { … } }`.
+/// Bundled entries omit `command`, causing Tau to use `[<current-exe>]` plus
+/// their `["component", <name>]` suffix. Entries with an explicit command name
+/// require that separate executable to be installed. Users can override
+/// individual fields (or set `enable: false`) per entry in `harness.yaml`
+/// under `extensions: { name: { … } }`.
 ///
 /// The list itself lives in `config/built-in.extensions.json5` and is
 /// embedded into the binary via `include_str!`; `built_in_extension_defs`

@@ -15,7 +15,6 @@ members = [
   "crates/tau-ext-pim",
   "crates/tau-ext-provider-builtin",
   "crates/tau-ext-rhai",
-  "crates/tau-ext-rostra",
   "crates/tau-ext-shell",
   "crates/tau-ext-slack",
   "crates/tau-ext-std-notifications",
@@ -71,9 +70,6 @@ unwrap_used = "deny"
 [workspace.dependencies]
 httpdate = "1.0.3"
 proptest = "1.7"
-rostra-client = "0.1.3"
-rostra-client-db = "0.1.3"
-rostra-core = "0.1.3"
 winapi-util = "0.1.11"
 # Internal crates
 tau-actions = { package = "dpc-tau-actions", path = "crates/tau-actions", version = "0.1.0" }
@@ -89,7 +85,6 @@ tau-delivery-memory = { package = "dpc-tau-delivery-memory", path = "crates/tau-
 tau-ext-pim = { package = "dpc-tau-ext-pim", path = "crates/tau-ext-pim" }
 tau-ext-provider-builtin = { package = "dpc-tau-ext-provider-builtin", path = "crates/tau-ext-provider-builtin" }
 tau-ext-rhai = { package = "dpc-tau-ext-rhai", path = "crates/tau-ext-rhai" }
-tau-ext-rostra = { package = "dpc-tau-ext-rostra", path = "crates/tau-ext-rostra" }
 tau-ext-shell = { package = "dpc-tau-ext-shell", path = "crates/tau-ext-shell" }
 tau-ext-slack = { package = "dpc-tau-ext-slack", path = "crates/tau-ext-slack" }
 tau-ext-std-notifications = { package = "dpc-tau-ext-std-notifications", path = "crates/tau-ext-std-notifications" }

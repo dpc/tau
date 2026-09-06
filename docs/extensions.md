@@ -71,10 +71,15 @@ For a content-free mount-namespace diagnostic, see the
 
 ## Rostra
 
-The bundled `std-rostra` instance is disabled by default. It runs one full
-Rostra client with relay-only Iroh peer transport, Pkarr HTTPS/DNS discovery,
-and no direct peer-IP transport. It derives its identity from a Tau-managed
-24-word mnemonic:
+The separately maintained `std-rostra` instance is disabled by default. Tau
+does not bundle its source or executable: install `tau-ext-rostra` separately
+and ensure it is available through `PATH` before enabling the instance. The
+default configuration launches that executable through Tau's normal supervised
+stdio extension route.
+
+The extension runs one full Rostra client with relay-only Iroh peer transport,
+Pkarr HTTPS/DNS discovery, and no direct peer-IP transport. It derives its
+identity from a Tau-managed 24-word mnemonic:
 
 ```yaml
 extensions:
@@ -167,7 +172,7 @@ An extension entry can:
   enabled extension cannot initialize;
 - set `startup_timeout_seconds` from 1 through 3,600 to bound its own
   successful-spawn-to-`Ready` interval; ordinary extensions default to two
-  seconds, while bundled `std-rostra` defaults to ten seconds for local
+  seconds, while external `std-rostra` defaults to ten seconds for local
   database upgrade and compaction work;
 - set its command argv with `command`, wrap it with an argv `prefix`, or set its
   process working directory with `cwd`;

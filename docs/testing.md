@@ -2,11 +2,12 @@
 
 ## Durable Rostra notification worker
 
-Test `std-rostra` notification changes at three boundaries. State fault tests
-cover atomic policy/checkpoint replacement, restart reconstruction, poisoning,
-and report-ID allocation. State-machine and report tests cover batching,
-projection, timing, canonical acknowledgement, and bounded payload assembly.
-Worker tests cover report-enqueue backoff, historical-boundary selection, and
+The separately maintained `tau-ext-rostra` project owns `std-rostra`
+implementation tests. Its state fault tests cover atomic policy/checkpoint
+replacement, restart reconstruction, poisoning, and report-ID allocation.
+State-machine and report tests cover batching, projection, timing, canonical
+acknowledgement, and bounded payload assembly. Worker tests cover
+report-enqueue backoff, historical-boundary selection, and
 the exact one-row argument at the production database scan seam. Keep that
 behavioral call-boundary oracle when changing the scan.
 Add deterministic feed/follow-snapshot fixtures when changing source selection;

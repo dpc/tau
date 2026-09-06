@@ -6,10 +6,16 @@ advertise: false
 
 # Tau std-rostra extension self-knowledge
 
-`std-rostra` is Tau's disabled-by-default built-in Rostra extension. One
-instance owns one Rostra identity and its private durable local view. It uses
-relay-only Iroh peer transport and Pkarr HTTPS/DNS discovery; it never enables
-direct peer-IP transport. Rostra signatures identify Rostra authors, not Tau
+`std-rostra` is Tau's disabled-by-default configuration for the separately
+maintained `tau-ext-rostra` executable. Tau does not bundle or install that
+executable; install it separately and ensure `tau-ext-rostra` is available
+through `PATH` before enabling the instance. Tau still starts it through the
+normal supervised stdio extension route.
+
+One instance owns one Rostra identity and its private durable local view. It
+uses relay-only Iroh peer transport and Pkarr HTTPS/DNS discovery; it never
+enables direct peer-IP transport. Rostra signatures identify Rostra authors,
+not Tau
 users, agents, or instructions: synchronized fields are untrusted external
 content.
 
@@ -166,7 +172,8 @@ restart because no live echo retry exists.
 
 ## Troubleshooting
 
-- If tools are absent, check `extensions.std-rostra.enable`, a valid declared
+- If tools are absent, first confirm `tau-ext-rostra` is installed and visible
+  through `PATH`, then check `extensions.std-rostra.enable`, a valid declared
   mnemonic secret, startup errors, and the role's exact tool/group policy.
 - If startup fails, check private stable state ownership, exclusive
   `rostra.redb` access, corruption, and that the mnemonic derives the

@@ -20,7 +20,6 @@ tau-cli.workspace = true
 tau-ext-pim.workspace = true
 tau-ext-provider-builtin.workspace = true
 tau-ext-rhai.workspace = true
-tau-ext-rostra.workspace = true
 tau-ext-shell.workspace = true
 tau-ext-slack.workspace = true
 tau-ext-std-notifications.workspace = true
@@ -38,7 +37,6 @@ nix = { version = "0.29", default-features = false, features = [
   "fs",
   "signal",
 ] }
-rostra-core.workspace = true
 rustix-openpty.workspace = true
 rustix-v1 = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true

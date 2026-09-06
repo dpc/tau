@@ -1,7 +1,8 @@
-// Built-in extensions shipped with tau. argv = prefix ++ command ++ suffix.
+// Extensions configured by Tau. argv = prefix ++ command ++ suffix.
 // When `command` is omitted, `builtin_extensions()` fills it with the
-// running tau binary, so each built-in only needs to specify the
-// component subcommand in `suffix`.
+// running tau binary, so bundled components only need to specify their
+// component subcommand in `suffix`. Explicit commands are separate
+// executables that operators must install.
 [
     {
         name: "provider-builtin",
@@ -33,7 +34,7 @@
     },
     {
         name: "std-rostra",
-        suffix: ["component", "ext-rostra"],
+        command: ["tau-ext-rostra"],
         role: "tool",
         enable: false,
         startup_timeout_seconds: 10,
