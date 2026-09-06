@@ -1380,6 +1380,7 @@ fn run_cache_report(
             working_memory_bytes: args.max_memory_bytes,
         },
         producer_build: build_revision(),
+        index: args.index,
     };
     let report =
         tau_session_inspect::read_cache_report(&options).map_err(|_| CliError::CacheInvalid)?;
@@ -1387,6 +1388,11 @@ fn run_cache_report(
         (cli::CacheFormat::Summary, cli::CacheView::Summary) => report.write_summary(writer),
         (cli::CacheFormat::Summary, _) | (cli::CacheFormat::Jsonl, _) => report.write_jsonl(writer),
     })?;
+    if report.index_written() {
+        eprintln!(
+            "Wrote a private disposable cache index; it contains linkable evidence and must be deleted manually when no longer needed."
+        );
+    }
     if report.is_partial() {
         Err(CliError::CachePartial)
     } else {

@@ -4,7 +4,9 @@
 //! attempts, expose provider IDs, or turn normalized accounting into raw
 //! provider evidence.
 
+mod exact_geometry;
 mod failure_shape;
+mod index;
 mod inventory;
 mod options;
 mod strict_json;
@@ -36,12 +38,19 @@ pub struct CacheReport {
     gaps: BTreeMap<&'static str, u64>,
     /// Whether strict canonical snapshot validation was admitted.
     inspected: bool,
+    /// Whether this invocation replaced the explicitly requested private index.
+    index_written: bool,
 }
 
 impl CacheReport {
     /// Returns whether the CLI must signal useful but partial analysis.
     pub fn is_partial(&self) -> bool {
         self.partial
+    }
+
+    /// Returns whether an explicitly requested disposable index was replaced.
+    pub fn index_written(&self) -> bool {
+        self.index_written
     }
 
     /// Writes internal version-zero JSON Lines without bodies or provider IDs.
@@ -175,7 +184,29 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
     if let CacheScope::Session(session) = &options.scope {
         sessions.insert(session.clone());
     }
-    let mut inventory = Inventory::default();
+    let mut index = options
+        .index
+        .as_deref()
+        .map(|path| {
+            index::IndexState::open(
+                path,
+                &options.producer_build,
+                options.limits.working_memory_bytes,
+            )
+            .map_err(invalid)
+        })
+        .transpose()?;
+    let key = index
+        .as_ref()
+        .map(|index| index.key.clone())
+        .unwrap_or(exact_geometry::FingerprintKey::random().map_err(invalid)?);
+    let mut inventory = Inventory::new(key);
+    if let Some(index) = &mut index {
+        inventory.extend_index(
+            std::mem::take(&mut index.requests),
+            std::mem::take(&mut index.responses),
+        );
+    }
     for session in sessions {
         inventory.scan(
             &options
@@ -198,6 +229,7 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
         responses: 0,
         gaps: inventory.gaps.clone(),
         inspected: true,
+        index_written: false,
     };
     let mut remaining = options.limits.working_memory_bytes / 4;
     append(
@@ -251,6 +283,21 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
         }
     }
     inventory.project(options, &agents, &mut report, &mut remaining)?;
+    if let Some(index) = &index {
+        if inventory.index_input_complete() {
+            let requests = inventory.indexable_exact_requests();
+            let responses = inventory.indexable_exact_responses();
+            index
+                .commit(&options.producer_build, &requests, &responses)
+                .map_err(invalid)?;
+            report.index_written = true;
+        } else {
+            *report
+                .gaps
+                .entry("cache_index_not_replaced_partial_input")
+                .or_default() += 1;
+        }
+    }
     if options.view == CacheView::Summary && options.prompt.is_some() && report.responses == 0 {
         *report
             .gaps
@@ -316,6 +363,7 @@ fn unavailable_report(
         responses: 0,
         gaps: BTreeMap::from([(reason, 1)]),
         inspected: false,
+        index_written: false,
     };
     let mut remaining = options.limits.working_memory_bytes;
     append(

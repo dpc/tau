@@ -601,6 +601,15 @@ retains reservation ownership and records a zero-dispatch backend summary.
 The shared opaque writer and retention tests exercise the new class without
 parsing it. Stage-1 inventory tests recognize it while preserving unavailable
 analysis rather than treating file counts as attempts.
+Exact-geometry tests use synthetic complete captures to pin strict duplicate-key
+rejection, recursively canonical object order, array/scalar distinctions, keyed
+domain separation, current attempt/dispatch joins, public Responses null-index
+ambiguity, ordered visible-prefix comparison, and content-free report-local
+labels. Index tests pin same-path key reuse, mode-0600 replacement, symlink/shared
+file rejection, matching-build validation, bounded loading/writing, and absence
+of bodies/raw provider IDs. These oracles must continue to label raw wire bytes,
+provider tokenization, upstream receipt, eligibility, and residency as unavailable
+or unknown.
 
 Writers and cleanup use that same dependency-neutral filename contract.
 Worker and producer-integration tests live in

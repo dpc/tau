@@ -16,9 +16,12 @@ workspace = true
 
 [dependencies]
 base64.workspace = true
+blake3.workspace = true
 ciborium.workspace = true
 libc.workspace = true
 opentelemetry-proto.workspace = true
+rand.workspace = true
+rustix-v1 = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_toon_format.workspace = true

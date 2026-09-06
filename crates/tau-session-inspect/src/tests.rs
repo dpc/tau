@@ -1918,6 +1918,7 @@ fn cache_report_projects_only_canonical_facts_and_preserves_unknowns() {
         view: crate::CacheView::Summary,
         limits: Default::default(),
         producer_build: "fixture".into(),
+        index: None,
     };
     let report = crate::read_cache_report(&options).expect("cache report");
     assert!(report.is_partial());
@@ -2085,5 +2086,6 @@ fn cache_session_options(root: &std::path::Path) -> crate::CacheOptions {
         view: crate::CacheView::Summary,
         limits: Default::default(),
         producer_build: "fixture".into(),
+        index: None,
     }
 }

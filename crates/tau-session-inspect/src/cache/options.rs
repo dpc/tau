@@ -72,4 +72,6 @@ pub struct CacheOptions {
     pub limits: CacheScanLimits,
     /// Inspector source/build identity, supplied by its executable.
     pub producer_build: String,
+    /// Explicit disposable owner-private geometry index destination.
+    pub index: Option<PathBuf>,
 }

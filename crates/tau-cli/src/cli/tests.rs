@@ -4,10 +4,10 @@ use clap::{CommandFactory, Parser};
 
 use super::{Cli, Command, DevCommand};
 
-/// Offline cache scopes parse typed identities and expose implemented views,
-/// while the deferred disposable index remains absent.
+/// Offline cache scopes parse typed identities, implemented views, and an
+/// explicitly requested disposable index path.
 #[test]
-fn offline_cache_scopes_parse_with_current_views_without_index_placeholder() {
+fn offline_cache_scopes_parse_with_current_views_and_private_index() {
     assert!(
         Cli::try_parse_from([
             "tau",
@@ -35,7 +35,7 @@ fn offline_cache_scopes_parse_with_current_views_without_index_placeholder() {
     );
     assert!(Cli::try_parse_from(["tau", "agent", "cache", "bad.id"]).is_err());
     assert!(
-        Cli::try_parse_from(["tau", "agent", "cache", "agent", "--index", "/tmp/index"]).is_err()
+        Cli::try_parse_from(["tau", "agent", "cache", "agent", "--index", "/tmp/index"]).is_ok()
     );
     assert!(Cli::try_parse_from(["tau", "agent", "cache", "agent", "--view", "geometry"]).is_ok());
 }

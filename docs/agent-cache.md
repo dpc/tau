@@ -1,8 +1,8 @@
 # Offline cache evidence
 
 `tau agent cache` and `tau session cache` inspect existing durable state without
-contacting a daemon or provider. Nothing is written: no index, source repair,
-temporary staging artifact, or capture enablement.
+contacting a daemon or provider. They write nothing unless `--index PATH` is
+explicitly requested; source repair and capture enablement never occur.
 
 ```console
 tau agent cache AGENT --include-descendants
@@ -10,6 +10,7 @@ tau agent cache AGENT --format jsonl --prompt PROMPT
 tau agent cache AGENT --prompt PROMPT --view attribution
 tau agent cache AGENT --view continuity
 tau agent cache AGENT --view geometry
+tau agent cache AGENT --view geometry --format jsonl --index ./cache.private-index
 tau session cache SESSION --format jsonl
 ```
 
@@ -98,8 +99,30 @@ empirical. This is useful for regime/change tracking, not proof of token boundar
 or provider cache geometry. Non-summary views emit JSONL even when `--format` is
 omitted.
 
-Shared filters beyond `--prompt`, exact-body prefix comparison, and disposable
-indexes remain subsequent work; no empty-success placeholders are exposed. Exact
+When complete exact request captures have current attempt correlation,
+`--view geometry` also compares complete captured JSON structure, closed controls,
+tools, instructions, remaining request fields, route identity, cache-key equality,
+ordered input-item prefixes, and explicitly captured response-chain edges. Values,
+field names outside closed categories, provider IDs, cache keys, and fingerprints
+are replaced by report-local ordinal labels. Object member order is canonicalized;
+array order and JSON scalar type/value remain significant. These results describe
+captured request structure, not the producer's original serialized whitespace,
+provider tokenization, upstream receipt, eligibility, or cache residency. A
+chained suffix without all required captured objects remains unavailable rather
+than being reconstructed as a full prefix.
+
+`--index PATH` replaces one disposable JSON index through an owner-private sibling
+temporary file and rename, without fsync. The index retains the same random keyed
+BLAKE3 key on later invocations at that exact path plus fixed-size structural
+evidence; it contains no request bodies or raw provider/cache identifiers. It is
+still private linkable workload data. Existing indexes must be regular,
+owner-private, matching-build files and fit one quarter of the configured memory
+budget. Invalid, shared, symlinked, oversized, or revision-skewed indexes fail
+closed. Tau does not discover, retain, or delete these explicit exports; delete
+them manually.
+
+Shared filters beyond `--prompt` remain subsequent work; no empty-success
+placeholders are exposed. Exact
 request/response capture remains **default-on
 for durable activity**, independently of the metadata setting below. This command
 does not alter capture, retention, inference, retry, refresh, or compaction policy.

@@ -371,6 +371,9 @@ pub struct CacheArgs {
     /// Capture parser and report working-memory budget in bytes.
     #[arg(long, default_value_t = 512 * 1024 * 1024)]
     pub max_memory_bytes: u64,
+    /// Replace one disposable owner-private index for later comparisons.
+    #[arg(long, value_name = "PATH")]
+    pub index: Option<PathBuf>,
 }
 
 /// Offline cache evidence projection.

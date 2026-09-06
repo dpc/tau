@@ -3,6 +3,8 @@
 use std::fs::File;
 use std::io::Write as _;
 
+use super::exact_geometry::{ExactRequest, FingerprintKey};
+use super::index::IndexState;
 use super::*;
 
 /// Operation recognition must not reorder existing prompt-attribution failures,
@@ -728,6 +730,7 @@ fn cache_options(root: &std::path::Path, view: CacheView) -> CacheOptions {
         view,
         limits: CacheScanLimits::default(),
         producer_build: "fixture".into(),
+        index: None,
     }
 }
 
@@ -739,6 +742,7 @@ fn empty_report() -> CacheReport {
         responses: 0,
         gaps: BTreeMap::new(),
         inspected: true,
+        index_written: false,
     }
 }
 
@@ -868,6 +872,7 @@ fn journal_preflight_produces_partial_without_inspection_or_mutation() {
             ..Default::default()
         },
         producer_build: "synthetic-build".into(),
+        index: None,
     };
     let report = read_cache_report(&options).expect("partial report");
     assert!(report.is_partial());
@@ -888,6 +893,210 @@ fn journal_preflight_boundary_and_overflow_cannot_wrap() {
     assert!(journal_memory_charge(0, 129) > 65536 / 4);
     assert_eq!(journal_memory_charge(0, u64::MAX), u64::MAX);
     assert_eq!(journal_memory_charge(u64::MAX - 1, 1), u64::MAX);
+}
+
+/// Exact request geometry joins only through attempt/dispatch identity, reports
+/// ordered structural prefix evidence, and never emits private values or
+/// hashes.
+#[test]
+fn exact_request_geometry_is_content_free_and_does_not_claim_tokens_or_residency() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (sequence, attempt, prompt, input) in [
+        (
+            1,
+            "11111111111111111111111111111111",
+            "prompt-1",
+            json!([{"role":"user","content":"PRIVATE-A"}]),
+        ),
+        (
+            2,
+            "22222222222222222222222222222222",
+            "prompt-2",
+            json!([
+                {"role":"user","content":"PRIVATE-A"},
+                {"role":"assistant","content":"PRIVATE-B"}
+            ]),
+        ),
+    ] {
+        let mut scalar = diagnostic("dispatch", sequence);
+        scalar["attempt_id"] = attempt.into();
+        scalar["agent_prompt_id"] = prompt.into();
+        scalar["operation_id"] = prompt.into();
+        scalar["recorded_at_unix_micros"] = sequence.into();
+        capture_json(root.path(), &format!("{sequence}-scalar.json.zst"), &scalar);
+        capture_json(
+            root.path(),
+            &format!("{sequence}-request.json.zst"),
+            &json!({
+                "session_id":"session","agent_prompt_id":prompt,
+                "backend":"responses","transport":"websocket","model":"model",
+                "attempt_id":attempt,"wire_dispatch_index":1,
+                "body":{"model":"model","input":input,"tools":[],
+                    "reasoning":{"effort":"high"},"unknown":{"value":"PRIVATE-C"}}
+            }),
+        );
+    }
+    let options = cache_options(root.path(), CacheView::Geometry);
+    let mut inventory = Inventory::new(FingerprintKey([4; 32]));
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    let mut remaining = 1_000_000;
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut remaining,
+        )
+        .expect("geometry");
+    let output = report.lines.join("\n");
+    assert!(output.contains("exact_captured_request_comparison_v0"));
+    assert!(output.contains("\"common_captured_input_items\":1"));
+    assert!(output.contains("\"provider_tokenization\":\"unknown\""));
+    assert!(output.contains("\"provider_residency\":\"unknown\""));
+    assert!(output.contains("\"raw_wire_byte_equality\":\"unavailable\""));
+    for private in [
+        "PRIVATE-A",
+        "PRIVATE-B",
+        "PRIVATE-C",
+        "11111111",
+        "22222222",
+    ] {
+        assert!(!output.contains(private), "{private} leaked: {output}");
+    }
+}
+
+/// Request qualification is independent of the selected report view so an
+/// explicit summary-view index first-write and reopen retain current evidence.
+#[test]
+fn non_geometry_view_qualifies_first_index_write_and_same_path_reuse() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut scalar = diagnostic("dispatch", 1);
+    scalar["attempt_id"] = "11111111111111111111111111111111".into();
+    scalar["recorded_at_unix_micros"] = 1.into();
+    capture_json(root.path(), "1-scalar.json.zst", &scalar);
+    capture_json(
+        root.path(),
+        "2-request.json.zst",
+        &json!({
+            "session_id":"session","agent_prompt_id":"prompt",
+            "backend":"responses","transport":"websocket","model":"model",
+            "attempt_id":"11111111111111111111111111111111",
+            "wire_dispatch_index":1,
+            "body":{"model":"model","input":[],"tools":[]}
+        }),
+    );
+    let index_path = root.path().join("private.index");
+    let mut options = cache_options(root.path(), CacheView::Summary);
+    options.index = Some(index_path.clone());
+    let mut inventory = Inventory::new(FingerprintKey([5; 32]));
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("summary projection");
+    let requests = inventory.indexable_exact_requests();
+    assert_eq!(requests.len(), 1);
+    let state = IndexState::open(&index_path, "fixture", 1024 * 1024).expect("new index");
+    state
+        .commit("fixture", &requests, &[])
+        .expect("first index write");
+    let reopened = IndexState::open(&index_path, "fixture", 1024 * 1024).expect("reuse index");
+    assert_eq!(reopened.requests.len(), 1);
+    assert!(reopened.requests[0].indexed);
+}
+
+/// Any malformed candidate capture blocks replacement admission, preserving an
+/// existing index instead of silently forgetting skipped evidence.
+#[test]
+fn malformed_capture_blocks_index_replacement_admission() {
+    let root = tempfile::tempdir().expect("fixture root");
+    capture(
+        root.path(),
+        "malformed.json.zst",
+        br#"{"body":{"a":1,"a":2}}"#,
+    );
+    let mut inventory = Inventory::new(FingerprintKey([6; 32]));
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &CacheScanLimits::default(),
+    );
+    assert_eq!(inventory.gaps["malformed_or_ambiguous_capture_json"], 1);
+    assert!(!inventory.index_input_complete());
+}
+
+/// A reused index never projects one session's structural evidence into another
+/// session merely because the same agent participates in both.
+#[test]
+fn indexed_exact_evidence_isolated_by_selected_session() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut inventory = Inventory::new(FingerprintKey([7; 32]));
+    inventory.extend_index(vec![stored_request("session-a")], Vec::new());
+    let options = CacheOptions {
+        state_dir: root.path().into(),
+        scope: CacheScope::Session("session-b".parse().expect("session")),
+        prompt: None,
+        view: CacheView::Geometry,
+        limits: CacheScanLimits::default(),
+        producer_build: "fixture".into(),
+        index: Some(root.path().join("private.index")),
+    };
+    let mut report = empty_report();
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("geometry projection");
+    assert!(
+        !report
+            .lines
+            .join("\n")
+            .contains("exact_captured_request_shape_v0")
+    );
+}
+
+/// Builds one body-free indexed request fixture.
+fn stored_request(session: &str) -> ExactRequest {
+    ExactRequest {
+        session: session.into(),
+        agent: "agent".into(),
+        prompt: "prompt".into(),
+        instance: "i".repeat(64),
+        attempt: Some("a".repeat(64)),
+        dispatch: Some(1),
+        adapter: "responses".into(),
+        body: "b".repeat(64),
+        instructions: None,
+        tools: "t".repeat(64),
+        controls: "c".repeat(64),
+        other: "o".repeat(64),
+        route: "r".repeat(64),
+        cache_key: None,
+        previous_response: None,
+        items: Vec::new(),
+        prefixes: Vec::new(),
+        complete: true,
+        indexed: true,
+        recorded_at_unix_micros: Some(1),
+        request_form: Some("full".into()),
+    }
 }
 
 /// Current producer envelopes remain recognized without exposing their raw

@@ -9,8 +9,11 @@ use serde_json::Value;
 use tau_proto::{AgentId, AgentPromptId, SessionId};
 use zstd::stream::read::Decoder;
 
+use super::exact_geometry::{self, ExactRequest, ExactResponse, FingerprintKey};
 use super::{CacheOptions, CacheReport, CacheScanLimits, CacheView};
 use crate::InspectError;
+
+mod exact;
 
 /// Stable identity of one scalar record inside one provider process run.
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -38,6 +41,9 @@ struct DiagnosticRecord {
     attempt: String,
 }
 
+/// Explicit scalar dispatch attribution used for exact-capture joins.
+type DispatchJoin<'a> = (&'a AgentId, &'a AgentPromptId, u64);
+
 /// Counts of independently observed files, never inferred dispatch counts.
 #[derive(Default, serde::Serialize)]
 pub(super) struct CaptureCounts {
@@ -52,7 +58,6 @@ pub(super) struct CaptureCounts {
 }
 
 /// Content-free evidence collected without retaining provider payloads or IDs.
-#[derive(Default)]
 pub(super) struct Inventory {
     /// Exact typed session/prompt attribution; no terminal association implied.
     pub prompts: BTreeMap<(SessionId, AgentPromptId), CaptureCounts>,
@@ -66,11 +71,42 @@ pub(super) struct Inventory {
     conflicted_records: BTreeSet<RecordId>,
     /// Conservative retained scalar allocation charge.
     retained_diagnostic_bytes: u64,
+    /// Inspection-local secret for exact equality evidence.
+    exact_key: FingerprintKey,
+    /// Fixed-size request evidence derived before private bodies are discarded.
+    exact_requests: Vec<ExactRequest>,
+    /// Fixed-size successful-response IDs for explicit chain checks.
+    exact_responses: Vec<ExactResponse>,
+    /// Conservative allocation charge for exact evidence.
+    retained_exact_bytes: u64,
     /// Total decoded bytes consumed, including rejected files.
     decoded: u64,
 }
 
+impl Default for Inventory {
+    fn default() -> Self {
+        Self::new(FingerprintKey::random().expect("OS randomness is required for private hashes"))
+    }
+}
+
 impl Inventory {
+    /// Constructs an empty inventory using one invocation/index-local key.
+    pub(super) fn new(exact_key: FingerprintKey) -> Self {
+        Self {
+            prompts: BTreeMap::new(),
+            gaps: BTreeMap::new(),
+            diagnostics: Vec::new(),
+            record_values: BTreeMap::new(),
+            conflicted_records: BTreeSet::new(),
+            retained_diagnostic_bytes: 0,
+            exact_key,
+            exact_requests: Vec::new(),
+            exact_responses: Vec::new(),
+            retained_exact_bytes: 0,
+            decoded: 0,
+        }
+    }
+
     /// Returns retained scalar rows for focused in-crate identity tests.
     #[cfg(test)]
     pub(super) fn diagnostic_count(&self) -> usize {
@@ -304,6 +340,16 @@ impl Inventory {
             self.gap("unsupported_capture_shape");
             return;
         };
+        if kind == 0 {
+            match exact_geometry::request(&self.exact_key, instance, &value) {
+                Ok(request) => self.admit_exact_request(request, limits),
+                Err(reason) => self.gap(reason),
+            }
+        } else if kind == 1
+            && let Some(response) = exact_geometry::response(&self.exact_key, instance, &value)
+        {
+            self.admit_exact_response(response, limits);
+        }
         if (self.prompts.len() as u64)
             .saturating_add(1)
             .saturating_mul(1024)
@@ -357,12 +403,15 @@ impl Inventory {
 
     /// Projects current scalar records without changing canonical accounting.
     pub(super) fn project(
-        &self,
+        &mut self,
         options: &CacheOptions,
         selected_agents: &BTreeSet<AgentId>,
         report: &mut CacheReport,
         remaining: &mut u64,
     ) -> Result<(), InspectError> {
+        if options.view == CacheView::Geometry || options.index.is_some() {
+            self.qualify_exact_requests(selected_agents, report);
+        }
         match options.view {
             CacheView::Summary | CacheView::Gaps => Ok(()),
             CacheView::Attribution => {
@@ -667,7 +716,8 @@ impl Inventory {
                 }),
             )?;
         }
-        if !selected.is_empty() {
+        self.project_exact_geometry(options, selected_agents, report, remaining)?;
+        if !selected.is_empty() && self.exact_requests.is_empty() {
             *report
                 .gaps
                 .entry("exact_request_geometry_unavailable")
