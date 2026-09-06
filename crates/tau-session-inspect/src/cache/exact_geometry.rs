@@ -77,6 +77,15 @@ pub(super) struct ExactRequest {
     /// Closed scalar request form used to reject suffix-as-full comparisons.
     #[serde(default)]
     pub(super) request_form: Option<String>,
+    /// Effective model copied from the correlated scalar dispatch.
+    #[serde(default)]
+    pub(super) model: Option<String>,
+    /// Closed operation copied from the correlated scalar dispatch.
+    #[serde(default)]
+    pub(super) operation: Option<String>,
+    /// Existing logical or harness attempt ordinal, when observed.
+    #[serde(default)]
+    pub(super) attempt_ordinal: Option<u64>,
 }
 
 /// Fixed-size successful-response identity used only to qualify explicit
@@ -94,6 +103,21 @@ pub(super) struct ExactResponse {
     /// Whether this row came from an earlier disposable index.
     #[serde(default)]
     pub(super) indexed: bool,
+}
+
+/// Validates bounded closed selection metadata loaded from a private index.
+pub(super) fn selection_metadata_valid(request: &ExactRequest) -> bool {
+    request
+        .model
+        .as_deref()
+        .is_none_or(|model| !model.is_empty() && model.len() <= 128)
+        && request.operation.as_deref().is_none_or(|operation| {
+            matches!(
+                operation,
+                "inference" | "standalone_compaction" | "cache_refresh"
+            )
+        })
+        && request.attempt_ordinal.is_none_or(|attempt| attempt != 0)
 }
 
 /// Hashes one capture-local identity in the same domain used by stored
@@ -232,6 +256,9 @@ pub(super) fn request(
         indexed: false,
         recorded_at_unix_micros: None,
         request_form: None,
+        model: None,
+        operation: None,
+        attempt_ordinal: None,
     })
 }
 

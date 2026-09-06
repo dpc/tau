@@ -525,6 +525,284 @@ fn geometry_never_groups_unobserved_models() {
     }));
 }
 
+/// Configurable grouping omits unselected dimensions, so backend-only analysis
+/// can combine model changes without printing or requiring model identities.
+#[test]
+fn geometry_groups_only_by_requested_dimensions() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (base, model, read) in [(1, "model-a", 128), (3, "model-b", 256)] {
+        let attempt = format!("{base:032x}");
+        let mut dispatch = diagnostic("dispatch", base);
+        dispatch["attempt_id"] = attempt.clone().into();
+        dispatch["effective_model"] = model.into();
+        capture_json(root.path(), &format!("{base}.json.zst"), &dispatch);
+        let mut end = diagnostic("attempt_end", base + 1);
+        end["attempt_id"] = attempt.into();
+        end["reported_usage"] = json!({"read_tokens": read});
+        capture_json(root.path(), &format!("{}.json.zst", base + 1), &end);
+    }
+    let mut options = cache_options(root.path(), CacheView::Geometry);
+    options.selection.group_by = vec![CacheGroup::Backend];
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("project");
+    let comparisons = report
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("row"))
+        .filter(|row| row["derived"]["method"] == "empirical_reported_read_distribution_v0")
+        .collect::<Vec<_>>();
+    assert_eq!(comparisons.len(), 1);
+    assert_eq!(comparisons[0]["reported"]["read_tokens"], json!([128, 256]));
+    assert!(comparisons[0]["derived"]["regime"].get("model").is_none());
+    assert!(
+        comparisons[0]["derived"]["regime"]
+            .get("controls")
+            .is_none()
+    );
+}
+
+/// Shared scalar filters use observed closed fields and count ordinary
+/// mismatches without turning them into invented evidence gaps.
+#[test]
+fn scalar_filters_select_observed_time_model_operation_and_attempt() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (sequence, model, attempt) in [(10, "keep", 2), (20, "drop", 3)] {
+        let mut dispatch = diagnostic("dispatch", sequence);
+        dispatch["attempt_id"] = format!("{sequence:032x}").into();
+        dispatch["recorded_at_unix_micros"] = sequence.into();
+        dispatch["effective_model"] = model.into();
+        dispatch["logical_attempt"] = attempt.into();
+        capture_json(root.path(), &format!("{sequence}.json.zst"), &dispatch);
+    }
+    let mut options = cache_options(root.path(), CacheView::Continuity);
+    options.selection.since_unix_micros = Some(5);
+    options.selection.until_unix_micros = Some(15);
+    options.selection.model = Some("keep".into());
+    options.selection.operation = Some(CacheOperation::Inference);
+    options.selection.attempt = Some(2);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("project");
+    assert_eq!(report.exclusions["scalar_filter_mismatch"], 1);
+    assert!(report.lines.iter().all(|line| !line.contains("\"drop\"")));
+}
+
+/// Malformed logical attempts and conflicted peer models remain unavailable;
+/// neither may fall through to apparently valid lower-authority fields.
+#[test]
+fn scalar_filters_reject_malformed_attempts_and_conflicted_models() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut malformed = diagnostic("dispatch", 1);
+    malformed["logical_attempt"] = "bad".into();
+    malformed["harness_provider_attempt"] = 2.into();
+    capture_json(root.path(), "malformed.json.zst", &malformed);
+
+    let mut first = diagnostic("dispatch", 2);
+    first["record_seq"] = 2.into();
+    first["effective_model"] = "model-a".into();
+    capture_json(root.path(), "conflict-a.json.zst", &first);
+    first["effective_model"] = "model-b".into();
+    capture_json(root.path(), "conflict-b.json.zst", &first);
+    let mut end = diagnostic("attempt_end", 3);
+    end["recorded_at_unix_micros"] = 3.into();
+    capture_json(root.path(), "end.json.zst", &end);
+
+    let mut inventory = Inventory::default();
+    let mut options = cache_options(root.path(), CacheView::Continuity);
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+
+    options.selection.attempt = Some(2);
+    let mut report = empty_report();
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("attempt filter");
+    assert!(report.exclusions.contains_key("scalar_attempt_unavailable"));
+
+    options.selection.attempt = None;
+    options.selection.model = Some("model-a".into());
+    let mut report = empty_report();
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("model filter");
+    assert!(report.exclusions.contains_key("scalar_model_conflicted"));
+}
+
+/// Exact request selection metadata stays attached to the full keyed dispatch
+/// identity even when two dispatches share prompt attribution and timestamp.
+#[test]
+fn exact_selection_metadata_uses_full_dispatch_identity() {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (sequence, attempt, model) in [
+        (1, "11111111111111111111111111111111", "model-a"),
+        (2, "22222222222222222222222222222222", "model-b"),
+    ] {
+        let mut scalar = diagnostic("dispatch", sequence);
+        scalar["attempt_id"] = attempt.into();
+        scalar["recorded_at_unix_micros"] = 10.into();
+        scalar["effective_model"] = model.into();
+        capture_json(root.path(), &format!("{sequence}-scalar.json.zst"), &scalar);
+        capture_json(
+            root.path(),
+            &format!("{sequence}-request.json.zst"),
+            &json!({
+                "session_id":"session","agent_prompt_id":"prompt",
+                "backend":"responses","transport":"websocket","model":model,
+                "attempt_id":attempt,"wire_dispatch_index":1,
+                "body":{"model":model,"input":[],"tools":[]}
+            }),
+        );
+    }
+    let options = cache_options(root.path(), CacheView::Geometry);
+    let mut inventory = Inventory::new(FingerprintKey([8; 32]));
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &options.limits,
+    );
+    let mut report = empty_report();
+    inventory
+        .project(
+            &options,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("qualify requests");
+    let mut models = inventory
+        .indexable_exact_requests()
+        .into_iter()
+        .map(|request| request.model.expect("bounded model"))
+        .collect::<Vec<_>>();
+    models.sort();
+    assert_eq!(models, ["model-a", "model-b"]);
+}
+
+/// Conflicted scalar identities and duplicate exact dispatch keys cannot
+/// authorize current or indexed exact-request selection metadata.
+#[test]
+fn exact_selection_rejects_conflicted_and_ambiguous_dispatch_authority() {
+    for (name, records, expected_gap) in [
+        (
+            "conflicted",
+            vec![(1, "model-a"), (1, "model-b")],
+            "conflicting_cache_diagnostic_record",
+        ),
+        (
+            "ambiguous",
+            vec![(1, "model-a"), (2, "model-b")],
+            "exact_request_dispatch_ambiguous",
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("fixture root");
+        let index_path = root.path().join("private.index");
+        let existing =
+            IndexState::open(&index_path, "fixture", 1024 * 1024).expect("fresh existing index");
+        existing
+            .commit("fixture", &[stored_request("old-session")], &[])
+            .expect("seed existing index");
+        let existing_bytes = std::fs::read(&index_path).expect("read seeded index");
+        let attempt = "11111111111111111111111111111111";
+        for (sequence, model) in records {
+            let mut scalar = diagnostic("dispatch", sequence);
+            scalar["record_seq"] = sequence.into();
+            scalar["attempt_id"] = attempt.into();
+            scalar["effective_model"] = model.into();
+            capture_json(
+                root.path(),
+                &format!("{name}-{sequence}-{model}.json.zst"),
+                &scalar,
+            );
+        }
+        capture_json(
+            root.path(),
+            "request.json.zst",
+            &json!({
+                "session_id":"session","agent_prompt_id":"prompt",
+                "backend":"responses","transport":"websocket","model":"model-a",
+                "attempt_id":attempt,"wire_dispatch_index":1,
+                "body":{"model":"model-a","input":[],"tools":[]}
+            }),
+        );
+        let options = cache_options(root.path(), CacheView::Geometry);
+        let mut inventory = Inventory::new(FingerprintKey([9; 32]));
+        inventory.scan(
+            root.path(),
+            &"session".parse().expect("session"),
+            &options.limits,
+        );
+        let mut report = empty_report();
+        inventory
+            .project(
+                &options,
+                &BTreeSet::from(["agent".parse().expect("agent")]),
+                &mut report,
+                &mut 1_000_000,
+            )
+            .expect("qualify requests");
+        assert!(
+            report.gaps.contains_key(expected_gap) || inventory.gaps.contains_key(expected_gap),
+            "{name}"
+        );
+        assert!(
+            inventory.indexable_exact_requests().is_empty(),
+            "{name} retained ambiguous authority"
+        );
+        if inventory.index_input_complete() {
+            existing
+                .commit(
+                    "fixture",
+                    &inventory.indexable_exact_requests(),
+                    &inventory.indexable_exact_responses(),
+                )
+                .expect("replacement");
+        }
+        assert_eq!(
+            std::fs::read(&index_path).expect("read preserved index"),
+            existing_bytes,
+            "{name} replaced an index from incomplete input"
+        );
+    }
+}
+
 /// Geometry comparison references must resolve to the emitted attempt-end row,
 /// not a dispatch row or a filtered ordinal.
 #[test]
@@ -727,6 +1005,7 @@ fn cache_options(root: &std::path::Path, view: CacheView) -> CacheOptions {
             include_descendants: false,
         },
         prompt: None,
+        selection: Default::default(),
         view,
         limits: CacheScanLimits::default(),
         producer_build: "fixture".into(),
@@ -741,6 +1020,7 @@ fn empty_report() -> CacheReport {
         partial: false,
         responses: 0,
         gaps: BTreeMap::new(),
+        exclusions: BTreeMap::new(),
         inspected: true,
         index_written: false,
     }
@@ -866,6 +1146,7 @@ fn journal_preflight_produces_partial_without_inspection_or_mutation() {
             include_descendants: false,
         },
         prompt: None,
+        selection: Default::default(),
         view: CacheView::Summary,
         limits: CacheScanLimits {
             working_memory_bytes: 65536,
@@ -968,6 +1249,25 @@ fn exact_request_geometry_is_content_free_and_does_not_claim_tokens_or_residency
     ] {
         assert!(!output.contains(private), "{private} leaked: {output}");
     }
+
+    let mut exact_only = options;
+    exact_only.selection.require_exact_chain = true;
+    let mut report = empty_report();
+    inventory
+        .project(
+            &exact_only,
+            &BTreeSet::from(["agent".parse().expect("agent")]),
+            &mut report,
+            &mut 1_000_000,
+        )
+        .expect("exact-chain projection");
+    assert!(
+        !report
+            .lines
+            .join("\n")
+            .contains("exact_captured_request_comparison_v0")
+    );
+    assert_eq!(report.exclusions["exact_chain_not_equal"], 1);
 }
 
 /// Request qualification is independent of the selected report view so an
@@ -1050,6 +1350,7 @@ fn indexed_exact_evidence_isolated_by_selected_session() {
         state_dir: root.path().into(),
         scope: CacheScope::Session("session-b".parse().expect("session")),
         prompt: None,
+        selection: Default::default(),
         view: CacheView::Geometry,
         limits: CacheScanLimits::default(),
         producer_build: "fixture".into(),
@@ -1096,6 +1397,9 @@ fn stored_request(session: &str) -> ExactRequest {
         indexed: true,
         recorded_at_unix_micros: Some(1),
         request_form: Some("full".into()),
+        model: Some("fixture-model".into()),
+        operation: Some("inference".into()),
+        attempt_ordinal: Some(1),
     }
 }
 

@@ -353,6 +353,32 @@ pub struct CacheArgs {
     /// Restrict canonical responses to this exact local prompt.
     #[arg(long)]
     pub prompt: Option<tau_proto::AgentPromptId>,
+    /// Include observations at or after this absolute RFC3339 timestamp.
+    #[arg(long, value_parser = parse_cache_since)]
+    pub since: Option<u64>,
+    /// Include observations at or before this absolute RFC3339 timestamp.
+    #[arg(long, value_parser = parse_cache_until)]
+    pub until: Option<u64>,
+    /// Restrict evidence to this exact configured or effective model.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Restrict evidence to one closed provider operation.
+    #[arg(long, value_enum)]
+    pub operation: Option<CacheOperation>,
+    /// Restrict evidence to one logical/provider attempt ordinal.
+    #[arg(long)]
+    pub attempt: Option<u64>,
+    /// Exclude exact comparisons without a proven captured response-chain edge.
+    #[arg(long)]
+    pub require_exact_chain: bool,
+    /// Geometry grouping dimensions, as a comma-separated list.
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        default_value = "model,backend,controls"
+    )]
+    pub group_by: Vec<CacheGroup>,
     /// Select summary, attribution, continuity, geometry, or gap evidence.
     #[arg(long, value_enum, default_value_t)]
     pub view: CacheView,
@@ -374,6 +400,56 @@ pub struct CacheArgs {
     /// Replace one disposable owner-private index for later comparisons.
     #[arg(long, value_name = "PATH")]
     pub index: Option<PathBuf>,
+}
+
+/// Closed cache operation accepted by offline selection.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum CacheOperation {
+    /// Ordinary provider inference.
+    Inference,
+    /// Provider-backed standalone compaction.
+    StandaloneCompaction,
+    /// Provider cache refresh or prewarm work.
+    CacheRefresh,
+}
+
+/// Closed empirical geometry grouping dimension.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum CacheGroup {
+    /// Effective provider model.
+    Model,
+    /// Backend adapter and transport.
+    Backend,
+    /// Reasoning, tool, tier, and cache controls.
+    Controls,
+}
+
+/// Parses an inclusive lower RFC3339 bound, rounding toward later observations.
+pub(crate) fn parse_cache_since(value: &str) -> Result<u64, String> {
+    let nanos = parse_cache_rfc3339_nanos(value)?;
+    u64::try_from((nanos + 999) / 1_000)
+        .map_err(|_| "timestamp exceeds the supported Unix-microsecond range".to_owned())
+}
+
+/// Parses an inclusive upper RFC3339 bound, rounding toward earlier
+/// observations.
+pub(crate) fn parse_cache_until(value: &str) -> Result<u64, String> {
+    let nanos = parse_cache_rfc3339_nanos(value)?;
+    u64::try_from(nanos / 1_000)
+        .map_err(|_| "timestamp exceeds the supported Unix-microsecond range".to_owned())
+}
+
+/// Parses one nonnegative absolute RFC3339 timestamp at nanosecond precision.
+fn parse_cache_rfc3339_nanos(value: &str) -> Result<i128, String> {
+    use time::format_description::well_known::Rfc3339;
+
+    let timestamp = time::OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|error| format!("must be an absolute RFC3339 timestamp: {error}"))?;
+    let nanos = timestamp.unix_timestamp_nanos();
+    if nanos < 0 {
+        return Err("timestamp must not precede the Unix epoch".to_owned());
+    }
+    Ok(nanos)
 }
 
 /// Offline cache evidence projection.

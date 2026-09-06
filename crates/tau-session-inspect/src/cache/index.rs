@@ -100,6 +100,9 @@ impl IndexState {
             .map_err(|_| "cache_index_malformed")?;
         let key: [u8; 32] = decoded.try_into().map_err(|_| "cache_index_malformed")?;
         for request in &mut index.requests {
+            if !super::exact_geometry::selection_metadata_valid(request) {
+                return Err("cache_index_malformed");
+            }
             request.indexed = true;
         }
         for response in &mut index.responses {
@@ -121,6 +124,12 @@ impl IndexState {
         requests: &[ExactRequest],
         responses: &[ExactResponse],
     ) -> Result<(), &'static str> {
+        if requests
+            .iter()
+            .any(|request| !super::exact_geometry::selection_metadata_valid(request))
+        {
+            return Err("cache_index_malformed");
+        }
         let index = IndexFile {
             schema: "tau.cache_diagnostic.index".to_owned(),
             schema_version: 0,

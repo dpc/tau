@@ -95,19 +95,22 @@ impl Inventory {
         selected_agents: &BTreeSet<AgentId>,
         report: &mut CacheReport,
     ) {
-        let mut exact_dispatches: BTreeMap<(String, String, u64), DispatchJoin<'_>> =
+        let mut exact_dispatches: BTreeMap<(String, String, u64), Vec<DispatchJoin<'_>>> =
             BTreeMap::new();
         let mut attempt_dispatches: BTreeMap<(String, String), Vec<DispatchJoin<'_>>> =
             BTreeMap::new();
         for diagnostic in self.diagnostics.iter().filter(|record| {
             record.value["record_kind"] == "dispatch" && selected_agents.contains(&record.agent)
         }) {
+            if self.conflicted_records.contains(&diagnostic.id) {
+                continue;
+            }
             let Some(index) = diagnostic.value["wire_dispatch_index"].as_u64() else {
                 continue;
             };
-            let Some(prompt) = diagnostic.prompt.as_ref() else {
+            if diagnostic.prompt.is_none() {
                 continue;
-            };
+            }
             let instance = exact_geometry::identity(
                 &self.exact_key,
                 b"provider-instance",
@@ -115,17 +118,14 @@ impl Inventory {
             );
             let attempt =
                 exact_geometry::identity(&self.exact_key, b"attempt-id", &diagnostic.attempt);
-            let recorded = diagnostic.value["recorded_at_unix_micros"]
-                .as_u64()
-                .unwrap_or_default();
-            exact_dispatches.insert(
-                (instance.clone(), attempt.clone(), index),
-                (&diagnostic.agent, prompt, recorded),
-            );
+            exact_dispatches
+                .entry((instance.clone(), attempt.clone(), index))
+                .or_default()
+                .push(diagnostic);
             attempt_dispatches
                 .entry((instance, attempt))
                 .or_default()
-                .push((&diagnostic.agent, prompt, recorded));
+                .push(diagnostic);
         }
         for request in &mut self.exact_requests {
             if request.indexed {
@@ -141,7 +141,21 @@ impl Inventory {
             let joined = if let Some(index) = request.dispatch {
                 exact_dispatches
                     .get(&(request.instance.clone(), attempt.clone(), index))
-                    .copied()
+                    .and_then(|candidates| match candidates.as_slice() {
+                        [candidate] => Some(*candidate),
+                        [_, ..] => {
+                            *report
+                                .gaps
+                                .entry("exact_request_dispatch_ambiguous")
+                                .or_default() += 1;
+                            *self
+                                .gaps
+                                .entry("exact_request_dispatch_ambiguous")
+                                .or_default() += 1;
+                            None
+                        }
+                        [] => None,
+                    })
             } else {
                 let candidates =
                     attempt_dispatches.get(&(request.instance.clone(), attempt.clone()));
@@ -152,15 +166,26 @@ impl Inventory {
                             .gaps
                             .entry("exact_request_dispatch_ambiguous")
                             .or_default() += 1;
+                        *self
+                            .gaps
+                            .entry("exact_request_dispatch_ambiguous")
+                            .or_default() += 1;
                         None
                     }
                     None => None,
                 }
             };
-            let Some((agent, prompt, recorded)) = joined else {
+            let Some(diagnostic) = joined else {
                 *report
                     .gaps
                     .entry("exact_request_dispatch_missing")
+                    .or_default() += 1;
+                continue;
+            };
+            let Some(prompt) = diagnostic.prompt.as_ref() else {
+                *report
+                    .gaps
+                    .entry("exact_request_prompt_mismatch")
                     .or_default() += 1;
                 continue;
             };
@@ -171,17 +196,23 @@ impl Inventory {
                     .or_default() += 1;
                 continue;
             }
-            request.agent = agent.as_str().to_owned();
-            request.recorded_at_unix_micros = Some(recorded);
-            let diagnostic = self.diagnostics.iter().find(|diagnostic| {
-                diagnostic.agent == *agent
-                    && diagnostic.prompt.as_ref() == Some(prompt)
-                    && diagnostic.value["record_kind"] == "dispatch"
-                    && diagnostic.value["recorded_at_unix_micros"].as_u64() == Some(recorded)
-            });
-            request.request_form = diagnostic
-                .and_then(|record| record.value["request_form"].as_str())
+            request.agent = diagnostic.agent.as_str().to_owned();
+            request.recorded_at_unix_micros = diagnostic.value["recorded_at_unix_micros"].as_u64();
+            request.request_form = diagnostic.value["request_form"].as_str().map(str::to_owned);
+            request.model = diagnostic.value["effective_model"]
+                .as_str()
+                .filter(|model| !model.is_empty() && model.len() <= 128)
                 .map(str::to_owned);
+            request.operation = diagnostic.value["operation"]
+                .as_str()
+                .filter(|operation| {
+                    matches!(
+                        *operation,
+                        "inference" | "standalone_compaction" | "cache_refresh"
+                    )
+                })
+                .map(str::to_owned);
+            request.attempt_ordinal = strict_attempt(&diagnostic.value);
         }
     }
 
@@ -212,6 +243,7 @@ impl Inventory {
             })
             .cloned()
             .collect::<Vec<_>>();
+        requests.retain(|request| exact_request_selected(request, options, report));
         requests.sort_by(|left, right| {
             (
                 left.recorded_at_unix_micros,
@@ -321,6 +353,23 @@ impl Inventory {
                 }
             });
             let chain = self.chain_continuity(left, right);
+            if options.selection.require_exact_chain && chain != "equal" {
+                *report
+                    .exclusions
+                    .entry(if chain == "unknown" {
+                        "exact_chain_unavailable"
+                    } else {
+                        "exact_chain_not_equal"
+                    })
+                    .or_default() += 1;
+                if chain == "unknown" {
+                    *report
+                        .gaps
+                        .entry("required_exact_chain_evidence_unavailable")
+                        .or_default() += 1;
+                }
+                continue;
+            }
             append(
                 report,
                 options,
@@ -402,6 +451,72 @@ impl Inventory {
             _ => "unknown",
         }
     }
+}
+
+/// Reads a valid one-based logical/harness attempt without accepting malformed
+/// logical fields as authority for fallback.
+fn strict_attempt(value: &serde_json::Value) -> Option<u64> {
+    match value.get("logical_attempt") {
+        Some(serde_json::Value::Number(number)) => number.as_u64().filter(|attempt| *attempt != 0),
+        Some(serde_json::Value::Null) => value
+            .get("harness_provider_attempt")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|attempt| *attempt != 0),
+        _ => None,
+    }
+}
+
+/// Applies projection-only filters to fixed-size exact evidence. Missing
+/// indexed metadata remains unavailable instead of being inferred.
+fn exact_request_selected(
+    request: &ExactRequest,
+    options: &CacheOptions,
+    report: &mut CacheReport,
+) -> bool {
+    let selection = &options.selection;
+    let mut unavailable = false;
+    let matched = selection.since_unix_micros.is_none_or(|since| {
+        request
+            .recorded_at_unix_micros
+            .is_some_and(|recorded| since <= recorded)
+    }) && selection.until_unix_micros.is_none_or(|until| {
+        request
+            .recorded_at_unix_micros
+            .is_some_and(|recorded| recorded <= until)
+    }) && selection
+        .model
+        .as_deref()
+        .is_none_or(|model| request.model.as_deref() == Some(model))
+        && selection
+            .operation
+            .is_none_or(|operation| request.operation.as_deref() == Some(operation.as_str()))
+        && selection
+            .attempt
+            .is_none_or(|attempt| request.attempt_ordinal == Some(attempt));
+    if selection.since_unix_micros.is_some() || selection.until_unix_micros.is_some() {
+        unavailable |= request.recorded_at_unix_micros.is_none();
+    }
+    unavailable |= selection.model.is_some() && request.model.is_none();
+    unavailable |= selection.operation.is_some() && request.operation.is_none();
+    unavailable |= selection.attempt.is_some() && request.attempt_ordinal.is_none();
+    if unavailable {
+        *report
+            .exclusions
+            .entry("exact_selection_evidence_unavailable")
+            .or_default() += 1;
+        *report
+            .gaps
+            .entry("selection_evidence_unavailable")
+            .or_default() += 1;
+        return false;
+    }
+    if !matched {
+        *report
+            .exclusions
+            .entry("exact_filter_mismatch")
+            .or_default() += 1;
+    }
+    matched
 }
 
 /// Assigns a report-local ordinal to a private keyed equality class.

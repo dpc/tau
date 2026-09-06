@@ -18,10 +18,13 @@ use std::io;
 
 use ciborium::de::Error as CborDecodeError;
 use inventory::Inventory;
-pub use options::{CacheOptions, CacheScanLimits, CacheScope, CacheView};
+pub use options::{
+    CacheGroup, CacheOperation, CacheOptions, CacheScanLimits, CacheScope, CacheSelection,
+    CacheView,
+};
 use serde_json::{Value, json};
 use tau_core::{AgentJournalSnapshot, SessionStore};
-use tau_proto::{AgentId, Event};
+use tau_proto::{AgentId, Event, PromptOperation};
 
 use crate::{DescendantSelection, InspectError};
 
@@ -36,6 +39,8 @@ pub struct CacheReport {
     responses: u64,
     /// Fixed gap codes and counts.
     gaps: BTreeMap<&'static str, u64>,
+    /// Expected filter exclusions, kept separate from evidence gaps.
+    exclusions: BTreeMap<&'static str, u64>,
     /// Whether strict canonical snapshot validation was admitted.
     inspected: bool,
     /// Whether this invocation replaced the explicitly requested private index.
@@ -88,6 +93,9 @@ impl CacheReport {
         for (reason, count) in &self.gaps {
             writeln!(output, "  {reason}: {count}")?;
         }
+        for (reason, count) in &self.exclusions {
+            writeln!(output, "  excluded {reason}: {count}")?;
+        }
         writeln!(
             output,
             "Content-free, not public-safe; keep this workload report private."
@@ -129,8 +137,28 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
         || options.limits.compressed_file_bytes == 0
         || options.limits.decompressed_file_bytes == 0
         || options.limits.total_decompressed_bytes == 0
+        || options
+            .selection
+            .since_unix_micros
+            .zip(options.selection.until_unix_micros)
+            .is_some_and(|(since, until)| until < since)
+        || options
+            .selection
+            .model
+            .as_ref()
+            .is_some_and(|model| model.is_empty() || model.len() > 128)
+        || options.selection.group_by.is_empty()
+        || options
+            .selection
+            .group_by
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != options.selection.group_by.len()
     {
-        return Err(invalid("invalid cache inspection build identity or limits"));
+        return Err(invalid(
+            "invalid cache inspection build identity, limits, time range, model, or grouping",
+        ));
     }
     let agents_dir = options.state_dir.join("agents");
     let membership_charge = match &options.scope {
@@ -228,6 +256,7 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
         partial: false,
         responses: 0,
         gaps: inventory.gaps.clone(),
+        exclusions: BTreeMap::new(),
         inspected: true,
         index_written: false,
     };
@@ -247,6 +276,15 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                     CacheScope::Session(session) => json!({"session_id": session}),
                 },
                 "prompt": options.prompt,
+                "selection": {
+                    "since_unix_micros": options.selection.since_unix_micros,
+                    "until_unix_micros": options.selection.until_unix_micros,
+                    "model": options.selection.model,
+                    "operation": options.selection.operation,
+                    "attempt": options.selection.attempt,
+                    "require_exact_chain": options.selection.require_exact_chain,
+                    "group_by": options.selection.group_by,
+                },
                 "view": format!("{:?}", options.view).to_ascii_lowercase(),
                 "limits": options.limits,
                 "content_policy": "content_free_not_public_safe",
@@ -327,25 +365,26 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
         )?;
     }
     let summary = json!({
-        "canonical": (options.view == CacheView::Summary).then(|| json!({
-            "response_count": report.responses
-        })),
-        "reported": null,
-        "derived": {
-            "method": if options.view == CacheView::Summary {
-                "canonical_occurrence_count_v0"
-            } else {
-                "selected_diagnostic_view_v0"
-            },
-            "input_records": if options.view == CacheView::Summary {
-                "canonical_response_rows"
-            } else {
-                "selected_diagnostic_rows"
-            },
-            "coverage": if report.partial { "partial" } else { "selected_canonical_prefix" },
-            "residency_miss": "unknown",
-            "failed_attempt_billing": "unknown",
+       "canonical": (options.view == CacheView::Summary).then(|| json!({
+           "response_count": report.responses
+       })),
+       "reported": null,
+       "derived": {
+           "method": if options.view == CacheView::Summary {
+               "canonical_occurrence_count_v0"
+           } else {
+               "selected_diagnostic_view_v0"
+           },
+           "input_records": if options.view == CacheView::Summary {
+               "canonical_response_rows"
+           } else {
+               "selected_diagnostic_rows"
+           },
+           "coverage": if report.partial { "partial" } else { "selected_canonical_prefix" },
+           "residency_miss": "unknown",
+           "failed_attempt_billing": "unknown",
             "cost_policy": "recorded_per_response_rates_and_increment_only"
+            ,"exclusions": report.exclusions
         }
     });
     append(&mut report, options, &mut remaining, "summary", summary)?;
@@ -362,6 +401,7 @@ fn unavailable_report(
         partial: true,
         responses: 0,
         gaps: BTreeMap::from([(reason, 1)]),
+        exclusions: BTreeMap::new(),
         inspected: false,
         index_written: false,
     };
@@ -474,6 +514,16 @@ fn project_agent(
                 if matches!(&options.scope, CacheScope::Session(id) if id != &prompt.session_id) {
                     continue;
                 }
+                if !canonical_selected(
+                    record.recorded_at.get(),
+                    &prompt.model.to_string(),
+                    prompt.operation,
+                    u64::from(response.provider_attempt.get()),
+                    options,
+                    report,
+                ) {
+                    continue;
+                }
                 let counts = inventory
                     .prompts
                     .get(&(prompt.session_id.clone(), response.agent_prompt_id.clone()));
@@ -544,6 +594,50 @@ fn project_agent(
         }
     }
     Ok(())
+}
+
+/// Applies shared canonical filters while distinguishing unavailable evidence
+/// from ordinary value mismatches.
+fn canonical_selected(
+    recorded_at: u64,
+    model: &str,
+    operation: PromptOperation,
+    attempt: u64,
+    options: &CacheOptions,
+    report: &mut CacheReport,
+) -> bool {
+    let operation = match operation {
+        PromptOperation::Inference => options::CacheOperation::Inference,
+        PromptOperation::StandaloneCompaction => options::CacheOperation::StandaloneCompaction,
+    };
+    let matched = options
+        .selection
+        .since_unix_micros
+        .is_none_or(|since| since <= recorded_at)
+        && options
+            .selection
+            .until_unix_micros
+            .is_none_or(|until| recorded_at <= until)
+        && options
+            .selection
+            .model
+            .as_deref()
+            .is_none_or(|selected| selected == model)
+        && options
+            .selection
+            .operation
+            .is_none_or(|selected| selected == operation)
+        && options
+            .selection
+            .attempt
+            .is_none_or(|selected| selected == attempt);
+    if !matched {
+        *report
+            .exclusions
+            .entry("canonical_filter_mismatch")
+            .or_default() += 1;
+    }
+    matched
 }
 
 /// Computes arithmetic without repairing invalid counters or synthesizing a

@@ -1366,6 +1366,31 @@ fn run_cache_report(
         state_dir: args.state_dir,
         scope,
         prompt: args.prompt,
+        selection: tau_session_inspect::CacheSelection {
+            since_unix_micros: args.since,
+            until_unix_micros: args.until,
+            model: args.model,
+            operation: args.operation.map(|operation| match operation {
+                cli::CacheOperation::Inference => tau_session_inspect::CacheOperation::Inference,
+                cli::CacheOperation::StandaloneCompaction => {
+                    tau_session_inspect::CacheOperation::StandaloneCompaction
+                }
+                cli::CacheOperation::CacheRefresh => {
+                    tau_session_inspect::CacheOperation::CacheRefresh
+                }
+            }),
+            attempt: args.attempt,
+            require_exact_chain: args.require_exact_chain,
+            group_by: args
+                .group_by
+                .into_iter()
+                .map(|group| match group {
+                    cli::CacheGroup::Model => tau_session_inspect::CacheGroup::Model,
+                    cli::CacheGroup::Backend => tau_session_inspect::CacheGroup::Backend,
+                    cli::CacheGroup::Controls => tau_session_inspect::CacheGroup::Controls,
+                })
+                .collect(),
+        },
         view: match args.view {
             cli::CacheView::Summary => tau_session_inspect::CacheView::Summary,
             cli::CacheView::Attribution => tau_session_inspect::CacheView::Attribution,

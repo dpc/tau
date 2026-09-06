@@ -2,6 +2,67 @@
 
 use super::*;
 
+/// Cache inspection accepts only absolute RFC3339 time bounds and closed
+/// comma-separated geometry grouping dimensions.
+#[test]
+fn cache_selection_controls_parse_without_provider_or_daemon_state() {
+    let cli = path_super_cli::Cli::parse_from([
+        "tau",
+        "agent",
+        "cache",
+        "agent-root",
+        "--since",
+        "2026-09-06T01:02:03Z",
+        "--until",
+        "2026-09-06T02:03:04+00:00",
+        "--model",
+        "provider/model",
+        "--operation",
+        "standalone-compaction",
+        "--attempt",
+        "2",
+        "--require-exact-chain",
+        "--group-by",
+        "backend,controls",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Some(super::super::cli::Command::Agent {
+            command: super::super::cli::AgentCommand::Cache(args),
+        }) if args.options.since.is_some()
+            && args.options.until.is_some()
+            && args.options.model.as_deref() == Some("provider/model")
+            && matches!(
+                args.options.operation,
+                Some(super::super::cli::CacheOperation::StandaloneCompaction)
+            )
+            && args.options.attempt == Some(2)
+            && args.options.require_exact_chain
+            && args.options.group_by.len() == 2
+    ));
+    assert!(
+        path_super_cli::Cli::try_parse_from([
+            "tau",
+            "agent",
+            "cache",
+            "agent-root",
+            "--since",
+            "yesterday",
+        ])
+        .is_err()
+    );
+    assert_eq!(
+        super::super::cli::parse_cache_since("1970-01-01T00:00:00.000000001Z")
+            .expect("lower bound"),
+        1
+    );
+    assert_eq!(
+        super::super::cli::parse_cache_until("1970-01-01T00:00:00.000000999Z")
+            .expect("upper bound"),
+        0
+    );
+}
+
 #[test]
 fn role_cli_overrides_preserve_argument_order() {
     let overrides = super::super::parse_role_cli_overrides([

@@ -4,6 +4,74 @@ use std::path::PathBuf;
 
 use tau_proto::{AgentId, AgentPromptId, SessionId};
 
+/// Closed operation selector accepted by the offline cache inspector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheOperation {
+    /// Ordinary provider inference.
+    Inference,
+    /// Provider-backed standalone compaction.
+    StandaloneCompaction,
+    /// Provider cache refresh or prewarm work.
+    CacheRefresh,
+}
+
+impl CacheOperation {
+    /// Returns the capture-schema spelling used for exact comparisons.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Inference => "inference",
+            Self::StandaloneCompaction => "standalone_compaction",
+            Self::CacheRefresh => "cache_refresh",
+        }
+    }
+}
+
+/// Closed dimensions available for empirical geometry grouping.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheGroup {
+    /// Effective provider model.
+    Model,
+    /// Backend adapter and transport.
+    Backend,
+    /// Reasoning, tool, tier, and cache controls.
+    Controls,
+}
+
+/// Bounded offline selection controls shared by every cache view.
+#[derive(Clone)]
+pub struct CacheSelection {
+    /// Inclusive lower observation-time boundary in Unix microseconds.
+    pub since_unix_micros: Option<u64>,
+    /// Inclusive upper observation-time boundary in Unix microseconds.
+    pub until_unix_micros: Option<u64>,
+    /// Exact effective/configured model selector.
+    pub model: Option<String>,
+    /// Exact closed operation selector.
+    pub operation: Option<CacheOperation>,
+    /// Exact logical/provider attempt ordinal.
+    pub attempt: Option<u64>,
+    /// Emit only exact request comparisons with a proven response-chain edge.
+    pub require_exact_chain: bool,
+    /// Dimensions used to group scalar geometry samples.
+    pub group_by: Vec<CacheGroup>,
+}
+
+impl Default for CacheSelection {
+    fn default() -> Self {
+        Self {
+            since_unix_micros: None,
+            until_unix_micros: None,
+            model: None,
+            operation: None,
+            attempt: None,
+            require_exact_chain: false,
+            group_by: vec![CacheGroup::Model, CacheGroup::Backend, CacheGroup::Controls],
+        }
+    }
+}
+
 /// Diagnostic projection selected by the offline cache inspector.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CacheView {
@@ -66,6 +134,8 @@ pub struct CacheOptions {
     pub scope: CacheScope,
     /// Optional exact local prompt filter.
     pub prompt: Option<AgentPromptId>,
+    /// Shared bounded offline selection and grouping controls.
+    pub selection: CacheSelection,
     /// Requested diagnostic projection.
     pub view: CacheView,
     /// Capture scan admission limits.

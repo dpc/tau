@@ -10,7 +10,7 @@ use tau_proto::{AgentId, AgentPromptId, SessionId};
 use zstd::stream::read::Decoder;
 
 use super::exact_geometry::{self, ExactRequest, ExactResponse, FingerprintKey};
-use super::{CacheOptions, CacheReport, CacheScanLimits, CacheView};
+use super::{CacheGroup, CacheOptions, CacheReport, CacheScanLimits, CacheView};
 use crate::InspectError;
 
 mod exact;
@@ -42,7 +42,7 @@ struct DiagnosticRecord {
 }
 
 /// Explicit scalar dispatch attribution used for exact-capture joins.
-type DispatchJoin<'a> = (&'a AgentId, &'a AgentPromptId, u64);
+type DispatchJoin<'a> = &'a DiagnosticRecord;
 
 /// Counts of independently observed files, never inferred dispatch counts.
 #[derive(Default, serde::Serialize)]
@@ -435,7 +435,7 @@ impl Inventory {
         report: &mut CacheReport,
         remaining: &mut u64,
     ) -> Result<(), InspectError> {
-        let selected = self.selected(options, selected_agents);
+        let selected = self.selected(options, selected_agents, report);
         let attempt_ends = selected
             .iter()
             .copied()
@@ -501,7 +501,7 @@ impl Inventory {
         remaining: &mut u64,
     ) -> Result<(), InspectError> {
         let mut attempts: BTreeMap<(&str, &str, &str), Vec<&DiagnosticRecord>> = BTreeMap::new();
-        for record in self.selected(options, selected_agents) {
+        for record in self.selected(options, selected_agents, report) {
             attempts
                 .entry((&record.id.instance, &record.id.run, &record.attempt))
                 .or_default()
@@ -552,6 +552,17 @@ impl Inventory {
                     .or_default() += 1;
             }
             let end = ends.first();
+            if options.selection.require_exact_chain {
+                *report
+                    .exclusions
+                    .entry("comparison_without_exact_chain")
+                    .or_default() += 1;
+                *report
+                    .gaps
+                    .entry("required_exact_chain_evidence_unavailable")
+                    .or_default() += 1;
+                continue;
+            }
             super::append(
                 report,
                 options,
@@ -602,7 +613,7 @@ impl Inventory {
         report: &mut CacheReport,
         remaining: &mut u64,
     ) -> Result<(), InspectError> {
-        let selected = self.selected(options, selected_agents);
+        let selected = self.selected(options, selected_agents, report);
         let mut labels = BTreeMap::new();
         for (ordinal, record) in selected.iter().copied().enumerate() {
             let label = record_label(ordinal);
@@ -642,7 +653,7 @@ impl Inventory {
             let keys = dispatches
                 .iter()
                 .filter(|dispatch| scalar_projection_valid(&dispatch.value))
-                .map(|dispatch| geometry_regime_key(&dispatch.value))
+                .map(|dispatch| geometry_regime_key(&dispatch.value, &options.selection.group_by))
                 .collect::<BTreeSet<_>>();
             if keys.len() != 1
                 || dispatches
@@ -656,15 +667,19 @@ impl Inventory {
                 continue;
             }
             let dispatch = dispatches[0];
-            let Some(model) = dispatch
+            let model = dispatch
                 .value
                 .get("effective_model")
                 .and_then(Value::as_str)
-                .filter(|model| !model.is_empty() && model.len() <= 128)
-            else {
+                .filter(|model| !model.is_empty() && model.len() <= 128);
+            if options.selection.group_by.contains(&CacheGroup::Model) && model.is_none() {
                 *report.gaps.entry("geometry_model_unavailable").or_default() += 1;
+                *report
+                    .exclusions
+                    .entry("geometry_group_value_unavailable")
+                    .or_default() += 1;
                 continue;
-            };
+            }
             if !scalar_projection_valid(&end.value) {
                 continue;
             }
@@ -676,16 +691,16 @@ impl Inventory {
                 continue;
             };
             let key = keys.into_iter().next().expect("one regime");
-            let next_model = model_labels.len().saturating_add(1);
-            let model_label = Some(
+            let model_label = model.map(|model| {
+                let next_model = model_labels.len().saturating_add(1);
                 model_labels
                     .entry(model.to_owned())
                     .or_insert_with(|| format!("model-{next_model}"))
-                    .clone(),
-            );
-            displayed_regimes
-                .entry(key.clone())
-                .or_insert_with(|| geometry_display_regime(&dispatch.value, model_label));
+                    .clone()
+            });
+            displayed_regimes.entry(key.clone()).or_insert_with(|| {
+                geometry_display_regime(&dispatch.value, model_label, &options.selection.group_by)
+            });
             groups.entry(key.clone()).or_default().push(read);
             references
                 .entry(key)
@@ -693,6 +708,13 @@ impl Inventory {
                 .push(labels[&end.id].clone());
         }
         for (key, mut reads) in groups {
+            if options.selection.require_exact_chain {
+                *report
+                    .exclusions
+                    .entry("comparison_without_exact_chain")
+                    .or_default() += 1;
+                continue;
+            }
             reads.sort_unstable();
             let empirical_gcd = reads.iter().copied().reduce(gcd);
             super::append(
@@ -726,13 +748,15 @@ impl Inventory {
         Ok(())
     }
 
-    /// Iterates records selected by the exact prompt filter.
+    /// Iterates records selected by shared prompt, time, model, operation, and
+    /// attempt filters.
     fn selected<'a>(
         &'a self,
         options: &'a CacheOptions,
         selected_agents: &'a BTreeSet<AgentId>,
+        report: &mut CacheReport,
     ) -> Vec<&'a DiagnosticRecord> {
-        let mut selected = self
+        let candidates = self
             .diagnostics
             .iter()
             .filter(move |record| {
@@ -744,8 +768,131 @@ impl Inventory {
                         .is_none_or(|prompt| record.prompt.as_ref() == Some(prompt))
             })
             .collect::<Vec<_>>();
+        let mut selected = Vec::new();
+        for record in candidates {
+            match self.scalar_selected(record, options) {
+                Ok(true) => selected.push(record),
+                Ok(false) => {
+                    *report
+                        .exclusions
+                        .entry("scalar_filter_mismatch")
+                        .or_default() += 1;
+                }
+                Err(reason) => {
+                    *report.exclusions.entry(reason).or_default() += 1;
+                    *report
+                        .gaps
+                        .entry("selection_evidence_unavailable")
+                        .or_default() += 1;
+                }
+            }
+        }
         selected.sort_by(|left, right| left.id.cmp(&right.id));
         selected
+    }
+
+    /// Applies shared scalar filters using capture-local attempt peers rather
+    /// than inventing missing values.
+    fn scalar_selected(
+        &self,
+        record: &DiagnosticRecord,
+        options: &CacheOptions,
+    ) -> Result<bool, &'static str> {
+        let selection = &options.selection;
+        if selection.since_unix_micros.is_none()
+            && selection.until_unix_micros.is_none()
+            && selection.model.is_none()
+            && selection.operation.is_none()
+            && selection.attempt.is_none()
+        {
+            return Ok(true);
+        }
+        if selection.since_unix_micros.is_some() || selection.until_unix_micros.is_some() {
+            let recorded = record
+                .value
+                .get("recorded_at_unix_micros")
+                .and_then(Value::as_u64)
+                .ok_or("scalar_time_unavailable")?;
+            if selection
+                .since_unix_micros
+                .is_some_and(|since| recorded < since)
+                || selection
+                    .until_unix_micros
+                    .is_some_and(|until| until < recorded)
+            {
+                return Ok(false);
+            }
+        }
+        if let Some(operation) = selection.operation {
+            let observed = record
+                .value
+                .get("operation")
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    matches!(
+                        *value,
+                        "inference" | "standalone_compaction" | "cache_refresh"
+                    )
+                })
+                .ok_or("scalar_operation_unavailable")?;
+            if observed != operation.as_str() {
+                return Ok(false);
+            }
+        }
+        if let Some(attempt) = selection.attempt {
+            let observed = observed_attempt(&record.value)?;
+            if observed != attempt {
+                return Ok(false);
+            }
+        }
+        if let Some(model) = selection.model.as_deref() {
+            let mut observed = BTreeSet::new();
+            for peer in self.diagnostics.iter().filter(|peer| {
+                peer.id.instance == record.id.instance
+                    && peer.id.run == record.id.run
+                    && peer.attempt == record.attempt
+                    && peer.value["record_kind"] == "dispatch"
+            }) {
+                if self.conflicted_records.contains(&peer.id) {
+                    return Err("scalar_model_conflicted");
+                }
+                let value = peer
+                    .value
+                    .get("effective_model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 128)
+                    .ok_or("scalar_model_unavailable")?;
+                observed.insert(value);
+            }
+            let observed = match observed.len() {
+                0 => return Err("scalar_model_unavailable"),
+                1 => *observed.iter().next().expect("one observed model"),
+                _ => return Err("scalar_model_ambiguous"),
+            };
+            if observed != model {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Reads the logical ordinal, falling back to the harness attempt only when the
+/// logical field is explicitly null.
+fn observed_attempt(value: &Value) -> Result<u64, &'static str> {
+    match value.get("logical_attempt") {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .filter(|attempt| *attempt != 0)
+            .ok_or("scalar_attempt_unavailable"),
+        Some(Value::Null) => match value.get("harness_provider_attempt") {
+            Some(Value::Number(number)) => number
+                .as_u64()
+                .filter(|attempt| *attempt != 0)
+                .ok_or("scalar_attempt_unavailable"),
+            _ => Err("scalar_attempt_unavailable"),
+        },
+        _ => Err("scalar_attempt_unavailable"),
     }
 }
 
@@ -906,37 +1053,78 @@ fn closed(value: &Value, field: &str, allowed: &[&str]) -> Value {
 }
 
 /// Produces an internal equality key; it is never emitted.
-fn geometry_regime_key(value: &Value) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "backend": closed(value, "backend", &["responses", "chat_completions"]),
-        "transport": closed(value, "transport", &["websocket", "http_sse", "http-sse"]),
-        "model": value.get("effective_model").and_then(Value::as_str)
-            .filter(|model| model.len() <= 128),
-        "reasoning": closed(value, "reasoning_selector",
-            &["none", "minimal", "low", "medium", "high", "xhigh"]),
-        "tool_choice": closed(value, "tool_choice", &["auto", "none", "required"]),
-        "service_tier": closed(value, "service_tier",
-            &["auto", "default", "flex", "priority", "scale"]),
-        "cache_mode": closed(value, "cache_mode", &["none", "ephemeral", "retained"]),
-        "cache_ttl_seconds": unsigned(value, "cache_ttl_seconds"),
-    }))
-    .expect("closed scalar regime serializes")
+fn geometry_regime_key(value: &Value, group_by: &[CacheGroup]) -> String {
+    let mut key = serde_json::Map::new();
+    if group_by.contains(&CacheGroup::Model) {
+        key.insert(
+            "model".into(),
+            value
+                .get("effective_model")
+                .and_then(Value::as_str)
+                .filter(|model| model.len() <= 128)
+                .map_or(Value::Null, Into::into),
+        );
+    }
+    if group_by.contains(&CacheGroup::Backend) {
+        key.insert(
+            "backend".into(),
+            serde_json::json!({
+                "adapter": closed(value, "backend", &["responses", "chat_completions"]),
+                "transport": closed(value, "transport", &["websocket", "http_sse", "http-sse"]),
+            }),
+        );
+    }
+    if group_by.contains(&CacheGroup::Controls) {
+        key.insert(
+            "controls".into(),
+            serde_json::json!({
+                "reasoning": closed(value, "reasoning_selector",
+                    &["none", "minimal", "low", "medium", "high", "xhigh"]),
+                "tool_choice": closed(value, "tool_choice", &["auto", "none", "required"]),
+                "service_tier": closed(value, "service_tier",
+                    &["auto", "default", "flex", "priority", "scale"]),
+                "cache_mode": closed(value, "cache_mode", &["none", "ephemeral", "retained"]),
+                "cache_ttl_seconds": unsigned(value, "cache_ttl_seconds"),
+            }),
+        );
+    }
+    serde_json::to_string(&key).expect("closed scalar regime serializes")
 }
 
 /// Produces the public regime with a report-local model label.
-fn geometry_display_regime(value: &Value, model_label: Option<String>) -> Value {
-    serde_json::json!({
-        "backend": closed(value, "backend", &["responses", "chat_completions"]),
-        "transport": closed(value, "transport", &["websocket", "http_sse", "http-sse"]),
-        "model": model_label,
-        "reasoning": closed(value, "reasoning_selector",
-            &["none", "minimal", "low", "medium", "high", "xhigh"]),
-        "tool_choice": closed(value, "tool_choice", &["auto", "none", "required"]),
-        "service_tier": closed(value, "service_tier",
-            &["auto", "default", "flex", "priority", "scale"]),
-        "cache_mode": closed(value, "cache_mode", &["none", "ephemeral", "retained"]),
-        "cache_ttl_seconds": unsigned(value, "cache_ttl_seconds"),
-    })
+fn geometry_display_regime(
+    value: &Value,
+    model_label: Option<String>,
+    group_by: &[CacheGroup],
+) -> Value {
+    let mut regime = serde_json::Map::new();
+    if group_by.contains(&CacheGroup::Model) {
+        regime.insert("model".into(), model_label.into());
+    }
+    if group_by.contains(&CacheGroup::Backend) {
+        regime.insert(
+            "backend".into(),
+            serde_json::json!({
+                "adapter": closed(value, "backend", &["responses", "chat_completions"]),
+                "transport": closed(value, "transport", &["websocket", "http_sse", "http-sse"]),
+            }),
+        );
+    }
+    if group_by.contains(&CacheGroup::Controls) {
+        regime.insert(
+            "controls".into(),
+            serde_json::json!({
+                "reasoning": closed(value, "reasoning_selector",
+                    &["none", "minimal", "low", "medium", "high", "xhigh"]),
+                "tool_choice": closed(value, "tool_choice", &["auto", "none", "required"]),
+                "service_tier": closed(value, "service_tier",
+                    &["auto", "default", "flex", "priority", "scale"]),
+                "cache_mode": closed(value, "cache_mode", &["none", "ephemeral", "retained"]),
+                "cache_ttl_seconds": unsigned(value, "cache_ttl_seconds"),
+            }),
+        );
+    }
+    Value::Object(regime)
 }
 
 /// Retains one optional unsigned counter.

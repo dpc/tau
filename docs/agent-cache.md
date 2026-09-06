@@ -9,7 +9,10 @@ tau agent cache AGENT --include-descendants
 tau agent cache AGENT --format jsonl --prompt PROMPT
 tau agent cache AGENT --prompt PROMPT --view attribution
 tau agent cache AGENT --view continuity
-tau agent cache AGENT --view geometry
+tau agent cache AGENT --view geometry --group-by model,backend,controls
+tau agent cache AGENT --since 2026-09-06T00:00:00Z --model provider/model
+tau agent cache AGENT --operation inference --attempt 2
+tau agent cache AGENT --view geometry --require-exact-chain
 tau agent cache AGENT --view geometry --format jsonl --index ./cache.private-index
 tau session cache SESSION --format jsonl
 ```
@@ -121,8 +124,18 @@ budget. Invalid, shared, symlinked, oversized, or revision-skewed indexes fail
 closed. Tau does not discover, retain, or delete these explicit exports; delete
 them manually.
 
-Shared filters beyond `--prompt` remain subsequent work; no empty-success
-placeholders are exposed. Exact
+Shared `--since` and `--until` bounds require absolute RFC3339 timestamps and
+are inclusive. `--model`, `--operation`, and `--attempt` select only directly
+observed values; unavailable fields are excluded and counted rather than
+inferred. The attempt selector uses the existing logical ordinal when present
+and otherwise the explicitly supplied harness provider attempt. Geometry groups
+by `model,backend,controls` by default; `--group-by` accepts any nonempty unique
+subset of those dimensions. `--require-exact-chain` excludes scalar and exact
+comparisons that lack a captured, matching response-chain edge. Exclusion counts
+do not imply exhaustive capture history, and missing evidence remains a partial
+result.
+
+Exact
 request/response capture remains **default-on
 for durable activity**, independently of the metadata setting below. This command
 does not alter capture, retention, inference, retry, refresh, or compaction policy.
