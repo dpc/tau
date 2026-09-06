@@ -2736,8 +2736,52 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             }),
         )
         .expect("seed prompt");
+    let through = agent_store
+        .agent(agent_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map(tau_proto::AgentHead::Node)
+        .expect("seeded prompt head");
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-loaded-later-0").expect("prompt id");
+    agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: None,
+                agent_prompt_id: prompt_id.clone(),
+                through,
+                model: Some("echo/model".into()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(through),
+                output_length_continuation: None,
+            }),
+        )
+        .expect("seed inference owner");
+    agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                agent_prompt_id: prompt_id,
+                agent_id: agent_id.clone(),
+                session_id: "s1".parse().expect("session id"),
+                model: "echo/model".into(),
+                model_params: Some(tau_proto::ModelParams::default()),
+                outer_turn_id: None,
+                operation: tau_proto::PromptOperation::Inference,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }),
+        )
+        .expect("seed ordinary materialization");
+    drop(agent_store);
 
     let mut h = quiet_provider_harness(&sp).expect("start");
+    h.session_runtime
+        .agent_store
+        .prepare_existing_agent(agent_id.as_str())
+        .expect("prepare durable agent for live load");
     let sink = connect_test_tool(&mut h, "restore-ext");
     h.handle_extension_message(
         &crate::test_connection_id("restore-ext"),
@@ -2860,6 +2904,17 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             })
         })
         .expect("loaded-agent stats snapshot");
+    let Event::AgentStatsUpdated(stats) = peel_delivery(&events[stats_index].frame)
+        .expect("stats delivery")
+        .event()
+    else {
+        panic!("loaded-agent stats position must hold stats");
+    };
+    assert_eq!(
+        stats.inner_turns_total,
+        Some(1),
+        "the replayed stats snapshot counts its durable ordinary prompt start"
+    );
     assert!(
         metadata_index < replay_index && replay_index < stats_index && stats_index < boundary_index
     );

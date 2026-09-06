@@ -89,7 +89,9 @@ hides the complete unit. The bottom status line identifies the selected role or
 agent but does not repeat the session id. Its mandatory priority-zero selected
 agent identity is the single `<work-emoji><turn-emoji> @agent` unit. Other
 independently hideable elements use ascending importance bands: context `10`,
-tool and active side-agent activity `20`, agent description,
+then its immediately following inner-turn count (which yields to context on the
+same-band reverse-declaration tie-break), tool and active side-agent activity
+`20`, agent description,
 selected-agent task title, and model adjustments `30`, watchers `40`, runtime
 estimated API cost and weekly quota `50`, UI-I/O
 diagnostics `60`, and the redraw

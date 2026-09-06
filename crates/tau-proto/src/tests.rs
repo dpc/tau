@@ -1595,6 +1595,7 @@ fn representative_events() -> Vec<Event> {
                 started_total: 1,
             },
             context: AgentContextStats::default(),
+            inner_turns_total: None,
             estimated_api_cost: Default::default(),
             creator_subtree_estimated_api_cost: Default::default(),
             work_status: Default::default(),
@@ -4269,7 +4270,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 1, "minor": 0})
+        serde_json::json!({"major": 1, "minor": 1})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4946,7 +4947,8 @@ fn agent_watches_updated_serde_round_trip() {
 }
 
 /// Ensures generic agent stats snapshots preserve work status alongside
-/// partial/unknown context usage, runtime state, and complete tool counters.
+/// partial/unknown context usage, runtime state, tool counters, and optional
+/// inner-turn evidence.
 #[test]
 fn agent_stats_updated_serde_round_trip() {
     let update = AgentStatsUpdated {
@@ -4970,6 +4972,7 @@ fn agent_stats_updated_serde_round_trip() {
             context_window: Some(200_000),
             percent_used: Some(21),
         },
+        inner_turns_total: Some(123),
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
     };
@@ -4979,12 +4982,13 @@ fn agent_stats_updated_serde_round_trip() {
     assert!(value["payload"]["context"].get("cached_tokens").is_none());
     assert_eq!(value["payload"]["work_status"]["phase"], "working");
     assert_eq!(value["payload"]["work_status"]["title"], "trace lifecycle");
+    assert_eq!(value["payload"]["inner_turns_total"], 123);
     let round_trip = serde_json::from_value::<Event>(value).expect("decode stats");
     assert_eq!(round_trip, Event::AgentStatsUpdated(update));
 }
 
-/// Decodes a legacy complete stats snapshot without the transient subtree field
-/// as known zero so mixed-version protocol peers remain wire compatible.
+/// Decodes a legacy complete stats snapshot without transient optional fields
+/// as unavailable evidence, so a mixed-version peer cannot claim a false zero.
 #[test]
 fn agent_stats_updated_defaults_missing_creator_subtree_cost() {
     let event = serde_json::json!({
@@ -5008,6 +5012,7 @@ fn agent_stats_updated_defaults_missing_creator_subtree_cost() {
     };
     assert_eq!(stats.estimated_api_cost.as_picodollars(), 7);
     assert_eq!(stats.creator_subtree_estimated_api_cost.as_picodollars(), 0);
+    assert_eq!(stats.inner_turns_total, None);
 }
 
 /// Work-status serde accepts every approved phase/title shape and preserves its

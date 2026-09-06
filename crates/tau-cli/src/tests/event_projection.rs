@@ -581,6 +581,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),

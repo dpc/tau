@@ -241,6 +241,7 @@ fn selected_agent_status_row_renders_phase_and_adapts_task_title() {
             turn_activity: tau_proto::AgentTurnActivity::Manipulating,
             tools: Default::default(),
             context: Default::default(),
+            inner_turns_total: None,
             estimated_api_cost: Default::default(),
             creator_subtree_estimated_api_cost: Default::default(),
         }));
@@ -395,6 +396,7 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
@@ -1338,6 +1340,7 @@ fn watched_agent_stats_redraws_status_row() {
             started_total: 3,
         },
         context: tau_proto::AgentContextStats::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
@@ -1482,6 +1485,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
             started_total: 13,
         },
         context: tau_proto::AgentContextStats::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
@@ -1506,6 +1510,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
             started_total: 42,
         },
         context: tau_proto::AgentContextStats::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
@@ -1577,6 +1582,7 @@ fn watched_agent_response_finished_keeps_status_row() {
             started_total: 15,
         },
         context: tau_proto::AgentContextStats::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
@@ -1660,6 +1666,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             turn_activity: tau_proto::AgentTurnActivity::Idle,
             tools: Default::default(),
             context: Default::default(),
+            inner_turns_total: None,
             estimated_api_cost: Default::default(),
             creator_subtree_estimated_api_cost: Default::default(),
         })
@@ -1832,8 +1839,8 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
 }
 
 /// Ensures watched-agent rows put self-reported status before stable identity
-/// and title while preserving generic telemetry, styling, and truncation
-/// priority.
+/// and title while preserving generic telemetry, independent counter styling,
+/// and context-first truncation priority.
 #[test]
 fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let theme = cli_test_theme();
@@ -1853,6 +1860,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
             context_window: Some(200_000),
             percent_used: Some(67),
         },
+        inner_turns_total: Some(123),
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
@@ -1890,12 +1898,12 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     );
     assert_eq!(leading, vec!["(review)", "review changes"]);
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["%2/3", "#133k/200k"]);
+    assert_eq!(texts, vec!["%2/3", "#133k/200k", "*123"]);
 
     let block = render_tool_block(&theme, &display);
     assert_eq!(
         priority_header_text(&block, 100),
-        "🚀💤 @engineer_1 (review) review changes %2/3 #133k/200k"
+        "🚀💤 @engineer_1 (review) review changes %2/3 #133k/200k *123"
     );
     let wide_cells = priority_header_cells(&block, 100);
     let identity_start = wide_cells
@@ -1935,6 +1943,15 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_INFO),
         "self-reported task titles remain informational metadata"
     );
+    let inner_turn_start = wide_cells
+        .iter()
+        .position(|cell| cell.ch == '*')
+        .expect("inner-turn counter span");
+    assert_eq!(
+        wide_cells[inner_turn_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_INNER_TURNS),
+        "inner turns retain their independently configurable status style"
+    );
     let without_display_name = priority_header_text(&block, 40);
     assert!(!without_display_name.contains("(review)"));
     assert!(
@@ -1954,6 +1971,15 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert!(
         !without_task_title.contains("review"),
         "{without_task_title:?}"
+    );
+    let without_inner_turns = priority_header_text(&block, 27);
+    assert!(
+        without_inner_turns.contains("#133k/200k"),
+        "{without_inner_turns:?}"
+    );
+    assert!(
+        !without_inner_turns.contains("*123"),
+        "{without_inner_turns:?}"
     );
 
     let percent_only_stats = tau_proto::AgentStatsUpdated {
@@ -1975,7 +2001,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     );
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(display.tool_name, "@engineer_1");
-    assert_eq!(texts, vec!["-> @leaf", "%2/3", "#67%"]);
+    assert_eq!(texts, vec!["-> @leaf", "%2/3", "#67%", "*123"]);
     let block = render_tool_block(&theme, &display);
     let watching = priority_header_cells(&block, 100)
         .into_iter()
@@ -3449,6 +3475,136 @@ fn model_status_shows_context_window_until_usage_is_known() {
     assert!(status_row.ends_with("#-/200k"));
 }
 
+/// The selected-agent status shows the canonical ordinary-turn count, while a
+/// narrow status line retains context before the lower-priority turn counter.
+#[test]
+fn model_status_shows_inner_turns_after_context() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
+        "inner-turns",
+        "main",
+    )));
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent_id("main"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
+        tools: tau_proto::AgentToolStats::default(),
+        context: tau_proto::AgentContextStats {
+            input_tokens: Some(12_000),
+            cached_tokens: None,
+            context_window: Some(200_000),
+            percent_used: Some(6),
+        },
+        inner_turns_total: Some(123),
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+        work_status: Default::default(),
+    }));
+    renderer.handle(&Event::HarnessAgentContextUsageChanged(
+        tau_proto::HarnessAgentContextUsageChanged {
+            agent_id: agent_id("main"),
+            input_tokens: Some(12_000),
+            cached_tokens: None,
+            context_window: Some(200_000),
+            percent_used: Some(6),
+        },
+    ));
+    sync(&handle);
+
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("@main"))
+        .expect("status row");
+    assert!(status_row.contains("#12k/200k *123"), "{status_row:?}");
+    let status_cells = priority_header_cells(&renderer.build_model_status_block(), 100);
+    let context_start = status_cells
+        .iter()
+        .position(|cell| cell.ch == '#')
+        .expect("context status chip");
+    let inner_turn_start = status_cells
+        .iter()
+        .position(|cell| cell.ch == '*')
+        .expect("inner-turn status chip");
+    assert_eq!(
+        status_cells[context_start].style,
+        tau_cli_term::resolve::resolve(&cli_test_theme(), tau_themes::names::STATUS_CONTEXT)
+    );
+    assert_eq!(
+        status_cells[inner_turn_start].style,
+        tau_cli_term::resolve::resolve(&cli_test_theme(), tau_themes::names::STATUS_INNER_TURNS)
+    );
+    assert_ne!(
+        status_cells[context_start].style, status_cells[inner_turn_start].style,
+        "the test theme keeps inner-turn styling independent from context"
+    );
+
+    let (_term, narrow_handle, narrow_vt) = setup(24, 24);
+    let mut narrow_renderer = EventRenderer::new(
+        narrow_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    narrow_renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    narrow_renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
+        "inner-turns-narrow",
+        "main",
+    )));
+    narrow_renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent_id("main"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
+        tools: tau_proto::AgentToolStats::default(),
+        context: tau_proto::AgentContextStats {
+            input_tokens: Some(12_000),
+            cached_tokens: None,
+            context_window: Some(200_000),
+            percent_used: Some(6),
+        },
+        inner_turns_total: Some(123),
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+        work_status: Default::default(),
+    }));
+    narrow_renderer.handle(&Event::HarnessAgentContextUsageChanged(
+        tau_proto::HarnessAgentContextUsageChanged {
+            agent_id: agent_id("main"),
+            input_tokens: Some(12_000),
+            cached_tokens: None,
+            context_window: Some(200_000),
+            percent_used: Some(6),
+        },
+    ));
+    sync(&narrow_handle);
+
+    let narrow_status_row = narrow_vt
+        .screen_text(24)
+        .into_iter()
+        .find(|row| row.contains("@main"))
+        .expect("narrow status row");
+    assert!(
+        narrow_status_row.contains("#12k/200k"),
+        "{narrow_status_row:?}"
+    );
+    assert!(!narrow_status_row.contains("*123"), "{narrow_status_row:?}");
+}
+
 /// The selected creator renders independent self and inclusive descendant
 /// estimates from the complete stats snapshot rather than collapsing them.
 #[test]
@@ -3474,6 +3630,7 @@ fn model_status_shows_selected_creator_cost_pair() {
         turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(
             2_140_000_000_000,
@@ -3618,6 +3775,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
             started_total: 3,
         },
         context: tau_proto::AgentContextStats::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),

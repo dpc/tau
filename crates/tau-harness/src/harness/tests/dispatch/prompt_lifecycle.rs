@@ -1997,13 +1997,24 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
 }
 
 /// Regression: one ordinary prompt's compact fact must enter the owning agent
-/// store exactly once and advance its inference generation.
+/// store exactly once, advance its inference generation, and update the
+/// complete runtime stats snapshot.
 #[test]
 fn ordinary_prompt_started_advances_persisted_inference_generation() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let stats = connect_test_tool(&mut h, "inner-turn-stats");
+    h.complete_subscription(
+        &crate::test_connection_id("inner-turn-stats"),
+        Vec::new(),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    drain_stats_updated(&stats);
     assert_eq!(
         h.session_runtime
             .agent_store
@@ -2072,6 +2083,19 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
             .expect("agent tree")
             .ordinary_inference_generation(),
         tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
+    );
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("current complete stats")
+            .inner_turns_total,
+        Some(1),
+        "the stats snapshot projects the committed ordinary materialization"
+    );
+    assert!(
+        drain_stats_updated(&stats)
+            .iter()
+            .any(|stats| stats.inner_turns_total == Some(1)),
+        "the committed ordinary materialization must publish its refreshed stats snapshot"
     );
     let full_prompt_count = event_log_events(&h)
         .iter()

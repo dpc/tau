@@ -352,6 +352,10 @@ live-only response notice. `ui.navigate_tree` remains a distinct state-changing 
 authenticated-agent-creator total. Both reset with runtime/session state and
 never become journal facts; new decoders synthesize zero when older payloads
 omit the defaulted subtree field.
+Its optional `inner_turns_total` reports the agent tree's durable count of
+ordinary materialized inference prompts. It omits unavailable skewed-peer
+evidence rather than claiming zero, and excludes standalone compaction and
+transport retries.
 
 Provider-hosted tool capabilities and materialized definitions occupy a
 separate namespace from registered Function/Custom tools. Exact-route

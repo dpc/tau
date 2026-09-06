@@ -272,7 +272,10 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   current/cumulative tool counters, and latest
   context usage, plus runtime-only self and inclusive authenticated-creator
   subtree estimated equivalent API costs and current canonical work-status
-  phase/title. Creator-subtree membership follows only same-session
+  phase/title. When present, `inner_turns_total` is the durable count of
+  committed ordinary-inference materializations; standalone compaction and
+  transport retries do not contribute. An absent field from a minor-skew peer
+  means unavailable evidence, not zero. Creator-subtree membership follows only same-session
   `AgentStarted.creator = AgentCreator::Agent`, never metadata
   `parent_agent`; both costs reset on session/runtime reset. A descendant
   increment publishes a complete snapshot for it and each loaded creator
@@ -1083,7 +1086,9 @@ canonical work-status phase/title,
 self-only `estimated_api_cost`, and inclusive
 `creator_subtree_estimated_api_cost`. The subtree field defaults to zero when
 decoding older peers and, like every stats field, is transient rather than
-journaled.
+  journaled. Its optional `inner_turns_total` derives from existing durable
+  ordinary-inference prompt-start facts; it excludes standalone compaction and
+  retries, and absence remains unavailable rather than a synthetic zero.
 Current snapshots are delivered during catch-up before replay completion.
 
 UI clients request absolute `set_active`, `set_active_auto`, or `set_suspended`

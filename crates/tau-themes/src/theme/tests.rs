@@ -281,6 +281,20 @@ fn builtin_watching_name_differs_from_tool_name() {
     }
 }
 
+/// Ensures inner-turn counters initially follow each built-in theme's context
+/// color while retaining a separately configurable semantic style name.
+#[test]
+fn builtin_inner_turns_match_context_style() {
+    for name in BUILTIN_THEME_NAMES {
+        let theme = Theme::builtin_named(name).expect("built-in theme");
+        assert_eq!(
+            theme.resolve_style(&StyleName::new(crate::names::STATUS_INNER_TURNS)),
+            theme.resolve_style(&StyleName::new(crate::names::STATUS_CONTEXT)),
+            "{name} must default inner turns to the context style"
+        );
+    }
+}
+
 /// Ensures every built-in theme keeps Markdown links visibly distinct.
 #[test]
 fn builtin_themes_style_markdown_links_bold_red() {

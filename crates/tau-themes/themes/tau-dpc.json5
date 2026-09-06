@@ -70,6 +70,7 @@
     "status.role":          { fg: "magenta" },
     "status.session":       { fg: "grey" },
     "status.context":       { fg: "blue" },
+    "status.inner_turns":   { fg: "blue" },
     "status.quota.under":   { fg: "green", bold: true },
     "status.quota.aligned": { fg: "green" },
     "status.quota.over":    { fg: "yellow" },

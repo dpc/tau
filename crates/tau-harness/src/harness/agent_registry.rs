@@ -1229,6 +1229,12 @@ impl Harness {
                 context_window: context_window.map(tau_proto::TokenCount::get),
                 percent_used: agent.execution.context_percent_used,
             },
+            inner_turns_total: self
+                .session_runtime
+                .agent_store
+                .agent(stable_agent_id.as_str())
+                .map(tau_core::AgentTree::ordinary_inference_generation)
+                .map(tau_proto::MaterializedPromptGeneration::get),
             estimated_api_cost: self
                 .agent_runtime
                 .agent_registry

@@ -76,6 +76,7 @@ pub const STATUS_MODEL: &str = "status.model";
 pub const STATUS_ROLE: &str = "status.role";
 pub const STATUS_SESSION: &str = "status.session";
 pub const STATUS_CONTEXT: &str = "status.context";
+pub const STATUS_INNER_TURNS: &str = "status.inner_turns";
 pub const STATUS_QUOTA_UNDER: &str = "status.quota.under";
 pub const STATUS_QUOTA_ALIGNED: &str = "status.quota.aligned";
 pub const STATUS_QUOTA_OVER: &str = "status.quota.over";

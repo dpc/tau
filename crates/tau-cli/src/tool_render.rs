@@ -463,6 +463,7 @@ pub(crate) enum ToolStatus {
     Agent,
     AgentContext,
     Counter,
+    InnerTurns,
     Progress,
     DiffAdded,
     DiffRemoved,
@@ -1183,6 +1184,7 @@ fn tool_status_style(status: ToolStatus) -> &'static str {
         ToolStatus::DiffRemoved => names::DIFF_REMOVED,
         ToolStatus::Context => names::STATUS_CONTEXT,
         ToolStatus::Tools => names::STATUS_TOOLS,
+        ToolStatus::InnerTurns => names::STATUS_INNER_TURNS,
         ToolStatus::Time => names::TOOL_STATUS_TIME,
     }
 }
@@ -1199,7 +1201,8 @@ fn tool_suffix_element(status: ToolStatus) -> ToolLineElement {
         | ToolStatus::DiffRemoved
         | ToolStatus::Context
         | ToolStatus::Tools
-        | ToolStatus::Counter => ToolLineElement::Counter,
+        | ToolStatus::Counter
+        | ToolStatus::InnerTurns => ToolLineElement::Counter,
         ToolStatus::WorkTitle => ToolLineElement::WorkTitle,
         ToolStatus::Info => ToolLineElement::Info,
         ToolStatus::Time => ToolLineElement::Duration,

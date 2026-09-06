@@ -3054,6 +3054,8 @@ impl Harness {
         if let Some(PostCommitContinuation::PromptMaterialization(continuation)) =
             prompt_materialization
         {
+            let materialized_ordinary_inference =
+                continuation.authority.started.operation == tau_proto::PromptOperation::Inference;
             let (prompt, authority) = continuation.into_delivery();
             let prompt = Event::AgentPromptCreated(prompt);
             let sync = sync_head_for.as_ref().expect("prompt sync exists");
@@ -3072,6 +3074,9 @@ impl Harness {
                     notify_watchers: false,
                 }),
             );
+            if materialized_ordinary_inference {
+                self.emit_agent_stats_updated(&sync.cid);
+            }
         }
         self.complete_pending_external_receive(&event);
         commit_timing.post_commit = post_commit_started.elapsed();

@@ -66,6 +66,7 @@
     "status.role":          { fg: "dark_yellow" },
     "status.session":       { fg: "dark_cyan" },
     "status.context":       { fg: "dark_blue" },
+    "status.inner_turns":   { fg: "dark_blue" },
     "status.quota.under":   { fg: "green", bold: true },
     "status.quota.aligned": { fg: "dark_green" },
     "status.quota.over":    { fg: "dark_yellow" },

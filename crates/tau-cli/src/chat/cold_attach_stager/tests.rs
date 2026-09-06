@@ -199,6 +199,7 @@ fn agent_stats(agent_id: &str) -> Event {
         turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
+        inner_turns_total: None,
         estimated_api_cost: Default::default(),
         creator_subtree_estimated_api_cost: Default::default(),
     })

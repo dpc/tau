@@ -1422,6 +1422,9 @@ pub(crate) fn watched_agent_tool_display(
     let primary_agent_id = via.unwrap_or(agent_id);
     let mut rendered =
         render_tool_use_state_without_status(&format!("@{primary_agent_id}"), &display);
+    if let Some(suffix) = inner_turns::watched_agent_suffix(stats) {
+        rendered.suffixes.push(suffix);
+    }
     rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
     if via.is_some() {
         rendered.leading_segments.push(ToolLineSegment {
@@ -3664,7 +3667,7 @@ impl EventRenderer {
         self.invalidate_for_retroactive_toggle();
     }
 
-    fn build_model_status_block(&mut self) -> tau_cli_term::StyledBlock {
+    pub(crate) fn build_model_status_block(&mut self) -> tau_cli_term::StyledBlock {
         use tau_cli_term::resolve::convert_color;
         use tau_cli_term::{PriorityLine, PriorityLineAlignment, StyledBlock};
         use tau_themes::{StyleName, names};
@@ -3841,6 +3844,13 @@ impl EventRenderer {
                     format!("#{context}"),
                 ),
             );
+        }
+        if let Some(chip) = inner_turns::selected_agent_status_chip(
+            &self.resources.theme,
+            self.selection.current_agent_id.as_ref(),
+            &self.watches.agent_stats,
+        ) {
+            line.push(StatusElement::Context.priority(), right, chip);
         }
         if let Some(agent_id) = self.selection.current_agent_id.as_ref() {
             let costs = self.watches.agent_stats.get(agent_id).map(|stats| {
@@ -9964,6 +9974,7 @@ impl EventRenderer {
 
 mod attach_presentation;
 mod finished_response_projection;
+mod inner_turns;
 mod prepared_renderer_event;
 mod presentation_facts;
 mod prompt_projection;

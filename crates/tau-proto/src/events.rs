@@ -3154,6 +3154,13 @@ pub struct AgentStatsUpdated {
     pub tools: AgentToolStats,
     /// Latest context usage known to the harness.
     pub context: AgentContextStats,
+    /// Total ordinary model turns durably materialized for this agent, when
+    /// the snapshot producer can provide that evidence.
+    ///
+    /// This counts committed inference prompt starts only. Standalone
+    /// compaction operations and transport retries do not advance it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner_turns_total: Option<u64>,
     /// Runtime-lifetime estimated equivalent API cost for this agent.
     #[serde(default)]
     pub estimated_api_cost: crate::EstimatedApiCost,

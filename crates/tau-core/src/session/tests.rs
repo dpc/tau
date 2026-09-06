@@ -6419,8 +6419,9 @@ fn self_compaction_terminal_delivery_is_correlated_and_exactly_once() {
     );
 }
 
-/// Standalone compaction provider prompts must not advance the target-owned
-/// ordinary-inference generation used by the manual compaction rate guard.
+/// The durable ordinary-inference generation counts only committed ordinary
+/// materializations, so it supplies UI inner-turn totals without counting
+/// standalone compaction.
 #[test]
 fn manual_compaction_generation_excludes_standalone_prompts() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);

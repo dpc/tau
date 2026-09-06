@@ -97,7 +97,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 1);
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.
