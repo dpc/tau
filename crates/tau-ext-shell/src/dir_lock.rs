@@ -326,7 +326,10 @@ enum WaitKind {
 pub(crate) enum LockAcquireError {
     Cancelled,
     Abandoned(AbandonedLock),
-    SelfConflict { dir: PathBuf },
+    SelfConflict {
+        uncovered_dir: PathBuf,
+        held_dir: PathBuf,
+    },
     NotCovered,
     Backend(String),
 }
@@ -601,9 +604,13 @@ impl DirLockManager {
             return Err(LockAcquireError::NotCovered);
         }
         if !state.manual_covers(&owner, &dirs)
-            && let Some(dir) = state.manual_lock_owned_overlapping(&owner, &dirs)
+            && let Some(held_dir) = state.manual_lock_owned_overlapping(&owner, &dirs)
+            && let Some(uncovered_dir) = state.first_uncovered_manual_dir(&owner, &dirs)
         {
-            return Err(LockAcquireError::SelfConflict { dir });
+            return Err(LockAcquireError::SelfConflict {
+                uncovered_dir,
+                held_dir,
+            });
         }
         if state.can_grant_now(&owner, &dirs, WaitKind::Automatic) {
             let id = state.add_auto(owner, dirs);
@@ -1067,6 +1074,17 @@ impl LockState {
             (&lock.owner == owner && dirs.iter().any(|dir| paths_overlap(&lock.dir, dir)))
                 .then(|| lock.dir.clone())
         })
+    }
+
+    fn first_uncovered_manual_dir(&self, owner: &AgentId, dirs: &[PathBuf]) -> Option<PathBuf> {
+        dirs.iter()
+            .find(|dir| {
+                !self
+                    .manual
+                    .iter()
+                    .any(|lock| &lock.owner == owner && dir.starts_with(&lock.dir))
+            })
+            .cloned()
     }
 
     fn can_grant_now(&self, owner: &AgentId, dirs: &[PathBuf], kind: WaitKind) -> bool {

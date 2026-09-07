@@ -549,7 +549,8 @@ fn same_owner_auto_must_be_covered_by_manual_lock_to_reenter() {
     assert_eq!(
         err,
         LockAcquireError::SelfConflict {
-            dir: path("/repo/a/child")
+            uncovered_dir: path("/repo/a"),
+            held_dir: path("/repo/a/child"),
         }
     );
     assert!(
@@ -569,6 +570,40 @@ fn same_owner_auto_must_be_covered_by_manual_lock_to_reenter() {
             .expect("state")
             .automatic
             .is_empty()
+    );
+}
+
+/// Filesystem-backed same-owner mixed coverage reports the uncovered target and
+/// held coverage while continuing to reject before an automatic lock is
+/// granted.
+#[test]
+fn filesystem_same_owner_auto_reports_uncovered_and_held_manual_directories() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager = filesystem_lock_manager(tempdir.path());
+    manager
+        .acquire_manual(
+            "manual-child".into(),
+            agent_id("agent-a"),
+            path("/repo/a/child"),
+            || {},
+        )
+        .expect("manual lock");
+
+    let err = manager
+        .acquire_auto(
+            "auto-ancestor".into(),
+            agent_id("agent-a"),
+            vec![path("/repo/a")],
+            || panic!("self-conflict should fail before waiting"),
+        )
+        .expect_err("uncovered same-owner auto should fail fast");
+
+    assert_eq!(
+        err,
+        LockAcquireError::SelfConflict {
+            uncovered_dir: path("/repo/a"),
+            held_dir: path("/repo/a/child"),
+        }
     );
 }
 

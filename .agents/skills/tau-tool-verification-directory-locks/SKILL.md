@@ -41,6 +41,9 @@ When locking is enabled, verify all of these behaviors:
 * Ancestor and child directories conflict both ways. Sibling directories do not conflict, even when a blocked waiter for another subtree is already queued.
 * Reads stay free: `read`, `grep`, `find`, and `ls` complete while an update lock is held.
 * Mutating filesystem tools participate when enabled: `edit` and `apply_patch` wait on conflicting locks.
+  A same-owner mixed-target mutation that exceeds manual coverage instead fails
+  before mutation; its diagnostic names the uncovered requested canonical
+  directory and the separately held manual coverage directory.
 * `shell`/`gpt_shell` do not infer read/write mode from the command text. Without same-owner manual-lock coverage they are inferred read-only and bypass conflicting update locks; with matching same-owner manual `dir_lock` coverage they run as covered read/write shell commands and keep that owner's lock active.
 * Lock waiters do not consume the ext-shell worker semaphore before their lock is available. A large number of blocked lock waiters should not prevent unrelated reads from running.
 * A mutating tool that waits more than 5s and then acquires its automatic lock reports `lock_wait_duration_seconds` in its final result or error details. Fast, unblocked, canceled, and abandoned lock paths omit it.

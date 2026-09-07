@@ -193,7 +193,9 @@ output rules; the focused skills contain the detailed tool-specific plans.
   delegate interruption, isolation, and event-log checks.
 * `tau-tool-verification-directory-locks` — `dir_lock` conflict behavior,
   automatic lock scopes, lock wait metadata, cancellation, force unlock, and
-  lifecycle cleanup.
+  lifecycle cleanup. When an automatic mutation mixes covered and uncovered
+  targets for the same owner, its diagnostic must distinguish the uncovered
+  requested canonical directory from the manual directory already held.
 * `tau-tool-verification-agent-coordination` — `message`, `agent_start`, and
   `agent_watch`, including routing, validation, queued and active-wait
   interruption, notification formatting, and deduplication. Always pair it

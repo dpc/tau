@@ -247,9 +247,13 @@ impl FsLockBackend {
                     return Ok(FsAcquireOutcome::NotCovered);
                 }
                 if !registry.manual_covers(&owner, &dirs)
-                    && let Some(dir) = registry.manual_lock_owned_overlapping(&owner, &dirs)
+                    && let Some(held_dir) = registry.manual_lock_owned_overlapping(&owner, &dirs)
+                    && let Some(uncovered_dir) = registry.first_uncovered_manual_dir(&owner, &dirs)
                 {
-                    return Ok(FsAcquireOutcome::SelfConflict(dir));
+                    return Ok(FsAcquireOutcome::SelfConflict {
+                        uncovered_dir,
+                        held_dir,
+                    });
                 }
                 if waiter_id.is_none() && registry.can_grant_now(&owner, &dirs, WaitKind::Automatic)
                 {
@@ -335,8 +339,14 @@ impl FsLockBackend {
                 }
                 FsAcquireOutcome::Cancelled => return Err(LockAcquireError::Cancelled),
                 FsAcquireOutcome::Abandoned(lock) => return Err(LockAcquireError::Abandoned(lock)),
-                FsAcquireOutcome::SelfConflict(dir) => {
-                    return Err(LockAcquireError::SelfConflict { dir });
+                FsAcquireOutcome::SelfConflict {
+                    uncovered_dir,
+                    held_dir,
+                } => {
+                    return Err(LockAcquireError::SelfConflict {
+                        uncovered_dir,
+                        held_dir,
+                    });
                 }
                 FsAcquireOutcome::NotCovered => return Err(LockAcquireError::NotCovered),
                 FsAcquireOutcome::NeedsAdmission => {
@@ -704,7 +714,10 @@ enum FsAcquireOutcome {
     NeedsAdmission,
     Cancelled,
     Abandoned(AbandonedLock),
-    SelfConflict(PathBuf),
+    SelfConflict {
+        uncovered_dir: PathBuf,
+        held_dir: PathBuf,
+    },
     NotCovered,
 }
 
@@ -747,6 +760,17 @@ impl FsRegistry {
             (&lock.owner == owner && dirs.iter().any(|dir| paths_overlap(&lock.dir, dir)))
                 .then(|| lock.dir.clone())
         })
+    }
+
+    fn first_uncovered_manual_dir(&self, owner: &FsOwner, dirs: &[PathBuf]) -> Option<PathBuf> {
+        dirs.iter()
+            .find(|dir| {
+                !self
+                    .manual
+                    .iter()
+                    .any(|lock| &lock.owner == owner && dir.starts_with(&lock.dir))
+            })
+            .cloned()
     }
 
     fn can_grant_now(&self, owner: &FsOwner, dirs: &[PathBuf], kind: WaitKind) -> bool {

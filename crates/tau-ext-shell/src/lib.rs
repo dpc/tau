@@ -1934,13 +1934,17 @@ fn dispatch_locked_tool_invoke(
             }
             return;
         }
-        Err(path_crate_dir_lock::LockAcquireError::SelfConflict { dir }) => {
+        Err(path_crate_dir_lock::LockAcquireError::SelfConflict {
+            uncovered_dir,
+            held_dir,
+        }) => {
             if lifecycle.claim_terminal_before_effect() {
                 let _ = send_tool_failure(
                     invoke,
                     path_crate_display::ToolFailure::new(format!(
-                        "automatic directory lock is outside your manual lock coverage: {}",
-                        dir.display()
+                        "automatic directory lock is outside your manual lock coverage: requested {}; held {}",
+                        uncovered_dir.display(),
+                        held_dir.display()
                     )),
                     &tx,
                 );

@@ -2524,6 +2524,108 @@ fn dir_lock_update_errors_when_same_agent_already_holds_overlapping_lock() {
     writer.flush().expect("flush");
 }
 
+/// A mixed-target patch outside manual coverage must retain its rejection while
+/// identifying both the uncovered target directory and held manual coverage.
+#[test]
+fn locked_apply_patch_reports_uncovered_target_and_held_manual_coverage() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let root = tempdir.path().canonicalize().expect("canonical root");
+    let project = root.join("project");
+    fs::create_dir(&project).expect("create project");
+    let covered_file = project.join("covered.txt");
+    let uncovered_file = root.join("OPEN-QUESTIONS.md");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
+
+    writer
+        .write_event(&tool_started(
+            "lock-project",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &project.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("lock project");
+    writer.flush().expect("flush project lock");
+    loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::ToolResult(result) if result.call_id.as_str() == "lock-project" => break,
+            Event::ToolError(error) if error.call_id.as_str() == "lock-project" => {
+                panic!("manual project lock failed: {error:?}");
+            }
+            _ => {}
+        }
+    }
+
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {}\n+covered\n*** Add File: {}\n+uncovered\n*** End Patch",
+        covered_file.display(),
+        uncovered_file.display()
+    );
+    writer
+        .write_event(&tool_started(
+            "mixed-patch",
+            APPLY_PATCH_TOOL_NAME,
+            CborValue::Text(patch),
+            "agent-a",
+        ))
+        .expect("mixed-target patch");
+    writer.flush().expect("flush mixed-target patch");
+    loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::ToolError(error) if error.call_id.as_str() == "mixed-patch" => {
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "automatic directory lock is outside your manual lock coverage: requested {}; held {}",
+                        root.display(),
+                        project.display()
+                    )
+                );
+                break;
+            }
+            Event::ToolResult(result) if result.call_id.as_str() == "mixed-patch" => {
+                panic!("mixed-target patch unexpectedly succeeded: {result:?}");
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !covered_file.exists() && !uncovered_file.exists(),
+        "rejected mixed-target patch must not mutate either target"
+    );
+
+    writer
+        .write_event(&tool_started(
+            "unlock-project",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "unlock"),
+                ("directory", &project.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("unlock project");
+    writer.flush().expect("flush project unlock");
+    loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::ToolResult(result) if result.call_id.as_str() == "unlock-project" => break,
+            Event::ToolError(error) if error.call_id.as_str() == "unlock-project" => {
+                panic!("manual project unlock failed: {error:?}");
+            }
+            _ => {}
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
 #[test]
 fn dir_lock_waiting_progress_preserves_shell_mode() {
     let tempdir = TempDir::new().expect("tempdir");
