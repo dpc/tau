@@ -31,8 +31,17 @@
 
 - Use `cargo check --workspace --all-targets` to check Rust code.
 - Use `cargo nextest run` for tests and `treefmt` for formatting.
+- After implementation and focused regression tests pass, start one independent
+  review of the fixed candidate. While that review runs, run
+  `cargo nextest run` for the affected packages; use the workspace suite for
+  cross-cutting changes such as compaction. Keep the candidate and source
+  unchanged until both complete, so review and tests do not race mutations.
+  Address any findings, rerun affected checks, and do not repeat an
+  already-passed equivalent test on an unchanged candidate merely because
+  review began.
 - Before considering a change done, run final local CI with
-  `selfci check --candidate <change-id>`.
+  `selfci check --candidate <change-id>` after the candidate is ready. This
+  final check remains mandatory; local tests do not cover every CI lane.
 
 ## General guidance
 
