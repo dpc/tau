@@ -1872,9 +1872,10 @@ pub(crate) fn config_profile_selection_block(
 
 pub(crate) fn session_status_block(
     theme: &tau_themes::Theme,
+    started: bool,
+    session_id: &tau_proto::SessionId,
     path: &Path,
     suffix: &str,
-    status: &str,
 ) -> tau_cli_term::StyledBlock {
     use tau_themes::{ThemedText, names};
 
@@ -1883,10 +1884,17 @@ pub(crate) fn session_status_block(
     let status_style = text.add_style(names::SESSION_STATUS);
     let path_style = text.add_style(names::SYSTEM_PATH);
     text.push(lifecycle, crate::transcript_markers::STATUS_UPDATE);
-    text.push(lifecycle, "session dir: ");
+    text.push(
+        lifecycle,
+        if started {
+            "started session: "
+        } else {
+            "attached session: "
+        },
+    );
+    text.push(status_style, session_id.to_string());
+    text.push(lifecycle, ", dir: ");
     text.push(path_style, format!("{}{}", display_path(path), suffix));
-    text.push(lifecycle, " ");
-    text.push(status_style, status);
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 

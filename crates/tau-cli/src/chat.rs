@@ -1469,6 +1469,7 @@ fn run_chat_session(
         settings.submitted_prompt_symbol,
     );
     renderer.set_cold_attach_redraw(cold_attach_redraw);
+    renderer.set_started_session(!attach);
     renderer.set_startup_profile_selection(startup_profile);
     renderer.set_osc8_links(settings.osc8_links);
     renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());

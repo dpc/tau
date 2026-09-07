@@ -887,7 +887,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     )?;
     wait_resume_boundaries(&mut observer_b, &session_id, &identities, deadline)?;
     observer_b.wait_for_extension("e2e-fake-provider", deadline)?;
-    boot_b.wait_for("live updates below", deadline)?;
+    boot_b.wait_for("started session:", deadline)?;
     assert_replay_only_before_input(&observer_b.events, &session_id, &identities)?;
     if matched_actions(&fixture)? != matched_after_a {
         return Err("S8 cold replay consumed a provider action".into());

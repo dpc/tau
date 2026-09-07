@@ -293,6 +293,12 @@ pub(super) struct SessionPresentationState {
     pub(super) ready_extensions: HashSet<String>,
     /// Current session identity.
     pub(super) current_session_id: Option<tau_proto::SessionId>,
+    /// Canonical session directory retained for the one startup announcement.
+    pub(super) session_dir: Option<tau_proto::HarnessSessionDir>,
+    /// Whether this UI launched rather than attached to the session.
+    pub(super) started_session: bool,
+    /// Whether the combined session announcement has already been rendered.
+    pub(super) session_announcement_rendered: bool,
     /// Irreversible fail-closed latch after a conflicting session identity.
     pub(super) session_binding_failed: bool,
     /// Session-wide provider token totals.

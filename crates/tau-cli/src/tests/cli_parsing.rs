@@ -773,10 +773,10 @@ fn runtime_version_label_matches_cli_version_shape() {
     );
 }
 
-/// Ensures the resolved profile stack follows the session-directory status
-/// while absent selection does not add a synthetic startup line.
+/// Ensures a UI-created session uses one exact combined announcement and the
+/// resolved profile stack follows it without legacy duplicate markers.
 #[test]
-fn session_directory_status_reports_only_selected_startup_profile_stacks() {
+fn started_session_announcement_is_one_line_without_redundant_markers() {
     let session_dir = HarnessSessionDir {
         session_id: test_session_id("tau-agent-test"),
         path: "/tmp/tau-agent-test".into(),
@@ -798,14 +798,22 @@ fn session_directory_status_reports_only_selected_startup_profile_stacks() {
     let named_lines = visible_lines(&vt, 100);
     let session_line = named_lines
         .iter()
-        .position(|line| line.contains("▤ session dir:"))
-        .expect("session directory status");
+        .position(|line| line.contains("▤ started session:"))
+        .expect("combined session announcement");
+    assert_eq!(
+        named_lines[session_line].trim_end(),
+        "▤ started session: tau-agent-test, dir: /tmp/tau-agent-test/"
+    );
     assert_eq!(
         named_lines
             .get(session_line + 1)
             .map(|line| line.trim_end()),
         Some("▤ config profile stack: focused,review")
     );
+    let output = named_lines.join("\n");
+    assert_eq!(output.matches("started session:").count(), 1);
+    assert!(!output.contains("session dir:"));
+    assert!(!output.contains("live updates below"));
 
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(

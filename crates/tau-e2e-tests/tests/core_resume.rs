@@ -260,10 +260,10 @@ fn prompt_stdin_accepted_provider_failure_exits_without_stdout()
 }
 
 /// Proves a second exact public CLI presents historical conversation followed
-/// by one live boundary, suppresses routine current-state snapshots, and spends
-/// no provider action.
+/// by one attached-session announcement, suppresses routine current-state
+/// snapshots, and spends no provider action.
 #[test]
-fn late_attached_public_pty_publishes_history_before_boundary()
+fn late_attached_public_pty_publishes_history_before_announcement()
 -> Result<(), Box<dyn std::error::Error>> {
     let nonce = format!("{:x}", std::process::id());
     let prompt = format!("attach-parity-prompt-{nonce}");
@@ -809,18 +809,18 @@ fn assert_attach_semantics(
     let editable = find(&format!("Write a message to {}...", agent_id.as_str()))?;
     let status = find(&format!("@{}", agent_id.as_str()))?;
     let valid_order = if attached {
-        let boundary = find("attached to")?;
+        let announcement = find("attached session:")?;
         !frame.contains(&format!("initialized {}", agent_id.as_str()))
             && submitted < answered
-            && answered < boundary
-            && boundary < editable
+            && answered < announcement
+            && announcement < editable
             && editable <= status
     } else {
         submitted < answered && answered < editable && editable <= status
     };
     if frame.match_indices(prompt).count() != 1
         || frame.match_indices(response).count() != 1
-        || (attached && frame.match_indices("attached to").count() != 1)
+        || (attached && frame.match_indices("attached session:").count() != 1)
         || !valid_order
     {
         return Err(format!(

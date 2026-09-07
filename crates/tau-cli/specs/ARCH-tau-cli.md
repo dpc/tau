@@ -381,9 +381,14 @@ non-replay `session.replay_complete` boundary. Replay-marked current-state rows
 continue directly to the renderer, but routine session, extension, directory,
 context-initialization, and diagnostic-notice snapshots update local current
 state without appending live-looking lifecycle rows. Alert-purpose warnings
-remain visible. The UI publishes one permanent `attached to <session> — live
-updates below` divider without changing wire delivery or shared catch-up
-semantics. Staging uses the same 1,024-item /
+remain visible. Once the directory snapshot and replay boundary are available,
+the UI publishes one permanent
+`▤ attached session: <session>, dir: <session-directory>/` announcement without
+changing wire delivery or shared catch-up semantics. A UI that launches the
+session instead publishes
+`▤ started session: <session>, dir: <session-directory>/`; neither form carries
+a separate directory line, live-updates suffix, or new/existing marker. Staging
+uses the same 1,024-item /
 64-MiB aggregate limits as renderer admission across retained transcript,
 pending tool starts, buffered live tool frames, session/membership/ownership
 indexes, settled tool-call ids, successful per-agent replay terminals, and

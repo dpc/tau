@@ -169,7 +169,7 @@ impl VtWriter {
         self.screen_text(w).iter().any(|r| r.contains(needle))
     }
 
-    fn scrollback_contains(&self, w: u16, rows: usize, needle: &str) -> bool {
+    pub(crate) fn scrollback_contains(&self, w: u16, rows: usize, needle: &str) -> bool {
         let mut parser = self.parser.lock().expect("vt");
         parser.screen_mut().set_scrollback(rows);
         let contains = parser.screen().rows(0, w).any(|row| row.contains(needle));

@@ -144,10 +144,11 @@ The same target also owns one live dual-PTY attach baseline. The owning exact
 public CLI creates the daemon, completes one closed text action, and then a
 second exact public CLI explicitly attaches to that session. Normalized VT row
 classes require every stable terminal response/message row exactly once and
-the attach history/live boundary before editable input, rather than comparing
+the combined attached-session announcement after history and before editable
+input, rather than comparing
 terminal bytes. The late replay-aware socket observer separately requires the
 submitted prompt and canonical delivery order while the attached UI suppresses
-routine replay snapshots and publishes transcript before the boundary. Exact
+routine replay snapshots and publishes transcript before the announcement. Exact
 fake-provider consumption, bounded synchronization,
 process-group teardown, and absence of runtime discovery artifacts remain
 separate authorities. A correlated `HoldUntilCancel` lane also attaches only

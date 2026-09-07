@@ -371,9 +371,11 @@ enum DiagnosticProjection {
         path: std::path::PathBuf,
     },
     /// Session directory announcement.
-    SessionDir {
+    SessionAnnouncement {
         /// Canonical announcement payload.
         event: tau_proto::HarnessSessionDir,
+        /// Whether this UI launched rather than attached to the session.
+        started: bool,
     },
     /// Startup configuration profile selection.
     ConfigProfile {
@@ -1484,7 +1486,10 @@ impl EventRenderer {
             event_owners: renderer_state::EventOwnershipState::default(),
             watches: renderer_state::WatchActivityState::default(),
             transcript: renderer_state::TranscriptState::default(),
-            session: renderer_state::SessionPresentationState::default(),
+            session: renderer_state::SessionPresentationState {
+                started_session: true,
+                ..renderer_state::SessionPresentationState::default()
+            },
             presentation: renderer_state::PresentationSettingsState {
                 state_dirs,
                 diffs_expanded: state.show_diff,
@@ -1633,6 +1638,11 @@ impl EventRenderer {
         selection: Option<tau_config::settings::ProfileSelection>,
     ) {
         self.session.startup_profile_selection = selection;
+    }
+
+    /// Configures whether this UI launched rather than attached to the session.
+    pub(crate) fn set_started_session(&mut self, started: bool) {
+        self.session.started_session = started;
     }
 
     /// Configures the filesystem context rendered beside the current session.
@@ -3506,11 +3516,12 @@ impl EventRenderer {
                 status.as_str(),
             ),
             DiagnosticProjection::UiDir { path } => ui_dir_block(&self.resources.theme, path),
-            DiagnosticProjection::SessionDir { event } => session_status_block(
+            DiagnosticProjection::SessionAnnouncement { event, started } => session_status_block(
                 &self.resources.theme,
+                *started,
+                &event.session_id,
                 &event.path,
                 "/",
-                event.status.as_str(),
             ),
             DiagnosticProjection::ConfigProfile { selection } => {
                 config_profile_selection_block(&self.resources.theme, selection)
@@ -4559,7 +4570,7 @@ impl EventRenderer {
     }
 
     /// Completes attach-time target resolution without overriding newer local
-    /// intent, then publishes one local history/live boundary.
+    /// intent, then publishes the combined attached-session announcement.
     pub(crate) fn handle_attach_replay_complete_socket_delivery(
         &mut self,
         event: &Event,
@@ -4577,7 +4588,9 @@ impl EventRenderer {
             }
             selection_intent::InitialAttachTarget::FreshSession => {
                 if self.claim_initial_creation_intent() {
-                    self.selection.awaiting_new_agent_selection = true;
+                    // Implicit creation in a proven-empty session retains the
+                    // untouched startup transcript for the first conversation.
+                    self.selection.awaiting_new_agent_selection = false;
                     self.refresh_prompt_placeholder();
                 }
             }
@@ -4589,22 +4602,7 @@ impl EventRenderer {
             }
         }
         self.handle_socket_delivery(event, recorded_at, delivery_id);
-        let session_id = self
-            .session
-            .current_session_id
-            .as_ref()
-            .map_or_else(|| "session".to_owned(), ToString::to_string);
-        self.resources.handle.print_output(
-            "attach-boundary",
-            tau_cli_term::resolve::themed_block(
-                &self.resources.theme,
-                tau_themes::names::SYSTEM_INFO,
-                format!(
-                    "{}attached to {session_id} — live updates below",
-                    crate::transcript_markers::STATUS_UPDATE
-                ),
-            ),
-        );
+        self.render_session_announcement();
         self.resources.handle.terminal_handle().redraw();
         drop(self.cold_attach_redraw.take());
     }
@@ -5120,9 +5118,12 @@ impl EventRenderer {
                 self.handle_existing_session_started(started);
                 true
             }
+            Event::HarnessSessionDir(session_dir) => {
+                self.session.session_dir = Some(session_dir.clone());
+                true
+            }
             Event::ExtensionStarting(_)
             | Event::ExtensionContextReady(_)
-            | Event::HarnessSessionDir(_)
             | Event::HarnessUiDir(_) => true,
             Event::ExtensionReady(ready) => {
                 self.session
@@ -9685,13 +9686,8 @@ impl EventRenderer {
     }
 
     fn handle_harness_session_dir(&mut self, session_dir: &tau_proto::HarnessSessionDir) {
-        self.retain_diagnostic_block(
-            "session-dir",
-            tau_proto::NoticeLevel::Info,
-            DiagnosticProjection::SessionDir {
-                event: session_dir.clone(),
-            },
-        );
+        self.session.session_dir = Some(session_dir.clone());
+        self.render_session_announcement();
         if let Some(selection) = self.session.startup_profile_selection.as_ref() {
             self.retain_diagnostic_block(
                 "config-profile-selection",
@@ -9701,6 +9697,26 @@ impl EventRenderer {
                 },
             );
         }
+    }
+
+    /// Renders the single combined session lifecycle and directory
+    /// announcement.
+    fn render_session_announcement(&mut self) {
+        if self.session.session_announcement_rendered {
+            return;
+        }
+        let Some(event) = self.session.session_dir.clone() else {
+            return;
+        };
+        self.session.session_announcement_rendered = true;
+        self.retain_diagnostic_block(
+            "session-announcement",
+            tau_proto::NoticeLevel::Info,
+            DiagnosticProjection::SessionAnnouncement {
+                event,
+                started: self.session.started_session,
+            },
+        );
     }
 
     fn handle_harness_role_events(&mut self, event: &Event) -> bool {

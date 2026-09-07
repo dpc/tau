@@ -35,6 +35,11 @@ without replacing the terminal snapshot or clearing scrollback. Pending no-agent
 action completions and extension lifecycle owners are retargeted to the adopted
 agent only in this initial no-swap case so later completions update the same
 visible conversation.
+Normal `tau` startup and its first prompt therefore form one continuous terminal
+scrollback: selecting the prompt-created first agent must not perform a full
+redraw or wipe the banner, readiness, welcome, or other startup output. Explicit
+later transitions such as `:new` and selection of an existing agent retain the
+ordinary transcript-swap behavior.
 
 The exception is all-agent overview history. The no-agent screen copies each
 genuine inter-agent message into a session-scoped aggregate, deduplicating sender

@@ -2527,15 +2527,16 @@ fn initial_prompt_failure_midpoint_buffer_mutation_blocks_draft_restore() {
 }
 
 /// Cold attach folds routine current-state diagnostics silently, preserves
-/// alert-purpose warnings, and publishes one explicit history/live divider.
+/// alert-purpose warnings, and publishes one combined attached-session line.
 #[test]
-fn cold_attach_suppresses_routine_snapshots_but_keeps_alert_and_boundary() {
+fn cold_attach_suppresses_routine_snapshots_and_announces_session_once() {
     let (_term, handle, vt) = crate::tests::setup(100, 24);
     let mut renderer = super::EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     );
+    renderer.set_started_session(false);
     handle.redraw_sync();
     renderer.set_cold_attach_redraw(Some(handle.suppress_redraws()));
     let generation = vt.frame_generation();
@@ -2546,6 +2547,15 @@ fn cold_attach_suppresses_routine_snapshots_but_keeps_alert_and_boundary() {
         }),
         tau_proto::UnixMicros::new(0),
         RendererDeliveryId::new(9),
+    );
+    renderer.handle_cold_attach_replay_socket_delivery(
+        &tau_proto::Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
+            session_id: "s1".parse().expect("valid session id"),
+            path: "/tmp/s1".into(),
+            status: tau_proto::SessionDirStatus::New,
+        }),
+        tau_proto::UnixMicros::new(0),
+        RendererDeliveryId::new(10),
     );
     renderer.handle_cold_attach_replay_socket_delivery(
         &tau_proto::Event::HarnessAgentContextInitialized(
@@ -2587,11 +2597,86 @@ fn cold_attach_suppresses_routine_snapshots_but_keeps_alert_and_boundary() {
     assert!(
         screen
             .iter()
-            .any(|row| row.contains("attached to s1 — live updates below")),
+            .any(|row| row.contains("attached session: s1, dir: /tmp/s1/")),
         "{screen:?}"
     );
+    let output = screen.join("\n");
+    assert_eq!(output.matches("attached session:").count(), 1);
+    assert!(
+        screen
+            .iter()
+            .any(|row| row.trim_end() == "▤ attached session: s1, dir: /tmp/s1/"),
+        "{screen:?}"
+    );
+    assert!(!output.contains("session dir:"));
+    assert!(!output.contains("live updates below"));
     handle.redraw_sync();
     assert!(vt.screen_contains(100, "replay warning"));
+}
+
+/// A proven-empty startup composer adopts its first agent without a full redraw
+/// or scrollback loss, while the later explicit `:new` transition still clears
+/// the previous agent view.
+#[test]
+fn fresh_first_agent_keeps_startup_scrollback_but_later_new_clears_it() {
+    let (_term, handle, vt) = crate::tests::setup(80, 8);
+    let mut renderer = super::EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    renderer.handle(&tau_proto::Event::SessionStarted(
+        tau_proto::SessionStarted {
+            session_id: "fresh-session".parse().expect("valid session id"),
+            reason: tau_proto::SessionStartReason::Initial,
+        },
+    ));
+    renderer.handle(&tau_proto::Event::HarnessNotice(
+        tau_proto::HarnessNotice::alert(
+            tau_proto::notice_kind::HARNESS_NOTICE,
+            "startup scrollback canary\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9",
+            tau_proto::NoticeLevel::Info,
+        ),
+    ));
+    renderer.handle(&tau_proto::Event::ExtensionStarting(
+        tau_proto::ExtensionStarting {
+            extension_name: "startup-extension".parse().expect("valid extension name"),
+            instance_id: 1.into(),
+            pid: Some(123),
+        },
+    ));
+    renderer.handle_attach_replay_complete_socket_delivery(
+        &tau_proto::Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            session_id: "fresh-session".parse().expect("valid session id"),
+            error: None,
+        }),
+        InitialAttachTarget::FreshSession,
+        tau_proto::UnixMicros::new(1),
+        RendererDeliveryId::new(1),
+    );
+    handle.redraw_sync();
+    assert!(vt.scrollback_contains(80, 40, "startup scrollback canary"));
+    let before_first_agent = handle.full_render_count();
+
+    renderer.switch_agent(agent_id("first-agent"));
+    handle.redraw_sync();
+
+    assert_eq!(
+        handle.full_render_count(),
+        before_first_agent,
+        "the implicit first-agent transition must append without a full redraw"
+    );
+    assert!(vt.scrollback_contains(80, 40, "startup scrollback canary"));
+    assert!(vt.screen_contains(80, "extension startup-extension starting"));
+
+    renderer.clear_selected_agent();
+    handle.redraw_sync();
+
+    assert!(
+        handle.full_render_count() > before_first_agent,
+        "explicit :new must still replace the selected agent view"
+    );
+    assert!(!vt.screen_contains(80, "startup scrollback canary"));
 }
 
 /// A late optional roster result remains overview-owned across unique automatic
