@@ -207,7 +207,7 @@
                 echo "       (likely the compiler optimized it out — check crates/tau-harness/src/version.rs)" >&2
                 exit 1
               fi
-              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                 # Wild keeps x86_64 Linux links for this large binary fast. Fail
                 # rather than allowing a shared build override to disable it again.
                 if ${pkgs.binutils}/bin/readelf --file-header "$out/bin/tau" |
@@ -534,7 +534,7 @@
           site = site;
           "cargo-crap" = cargoCrap;
         }
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           inherit release-archives;
         };
 

@@ -135,82 +135,6 @@ fn set_tool_terminal_descriptor_observer_for_test(
     TOOL_TERMINAL_DESCRIPTOR_OBSERVER.with(|slot| *slot.borrow_mut() = observer);
 }
 
-/// Canonical outcome that owns a terminal tool row's displayed status.
-#[derive(Clone, Copy)]
-enum TerminalToolOutcome<'a> {
-    /// The terminal event reports successful completion.
-    SuccessResult,
-    /// The terminal event reports failure with this canonical message.
-    Error { canonical_message: &'a str },
-    /// The terminal event reports cancellation.
-    Cancelled,
-}
-
-/// Borrowed fields shared by foreground and background tool-error terminals.
-struct BorrowedToolError<'a> {
-    /// Stable call identity used to finish runtime state.
-    call_id: &'a tau_proto::ToolCallId,
-    /// Generic tool identity rendered in the terminal row.
-    tool_name: &'a tau_proto::ToolName,
-    /// Canonical terminal error message.
-    message: &'a str,
-    /// Optional structured details used by generic delegate fallback rendering.
-    details: Option<&'a CborValue>,
-    /// Optional producer-supplied generic display descriptor.
-    descriptor: Option<&'a tau_proto::ToolUseState>,
-    /// Whether this terminal belongs to the user-facing conversation.
-    originator_is_user: bool,
-}
-
-/// Makes a producer descriptor's status agree with its canonical terminal
-/// event.
-///
-/// The descriptor still owns all non-status presentation metadata. A successful
-/// terminal may retain a completed warning, while an error descriptor may
-/// retain its nonempty label only when it already described an error.
-fn normalize_terminal_tool_use_state(
-    mut descriptor: tau_proto::ToolUseState,
-    outcome: TerminalToolOutcome<'_>,
-) -> tau_proto::ToolUseState {
-    match outcome {
-        TerminalToolOutcome::SuccessResult => {
-            if descriptor.status == tau_proto::ToolUseStatus::Warning {
-                if descriptor.status_text.trim().is_empty() {
-                    descriptor.status_text = "warn".to_owned();
-                }
-            } else {
-                descriptor.status = tau_proto::ToolUseStatus::Success;
-                descriptor.status_text = "ok".to_owned();
-            }
-        }
-        TerminalToolOutcome::Error { canonical_message } => {
-            let retain_producer_label = descriptor.status == tau_proto::ToolUseStatus::Error
-                && !descriptor.status_text.trim().is_empty();
-            descriptor.status = tau_proto::ToolUseStatus::Error;
-            if !retain_producer_label {
-                descriptor.status_text = {
-                    if canonical_message.trim().is_empty() {
-                        "err".to_owned()
-                    } else {
-                        let fallback =
-                            synthesize_fallback_display("", Some(canonical_message)).status_text;
-                        if fallback.trim().is_empty() {
-                            "err".to_owned()
-                        } else {
-                            fallback
-                        }
-                    }
-                };
-            }
-        }
-        TerminalToolOutcome::Cancelled => {
-            descriptor.status = tau_proto::ToolUseStatus::Warning;
-            descriptor.status_text = "cancelled".to_owned();
-        }
-    }
-    descriptor
-}
-
 /// Renders a provider-native tool through the generic tool state while keeping
 /// the execution-boundary qualifier as a subdued informational segment.
 pub(crate) fn provider_native_tool_display(
@@ -9992,11 +9916,15 @@ pub(crate) mod selection_intent;
 mod terminal_tool_calls;
 #[cfg(test)]
 mod terminal_tool_calls_tests;
+mod terminal_tool_outcome;
 mod tool_presentation;
 use finished_response_projection::FinishedResponseProjection;
 use renderer_state::AgentUiState;
 pub(crate) use renderer_state::EventRenderer;
 use selection_intent::UiCreateResultEffect;
+use terminal_tool_outcome::{
+    BorrowedToolError, TerminalToolOutcome, normalize_terminal_tool_use_state,
+};
 
 #[cfg(test)]
 mod tests;
