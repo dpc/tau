@@ -782,8 +782,8 @@ fn loop_guard_counts_repeated_self_compaction_as_no_progress() {
 #[test]
 fn loop_guard_provider_repetition_response_queues_pivot_then_blocks() {
     // Provider-side stream repetition is trusted only as a loop-guard trigger:
-    // the provider's error is display text, while the harness uses a fixed pivot
-    // reason and blocks only after the breaker was tried.
+    // the provider's error is display text, while the harness uses a fixed
+    // pivot reason and blocks only after the breaker was tried.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");

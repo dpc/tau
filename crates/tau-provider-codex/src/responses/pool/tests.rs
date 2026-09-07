@@ -100,9 +100,10 @@ fn keys_distinguish_agents_under_same_account() {
 
 #[test]
 fn keys_ignore_prompt_originator_buckets() {
-    // Upgrade headers are fixed for the socket lifetime, so the pool must follow
-    // the prompt-cache UUID exactly. Since the cache key is stable per agent,
-    // originator changes and the legacy share-user flag must not split sockets.
+    // Upgrade headers are fixed for the socket lifetime, so the pool must
+    // follow the prompt-cache UUID exactly. Since the cache key is stable
+    // per agent, originator changes and the legacy share-user flag must not
+    // split sockets.
     let cfg = make_config("https://chatgpt.com/backend-api", Some("acc"));
     let user = pool_key_for(&cfg, "agent", tau_proto::PromptOriginator::User, false);
     let ext = tau_proto::PromptOriginator::Extension {

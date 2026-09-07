@@ -2716,7 +2716,8 @@ impl std::ops::Deref for AgentOuterTurnId {
 }
 
 crate::validated_string_newtype!(
-    /// Opaque stable correlation captured when a non-journaled input is accepted.
+    /// Opaque stable correlation captured when a non-journaled input is
+    /// accepted.
     AgentActivationCorrelationId,
     AgentActivationCorrelationIdParseError,
     "agent activation correlation id",

@@ -669,8 +669,9 @@ fn imap_since_date(cutoff: SystemTime) -> Result<String, String> {
         .as_secs()
         / 86_400;
     // IMAP `SINCE` accepts a server-calendar date rather than an instant. Start
-    // one UTC calendar day before the exact cutoff so any server-zone projection
-    // remains a superset; exact internal-timestamp filtering above owns results.
+    // one UTC calendar day before the exact cutoff so any server-zone
+    // projection remains a superset; exact internal-timestamp filtering
+    // above owns results.
     let since_days = cutoff_days.saturating_sub(1);
     let (year, month, day) = civil_date_from_unix_days(since_days as i64);
     const MONTHS: [&str; 12] = [

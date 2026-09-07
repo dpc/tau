@@ -555,9 +555,10 @@ fn spawn_extension_with_prefix(
     let (ext_stream, harness_stream) = UnixStream::pair().expect("pair");
     let reader_stream = ext_stream.try_clone().expect("clone");
     thread::spawn(move || {
-        // Behavior tests often close the harness side once the expected event is
-        // observed. Treat resulting extension I/O errors as teardown, not as a
-        // test-thread panic that can abort a later test run.
+        // Behavior tests often close the harness side once the expected event
+        // is observed. Treat resulting extension I/O errors as
+        // teardown, not as a test-thread panic that can abort a later
+        // test run.
         let _ = run_with_clients(reader_stream, ext_stream, searcher, parallel_client);
     });
     let reader = EventReader::new(BufReader::new(

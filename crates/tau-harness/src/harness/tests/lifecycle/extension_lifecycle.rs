@@ -6424,9 +6424,9 @@ fn startup_session_dir_is_reported_before_extension_ready() {
 /// wait-state signals.
 #[test]
 fn session_context_ready_is_published_live() {
-    // Session-wide context acknowledgements are first-party protocol events, not
-    // just private wait-state signals. Subscribers must observe them when an
-    // extension finishes session skill/AGENTS.md refresh.
+    // Session-wide context acknowledgements are first-party protocol events,
+    // not just private wait-state signals. Subscribers must observe them
+    // when an extension finishes session skill/AGENTS.md refresh.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -6491,7 +6491,8 @@ fn session_context_ready_is_published_live() {
 #[test]
 fn interceptor_registration_is_staged_until_ready() {
     // Interception is an extension capability: before Ready, matching events
-    // must pass through normally; after Ready, the same selector becomes active.
+    // must pass through normally; after Ready, the same selector becomes
+    // active.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");

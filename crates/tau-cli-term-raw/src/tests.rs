@@ -3783,7 +3783,8 @@ fn virtual_term_block_removed_from_active_then_printed_to_history() {
         "final should be visible, got: {:?}",
         vt100_rows(&parser, 80)
     );
-    // The old "partial response" should be gone — only "final response" remains.
+    // The old "partial response" should be gone — only "final response"
+    // remains.
     assert!(
         !screen_contains(&parser, 80, "partial response"),
         "partial should be gone, got: {:?}",

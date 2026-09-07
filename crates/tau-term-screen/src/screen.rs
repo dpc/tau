@@ -519,9 +519,11 @@ impl Screen {
             w.queue(MoveUp((self.cursor_row - row) as u16))?;
         } else if row > self.cursor_row {
             // Use an explicit column reset before LF for downward movement:
-            // - \n scrolls at the screen bottom (unlike MoveDown which silently stops)
-            // - the column reset is needed because \n alone preserves the column, and
-            //   pending-wrap state after an exact-width line is unsafe
+            // - \n scrolls at the screen bottom (unlike MoveDown which silently
+            //   stops)
+            // - the column reset is needed because \n alone preserves the
+            //   column, and pending-wrap state after an exact-width line is
+            //   unsafe
             let down = row - self.cursor_row;
             for _ in 0..down {
                 self.move_down_one(w)?;

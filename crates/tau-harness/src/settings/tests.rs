@@ -917,8 +917,9 @@ fn resolve_extensions_cli_can_enable_disabled_user_extension() {
 
 #[test]
 fn resolve_extensions_cli_enable_unknown_extension_errors() {
-    // A typo in `--enable-extension` must fail startup instead of being silently
-    // ignored, otherwise users cannot tell why their intended extension is missing.
+    // A typo in `--enable-extension` must fail startup instead of being
+    // silently ignored, otherwise users cannot tell why their intended
+    // extension is missing.
     let s = HarnessSettings::built_in();
     let err = resolve_extensions_with_cli_overrides(
         &s,

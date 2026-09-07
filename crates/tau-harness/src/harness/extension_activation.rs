@@ -1755,8 +1755,8 @@ impl Harness {
             HarnessInputMessage::Emit(emit) => {
                 // Governing contract:
                 // `specs/SPEC-peer-event-publication.md`.
-                // `Emit` is a private protocol submission request, not a committed
-                // event fact. Keep this arm a generic
+                // `Emit` is a private protocol submission request, not a
+                // committed event fact. Keep this arm a generic
                 // admission/interception/commit chokepoint: never add
                 // concrete-event semantics here. Move each family to
                 // committed-event processing or a dedicated protocol message

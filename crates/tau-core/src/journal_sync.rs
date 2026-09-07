@@ -334,8 +334,8 @@ impl Drop for JournalSyncWorker {
             state.stopping = true;
         }
         self.shared.wake.notify_one();
-        // A filesystem sync can block indefinitely. Detach rather than make store
-        // destruction or the event loop wait for the worker.
+        // A filesystem sync can block indefinitely. Detach rather than make
+        // store destruction or the event loop wait for the worker.
         let _ = self
             .thread
             .lock()

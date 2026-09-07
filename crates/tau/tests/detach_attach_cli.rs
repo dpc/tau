@@ -2029,7 +2029,8 @@ impl PtyChild {
             "{output}"
         );
         // Terminal feature-reset controls may precede the stderr line without
-        // moving the cursor. Nothing, including cleanup controls, may follow it.
+        // moving the cursor. Nothing, including cleanup controls, may follow
+        // it.
         assert!(output.trim_end().ends_with(expected), "{output}");
         assert!(!output.contains("Session exit unconfirmed"), "{output}");
     }

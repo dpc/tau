@@ -479,7 +479,8 @@ fn open_pidfd(pid: u32) -> Result<path_std_os::fd::OwnedFd, ToolFailure> {
             std::io::Error::last_os_error()
         )));
     }
-    // SAFETY: `fd` was returned by `pidfd_open` above and is uniquely owned here.
+    // SAFETY: `fd` was returned by `pidfd_open` above and is uniquely owned
+    // here.
     #[allow(unsafe_code)]
     Ok(unsafe { OwnedFd::from_raw_fd(fd as path_std_os::fd::RawFd) })
 }
@@ -487,12 +488,12 @@ fn open_pidfd(pid: u32) -> Result<path_std_os::fd::OwnedFd, ToolFailure> {
 #[cfg(target_os = "linux")]
 fn kill_ripgrep_child(child: &mut std::process::Child, pid: u32) {
     // Production grep children run under `apply_command_isolation`, which makes
-    // the child pid the process-group id. Kill the group first so descendants do
-    // not linger, then kill through the still-owned child handle as a pid-safe
-    // fallback for tests or isolation failure.
+    // the child pid the process-group id. Kill the group first so descendants
+    // do not linger, then kill through the still-owned child handle as a
+    // pid-safe fallback for tests or isolation failure.
     // SAFETY: The negative pid targets the process group created for this child
-    // by `apply_command_isolation`; errors are ignored because the child may have
-    // exited already and `Child::kill` below is the pid-safe fallback.
+    // by `apply_command_isolation`; errors are ignored because the child may
+    // have exited already and `Child::kill` below is the pid-safe fallback.
     #[allow(unsafe_code)]
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);

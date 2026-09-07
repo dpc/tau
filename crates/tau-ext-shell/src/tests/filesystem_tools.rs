@@ -530,8 +530,8 @@ fn edit_context_line_allows_matching_start_line() {
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("write");
 
-    // Regression coverage: context_line must match start_line's original content,
-    // not the previous line.
+    // Regression coverage: context_line must match start_line's original
+    // content, not the previous line.
     let result = edit_file(&edit_arguments(
         &file_path,
         vec![context_line_edit(2, 2, "BETA\n", "beta")],
@@ -582,9 +582,9 @@ fn edit_context_line_rejects_stale_line_number_and_returns_context_line_context(
     fs::write(&file_path, &original).expect("write");
 
     // On mismatch, the file stays untouched and the agent gets read-like
-    // details around the line whose context_line failed. This gives enough context
-    // to recover from stale line numbers without dumping context into the UI
-    // payload.
+    // details around the line whose context_line failed. This gives enough
+    // context to recover from stale line numbers without dumping context
+    // into the UI payload.
     let error = edit_file(&edit_arguments(
         &file_path,
         vec![
@@ -757,8 +757,8 @@ fn edit_context_line_rejects_embedded_newline_characters_without_writing() {
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "alpha\nbeta\n").expect("write");
 
-    // Context lines describe one line's content only, so embedded line endings are
-    // malformed instead of being treated as ordinary mismatching text.
+    // Context lines describe one line's content only, so embedded line endings
+    // are malformed instead of being treated as ordinary mismatching text.
     for context_line in ["al\npha", "al\rpha", "al\r\npha"] {
         let error = edit_file(&edit_arguments(
             &file_path,

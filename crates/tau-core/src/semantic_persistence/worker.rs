@@ -907,8 +907,9 @@ fn initialize_owned_session(
             )),
         };
     }
-    // The canonical hard link now owns lock authority. Cleanup failure may leave
-    // an inert alias, but it must not report that committed publication failed.
+    // The canonical hard link now owns lock authority. Cleanup failure may
+    // leave an inert alias, but it must not report that committed
+    // publication failed.
     let _ = shared.backend.remove_file(&pending_lock_path);
     Ok((
         lock,

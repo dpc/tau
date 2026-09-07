@@ -3760,7 +3760,8 @@ fn harness_settings_role_cli_overrides_later_disable_wins() {
 #[test]
 fn harness_settings_role_cli_disable_all_leaves_no_effective_roles() {
     // `--disable-roles-all` must not be undone by default-role fallback. The
-    // harness reports an explicit startup error for this empty effective role set.
+    // harness reports an explicit startup error for this empty effective role
+    // set.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
 
@@ -3779,8 +3780,8 @@ fn harness_settings_role_cli_disable_all_leaves_no_effective_roles() {
 /// errors.
 #[test]
 fn harness_settings_role_cli_unknown_role_errors() {
-    // CLI role typos must fail startup instead of silently leaving the effective
-    // role set unchanged.
+    // CLI role typos must fail startup instead of silently leaving the
+    // effective role set unchanged.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
 

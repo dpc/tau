@@ -555,9 +555,9 @@ fn process_disappears(pid: i32, timeout: Duration) -> bool {
 
 #[test]
 fn no_configure_exits_after_hello_only() {
-    // Rhai uses tau-client deferred startup: before the first Configure, it must
-    // send only Hello and must not leak script-dependent startup declarations or
-    // inert Ready frames.
+    // Rhai uses tau-client deferred startup: before the first Configure, it
+    // must send only Hello and must not leak script-dependent startup
+    // declarations or inert Ready frames.
     let frames = run_frames(&[]);
 
     assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
@@ -832,8 +832,8 @@ fn unknown_config_field_reports_config_error() {
 
 #[test]
 fn max_operations_limit_aborts_runaway_callback() {
-    // Script operation limits are a key guardrail for callbacks that accidentally
-    // spin forever while handling harness events.
+    // Script operation limits are a key guardrail for callbacks that
+    // accidentally spin forever while handling harness events.
     let dir = tempfile::tempdir().expect("tempdir");
     let script = write_script(
         &dir,

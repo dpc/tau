@@ -982,7 +982,8 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
 #[test]
 fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
     // A prompt-anchor rewind moves the cursor to the selected prompt's parent,
-    // but a later replacement prompt must become the restored head after resume.
+    // but a later replacement prompt must become the restored head after
+    // resume.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let replacement_node: tau_core::NodeId;
@@ -3942,11 +3943,11 @@ fn failed_create_prompt_does_not_resurrect_after_cold_reload() {
 
 #[test]
 fn queued_first_user_prompt_publishes_replayable_agent_target() {
-    // Regression: if the first prompt queues before the provider/model is ready,
-    // the agent id must already exist and be carried on the transient queued
-    // event and in-memory replay so a live or late UI can select the same
-    // conversation before dispatch. Queue lifecycle events are intentionally not
-    // durable session-store facts.
+    // Regression: if the first prompt queues before the provider/model is
+    // ready, the agent id must already exist and be carried on the
+    // transient queued event and in-memory replay so a live or late UI can
+    // select the same conversation before dispatch. Queue lifecycle events
+    // are intentionally not durable session-store facts.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");

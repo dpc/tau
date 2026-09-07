@@ -1267,8 +1267,9 @@ fn spawn_writer_thread_inner(
                     }
                     log.retire_consumer_after_io(consumer);
                     // A local UI's ingress reader remains authoritative for
-                    // disconnect ordering while the downlink fails concurrently.
-                    // Supervised extensions retain writer-failure reporting
+                    // disconnect ordering while the downlink fails
+                    // concurrently. Supervised extensions
+                    // retain writer-failure reporting
                     // because their owned-child lifecycle has no independent
                     // local-UI ingress transition to preserve.
                     let report_failure = match &shutdown {

@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn shell_hidden_read_write_mode_is_unrestricted_by_default() {
-    // With directory locking disabled, shell calls run read-write and publish no
-    // access-mode chip.
+    // With directory locking disabled, shell calls run read-write and publish
+    // no access-mode chip.
     let td = TempDir::new().expect("tempdir");
     let args = CborValue::Map(vec![
         (
@@ -190,8 +190,9 @@ fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
 
 #[test]
 fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
-    // Regression coverage for commands that write invalid bytes to both streams:
-    // the agent should see both decoded streams and one concise warning.
+    // Regression coverage for commands that write invalid bytes to both
+    // streams: the agent should see both decoded streams and one concise
+    // warning.
     let args = CborValue::Map(vec![(
         CborValue::Text("command".to_owned()),
         CborValue::Text("printf '\\377stdout'; printf '\\376stderr' >&2".to_owned()),
@@ -230,9 +231,9 @@ fn read_only_mount_setattr_flags_are_recursive() {
 #[test]
 fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
     // Regression coverage for enforced inferred read-only shell mode: lock
-    // elision is not enough. When `enforce_ro_bind` is true, the child must get a
-    // read-only bind mount over its cwd so accidental writes fail before they
-    // can alter the working tree.
+    // elision is not enough. When `enforce_ro_bind` is true, the child must get
+    // a read-only bind mount over its cwd so accidental writes fail before
+    // they can alter the working tree.
     let dir = TempDir::new().expect("temp dir");
     fs::write(dir.path().join("input.txt"), "ok").expect("write fixture");
     let args = CborValue::Map(vec![
@@ -959,8 +960,8 @@ fn shell_tool_short_display_args_omit_redundant_text_payload() {
 
 #[test]
 fn shell_tool_use_state_mode_can_show_inferred_access_mode() {
-    // When directory locking is enabled, the CLI can render ext-shell's inferred
-    // shell access mode separately from display args.
+    // When directory locking is enabled, the CLI can render ext-shell's
+    // inferred shell access mode separately from display args.
     let args = CborValue::Map(vec![(
         CborValue::Text("command".to_owned()),
         CborValue::Text("printf hello".to_owned()),

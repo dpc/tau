@@ -56,8 +56,8 @@ fn discover_agents_files_walks_ancestor_chain_in_order() {
 #[test]
 fn discover_agents_files_follows_symlinked_candidates() {
     // AGENTS.md files are trusted prompt input. Tau follows symlinks here so
-    // project-local and dotfile-managed instruction layouts behave like ordinary
-    // filesystem reads.
+    // project-local and dotfile-managed instruction layouts behave like
+    // ordinary filesystem reads.
     let tempdir = TempDir::new().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(&root).expect("mkdir");

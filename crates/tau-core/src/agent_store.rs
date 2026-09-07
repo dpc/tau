@@ -2092,7 +2092,8 @@ impl AgentStore {
             return Ok(());
         }
         // Durable metadata is now exclusively a projection of journal facts.
-        // Creation commits `AgentStarted`; a metadata-only identity is forbidden.
+        // Creation commits `AgentStarted`; a metadata-only identity is
+        // forbidden.
         Ok(())
     }
 

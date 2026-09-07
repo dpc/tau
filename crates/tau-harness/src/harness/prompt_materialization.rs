@@ -1052,7 +1052,8 @@ impl Harness {
         }
         // Non-tool extension side agents (`std-notifications`' idle summary,
         // etc.) must not execute tools. Provider `tool_choice: none` is the
-        // upstream authority; local rejection alone cannot contain hosted tools.
+        // upstream authority; local rejection alone cannot contain hosted
+        // tools.
         let is_non_tool_ext_query = Self::agent_uses_non_tool_prompt_surface(conv);
         let tool_choice = if is_non_tool_ext_query {
             tau_proto::ToolChoice::None
@@ -2315,10 +2316,10 @@ impl Harness {
         agent_prompt_id: &AgentPromptId,
     ) -> Option<String> {
         // Unavailable-tool diagnostics for model calls must be based on the
-        // exact prompt-owned tool snapshot when one exists. The role's live tool
-        // surface may have changed since the provider saw the prompt; suggesting
-        // a current-role-only tool would steer the model toward a tool it could
-        // not have selected in that turn.
+        // exact prompt-owned tool snapshot when one exists. The role's live
+        // tool surface may have changed since the provider saw the
+        // prompt; suggesting a current-role-only tool would steer the
+        // model toward a tool it could not have selected in that turn.
         let specs = self
             .prompt_coordination
             .prompt_runtime

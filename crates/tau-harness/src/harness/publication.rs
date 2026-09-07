@@ -2757,10 +2757,11 @@ impl Harness {
                     model_info.as_ref(),
                 );
             }
-            // Provider-owned prompt execution is point-to-point: observers still
-            // see the transient work envelope, but execution clients do not all race
-            // to consume it. The owning provider gets the exact same delivery
-            // payload via a directed route so replay/live delivery metadata
+            // Provider-owned prompt execution is point-to-point: observers
+            // still see the transient work envelope, but execution
+            // clients do not all race to consume it. The owning
+            // provider gets the exact same delivery payload via a
+            // directed route so replay/live delivery metadata
             // matches the subscribed-provider path.
             let execution_kinds = [ClientKind::Provider];
             let provider_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
@@ -2835,8 +2836,8 @@ impl Harness {
             // Provider prompts are never broadcast. A route can disappear while
             // PromptStarted/PromptCreated is parked in interception, after the
             // pre-materialization ownership check. Keep observer delivery, but
-            // exclude every provider and fail the exact durable owner before any
-            // remote client can see the request.
+            // exclude every provider and fail the exact durable owner before
+            // any remote client can see the request.
             let execution_kinds = [ClientKind::Provider];
             let admission_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
             self.runtime_io
@@ -2928,8 +2929,9 @@ impl Harness {
             }
         }
         // A committed acceptance makes its reserved placeholder addressable.
-        // First-party `agent_start` reacts below by installing a watch, so expose
-        // that post-commit state before invoking internal tool handlers.
+        // First-party `agent_start` reacts below by installing a watch, so
+        // expose that post-commit state before invoking internal tool
+        // handlers.
         let acceptance_successor = if matches!(event, Event::StartAgentAccepted(_))
             && let Some(owner) = start_owner.take()
         {

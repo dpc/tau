@@ -149,7 +149,8 @@ pub fn load_secret_sources(
     }
     if disposition == EnvironmentDisposition::RemoveAfterSnapshot {
         for key in keys {
-            // Called by the single-threaded setup/startup boundary before children.
+            // Called by the single-threaded setup/startup boundary before
+            // children.
             unsafe { std::env::remove_var(key) };
         }
     }

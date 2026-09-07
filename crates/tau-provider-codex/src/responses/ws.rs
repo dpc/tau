@@ -1053,7 +1053,8 @@ impl WsConn {
                     thread::park_timeout(wait);
                     // Provider-owned response liveness is deadline-driven, not
                     // upstream-event-driven. Wake the outer sampled emitter
-                    // during quiet WebSocket waits; it enforces the 1Hz cadence.
+                    // during quiet WebSocket waits; it enforces the 1Hz
+                    // cadence.
                     on_update(&state);
                     continue;
                 }
@@ -1570,8 +1571,9 @@ async fn read_loop(mut stream: Stream, tx: InboundSender) {
                 true,
             ),
             Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {
-                // Ping/Pong are protocol control frames — tungstenite surfaces them after
-                // auto-handling, no caller action needed.
+                // Ping/Pong are protocol control frames — tungstenite surfaces
+                // them after auto-handling, no caller action
+                // needed.
                 continue;
             }
             Err(tungstenite::Error::Capacity(_)) => (InboundEvent::ResourceLimit, true),

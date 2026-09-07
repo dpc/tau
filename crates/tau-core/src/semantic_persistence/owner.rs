@@ -388,9 +388,10 @@ impl StagingReservation {
             admission_watermark,
         );
         /*
-         * The lifecycle match above is deliberately exhaustive. Keep the swap and
-         * accounting transfer and preallocated insertion adjacent: no fallible
-         * or destructor work belongs after this cut.
+         * The lifecycle match above is deliberately exhaustive. Keep the
+         * swap and accounting transfer and preallocated insertion
+         * adjacent: no fallible or destructor work belongs after
+         * this cut.
          */
         mem::swap(target, &mut replacement);
         job.release_staging_replacement();

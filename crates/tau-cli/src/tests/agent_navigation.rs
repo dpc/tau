@@ -1043,8 +1043,9 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
 
 #[test]
 fn agent_stats_does_not_overwrite_display_name() {
-    // `:agent switch` completions are backed by durable display names. Agent stats
-    // must not replace the display name chosen by the harness template.
+    // `:agent switch` completions are backed by durable display names. Agent
+    // stats must not replace the display name chosen by the harness
+    // template.
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,

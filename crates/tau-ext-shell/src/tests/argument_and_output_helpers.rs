@@ -156,8 +156,9 @@ fn slice_lines_clamps_past_end() {
 }
 #[test]
 fn shell_tool_ignores_legacy_wrong_type_mode_argument() {
-    // `mode` is no longer part of the schema. If a stale caller sends it anyway,
-    // shell execution is controlled by ext-shell's inferred mode argument.
+    // `mode` is no longer part of the schema. If a stale caller sends it
+    // anyway, shell execution is controlled by ext-shell's inferred mode
+    // argument.
     let args = CborValue::Map(vec![
         (
             CborValue::Text("mode".to_owned()),

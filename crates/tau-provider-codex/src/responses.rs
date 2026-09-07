@@ -2019,8 +2019,8 @@ fn apply_output_item_reasoning(
     kind: OutputItemEventKind,
 ) -> bool {
     // Capture reasoning items only on `output_item.done`, not on `added` — the
-    // `added` event arrives before any summary parts/encrypted content stream in,
-    // so its payload is just a stub. `done` carries the full item (id +
+    // `added` event arrives before any summary parts/encrypted content stream
+    // in, so its payload is just a stub. `done` carries the full item (id +
     // encrypted_content + summary) the harness needs to replay verbatim on the
     // next turn.
     //
@@ -2029,10 +2029,11 @@ fn apply_output_item_reasoning(
     // Pi-style blob the harness re-emits on full-transcript replay.
     //
     // An item without `encrypted_content` is unreplayable: the server stores
-    // reasoning only for `store: true` requests, and Codex forces `store: false`,
-    // so a bare `rs_…` id in a later turn's `input[]` triggers `Item with id
-    // 'rs_…' not found` and an 8-attempt retry loop. Skip those — losing
-    // reasoning continuity on this turn is better than poisoning the chain.
+    // reasoning only for `store: true` requests, and Codex forces `store:
+    // false`, so a bare `rs_…` id in a later turn's `input[]` triggers
+    // `Item with id 'rs_…' not found` and an 8-attempt retry loop. Skip
+    // those — losing reasoning continuity on this turn is better than
+    // poisoning the chain.
     if kind.is_done()
         && item["type"].as_str() == Some("reasoning")
         && item["encrypted_content"].is_string()
@@ -2722,7 +2723,8 @@ fn build_request(
     // Stateful chaining is valid only when the current canonical prefix through
     // the cached response is exactly what that response represented upstream.
     // Async input may commit before an in-flight response even though the
-    // response did not observe it, so response-id identity alone is insufficient.
+    // response did not observe it, so response-id identity alone is
+    // insufficient.
     let context_item_count = borrowed_context_items(request.context).count();
     let previous_response = cached_response_anchor.and_then(|anchor| {
         let mut next_item_index = context_item_count;
@@ -2732,12 +2734,13 @@ fn build_request(
                     if response.provider_response_id.as_deref() == Some(anchor.response_id.as_str())
                     {
                         // workaround for server side bug:
-                        // server incorrectly build history if previous response id from
-                        // compaction
+                        // server incorrectly build history if previous response
+                        // id from compaction
                         //
                         // we solve by sending entire request in this case.
                         //
-                        // this is pretty cheap, only happens for request after that normal
+                        // this is pretty cheap, only happens for request after
+                        // that normal
                         // previous_response_id should continue
                         if response
                             .output_items

@@ -1008,8 +1008,9 @@ fn bounded_running_shell_snapshot<'a>(
 
 fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
     // Replay final, durable transcript facts, not progress. In particular, skip
-    // provider streaming chunks and prompt-created pending markers, but keep the
-    // agent-owned user/assistant/tool facts needed to reconstruct transcript UI.
+    // provider streaming chunks and prompt-created pending markers, but keep
+    // the agent-owned user/assistant/tool facts needed to reconstruct
+    // transcript UI.
     matches!(
         event,
         Event::AgentStarted(_)

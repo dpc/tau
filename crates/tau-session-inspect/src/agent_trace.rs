@@ -179,9 +179,10 @@ pub(crate) fn discover_agents(
         let Ok(agent_id) = AgentId::parse(&name) else {
             continue;
         };
-        // An unreadable sequence-zero record cannot authenticate a creation edge.
-        // Ignore that unrelated artifact here; any journal whose valid edge makes
-        // it reachable has its selected prefix strictly validated below.
+        // An unreadable sequence-zero record cannot authenticate a creation
+        // edge. Ignore that unrelated artifact here; any journal whose
+        // valid edge makes it reachable has its selected prefix
+        // strictly validated below.
         let Some(record) = read_agent_creation_record(agents_dir, &agent_id).unwrap_or(None) else {
             continue;
         };

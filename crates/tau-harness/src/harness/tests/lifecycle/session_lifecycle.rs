@@ -439,10 +439,10 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
 #[test]
 fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
     // Regression coverage for configured extensions that subscribe during
-    // startup after the live `harness.session_dir` notice but before the session
-    // is marked initialized. Init completion must replay the current-state
-    // session-dir snapshot so extensions can apply the correct persistence
-    // policy.
+    // startup after the live `harness.session_dir` notice but before the
+    // session is marked initialized. Init completion must replay the
+    // current-state session-dir snapshot so extensions can apply the
+    // correct persistence policy.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");

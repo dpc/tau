@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::{AgentId, SessionId, SkillName};
 
 crate::validated_string_newtype!(
-    /// Opaque correlation for one attempt to initialize a loaded agent's context.
+    /// Opaque correlation for one attempt to initialize a loaded agent's
+    /// context.
     AgentInitializationId,
     AgentInitializationIdParseError,
     "agent initialization id",

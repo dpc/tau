@@ -144,8 +144,9 @@ impl ShutdownSignal {
     /// Wait until shutdown is requested without polling.
     async fn wait(&self) {
         loop {
-            // Create the notification future before checking the flag: `notify_waiters()`
-            // does not buffer for future waiters, so this ordering prevents missing a
+            // Create the notification future before checking the flag:
+            // `notify_waiters()` does not buffer for future
+            // waiters, so this ordering prevents missing a
             // concurrent request between the check and await.
             let notified = self.notify.notified();
             if self.is_requested() {
@@ -907,9 +908,10 @@ impl Extension {
             if !has_config {
                 return tool_error(invoke, "xmpp extension is not configured".to_owned());
             }
-            // Tool-side readiness gives callers a clear bounded wait/error before
-            // normal validation; worker-side readiness below still protects
-            // against reconnect races or callers that bypass this preflight.
+            // Tool-side readiness gives callers a clear bounded wait/error
+            // before normal validation; worker-side readiness below
+            // still protects against reconnect races or callers
+            // that bypass this preflight.
             if bridge_started
                 && let Err(message) = self.bridge.wait_until_ready(ONLINE_WAIT_TIMEOUT)
             {
@@ -2163,8 +2165,9 @@ impl WorkerState {
             tracing::warn!(target: LOG_TARGET, "received xmpp message error");
             return;
         }
-        // XEP-0203 delayed delivery marks backlog/history. The MVP is live-only,
-        // so delayed messages must not become fresh Tau report submissions.
+        // XEP-0203 delayed delivery marks backlog/history. The MVP is
+        // live-only, so delayed messages must not become fresh Tau
+        // report submissions.
         if has_delay_payload(&message) {
             return;
         }

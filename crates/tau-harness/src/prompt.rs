@@ -1218,7 +1218,8 @@ pub(crate) fn chrono_free_date() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let days = secs / 86400;
-    // Simple days-since-epoch to Y-M-D (good enough, no leap second edge cases).
+    // Simple days-since-epoch to Y-M-D (good enough, no leap second edge
+    // cases).
     let mut y = 1970_i64;
     let mut remaining = days as i64;
     loop {
@@ -1651,8 +1652,9 @@ fn assemble_prompt_context_window(
             } => match kind {
                 tau_proto::AgentMessageKind::Message => {
                     if *direction == tau_core::AgentMessageDirection::Outbound {
-                        // The original tool call/result already records the sender turn.
-                        // Replaying this routing fact would fabricate assistant output.
+                        // The original tool call/result already records the
+                        // sender turn. Replaying this
+                        // routing fact would fabricate assistant output.
                         if let Some(measurement_state) = measurement_state.as_mut() {
                             measurement_state.record(node_id);
                         }
@@ -1890,7 +1892,8 @@ impl<'a> PromptContextMeasurementState<'a> {
     ) -> Self {
         // Prefix admission measures the exact historical context that prompt
         // materialization will send. Keep the initialization block out of the
-        // assembled transcript itself so materialization remains its sole owner.
+        // assembled transcript itself so materialization remains its sole
+        // owner.
         let measurement_prefix = initialization_agents_context_block(tree);
         let measured_blocks = measurement_prefix
             .iter()

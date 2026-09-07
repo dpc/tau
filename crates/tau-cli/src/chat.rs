@@ -1651,7 +1651,8 @@ fn run_chat_session(
     // renderer workers alone does not restore the terminal.
     drop(term);
     let outcome = finish_daemon_for_exit(disposition, daemon, peer_exit);
-    // Renderer joins and raw-terminal cleanup precede the sole final status line.
+    // Renderer joins and raw-terminal cleanup precede the sole final status
+    // line.
     match outcome {
         Ok(message) => eprintln!("{message}"),
         Err(message) => eprintln!("Session exit unconfirmed: {message}"),
@@ -3270,8 +3271,8 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        // Keep session-lifecycle commands first: UI/session quit and detach exit
-        // immediately. A daemon never switches its bound session.
+        // Keep session-lifecycle commands first: UI/session quit and detach
+        // exit immediately. A daemon never switches its bound session.
         let outcome = self.handle_session_command(text)?;
         if !matches!(outcome, CommandOutcome::NotHandled) {
             return Ok(outcome);
@@ -4136,9 +4137,10 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn toggle_fast_service_tier(&self) {
-        // `fast_service_tier_state` is kept in sync by renderer events. Toggling
-        // from Fast sends `None` to restore the role/model default; toggling from
-        // any other state requests explicit Fast service.
+        // `fast_service_tier_state` is kept in sync by renderer events.
+        // Toggling from Fast sends `None` to restore the role/model
+        // default; toggling from any other state requests explicit Fast
+        // service.
         let enabled = self
             .ctx
             .fast_service_tier_state
@@ -5006,9 +5008,10 @@ fn handle_recorded_line_with_handlers(
     match handlers.handle_known_command(text)? {
         CommandOutcome::NotHandled => match handlers.handle_dynamic_action(text) {
             CommandOutcome::NotHandled => {
-                // This is only a candidate leading command-token detector. It must
-                // run after CLI-owned commands, dynamic extension actions, and
-                // harness-owned prompt commands such as `:skill` are excluded so
+                // This is only a candidate leading command-token detector. It
+                // must run after CLI-owned commands, dynamic
+                // extension actions, and harness-owned prompt
+                // commands such as `:skill` are excluded so
                 // each owner keeps its routing contract.
                 if let Some(action) = leading_command_token(text)
                     && !is_harness_prompt_command(action)

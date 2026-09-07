@@ -280,8 +280,9 @@ impl SetupStore {
             &self.state_dir,
             &PathBuf::from("providers").join(plan.extension_instance.as_str()),
         )?;
-        // Serialize setup with harness startup: settings generation decides which
-        // named source may materialize, so this lock must precede Secret scope.
+        // Serialize setup with harness startup: settings generation decides
+        // which named source may materialize, so this lock must precede
+        // Secret scope.
         let _settings_lock = self
             .acquire_instance_lock(&plan.extension_instance)?
             .ok_or_else(|| {

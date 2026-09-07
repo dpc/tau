@@ -434,7 +434,8 @@ fn reject_known_network_filesystem(path: &Path) -> io::Result<()> {
     let encoded = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "runtime path contains NUL"))?;
     let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `encoded` is NUL terminated and `stats` points to writable storage.
+    // SAFETY: `encoded` is NUL terminated and `stats` points to writable
+    // storage.
     if unsafe { libc::statfs(encoded.as_ptr(), stats.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -1154,6 +1155,7 @@ fn ensure_private_runtime_dir(path: &Path) -> io::Result<()> {
 
 #[allow(unsafe_code)]
 fn current_euid() -> u32 {
-    // SAFETY: `geteuid` has no preconditions and reads process credentials only.
+    // SAFETY: `geteuid` has no preconditions and reads process credentials
+    // only.
     unsafe { libc::geteuid() }
 }

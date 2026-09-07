@@ -399,7 +399,8 @@ fn check_trace(seed: u64, trace: &[ModelCommand]) -> Result<(), TestCaseError> {
         let mut expected = expected_removed;
         let mut actual = removed;
         if matches!(command, ModelCommand::CancelAll) {
-            // BinaryHeap::drain has no semantic order for broadcast cancellation.
+            // BinaryHeap::drain has no semantic order for broadcast
+            // cancellation.
             expected.sort_unstable();
             actual.sort_unstable();
         }

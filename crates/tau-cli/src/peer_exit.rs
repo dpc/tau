@@ -42,7 +42,8 @@ impl PeerExit {
         if result != 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: successful SO_PEERPIDFD returns a new owned, close-on-exec fd.
+        // SAFETY: successful SO_PEERPIDFD returns a new owned, close-on-exec
+        // fd.
         Ok(Self {
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
         })

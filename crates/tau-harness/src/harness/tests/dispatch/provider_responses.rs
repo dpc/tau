@@ -2704,9 +2704,9 @@ fn finished_response_normalizes_cached_usage_before_context_update() {
 
 #[test]
 fn repetition_response_with_output_items_is_cleared_before_persisting() {
-    // The harness enforces the repetition-detected empty-output invariant at the
-    // provider boundary so a buggy provider cannot smuggle text or tool calls in
-    // a loop-guard terminal response.
+    // The harness enforces the repetition-detected empty-output invariant at
+    // the provider boundary so a buggy provider cannot smuggle text or tool
+    // calls in a loop-guard terminal response.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -2983,7 +2983,8 @@ fn params_drift_invalidates_chain_anchor() {
     })
     .expect("finish first");
 
-    // User dials effort up between turns by updating the selected role override.
+    // User dials effort up between turns by updating the selected role
+    // override.
     h.config
         .available_roles
         .get_mut(&h.config.selected_role.clone())

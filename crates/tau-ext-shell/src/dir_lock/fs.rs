@@ -946,8 +946,9 @@ fn wait_for_lock_change(
     }
     let now = Instant::now();
     // Timed waits intentionally consume backoff even when the liveness deadline
-    // caps the actual sleep. The liveness deadline remains the faster cadence in
-    // that case, while normal cross-process availability checks back off.
+    // caps the actual sleep. The liveness deadline remains the faster cadence
+    // in that case, while normal cross-process availability checks back
+    // off.
     let wait_for =
         select_wait_duration(backoff, next_liveness_check.saturating_duration_since(now));
     let (guard, wait_timeout) = manager

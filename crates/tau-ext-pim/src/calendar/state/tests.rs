@@ -169,9 +169,10 @@ fn claimed_calendar_change_can_be_released_before_dispatch() {
 
 #[test]
 fn calendar_change_approval_validation_rejects_unsafe_persisted_records() {
-    // Persisted approvals gate side-effecting calendar writes. Keep representative
-    // rejection cases pinned so validation helper refactors cannot accidentally
-    // skip identity, status, metadata, field, description, or attendee checks.
+    // Persisted approvals gate side-effecting calendar writes. Keep
+    // representative rejection cases pinned so validation helper refactors
+    // cannot accidentally skip identity, status, metadata, field,
+    // description, or attendee checks.
     #[derive(Clone, Copy)]
     enum Mutation {
         UnsupportedSchema,

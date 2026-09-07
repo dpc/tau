@@ -838,7 +838,8 @@ fn minting_agent_ids_renders_role_group_in_configured_template() {
 #[test]
 fn minting_agent_ids_reject_display_name_only_template_fields() {
     // Agent ID templates must stay strict and only expose ID-safe context.
-    // Display-name-only fields would otherwise silently render as empty strings.
+    // Display-name-only fields would otherwise silently render as empty
+    // strings.
     let mut warnings = Vec::new();
     let agent_id = super::mint_available_agent_id_for_role_with(
         "engineer",

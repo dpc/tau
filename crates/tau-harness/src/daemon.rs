@@ -357,8 +357,8 @@ enum ListenerHandle {
 
 impl ListenerHandle {
     // Spawns the only accept forwarder for this listener. The forwarder owns a
-    // socketpair wake endpoint, so shutdown never depends on the filesystem socket
-    // path still naming this listener.
+    // socketpair wake endpoint, so shutdown never depends on the filesystem
+    // socket path still naming this listener.
     fn spawn_forwarder(
         &self,
         tx: mpsc::Sender<HarnessEvent>,
@@ -383,10 +383,10 @@ struct ListenerForwarder {
 
 impl Drop for ListenerForwarder {
     fn drop(&mut self) {
-        // The accept loop polls this owned socketpair endpoint together with the
-        // listener fd. Shutting down the write side wakes the thread without using
-        // the filesystem socket path, and the wake fd is never forwarded as a
-        // `NewClient` stream.
+        // The accept loop polls this owned socketpair endpoint together with
+        // the listener fd. Shutting down the write side wakes the
+        // thread without using the filesystem socket path, and the wake
+        // fd is never forwarded as a `NewClient` stream.
         let _ = self.wake_tx.shutdown(Shutdown::Write);
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -1130,8 +1130,8 @@ fn wait_for_daemon_trace_outcome(
     let mut progress_messages = Vec::new();
     // Counter parsed out of the `AgentPromptCreated` whose `ctx_id`
     // matches our submit. The terminal `ProviderResponseFinished` has a
-    // spid counter where `our_spid_counter <= terminal_counter` (equal when no tool
-    // calls, higher when tool-result follow-ups bump the counter).
+    // spid counter where `our_spid_counter <= terminal_counter` (equal when no
+    // tool calls, higher when tool-result follow-ups bump the counter).
     let mut our_spid_counter: Option<u64> = None;
     let mut created_agent_id = None;
 

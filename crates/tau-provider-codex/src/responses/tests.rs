@@ -5281,8 +5281,8 @@ fn stream_error_ignores_nested_echo_reset_hint() {
 
 #[test]
 fn repeated_output_text_delta_aborts_before_appending_more_output() {
-    // Ensures the Responses stream guard aborts tight exact assistant text loops
-    // before the repeated suffix can be emitted as a normal update.
+    // Ensures the Responses stream guard aborts tight exact assistant text
+    // loops before the repeated suffix can be emitted as a normal update.
     let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_text.delta",
@@ -5299,8 +5299,9 @@ fn repeated_output_text_delta_aborts_before_appending_more_output() {
 
 #[test]
 fn repeated_tool_argument_delta_aborts_before_appending_more_arguments() {
-    // Ensures tool-call argument streams use the same tight exact guard, because
-    // argument loops can otherwise burn the provider output budget unseen.
+    // Ensures tool-call argument streams use the same tight exact guard,
+    // because argument loops can otherwise burn the provider output budget
+    // unseen.
     let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.function_call_arguments.delta",
@@ -5317,8 +5318,8 @@ fn repeated_tool_argument_delta_aborts_before_appending_more_arguments() {
 
 #[test]
 fn repeated_output_text_done_aborts_without_appending_snapshot() {
-    // Done snapshots can carry all text without prior deltas; they must be guarded
-    // before becoming assistant output.
+    // Done snapshots can carry all text without prior deltas; they must be
+    // guarded before becoming assistant output.
     let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_text.done",
@@ -5353,8 +5354,8 @@ fn non_repeating_output_text_done_is_accepted() {
 
 #[test]
 fn repeated_function_arguments_done_aborts_without_appending_snapshot() {
-    // Function argument done events can provide a full final argument string; the
-    // guard must check it even when no argument deltas were sent.
+    // Function argument done events can provide a full final argument string;
+    // the guard must check it even when no argument deltas were sent.
     let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.function_call_arguments.done",
@@ -5371,8 +5372,8 @@ fn repeated_function_arguments_done_aborts_without_appending_snapshot() {
 
 #[test]
 fn repeated_custom_tool_input_done_aborts_without_appending_snapshot() {
-    // Custom tool input done events share the same final-snapshot bypass risk as
-    // function arguments.
+    // Custom tool input done events share the same final-snapshot bypass risk
+    // as function arguments.
     let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.custom_tool_call_input.done",
@@ -5389,8 +5390,8 @@ fn repeated_custom_tool_input_done_aborts_without_appending_snapshot() {
 
 #[test]
 fn repeated_output_item_done_message_aborts_without_appending_snapshot() {
-    // Message output_item.done fallbacks are guarded in addition to the dedicated
-    // output_text.done event.
+    // Message output_item.done fallbacks are guarded in addition to the
+    // dedicated output_text.done event.
     let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_item.done",
@@ -5452,7 +5453,8 @@ fn repeated_reasoning_summary_delta_aborts_before_appending() {
 
 #[test]
 fn repeated_custom_tool_input_delta_aborts_before_appending() {
-    // Custom tool input deltas are guarded independently from function arguments.
+    // Custom tool input deltas are guarded independently from function
+    // arguments.
     let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.custom_tool_call_input.delta",

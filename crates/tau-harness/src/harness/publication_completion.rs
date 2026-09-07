@@ -1833,7 +1833,8 @@ impl Harness {
             // A standalone-owned checkpoint is the sole continuation owner for
             // its durable transaction. Keep AwaitingCheckpoint intact when its
             // successor does not commit; unlike an ordinary activation, it has
-            // no deferred branch obligation from which to reconstruct ownership.
+            // no deferred branch obligation from which to reconstruct
+            // ownership.
             return;
         }
         let mut retained_output_length = false;
@@ -4689,10 +4690,11 @@ impl Harness {
                 })
                 .is_none_or(|cid| !self.tool_terminal_has_open_durable_owner(cid, call_id))
         {
-            // Harness-owned wait and peer completions can have a live agent route
-            // without a declared transcript call. They still publish the
-            // authoritative provider-shaped fact before projections, but have no
-            // semantic journal owner to accept it.
+            // Harness-owned wait and peer completions can have a live agent
+            // route without a declared transcript call. They still
+            // publish the authoritative provider-shaped fact before
+            // projections, but have no semantic journal owner to
+            // accept it.
             return Ok(None);
         }
         if !semantic_event_router::should_persist_event(event, persist) {

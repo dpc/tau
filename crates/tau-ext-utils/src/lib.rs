@@ -944,10 +944,10 @@ impl TimerRuntime {
         invoke: &ToolStarted,
         now: UnixMicros,
     ) -> Result<TimerToolCompletion, String> {
-        // A live tool call is delivered only after the connection catch-up phase
-        // has released live traffic for this agent, so timers scheduled from it
-        // may fire even if the harness did not emit a separate live-load replay
-        // boundary for a brand-new agent.
+        // A live tool call is delivered only after the connection catch-up
+        // phase has released live traffic for this agent, so timers
+        // scheduled from it may fire even if the harness did not emit a
+        // separate live-load replay boundary for a brand-new agent.
         self.replay_complete_agents.insert(invoke.agent_id.clone());
         let pending = PendingInvocation {
             agent_id: invoke.agent_id.clone(),
@@ -1571,7 +1571,8 @@ fn format_seconds(seconds: u64) -> String {
 }
 
 fn ok_display(args: String) -> ToolUseState {
-    // Keep successful tool-result metadata consistent with the shared short `ok`.
+    // Keep successful tool-result metadata consistent with the shared short
+    // `ok`.
     ToolUseState {
         args,
         status: ToolUseStatus::Success,

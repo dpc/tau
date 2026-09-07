@@ -2744,8 +2744,8 @@ impl Harness {
             })
             .ok_or(PeerEntrypointResolutionError::NoReceiver)?;
         // Resolve role, model, required skills, and the ordinary endpoint shape
-        // before spending. `prepare_start_agent_request` mints identity but does
-        // not create an agent or dispatch model work.
+        // before spending. `prepare_start_agent_request` mints identity but
+        // does not create an agent or dispatch model work.
         let query = tau_proto::StartAgentRequest {
             trusted_internal_spans: Vec::new(),
             query_id: format!("{PEER_AUTO_START_QUERY_PREFIX}{message_id}"),
@@ -3220,8 +3220,9 @@ impl Harness {
             .get(agent_id)
             .is_some_and(|agent| {
                 // Accepted activation wakes active waits at queue time. This
-                // level-triggered guard closes queue-before-register. A completion
-                // prompt is ignored only when this exact/bare invocation can consume
+                // level-triggered guard closes queue-before-register. A
+                // completion prompt is ignored only when this
+                // exact/bare invocation can consume
                 // that prompt's call, preserving completion arbitration without
                 // hiding activating notices for other completed calls.
                 agent.dispatch.pending_replay_activation

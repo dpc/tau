@@ -1033,9 +1033,9 @@ impl Harness {
             Some(source_id.clone()),
         );
         // Record parent request state and task metadata for teardown/background
-        // ownership and child display metadata. Explicit-parent typed starts have
-        // no tool call, but still retain their completed child after returning the
-        // request result.
+        // ownership and child display metadata. Explicit-parent typed starts
+        // have no tool call, but still retain their completed child
+        // after returning the request result.
         conv.identity.parent_tool_call_id = parent_call_id;
         conv.identity.parent_agent_id = parent_agent_id;
         conv.identity.display_name = display_name;
@@ -1152,8 +1152,9 @@ impl Harness {
         }
 
         if publish_initial_instruction {
-            // Publish the accepted instruction into the side agent transcript and
-            // dispatch only after that prompt folds into the agent head.
+            // Publish the accepted instruction into the side agent transcript
+            // and dispatch only after that prompt folds into the
+            // agent head.
             let mut prompt = PendingPrompt::user(query.instruction);
             prompt.trusted_internal_spans = query.trusted_internal_spans;
             self.publish_pending_prompt_for_agent(&cid, prompt)?;
@@ -1164,10 +1165,11 @@ impl Harness {
 
     pub(super) fn detach_completed_parented_start_agent(&mut self, cid: &AgentId) {
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            // A completed parented worker remains addressable by its `agent_id`,
-            // but it is no longer fulfilling the parent request or owned by the
-            // extension query that started it. Clearing the transient side-query
-            // fields makes later user prompts behave like a normal active
+            // A completed parented worker remains addressable by its
+            // `agent_id`, but it is no longer fulfilling the parent
+            // request or owned by the extension query that started
+            // it. Clearing the transient side-query fields makes
+            // later user prompts behave like a normal active
             // conversation on the same branch. The durable AgentStarted event
             // retains ancestry.
             conv.identity.originator = tau_proto::PromptOriginator::User;
@@ -2413,9 +2415,10 @@ impl Harness {
                 ));
                 return;
             }
-            // Existing identities can become loaded after cold rehydration. Fold
-            // their already-validated immutable creation fact now, rather than
-            // losing creator cost propagation until another daemon resume.
+            // Existing identities can become loaded after cold rehydration.
+            // Fold their already-validated immutable creation fact
+            // now, rather than losing creator cost propagation
+            // until another daemon resume.
             self.seed_agent_creator_topology(agent_id);
         }
         // New agents reached this point only after their creation record

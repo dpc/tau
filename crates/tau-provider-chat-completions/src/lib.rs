@@ -2996,8 +2996,9 @@ fn apply_event(
             }
             return Err(error);
         }
-        // Preserve the semantic fact before a later parser for the same event can
-        // fail (for example, repetitive tool arguments after accepted content).
+        // Preserve the semantic fact before a later parser for the same event
+        // can fail (for example, repetitive tool arguments after
+        // accepted content).
         if state.semantic_progress == SemanticProgress::Parsed {
             on_update(state);
         }

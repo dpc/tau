@@ -1851,9 +1851,9 @@ fn agent_store_rejects_non_sequential_persisted_sequence_on_load() {
     let agents_dir = temp_dir("agents-bad-seq");
     let events_path = agents_dir.join("agent-1").join("events.cbor");
 
-    // Persisted sequence is deliberately redundant with file order. Loading must
-    // reject a mismatch so a reordered or spliced event stream is caught before
-    // it is folded into the agent tree.
+    // Persisted sequence is deliberately redundant with file order. Loading
+    // must reject a mismatch so a reordered or spliced event stream is
+    // caught before it is folded into the agent tree.
     append_raw_cbor(
         &events_path,
         &PersistedAgentEvent {
@@ -2626,7 +2626,8 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
 #[test]
 fn session_store_memory_only_fact_does_not_skip_later_durable_sequence() {
     // Memory-only membership facts are live state only. They must not consume a
-    // durable sequence number, or a later durable append would make replay fail.
+    // durable sequence number, or a later durable append would make replay
+    // fail.
     let sessions_dir = temp_dir("sessions-ephemeral-then-durable");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
 
@@ -2658,8 +2659,8 @@ fn session_store_memory_only_fact_does_not_skip_later_durable_sequence() {
 
 #[test]
 fn session_store_memory_only_fact_between_durable_facts_keeps_sequence_contiguous() {
-    // Interleaving a memory-only membership fact between durable records must not
-    // create an on-disk sequence gap that would break later resume.
+    // Interleaving a memory-only membership fact between durable records must
+    // not create an on-disk sequence gap that would break later resume.
     let sessions_dir = temp_dir("sessions-durable-ephemeral-durable");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
 
@@ -2817,9 +2818,9 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     let sessions_dir = temp_dir("sessions-bad-seq");
     let events_path = sessions_dir.join("session-1").join("events.cbor");
 
-    // Persisted sequence is deliberately redundant with file order. Loading must
-    // reject a mismatch so a reordered or spliced membership stream is caught
-    // before it is folded into the session view.
+    // Persisted sequence is deliberately redundant with file order. Loading
+    // must reject a mismatch so a reordered or spliced membership stream is
+    // caught before it is folded into the session view.
     append_raw_cbor(
         &events_path,
         &PersistedSessionEvent {

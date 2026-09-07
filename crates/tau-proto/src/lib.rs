@@ -499,8 +499,10 @@ validated_string_newtype!(
     128
 );
 // ToolName is defined manually below with validation.
-string_newtype!(/// Tool call identifier.
-    ToolCallId);
+string_newtype!(
+    /// Tool call identifier.
+    ToolCallId
+);
 validated_string_newtype!(
     /// User-interface action invocation identifier.
     ActionInvocationId,
@@ -533,10 +535,14 @@ validated_string_newtype!(
 /// Maximum encoded bytes in a configured extension name.
 pub const EXTENSION_NAME_MAX_BYTES: usize = 128;
 
-string_newtype!(/// Agent-scoped context key published by an extension.
-    AgentContextKey);
-string_newtype!(/// Durable agent metadata key visible to extensions.
-    AgentMetadataKey);
+string_newtype!(
+    /// Agent-scoped context key published by an extension.
+    AgentContextKey
+);
+string_newtype!(
+    /// Durable agent metadata key visible to extensions.
+    AgentMetadataKey
+);
 /// Maximum encoded bytes in a metadata mutation correlation id.
 pub const AGENT_METADATA_MUTATION_ID_MAX_BYTES: usize = 256;
 
@@ -590,8 +596,10 @@ impl std::error::Error for InvalidAgentMetadataMutationId {}
 // ProviderName / ModelName / ModelId are defined manually below — they
 // validate at construction (no '/', non-empty, etc.) so the rest of
 // the codebase can stop re-parsing `"provider/model"` strings.
-string_newtype!(/// Skill name (e.g. `"jujutsu"`, `"preview-site"`).
-    SkillName);
+string_newtype!(
+    /// Skill name (e.g. `"jujutsu"`, `"preview-site"`).
+    SkillName
+);
 validated_string_newtype!(
     /// Identifier correlating a user-initiated `!`/`!!` shell command's
     /// lifecycle events (progress, finished).

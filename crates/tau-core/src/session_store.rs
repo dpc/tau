@@ -1061,10 +1061,10 @@ impl SessionStore {
         if write_to_disk || retain_in_memory {
             tree.advance_next_event_seq();
         }
-        // The manifest's activity hint follows a durable session-journal append,
-        // but does not participate in that journal's commit. Do not let a
-        // best-effort hint refresh make the caller retry an already-persisted
-        // sequence and create a duplicate record.
+        // The manifest's activity hint follows a durable session-journal
+        // append, but does not participate in that journal's commit. Do
+        // not let a best-effort hint refresh make the caller retry an
+        // already-persisted sequence and create a duplicate record.
         if write_to_disk {
             let _ = touch_meta(&session_dir.join("meta.json"));
         }

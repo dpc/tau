@@ -3485,9 +3485,10 @@ impl Term {
             // format (e.g. `\e[13;2u`): native kitty protocol, fixterms, or
             // tmux 3.5+ with `extended-keys-format csi-u`. Crossterm does NOT
             // parse the xterm modifyOtherKeys CSI-27 form (`\e[27;2;13~`), so
-            // tmux configured with `extended-keys-format xterm` will swallow it.
-            // Alt+Enter is the universal fallback because every terminal sends
-            // `\e\r` for it regardless of protocol negotiation.
+            // tmux configured with `extended-keys-format xterm` will swallow
+            // it. Alt+Enter is the universal fallback because every
+            // terminal sends `\e\r` for it regardless of protocol
+            // negotiation.
             return self.insert_newline();
         }
 
@@ -5205,8 +5206,9 @@ fn render_diff_frame(
     layout: &LayoutAll,
     plan: ViewPlan,
 ) -> io::Result<()> {
-    // No new scrollback rows — normal differential update. This includes visible
-    // shrinkage: rubber grows instead of moving the viewport upward.
+    // No new scrollback rows — normal differential update. This includes
+    // visible shrinkage: rubber grows instead of moving the viewport
+    // upward.
     let visible = plan.visible_lines(pass.height);
     let cursor_in_visible = plan.cursor_in_visible(pass.height);
     screen.update_rows(writer, visible, (cursor_in_visible, layout.cursor_col))?;
@@ -5404,15 +5406,17 @@ fn full_render(
         full_render_effective_viewport_start(layout, plan, height, redraw_history_size);
 
     with_synchronized_update(stdout, |stdout| {
-        // Clear screen, home cursor, and clear scrollback. The scrollback is rebuilt
-        // by replaying the capped no-rubber suffix below. Disable autowrap while
-        // replaying so exact-width rows don't create phantom blank rows before the
-        // explicit CRLF between logical rows.
+        // Clear screen, home cursor, and clear scrollback. The scrollback is
+        // rebuilt by replaying the capped no-rubber suffix below.
+        // Disable autowrap while replaying so exact-width rows don't
+        // create phantom blank rows before the explicit CRLF between
+        // logical rows.
         stdout.queue(Print("\x1b[2J\x1b[H\x1b[3J\x1b[?7l"))?;
 
-        // Output the capped logical suffix starting at the top. Overflow scrolls
-        // into scrollback naturally. Short content stays at the top, so the prompt
-        // sits directly under content instead of being bottom-pinned by rubber.
+        // Output the capped logical suffix starting at the top. Overflow
+        // scrolls into scrollback naturally. Short content stays at the
+        // top, so the prompt sits directly under content instead of
+        // being bottom-pinned by rubber.
         for (i, line) in replay_lines.iter().enumerate() {
             if 0 < i {
                 stdout.queue(Print("\r\n"))?;
@@ -5422,9 +5426,9 @@ fn full_render(
 
         stdout.queue(Print("\x1b[?7h"))?;
 
-        // After outputting, the cursor is at the last content line. When content
-        // overflowed, that line is at the terminal bottom; otherwise it is at its
-        // natural row below the transcript.
+        // After outputting, the cursor is at the last content line. When
+        // content overflowed, that line is at the terminal bottom;
+        // otherwise it is at its natural row below the transcript.
         let current_screen_row = if height <= replay_total {
             height - 1
         } else {
@@ -5588,9 +5592,9 @@ fn advance_prompt_cursor_position(
     if is_prompt_line_break(grapheme) {
         if *pending_exact_wrap {
             // A printable character exactly filled the previous visual row, so
-            // the cursor is already at column 0 of this row. An explicit newline
-            // at that byte position should consume that pending wrap, not add a
-            // second blank row.
+            // the cursor is already at column 0 of this row. An explicit
+            // newline at that byte position should consume that
+            // pending wrap, not add a second blank row.
             *pending_exact_wrap = false;
         } else {
             *row += 1;

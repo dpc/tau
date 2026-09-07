@@ -1068,10 +1068,11 @@ where
     runtime.state().install_waker(waker);
     let loop_result = run_shell_manual_loop(&mut runtime);
 
-    // EOF/disconnect/errors may arrive without a committed SessionShutdown event.
-    // Wake lock waiters and drop scheduler workers before tau-client shuts down
-    // its writer, because active worker jobs may be blocked inside DirLockManager
-    // and worker-held output handles must not enqueue after writer shutdown.
+    // EOF/disconnect/errors may arrive without a committed SessionShutdown
+    // event. Wake lock waiters and drop scheduler workers before tau-client
+    // shuts down its writer, because active worker jobs may be blocked
+    // inside DirLockManager and worker-held output handles must not enqueue
+    // after writer shutdown.
     runtime.state_mut().final_shutdown();
     let finish_result = runtime.finish().map(|_| ());
     match (loop_result, finish_result) {

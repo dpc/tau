@@ -2013,8 +2013,9 @@ impl Harness {
                 })
         {
             // A replacement-only window has no progress-making automatic cut.
-            // Let the already-durable activation claim ordinary inference rather
-            // than terminally blocking it with an impossible compaction pass.
+            // Let the already-durable activation claim ordinary inference
+            // rather than terminally blocking it with an impossible
+            // compaction pass.
             return false;
         }
         let cut = fitting_cut
@@ -2178,11 +2179,12 @@ impl Harness {
         recoveries: Vec<(AgentId, tau_core::ManualCompactionRecovery)>,
     ) {
         // AgentTree recovery is authoritative. These runtime maps are rebuilt
-        // only to repair accepted-before-placeholder, complete-round-before-start,
+        // only to repair accepted-before-placeholder,
+        // complete-round-before-start,
         // transaction-terminal-before-background-terminal, and
         // background-terminal-before-checkpoint crash windows. An outcome-less
-        // started transaction is never resent: generic standalone recovery first
-        // terminalizes it as interrupted.
+        // started transaction is never resent: generic standalone recovery
+        // first terminalizes it as interrupted.
         let mut waiting = Vec::new();
         for (target_cid, recovery) in recoveries {
             let (request, started) = match recovery {

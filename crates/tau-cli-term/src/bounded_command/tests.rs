@@ -235,8 +235,8 @@ fn pty_job_control_restores_external_foreground_owner() {
         ))
         .stdout(path_std_process::Stdio::null())
         .stderr(path_std_process::Stdio::piped());
-    // SAFETY: the child-only hook invokes async-signal-safe session/tty syscalls
-    // against its already-installed PTY stdin before exec.
+    // SAFETY: the child-only hook invokes async-signal-safe session/tty
+    // syscalls against its already-installed PTY stdin before exec.
     #[allow(unsafe_code)]
     unsafe {
         child.pre_exec(|| {

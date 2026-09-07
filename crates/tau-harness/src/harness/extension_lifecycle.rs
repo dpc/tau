@@ -158,8 +158,8 @@ impl Harness {
         self.remove_discovered_context(connection_id);
         self.publish_session_skills_projection();
         // Remove prompt/context projections before resolving an interception
-        // owned by this connection. Resolution may synchronously commit deferred
-        // readiness and dispatch a prompt snapshot.
+        // owned by this connection. Resolution may synchronously commit
+        // deferred readiness and dispatch a prompt snapshot.
         self.remove_extension_context_for_connection(connection_id);
         self.clear_agent_runtime_indicators_for_source(connection_id);
         self.runtime_io

@@ -4276,8 +4276,8 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
 /// material.
 #[test]
 fn configure_secrets_round_trip_and_debug_redacts_values() {
-    // Secret values travel only to explicitly configured extensions and must not
-    // leak through derived protocol debug output.
+    // Secret values travel only to explicitly configured extensions and must
+    // not leak through derived protocol debug output.
     let mut secrets = path_std_collections::BTreeMap::new();
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
@@ -4545,8 +4545,9 @@ fn model_id_parses_provider_and_slashy_model_name() {
 /// event names.
 #[test]
 fn provider_model_event_names_match_wire_family() {
-    // Both names are routed and intercepted independently. Keep the peer-authored
-    // declaration distinct from the harness-authored current-state projection.
+    // Both names are routed and intercepted independently. Keep the
+    // peer-authored declaration distinct from the harness-authored
+    // current-state projection.
     let cases = [
         (
             Event::ProviderModelsDeclared(ProviderModelsDeclared { models: Vec::new() }),

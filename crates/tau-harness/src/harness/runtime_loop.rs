@@ -682,8 +682,9 @@ impl Harness {
             };
             if notification == Some(deadline) {
                 self.process_notification_delivery_deadlines_at(deadline);
-                // The notification processor owns a bounded cohort budget. Return
-                // to the central loop before admitting another due cohort.
+                // The notification processor owns a bounded cohort budget.
+                // Return to the central loop before admitting
+                // another due cohort.
                 break;
             } else if work_wait == Some(deadline) {
                 let budget = self

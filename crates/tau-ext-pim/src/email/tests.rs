@@ -858,7 +858,8 @@ fn email_run_startup_order_and_subscriptions_are_stable() {
 #[test]
 fn registers_email_read_tool_prompt_fragment() {
     // Email read can expose hostile message content. Keep the safety notice on
-    // that split tool only, without duplicating it across unrelated email tools.
+    // that split tool only, without duplicating it across unrelated email
+    // tools.
     let mut pair = spawn_extension();
     let mut saw_read_prompt = false;
     let mut saw_send_prompt = false;
@@ -3658,8 +3659,9 @@ fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
 
 #[test]
 fn outgoing_approve_accepts_multiple_ids() {
-    // Users often review several queued drafts from one `:email out list` output.
-    // A single approve action should accept all selected ids and send each draft.
+    // Users often review several queued drafts from one `:email out list`
+    // output. A single approve action should accept all selected ids and
+    // send each draft.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
     for subject in ["proposal one", "proposal two"] {
@@ -3692,7 +3694,8 @@ fn outgoing_approve_accepts_multiple_ids() {
 fn outgoing_deny_rejects_pending_ids_and_blocks_later_approval() {
     // Outgoing approvals are user consent tokens for sending email. Denying a
     // pending token must move it out of the approvable queue, keep an auditably
-    // denied state, and ensure a later approve action for the same id cannot send.
+    // denied state, and ensure a later approve action for the same id cannot
+    // send.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
     let _queued = engine.dispatch(EmailCommand::Send {
@@ -3743,8 +3746,9 @@ fn outgoing_deny_rejects_pending_ids_and_blocks_later_approval() {
 #[test]
 fn outgoing_denied_tombstone_wins_over_stale_pending_record() {
     // A partial state update can theoretically leave both pending and denied
-    // records for the same outgoing id. The denied tombstone must fail closed so
-    // the draft cannot be shown as approvable or sent after user rejection.
+    // records for the same outgoing id. The denied tombstone must fail closed
+    // so the draft cannot be shown as approvable or sent after user
+    // rejection.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
     let _queued = engine.dispatch(EmailCommand::Send {
@@ -4383,9 +4387,9 @@ fn outgoing_success_outputs_do_not_leak_bcc() {
 
 #[test]
 fn action_outputs_escape_controls_and_row_forgery() {
-    // Approval actions render attacker-controlled email fields in a terminal UI.
-    // Newlines, ESC, and bidi controls must be visible/neutralized in metadata
-    // rows so they cannot forge extra approval or header lines.
+    // Approval actions render attacker-controlled email fields in a terminal
+    // UI. Newlines, ESC, and bidi controls must be visible/neutralized in
+    // metadata rows so they cannot forge extra approval or header lines.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
     engine.backend.messages.insert(

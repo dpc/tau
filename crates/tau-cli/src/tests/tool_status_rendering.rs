@@ -4380,8 +4380,8 @@ fn finished_tool_result_preserves_message_and_tool_item_order() {
 #[test]
 fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
     // Running tool calls live in the fixed active-tools area above the prompt.
-    // Timer ticks should therefore repaint that visible area only, not trigger a
-    // hidden-prefix full redraw of old transcript rows that have moved to
+    // Timer ticks should therefore repaint that visible area only, not trigger
+    // a hidden-prefix full redraw of old transcript rows that have moved to
     // scrollback.
     let (_term, handle, vt) = setup(80, 5);
     let mut renderer = EventRenderer::new(
@@ -4432,7 +4432,8 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
 fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     // Multi-line live tool payloads can extend above the visible active-tools
     // area. Updating only the elapsed seconds would force visible churn without
-    // changing useful content, so keep the live duration stable until completion.
+    // changing useful content, so keep the live duration stable until
+    // completion.
     let (_term, handle, vt) = setup(80, 8);
     let mut renderer = EventRenderer::new(
         handle.clone(),

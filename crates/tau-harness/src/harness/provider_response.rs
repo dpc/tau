@@ -2322,8 +2322,9 @@ impl Harness {
         {
             agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
         }
-        // Rejection retains neither cache evidence nor context-recovery authority,
-        // but it must release the prompt-local snapshots allocated for dispatch.
+        // Rejection retains neither cache evidence nor context-recovery
+        // authority, but it must release the prompt-local snapshots
+        // allocated for dispatch.
         self.provider_runtime
             .cache_residency
             .drop_prompt(&response.agent_prompt_id);
@@ -4077,9 +4078,10 @@ impl Harness {
                 .any(|owner| owner == cid);
         // Release before removing or detaching the side agent so
         // queued descendants can still resolve their parent agent
-        // while starting. Active descendants keep their own copied state. Result
-        // delivery can synchronously dispatch a replacement prompt, so do not
-        // overwrite that prompt's running state while detaching the old request.
+        // while starting. Active descendants keep their own copied state.
+        // Result delivery can synchronously dispatch a replacement
+        // prompt, so do not overwrite that prompt's running state while
+        // detaching the old request.
         if !replacement_prompt_in_flight && !replacement_tool_terminal_in_flight {
             self.set_agent_turn_state(cid, AgentTurnState::Idle);
         }

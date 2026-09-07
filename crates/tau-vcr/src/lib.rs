@@ -181,7 +181,8 @@ pub fn encode_escaped_bytes(bytes: &[u8]) -> String {
             }
             Err(error) => {
                 let (valid, rest) = remaining.split_at(error.valid_up_to());
-                // SAFETY: `valid_up_to` is guaranteed to end on a UTF-8 boundary.
+                // SAFETY: `valid_up_to` is guaranteed to end on a UTF-8
+                // boundary.
                 push_escaped_valid_text(
                     &mut encoded,
                     std::str::from_utf8(valid).expect("valid prefix"),

@@ -2377,7 +2377,8 @@ impl NonUnixChildWait {
         let handle = child.as_raw_handle() as usize;
         std::thread::spawn(move || {
             // SAFETY: `handle` is a borrowed process handle that remains valid
-            // until this watcher is joined before the owning `Child` is dropped.
+            // until this watcher is joined before the owning `Child` is
+            // dropped.
             #[allow(unsafe_code)]
             unsafe {
                 let result = WaitForSingleObject(handle as *mut std::ffi::c_void, INFINITE);

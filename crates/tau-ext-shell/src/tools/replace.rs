@@ -73,7 +73,8 @@ pub(crate) fn replace_file(
         ..Default::default()
     };
     if changed {
-        // Source and result are UTF-8 because source and all request text are UTF-8.
+        // Source and result are UTF-8 because source and all request text are
+        // UTF-8.
         display.payload = Some(ToolUsePayload::Diff(compute_diff(
             original,
             std::str::from_utf8(&result).expect("UTF-8 replacement preserves UTF-8"),

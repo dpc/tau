@@ -66,8 +66,8 @@ impl WatchGraphProjection {
         );
 
         // Keep the forward topology in the constructor contract: it documents
-        // that direct facts must belong to live edges and catches bad callers in
-        // debug builds without expanding the production projection.
+        // that direct facts must belong to live edges and catches bad callers
+        // in debug builds without expanding the production projection.
         // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(direct_edges.iter().all(|(watcher, watched)| {
             watched_agents
@@ -155,9 +155,9 @@ impl WatchGraphProjection {
             let mut next = Vec::new();
             let mut next_ids = HashSet::new();
             // `level` is lexicographic path order: parents retain the previous
-            // level's order and each sorted child set extends one common prefix.
-            // The first candidate for a shared child therefore owns its stable
-            // equal-depth predecessor.
+            // level's order and each sorted child set extends one common
+            // prefix. The first candidate for a shared child
+            // therefore owns its stable equal-depth predecessor.
             for (agent_id, predecessor) in level {
                 if !visited.insert(agent_id.clone()) {
                     continue;

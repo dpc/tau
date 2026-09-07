@@ -319,8 +319,8 @@ impl Harness {
         if let Event::ToolRequest(request) = &event {
             // This is only structural and authoring-authority admission. Per
             // `specs/SPEC-peer-event-publication.md`, duplicate
-            // correlation checks, pending-call bookkeeping, and registry routing
-            // run from the committed-event consumer.
+            // correlation checks, pending-call bookkeeping, and registry
+            // routing run from the committed-event consumer.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
                 matches!(
                     entry.kind,
@@ -395,8 +395,8 @@ impl Harness {
         ) {
             // This is only configured event-authority admission. Per
             // `specs/SPEC-peer-event-publication.md`, prompt ownership,
-            // retry correlation, response normalization, and terminal processing
-            // run from the committed-event consumer.
+            // retry correlation, response normalization, and terminal
+            // processing run from the committed-event consumer.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
                 entry.kind == ClientKind::Provider && entry.state != ExtensionState::Disconnected
             });
@@ -425,9 +425,10 @@ impl Harness {
         ) {
             // This is only declarative event-authority admission. Per
             // `specs/SPEC-peer-event-publication.md`, provider ownership,
-            // route bindings, bounds, and epoch/sequence validation run from the
-            // committed-event consumer. A configured Provider's unowned payload
-            // still commits as its report before downstream validation rejects it.
+            // route bindings, bounds, and epoch/sequence validation run from
+            // the committed-event consumer. A configured Provider's
+            // unowned payload still commits as its report before
+            // downstream validation rejects it.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
                 entry.kind == ClientKind::Provider && entry.state != ExtensionState::Disconnected
             });
@@ -451,8 +452,9 @@ impl Harness {
         if matches!(event, Event::ProviderModelsDeclared(_)) {
             // This is declarative source-aware admission, not provider-model
             // processing. `SPEC-peer-event-publication` requires the
-            // accepted declaration to use ordinary interception/commit before the
-            // downstream consumer derives canonical current state.
+            // accepted declaration to use ordinary interception/commit before
+            // the downstream consumer derives canonical current
+            // state.
             if !self.is_provider_extension(source_id)
                 || !self.accepts_provider_event_from(source_id, &event_name)
             {
@@ -480,7 +482,8 @@ impl Harness {
             // authenticated configured extension kind owns its source/name
             // fragment slots. Projection replacement and prompt assembly happen
             // only after ordinary interception and commit. Configured peers are
-            // trusted local executables under `SECURITY.md#local-ipc-and-external-ingress`;
+            // trusted local executables under
+            // `SECURITY.md#local-ipc-and-external-ingress`;
             // see `SPEC-prompt-fragment-declarations-and-projection`.
             let authorized = self
                 .extensions
@@ -516,8 +519,8 @@ impl Harness {
         }
         if matches!(event, Event::ExtInternalPromptSubmitRequest(_)) {
             // This is configured request-authority admission only. Loaded-agent
-            // validation and prompt submission happen after ordinary commit under
-            // `SPEC-internal-prompt-submit-requests`.
+            // validation and prompt submission happen after ordinary commit
+            // under `SPEC-internal-prompt-submit-requests`.
             let authorized = self
                 .extensions
                 .entries
@@ -550,8 +553,9 @@ impl Harness {
         }
         if matches!(event, Event::StartAgentRequest(_)) {
             // This is configured request-authority admission only. Role and
-            // parent validation, duplicate rebinding, acceptance/result routing,
-            // and agent creation happen after ordinary commit.
+            // parent validation, duplicate rebinding, acceptance/result
+            // routing, and agent creation happen after ordinary
+            // commit.
             let authorized = self
                 .extensions
                 .entries
@@ -863,8 +867,9 @@ impl Harness {
         {
             // The raw event has already committed and remains observable. A
             // shutdown generation boundary suppresses session-bound downstream
-            // semantics. Explicitly process-global declarations and current-state
-            // reports continue below under exact connection/instance checks.
+            // semantics. Explicitly process-global declarations and
+            // current-state reports continue below under exact
+            // connection/instance checks.
             self.discard_peer_activation_reservation(peer_context);
             return;
         }
@@ -1268,7 +1273,8 @@ impl Harness {
                 });
         if !source_is_current {
             // The request remains a committed observation, but a parked stale
-            // generation cannot route work or alter replacement-generation state.
+            // generation cannot route work or alter replacement-generation
+            // state.
             return;
         }
         if let Some(message) = self.extension_tool_request_rejection(request) {
@@ -1323,15 +1329,18 @@ impl Harness {
                 self.bump_tools_started_for(&cid);
                 match &route.target {
                     ToolRouteTarget::Internal => {
-                        // Configured extensions are trusted local executables; see
-                        // `SECURITY.md#local-ipc-and-external-ingress`. Their
-                        // payload agent id supplies ordinary request correlation,
+                        // Configured extensions are trusted local executables;
+                        // see `SECURITY.md#
+                        // local-ipc-and-external-ingress`. Their
+                        // payload agent id supplies ordinary request
+                        // correlation,
                         // while the harness still requires a live loaded route.
                         self.record_wait_tool_request(&request.call_id);
                     }
                     ToolRouteTarget::Extension(provider_connection_id) => {
-                        // Establish terminal-report authority before the selected
-                        // tool can observe `tool.started` and immediately answer.
+                        // Establish terminal-report authority before the
+                        // selected tool can observe
+                        // `tool.started` and immediately answer.
                         self.ensure_tool_started_subscription(provider_connection_id);
                         self.tool_routing
                             .tool_runtime
@@ -2028,9 +2037,9 @@ impl Harness {
                 && entry.state != ExtensionState::Disconnected
         });
         if !source_is_current {
-            // A committed declaration keeps its captured publisher envelope, but
-            // an obsolete generation cannot mutate or release the replacement
-            // generation's registry/staging state.
+            // A committed declaration keeps its captured publisher envelope,
+            // but an obsolete generation cannot mutate or release
+            // the replacement generation's registry/staging state.
             return;
         }
         if let Some(reservation) = extension.activation_reservation
@@ -2606,10 +2615,11 @@ impl Harness {
             // first call_id that produced this content on this agent's branch.
             // See `crate::dedup` for the design.
             self.dedup_tool_result(&cid, &mut result);
-            // Snap to the owning agent's head before folding the result. Without
-            // this, a sibling side conv that just touched the parent agent
-            // (during its teardown) leaves `tree.head` on the *parent* branch —
-            // folding the result there misplaces it and produces orphan ToolUse
+            // Snap to the owning agent's head before folding the result.
+            // Without this, a sibling side conv that just touched
+            // the parent agent (during its teardown) leaves
+            // `tree.head` on the *parent* branch — folding the
+            // result there misplaces it and produces orphan ToolUse
             // blocks when the parent conv is later re-prompted.
             self.publish_terminal_tool_result(
                 Some(&cid),

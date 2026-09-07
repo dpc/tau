@@ -1811,8 +1811,9 @@ impl EventRenderer {
             let display_changed = self.selection.displayed_agent_id.as_ref() != Some(&agent_id);
 
             if display_changed {
-                // Let transcript switching see the previous awaiting flag so it can
-                // distinguish initial no-agent adoption from explicit `:agent new`.
+                // Let transcript switching see the previous awaiting flag so it
+                // can distinguish initial no-agent adoption
+                // from explicit `:agent new`.
                 self.show_agent_transcript(agent_id.clone());
             }
             after_display_update();
@@ -2025,11 +2026,12 @@ impl EventRenderer {
     fn visible_no_agent_snapshot_needs_preservation(&self) -> bool {
         // Ordinary startup/status history on the initial start-new-agent screen
         // begins the first user-created conversation and remains adoptable.
-        // Globally owned message facts are the exception: they never belong to an
-        // agent transcript, so their snapshot is preserved even on that initial
-        // screen. Other preservation state applies only after explicit
-        // `:agent none` or `:agent new`, when the user has deliberately left a
-        // previous transcript and the no-agent output must remain available.
+        // Globally owned message facts are the exception: they never belong to
+        // an agent transcript, so their snapshot is preserved even on
+        // that initial screen. Other preservation state applies only
+        // after explicit `:agent none` or `:agent new`, when the user
+        // has deliberately left a previous transcript and the no-agent
+        // output must remain available.
         self.selection.displayed_agent_id.is_none()
             && (self.transcript.ownership.contains_global_message_fact
                 || self.transcript.ownership.contains_overview_message
@@ -5685,7 +5687,8 @@ impl EventRenderer {
             Event::UiPromptSubmitted(prompt) => {
                 let agent_id = prompt.agent_id.clone();
                 // This is only a transient UI request. Activation waits for an
-                // accepted queue or committed submission event from the harness.
+                // accepted queue or committed submission event from the
+                // harness.
                 self.remember_agent(agent_id.clone());
                 if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
                 {
@@ -7139,10 +7142,10 @@ impl EventRenderer {
             && self.front_queued_user_prompt_matches(&steered.text)
         {
             // Queue records lack a submission source. A front-exact match is
-            // authoritative only for user or legacy prompt provenance; extension
-            // and harness facts retain their source-aware presentation. Never
-            // consume a different queued item merely because a later item has
-            // the same text.
+            // authoritative only for user or legacy prompt provenance;
+            // extension and harness facts retain their source-aware
+            // presentation. Never consume a different queued item
+            // merely because a later item has the same text.
             let Some(queued) = self.transcript.runtime.queued_user_blocks.pop_front() else {
                 return;
             };
@@ -7798,8 +7801,8 @@ impl EventRenderer {
             if update.deltas.is_empty() {
                 self.update_live_response_block(spid, &status.text, MarkdownStreamUpdate::Replace);
                 if let Some(state) = self.transcript.runtime.prompts.get_mut(spid) {
-                    // Status text is transient and is not the prefix of the next
-                    // accumulated assistant snapshot.
+                    // Status text is transient and is not the prefix of the
+                    // next accumulated assistant snapshot.
                     state.response_markdown_cache = MarkdownStreamCache::default();
                 }
                 return;
@@ -8074,8 +8077,9 @@ impl EventRenderer {
         spid: &tau_proto::AgentPromptId,
         block: tau_cli_term::StyledBlock,
     ) {
-        // Insert thinking above the live response/compaction stack while keeping
-        // any active tool-call UI pinned below the whole streaming response.
+        // Insert thinking above the live response/compaction stack while
+        // keeping any active tool-call UI pinned below the whole
+        // streaming response.
         let tbid = self
             .resources
             .handle
@@ -9135,8 +9139,9 @@ impl EventRenderer {
             self.resources.handle.remove_block(state.block_id);
             state.include_in_context
         } else {
-            // Session replay may contain only the durable terminal event. Render
-            // it from the self-contained payload instead of dropping it.
+            // Session replay may contain only the durable terminal event.
+            // Render it from the self-contained payload instead of
+            // dropping it.
             finished.include_in_context
         };
         let suffix = Self::shell_finished_suffix(finished, include_in_context);

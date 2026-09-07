@@ -137,7 +137,8 @@ impl PtyProcess {
             ws_ypixel: 0,
         };
         let mut capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
-        // SAFETY: `writer` is the owned PTY master and `winsize` outlives ioctl.
+        // SAFETY: `writer` is the owned PTY master and `winsize` outlives
+        // ioctl.
         #[allow(unsafe_code)]
         if unsafe { nix::libc::ioctl(writer.as_fd().as_raw_fd(), nix::libc::TIOCSWINSZ, &winsize) }
             == -1

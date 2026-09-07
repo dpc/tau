@@ -1717,8 +1717,9 @@ impl Harness {
         reason: tau_proto::SessionStartReason,
     ) -> Result<(), HarnessError> {
         // AGENTS.md and skill context is agent-scoped. Session init only waits
-        // for discovery; the discovered context is injected when a durable agent
-        // is explicitly created from the UI's current role/cwd state.
+        // for discovery; the discovered context is injected when a durable
+        // agent is explicitly created from the UI's current role/cwd
+        // state.
         self.enforce_required_role_skills()?;
         self.publish_session_skills_projection();
         // A resumed roster is already live before session discovery completes.

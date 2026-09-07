@@ -2855,10 +2855,10 @@ where
         let startup_profiles = self.startup_profiles;
         let publish_models_after_configure = startup_profiles.is_none();
         let mut configured = false;
-        // No past effectful provider events requested: provider work starts from
-        // fresh live state. Harness session directory announcements are
-        // current-state facts, so replay catch-up is allowed for diagnostics
-        // policy only.
+        // No past effectful provider events requested: provider work starts
+        // from fresh live state. Harness session directory
+        // announcements are current-state facts, so replay catch-up is
+        // allowed for diagnostics policy only.
         builder
             .configure_raw(move |cx| {
                 if configured {
@@ -3454,8 +3454,9 @@ where
                 .missing_login(&model.provider)
                 .then(|| model.provider.clone()),
         });
-        // Resolution can refresh or adopt a winning OAuth credential generation.
-        // Rehydrate immediately so the declaration reflects that observed write.
+        // Resolution can refresh or adopt a winning OAuth credential
+        // generation. Rehydrate immediately so the declaration reflects
+        // that observed write.
         self.observe_selected_oauth_resolution(&model.provider, observes_oauth_refresh, handle)?;
         self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
         if let PromptBackend::Responses(config) = &backend {
@@ -8405,8 +8406,9 @@ fn refresh_chatgpt_credentials_with(
             "unexpected OAuth credential CAS result",
         ))),
         Err(OAuthCredentialStorageError::GenerationMismatch) => {
-            // A concurrent rotating refresh may have won CAS. Reload and use its
-            // complete generation rather than retrying the now-consumed token.
+            // A concurrent rotating refresh may have won CAS. Reload and use
+            // its complete generation rather than retrying the
+            // now-consumed token.
             let value =
                 request(tau_proto::ExtensionDataRequestOp::ReadFile { path }).map_err(|_| {
                     RefreshCredentialsError::Storage(path_std_io::Error::other(
@@ -9689,9 +9691,9 @@ fn emit_chatgpt_stream_update<S: ProviderReportSink>(
     // callback. After the first prompt update, progress/byte updates MUST be
     // batched and emitted no faster than PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
     // (1s) per prompt. A byte change is NOT a reason to emit early. Only
-    // `RateLimitedResponseUpdateEmitter` may bypass this for the first non-empty
-    // progress sample and for a terminal flush immediately before the turn is
-    // closed.
+    // `RateLimitedResponseUpdateEmitter` may bypass this for the first
+    // non-empty progress sample and for a terminal flush immediately before
+    // the turn is closed.
     let deltas = delta_emitter.deltas(state);
     let compaction = state.compaction_update();
     if deltas.is_empty()

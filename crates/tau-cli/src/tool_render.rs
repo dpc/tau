@@ -367,7 +367,8 @@ fn reusable_prompt_prefix_tokens(
             );
             // A newly observed incompatible regime invalidates inherited
             // calibration immediately. A shorter read remains a meaningful miss
-            // against the retained envelope rather than silently recalibrating it.
+            // against the retained envelope rather than silently recalibrating
+            // it.
             if observed_geometry.is_some_and(|observed| observed != geometry)
                 || usage.prompt_cached_tokens > calibrated
             {

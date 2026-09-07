@@ -1116,9 +1116,10 @@ fn incoming_auth_decision(
     else {
         return PolicyDecision::denied("auth unaligned");
     };
-    // Authentication-Results headers below the newest one are attacker-controlled
-    // unless the trusted MTA strips them. Trust only the topmost parsed header so
-    // a forged lower header cannot override the server's result.
+    // Authentication-Results headers below the newest one are
+    // attacker-controlled unless the trusted MTA strips them. Trust only
+    // the topmost parsed header so a forged lower header cannot override
+    // the server's result.
     let Some(evidence) = message.auth_results.first() else {
         return PolicyDecision::denied("auth missing");
     };

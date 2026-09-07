@@ -1266,8 +1266,8 @@ fn retry_debug_projection_excludes_provider_detail_canary() {
     .expect("write intercepted retry");
     let lines = read_lines(log.path());
     // Transient response updates remain absent at the raw inbound boundary even
-    // when a malformed peer asks to persist one; only the content-free published
-    // and interceptor projections are logged.
+    // when a malformed peer asks to persist one; only the content-free
+    // published and interceptor projections are logged.
     assert_eq!(lines.len(), 2);
     let expected = serde_json::json!({
         "event": "provider.response_updated",

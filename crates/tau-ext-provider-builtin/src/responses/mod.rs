@@ -511,8 +511,8 @@ fn validate_responses_narrative_output(
 ) -> Result<tau_proto::ContextItem, String> {
     // Public Responses represents one reasoning stream twice: visible bounded
     // reasoning text and an opaque provider replay item. The summary validator
-    // bounds and discards the text; discard its replay-only twin before applying
-    // the shared one-message semantic contract.
+    // bounds and discards the text; discard its replay-only twin before
+    // applying the shared one-message semantic contract.
     super::chat_completions::validate_resolved_narrative_output(
         items
             .into_iter()

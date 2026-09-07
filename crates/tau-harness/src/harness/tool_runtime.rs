@@ -533,8 +533,8 @@ impl Harness {
             originator: result.originator,
         };
         if peer_internal {
-            // Settle ownerless runtime/wait state without creating transcript or
-            // background-completion-prompt ownership.
+            // Settle ownerless runtime/wait state without creating transcript
+            // or background-completion-prompt ownership.
             self.publish_event(
                 Some(source_id),
                 Event::ToolBackgroundResult(background.clone()),
@@ -658,8 +658,8 @@ impl Harness {
             originator: error.originator,
         };
         if peer_internal {
-            // Settle ownerless runtime/wait state without creating transcript or
-            // background-completion-prompt ownership.
+            // Settle ownerless runtime/wait state without creating transcript
+            // or background-completion-prompt ownership.
             self.publish_event(source, Event::ToolBackgroundError(background.clone()));
             self.record_wait_background_error(background, None, BackgroundErrorOutcome::Error);
             self.finish_harness_owned_tool_tracking(&call_id);
@@ -723,8 +723,9 @@ impl Harness {
         match completion_prompt_mode {
             BackgroundCompletionPromptMode::QueueAndAdvance => {
                 self.queue_background_completion_prompt(cid, call_id);
-                // Keep the completion prompt queued before draining. If an unblocked
-                // queued call closes the tool round, `maybe_complete_agent_turn` can
+                // Keep the completion prompt queued before draining. If an
+                // unblocked queued call closes the tool round,
+                // `maybe_complete_agent_turn` can
                 // fold this background notification into that follow-up prompt.
                 self.drain_pending_tool_invocations_or_report();
             }

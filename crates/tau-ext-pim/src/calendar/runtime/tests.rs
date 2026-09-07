@@ -2411,7 +2411,8 @@ fn calendar_secret_feed_url_is_validated_at_configure_time() {
 #[test]
 fn denied_calendar_change_tombstone_blocks_stale_pending_approval() {
     // Denial tombstones are fail-closed. If pending deletion previously failed
-    // after writing a denial, approval must not execute the stale pending record.
+    // after writing a denial, approval must not execute the stale pending
+    // record.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = google_test_engine(temp.path());
     let mut change = CalendarChangeApproval::pending("delete_event", "google", "primary");

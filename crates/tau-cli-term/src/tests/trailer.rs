@@ -149,7 +149,8 @@ fn unchanged_trailer_clears_recovery() {
 #[test]
 fn deleting_marker_line_does_not_save_recovery() {
     // Ensures deleting the marker makes the whole file prompt-owned and clears
-    // stale recovery instead of showing the same content again below the marker.
+    // stale recovery instead of showing the same content again below the
+    // marker.
     let editor_context = ctx(EditorContext {
         current_response: Some("agent context".to_owned()),
         edited_trailer_recovery: Some("old accidental text".to_owned()),

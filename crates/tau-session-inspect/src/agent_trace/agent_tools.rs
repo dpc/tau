@@ -924,8 +924,9 @@ fn project_keyed_facts(
                         if classification_fully_local && owner.agent_id == declaration.agent_id {
                             Resolution::Resolved
                         } else {
-                            // Foreign or missing endpoints can occur in selected
-                            // subsets and incomplete or historical journals.
+                            // Foreign or missing endpoints can occur in
+                            // selected subsets and
+                            // incomplete or historical journals.
                             Resolution::SourceNotSelected
                         },
                     );

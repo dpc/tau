@@ -519,20 +519,22 @@ impl Harness {
         //
         // Reasons this is a design choice, not dead weight:
         //
-        // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is the
-        //    fallback when a caller (embedded or socket) doesn't specify one, and even
-        //    when callers pick their own `chat-<ts>` id they still benefit: ext-shell
-        //    has already walked the user agent roots + the cwd ancestor chain once, so
-        //    the second init is cache-warm.
+        // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is
+        //    the fallback when a caller (embedded or socket) doesn't specify
+        //    one, and even when callers pick their own `chat-<ts>` id they
+        //    still benefit: ext-shell has already walked the user agent roots +
+        //    the cwd ancestor chain once, so the second init is cache-warm.
         //
-        // 2. **Surface discovery before the first prompt.** The CLI prints "loaded: …"
-        //    as events arrive; doing this at startup gives the user visible
-        //    confirmation that their AGENTS.md was found — before they type anything —
-        //    instead of bundling that feedback into the first agent response.
+        // 2. **Surface discovery before the first prompt.** The CLI prints
+        //    "loaded: …" as events arrive; doing this at startup gives the user
+        //    visible confirmation that their AGENTS.md was found — before they
+        //    type anything — instead of bundling that feedback into the first
+        //    agent response.
         //
-        // 3. **Fail loudly at startup, not mid-first-turn.** If a provider hangs or the
-        //    discovery logic panics, the process hits `SessionInitTimeout` here rather
-        //    than appearing to accept the first prompt and then silently stalling.
+        // 3. **Fail loudly at startup, not mid-first-turn.** If a provider
+        //    hangs or the discovery logic panics, the process hits
+        //    `SessionInitTimeout` here rather than appearing to accept the
+        //    first prompt and then silently stalling.
         //
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager

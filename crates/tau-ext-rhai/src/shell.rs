@@ -193,12 +193,12 @@ pub(crate) fn run_shell_command(
     let process_outcome = wait_for_process_event(&process_rx, deadline, &process_cancel);
     let _ = child_waiter.join();
     let _ = cancel_watcher.join();
-    // A shell can exit while background descendants keep inherited stdout/stderr
-    // pipes open. Kill the process group before joining pipe readers so
-    // shutdown, timeout, and ordinary completion cannot wedge on normal
-    // background descendants. Also ask pipe readers to stop after draining what
-    // is immediately available: descendants may deliberately detach from the
-    // process group while keeping inherited pipes open.
+    // A shell can exit while background descendants keep inherited
+    // stdout/stderr pipes open. Kill the process group before joining pipe
+    // readers so shutdown, timeout, and ordinary completion cannot wedge on
+    // normal background descendants. Also ask pipe readers to stop after
+    // draining what is immediately available: descendants may deliberately
+    // detach from the process group while keeping inherited pipes open.
     process_cancel.kill_process_group();
     stdout_stop.request();
     stderr_stop.request();

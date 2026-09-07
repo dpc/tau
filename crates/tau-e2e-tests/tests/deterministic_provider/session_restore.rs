@@ -310,9 +310,9 @@ fn run_output_length_restart_cut(
     } else {
         assert_eq!(final_stats.estimated_api_cost.as_picodollars(), 0);
     }
-    // After restart the journal proves no source resend and exactly one reserved
-    // successor. A separate accepted post-terminal initialization suffix may
-    // dispatch independently of this closed lineage.
+    // After restart the journal proves no source resend and exactly one
+    // reserved successor. A separate accepted post-terminal initialization
+    // suffix may dispatch independently of this closed lineage.
     let dispatches = after
         .iter()
         .filter_map(|record| match &record.event {

@@ -629,9 +629,9 @@ impl TauExtension for StdNotificationsExtension {
         builder
             .ready_message("std-notifications ready")
             .configure_raw(handle_configure);
-        // Subscribe-time catch-up delivers prior prompts/results as replay-marked
-        // frames; every delivery handler is live-only so sounds and idle nudges
-        // only fire for live activity.
+        // Subscribe-time catch-up delivers prior prompts/results as
+        // replay-marked frames; every delivery handler is live-only so
+        // sounds and idle nudges only fire for live activity.
         for event_name in subscribed_events() {
             builder.on_raw_live(EventSelector::Exact(event_name), handle_live_delivery);
         }
@@ -1331,9 +1331,10 @@ impl NotificationLoop {
 
     fn agent_for_tool_result(&self, call_id: &tau_proto::ToolCallId) -> Option<tau_proto::AgentId> {
         self.tool_call_agents.get(call_id).cloned().or_else(|| {
-            // Prefer the provider tool-call owner index. The single-waiting-agent
-            // fallback keeps legacy/fixture streams working when they emit a
-            // background placeholder without the preceding tool-call response.
+            // Prefer the provider tool-call owner index. The
+            // single-waiting-agent fallback keeps legacy/fixture
+            // streams working when they emit a background
+            // placeholder without the preceding tool-call response.
             let mut waiting_agents = self
                 .agent_turns
                 .iter()

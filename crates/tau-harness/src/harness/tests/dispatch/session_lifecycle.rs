@@ -366,9 +366,10 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
 
 #[test]
 fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
-    // Regression: after a cold resume the UI may know the selected agent id from
-    // replay and send targeted prompts. The harness must rebuild the live
-    // agent_id -> default conversation map from durable session events.
+    // Regression: after a cold resume the UI may know the selected agent id
+    // from replay and send targeted prompts. The harness must rebuild the
+    // live agent_id -> default conversation map from durable session
+    // events.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let agent_id = {
@@ -470,8 +471,9 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
     assert_eq!(active_entry.status, tau_core::AgentListStatus::Busy);
     std::fs::remove_dir(&checkpoint_obstacle).expect("release checkpoint publication");
     // Resume queues fresh initialization and restore suffixes on the managed
-    // persistence worker. The live snapshot above remains at its older checkpoint;
-    // release the writer leases before checking the repaired complete EOF.
+    // persistence worker. The live snapshot above remains at its older
+    // checkpoint; release the writer leases before checking the repaired
+    // complete EOF.
     harness.shutdown().expect("shutdown resumed harness");
     drop(harness);
     for path in &paths {

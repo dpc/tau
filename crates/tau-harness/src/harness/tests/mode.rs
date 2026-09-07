@@ -1429,7 +1429,8 @@ fn daemon_mode_renders_tool_definitions_for_requested_role() {
 #[test]
 fn daemon_mode_reports_unknown_role_for_rendered_tool_definitions_request() {
     // Tool diagnostics should fail in-band for role typos, matching prompt
-    // diagnostics and avoiding a misleading dump for the selected fallback role.
+    // diagnostics and avoiding a misleading dump for the selected fallback
+    // role.
     let td = TempDir::new().expect("tempdir");
     let sock = td.path().join("daemon.sock");
     let sp = td.path().join("state");
