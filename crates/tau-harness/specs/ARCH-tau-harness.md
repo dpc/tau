@@ -561,10 +561,14 @@ routing or liveness decisions.
 
 Exact lookup opens only the requested claim. An absent or safely unlocked claim
 linearizes as not running; a contended claim whose socket cannot complete exact
-session admission is incomplete. Listing scans bounded contended claims and
-fails wholly rather than returning a partial snapshot. Every routed socket
-client declares the expected session and receives `session_accepted` before
-semantic traffic.
+session admission is incomplete. Explicit diagnostic listing returns only
+exact-admitted responders and separately reports omitted incomplete claims;
+strict implicit target selection still requires a complete snapshot. Peer
+discovery likewise retains verified compatible responders while marking a
+snapshot incomplete when another candidate fails. Each candidate exchange has
+its own bound inside the whole-call deadline so one incompatible responder
+cannot consume the complete probe budget. Every routed socket client declares
+the expected session and receives `session_accepted` before semantic traffic.
 The built-in `tau-runtime-probe` remains semantically quarantined after exact
 admission: it may request only `get_current_session` diagnostics or disconnect.
 It cannot subscribe, inspect agents/debug/tree state, request shutdown, or

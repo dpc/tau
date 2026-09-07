@@ -36,16 +36,21 @@ running. A contended claim must contain the exact session identity and its socke
 must complete exact-session admission; unavailable, malformed, or mismatched
 contended state is incomplete and never falls back to PID or catalog scanning.
 Only a daemon holding the session claim may reclaim its stale socket. Listing
-alone performs bounded claim-directory traversal and fails wholly on traversal,
-deadline, or probe incompleteness. Outbound and inbound socket jobs retain
-bounded global admission and absolute deadlines. A 64 KiB message limit bounds
-accepted peer text. Disconnect and final daemon shutdown cancel live work;
-generation-tagged completions cannot enter a retired runtime.
+alone performs bounded claim-directory traversal. A traversal failure makes the
+snapshot incomplete, while an individual failed or timed-out probe preserves
+already verified compatible peers and marks the result `scan_truncated`.
+Outbound and inbound socket jobs retain bounded global admission and absolute
+deadlines. A 64 KiB message limit bounds accepted peer text. Disconnect and
+final daemon shutdown cancel live work; generation-tagged completions cannot
+enter a retired runtime.
 Claim listing and opted-in peer probing share one whole-call deadline. A timed
-out or failed opted-in probe makes the snapshot incomplete rather than exposing
-partial results, and cancellation is rechecked after claim reads and before
-socket I/O. Exact identity probes are quarantined diagnostic clients and do not
-count as completed UIs.
+out or failed opted-in probe is omitted without suppressing successfully
+verified peers, and each candidate exchange has a smaller bound within that
+whole-call deadline. Candidate scheduling probes the caller's current session
+first, then remaining claims in session-id order, so deadline pressure does not
+hide the caller behind unrelated failed peers. Cancellation is rechecked after
+claim reads and before socket I/O. Exact identity probes are quarantined
+diagnostic clients and do not count as completed UIs.
 
 The target admits input before creation or receive publication. Each endpoint
 accepts at most 32 queued peer inputs and 256 KiB of queued peer body, including

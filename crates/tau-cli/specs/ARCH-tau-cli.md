@@ -15,6 +15,11 @@ All modes start no UI, hold the session-keyed runtime claim, expose the
 session-keyed socket for `tau session list` and `tau attach ID`, and remain
 alive across zero or many UI connections. Every daemon incarnation is
 permanently bound to its construction session.
+The explicit `tau session list` command prints every exact-admitted compatible
+responder even when another contended claim is incompatible or unresponsive,
+then warns once on stderr with the number of omitted claims. Its plain and JSON
+stdout formats remain unchanged. Implicit attach selection retains strict
+complete-snapshot discovery.
 
 `tau serve` alone accepts the default-off `--mirror-extension-stderr` operator
 sink choice. When enabled, each supervised child's stderr still reaches its
@@ -517,12 +522,16 @@ governed by
 [SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
 Relative filters resolve from caller CWD; missing, inaccessible, and
 non-directory values fail as CLI misuse with exit 2. Zero, one, and multiple
-matches plus broken output pipes succeed. Bounded discovery, probe,
-serialization, and non-broken-pipe output failures return another nonzero
-status. Discovery, probe, and serialization failures occur before stdout is
-touched; non-broken-pipe stdout failures may leave a prefix because the stream
-cannot be rolled back. Listing is inspection-only and never creates or removes
-runtime or persisted state.
+matches plus broken output pipes succeed. Claim-directory traversal, whole-call
+discovery, serialization, and non-broken-pipe output failures return another nonzero
+status.
+A claim-directory traversal or whole-call discovery failure occurs before
+stdout is touched. An individual incompatible, stalled, closed, or otherwise
+incomplete contended responder is instead omitted: verified plain or JSON rows
+are written, one count-bearing warning goes to stderr, and the command succeeds.
+Serialization failures still occur before stdout; non-broken-pipe stdout
+failures may leave a prefix because the stream cannot be rolled back. Listing is
+inspection-only and never creates or removes runtime or persisted state.
 
 `tau agent list` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable

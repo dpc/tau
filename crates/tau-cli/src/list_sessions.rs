@@ -20,9 +20,26 @@ struct SessionListJsonEntry<'a> {
 /// Runs `tau session list` after clap has validated and canonicalized
 /// arguments.
 pub(crate) fn run(args: &crate::cli::SessionListArgs) -> Result<(), CliError> {
-    let sessions = tau_harness::runtime_dir::list_running_sessions()?;
-    let output = render(&sessions, args)?;
-    crate::line_output::write_stdout(&output)
+    let snapshot = tau_harness::runtime_dir::list_running_sessions_tolerant()?;
+    let output = render(&snapshot.sessions, args)?;
+    crate::line_output::write_stdout(&output)?;
+    if let Some(warning) = incomplete_claim_warning(snapshot.incomplete_claims) {
+        eprintln!("{warning}");
+    }
+    Ok(())
+}
+
+fn incomplete_claim_warning(incomplete_claims: usize) -> Option<String> {
+    match incomplete_claims {
+        0 => None,
+        1 => Some(
+            "warning: omitted 1 contended runtime claim that did not complete compatible exact-session admission"
+                .to_owned(),
+        ),
+        count => Some(format!(
+            "warning: omitted {count} contended runtime claims that did not complete compatible exact-session admission"
+        )),
+    }
 }
 
 /// Builds a complete output snapshot before stdout is touched.

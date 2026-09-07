@@ -123,12 +123,16 @@ a signal, deletes session data, or bypasses runtime socket access policy.
 
 Relative `--dir` values resolve from the caller's current directory. Missing,
 inaccessible, and non-directory values are CLI errors with exit status 2.
-Zero, one, and multiple matches are successful complete snapshots, and a closed
-output pipe is also success. Other discovery, probe, serialization, or output
-failures return nonzero. Discovery, probe, and serialization failures occur
-before stdout is touched; a stdout write failure can leave a written prefix
-because arbitrary output streams cannot be rolled back. The command only
-inspects runtime candidates and does not create or clean up state.
+Zero, one, and multiple verified matches are successful, and a closed output
+pipe is also success. If an individual contended claim is incompatible,
+unresponsive, or otherwise cannot complete exact-session admission, Tau omits
+it, preserves the plain or JSON stdout rows from compatible responders, and
+prints one count-bearing warning on stderr. Claim-directory traversal,
+whole-call discovery, serialization, and non-broken-pipe output failures return
+nonzero. Discovery and serialization failures occur before stdout is touched; a
+stdout write failure can leave a written prefix because arbitrary output streams
+cannot be rolled back. The command only inspects runtime candidates and does not
+create or clean up state.
 
 There is also a narrow temporary action-input redaction exception:
 content-enabled prompt drafts represent a recognizable `:email auth google

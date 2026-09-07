@@ -407,10 +407,10 @@ fn peer_discovery_reports_result_truncation() {
     drop(claim);
 }
 
-/// A failed opted-in probe makes the whole snapshot incomplete rather than
-/// returning a partial set of successfully probed peers.
+/// One failed opted-in probe marks the scan incomplete without suppressing an
+/// independently exact-admitted compatible peer.
 #[test]
-fn peer_discovery_rejects_partial_results_after_probe_failure() {
+fn peer_discovery_preserves_verified_results_after_probe_failure() {
     let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
     let root = bounded_runtime_root();
     let _override = override_runtime_dir(root.path());
@@ -434,12 +434,83 @@ fn peer_discovery_rejects_partial_results_after_probe_failure() {
         DiscoveryCallPermit::try_acquire().expect("discovery permit"),
     );
 
-    assert!(snapshot.sessions.is_empty());
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["peer-live"]
+    );
     assert!(snapshot.scan_truncated);
     live_daemon.join().expect("live peer daemon");
     drop(live_claim);
     drop(blocked_listener);
     drop(blocked_claim);
+}
+
+/// A full worker wave of incompatible or nonreplying peers cannot spend the
+/// whole-call budget before a later compatible peer receives a probe.
+#[test]
+fn peer_discovery_bounds_each_candidate_before_later_healthy_peer() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let mut blocked = Vec::new();
+    for index in 0..MAX_DISCOVERY_PROBES {
+        let id = session(&format!("a-blocked-{index}"));
+        let mut claim = claim_session(root.path(), &id).expect("claim blocked peer");
+        claim
+            .reclaim_stale_socket()
+            .expect("reclaim blocked peer socket");
+        let listener = UnixListener::bind(claim.socket_path()).expect("bind blocked peer socket");
+        claim.publish(true).expect("publish blocked peer claim");
+        blocked.push((claim, listener));
+    }
+    let (live_claim, live_daemon) = spawn_peer_daemon(&root, "z-peer-live", true);
+
+    let snapshot = discover_peer_sessions(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+    );
+
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-peer-live"]
+    );
+    assert!(snapshot.scan_truncated);
+    live_daemon.join().expect("live peer daemon");
+    drop(live_claim);
+    drop(blocked);
+}
+
+/// Peer scheduling protects the caller's own healthy session from deadline
+/// pressure, then keeps every other candidate deterministic by session id.
+#[test]
+fn peer_discovery_prioritizes_current_session_before_sorted_peers() {
+    let record = |session_id: &str| ClaimRecord {
+        version: CLAIM_VERSION,
+        session_id: session(session_id),
+        project_root: PathBuf::from("/project"),
+        peer_entrypoint: true,
+    };
+    let mut records = vec![record("a-peer"), record("z-current"), record("b-peer")];
+
+    prioritize_peer_claims(&mut records, "z-current");
+
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-current", "a-peer", "b-peer"]
+    );
 }
 
 /// Saturated global probe slots keep the candidate queued through the total
@@ -663,6 +734,43 @@ fn running_session_list_is_reachable_sorted_and_empty_when_absent() {
     daemon_a.join().expect("session-a daemon");
     daemon_b.join().expect("session-b daemon");
     drop((claim_a, claim_b));
+}
+
+/// Explicit diagnostic listing preserves exact-admitted compatible responders
+/// while counting contended claims that cannot complete compatible admission.
+#[test]
+fn tolerant_running_session_list_counts_incomplete_claims() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let blocked_id = session("a-session-blocked");
+    let mut blocked_claim = claim_session(root.path(), &blocked_id).expect("claim blocked session");
+    blocked_claim
+        .reclaim_stale_socket()
+        .expect("reclaim blocked socket");
+    let blocked_listener =
+        UnixListener::bind(blocked_claim.socket_path()).expect("bind blocked socket");
+    blocked_claim
+        .publish(false)
+        .expect("publish blocked session claim");
+    let (live_claim, live_daemon) =
+        spawn_exact_probe_daemon(&root, "z-session-live", ExactProbeReply::Correlated);
+
+    let snapshot = list_running_sessions_tolerant().expect("tolerant listing");
+
+    assert_eq!(snapshot.incomplete_claims, 1);
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-session-live"]
+    );
+    live_daemon.join().expect("live session daemon");
+    drop(live_claim);
+    drop(blocked_listener);
+    drop(blocked_claim);
 }
 
 /// Peer discovery ignores claims that did not opt in and exposes only the

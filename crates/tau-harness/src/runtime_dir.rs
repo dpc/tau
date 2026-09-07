@@ -62,6 +62,16 @@ pub struct RunningSession {
     pub project_root: PathBuf,
 }
 
+/// Verified responders plus the number of contended claims omitted from an
+/// explicitly tolerant runtime listing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunningSessionSnapshot {
+    /// Exact-admitted running sessions.
+    pub sessions: Vec<RunningSession>,
+    /// Contended claims that did not complete compatible exact admission.
+    pub incomplete_claims: usize,
+}
+
 /// Non-queued admission for one top-level peer-discovery call.
 #[derive(Clone)]
 pub(crate) struct DiscoveryCallPermit {
@@ -724,6 +734,104 @@ pub fn list_running_sessions() -> io::Result<Vec<RunningSession>> {
     Ok(sessions)
 }
 
+/// Lists every exact-admitted responder while counting individually incomplete
+/// contended claims.
+///
+/// Claim-directory traversal remains strict. This tolerant responder policy is
+/// intended for explicit diagnostic listing, not implicit target selection.
+pub fn list_running_sessions_tolerant() -> io::Result<RunningSessionSnapshot> {
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    let permit = DiscoveryCallPermit::try_acquire()
+        .ok_or_else(|| io::Error::other("running-session discovery is busy"))?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let scan_cancelled = Arc::clone(&cancelled);
+    let scan_permit = permit.clone();
+    let scan_dir = claims_dir();
+    let (scan_tx, scan_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _permit = scan_permit;
+        #[cfg(test)]
+        let _worker = DiscoveryWorkerGuard::new();
+        let result = list_running_claim_records_until(&scan_dir, deadline, &scan_cancelled);
+        let _ = scan_tx.send(result);
+    });
+    let mut records = deadline
+        .checked_duration_since(Instant::now())
+        .and_then(|remaining| scan_rx.recv_timeout(remaining).ok())
+        .and_then(Result::ok)
+        .ok_or_else(|| {
+            cancelled.store(true, Ordering::Release);
+            io::Error::other("could not list every running session claim")
+        })?;
+    records.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    let candidate_count = records.len();
+    let socket_dir = sockets_dir();
+    let queue = Arc::new(Mutex::new(
+        records
+            .into_iter()
+            .map(|record| {
+                let stem = socket_dir.join(session_key(&record.session_id));
+                (record, stem)
+            })
+            .collect::<std::collections::VecDeque<_>>(),
+    ));
+    let workers = MAX_DISCOVERY_PROBES.min(candidate_count);
+    let (tx, rx) = mpsc::channel();
+    let mut sessions = Vec::with_capacity(candidate_count);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let queue = Arc::clone(&queue);
+            let tx = tx.clone();
+            let cancelled = Arc::clone(&cancelled);
+            scope.spawn(move || {
+                #[cfg(test)]
+                let _worker = DiscoveryWorkerGuard::new();
+                loop {
+                    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                        break;
+                    }
+                    let Some(slot) = DiscoveryProbeSlot::acquire(deadline, &cancelled) else {
+                        break;
+                    };
+                    let candidate = queue.lock().expect("queue poisoned").pop_front();
+                    let Some((record, stem)) = candidate else {
+                        break;
+                    };
+                    let probe_deadline = candidate_probe_deadline(deadline);
+                    let running =
+                        probe_exact_session(&stem, &record.session_id, probe_deadline, &cancelled);
+                    drop(slot);
+                    if tx.send(running).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(remaining) {
+                Ok(Some(running)) => sessions.push(running),
+                Ok(None) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+            }
+        }
+        cancelled.store(true, Ordering::Release);
+        discovery_probe_slots().1.notify_all();
+    });
+    sessions.extend(rx.try_iter().flatten());
+    drop(permit);
+    sessions.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then(left.project_root.cmp(&right.project_root))
+    });
+    Ok(RunningSessionSnapshot {
+        incomplete_claims: candidate_count.saturating_sub(sessions.len()),
+        sessions,
+    })
+}
+
 /// Discovers exact live sessions that advertise an inter-harness entrypoint.
 pub(crate) fn discover_peer_sessions(
     query: Option<&str>,
@@ -748,11 +856,12 @@ pub(crate) fn discover_peer_sessions(
     let scan_result = deadline
         .checked_duration_since(Instant::now())
         .and_then(|remaining| scan_rx.recv_timeout(remaining).ok());
-    let Some(Ok(records)) = scan_result else {
+    let Some(Ok(mut records)) = scan_result else {
         cancelled.store(true, Ordering::Release);
         discovery_probe_slots().1.notify_all();
         return incomplete_peer_snapshot();
     };
+    prioritize_peer_claims(&mut records, current_session_id);
 
     let queue = Arc::new(Mutex::new(
         records
@@ -791,8 +900,13 @@ pub(crate) fn discover_peer_sessions(
                     let Some((record, stem)) = candidate else {
                         break;
                     };
-                    let outcome =
-                        probe_peer_entrypoint(&stem, &record.session_id, deadline, &cancelled);
+                    let probe_deadline = candidate_probe_deadline(deadline);
+                    let outcome = probe_peer_entrypoint(
+                        &stem,
+                        &record.session_id,
+                        probe_deadline,
+                        &cancelled,
+                    );
                     if tx.send((record, outcome)).is_err() {
                         break;
                     }
@@ -822,10 +936,14 @@ pub(crate) fn discover_peer_sessions(
         cancelled.store(true, Ordering::Release);
         discovery_probe_slots().1.notify_all();
     });
-    drop(permit);
-    if incomplete {
-        return incomplete_peer_snapshot();
+    for (record, outcome) in rx.try_iter() {
+        match outcome {
+            PeerProbeOutcome::Available => available.push(record),
+            PeerProbeOutcome::Unavailable => {}
+            PeerProbeOutcome::Incomplete => incomplete = true,
+        }
     }
+    drop(permit);
 
     let needle = query.map(str::to_lowercase);
     let mut projected = available
@@ -856,7 +974,7 @@ pub(crate) fn discover_peer_sessions(
     PeerSessionSnapshot {
         sessions: projected,
         truncated,
-        scan_truncated: false,
+        scan_truncated: incomplete,
     }
 }
 
@@ -967,6 +1085,20 @@ fn probe_peer_entrypoint(
 
 fn probe_remaining(deadline: Instant, cancelled: &AtomicBool) -> Option<Duration> {
     probe_remaining_at(deadline, cancelled, Instant::now())
+}
+
+fn candidate_probe_deadline(deadline: Instant) -> Instant {
+    deadline.min(Instant::now() + PROBE_TIMEOUT)
+}
+
+fn prioritize_peer_claims(records: &mut [ClaimRecord], current_session_id: &str) {
+    records.sort_by(|left, right| {
+        let left_current = left.session_id.as_str() == current_session_id;
+        let right_current = right.session_id.as_str() == current_session_id;
+        right_current
+            .cmp(&left_current)
+            .then(left.session_id.cmp(&right.session_id))
+    });
 }
 
 fn probe_remaining_at(deadline: Instant, cancelled: &AtomicBool, now: Instant) -> Option<Duration> {

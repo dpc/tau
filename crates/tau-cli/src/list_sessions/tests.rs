@@ -82,3 +82,28 @@ fn directory_filter_matches_only_the_exact_project_root() {
 
     assert_eq!(output, "exact\n");
 }
+
+/// Complete discovery stays silent so routine human and machine-readable
+/// listings do not gain an unconditional stderr side channel.
+#[test]
+fn complete_listing_has_no_warning() {
+    assert_eq!(incomplete_claim_warning(0), None);
+}
+
+/// Partial discovery reports one count-bearing warning without changing either
+/// stdout representation.
+#[test]
+fn incomplete_listing_warning_is_counted_and_pluralized() {
+    assert_eq!(
+        incomplete_claim_warning(1).as_deref(),
+        Some(
+            "warning: omitted 1 contended runtime claim that did not complete compatible exact-session admission"
+        )
+    );
+    assert_eq!(
+        incomplete_claim_warning(3).as_deref(),
+        Some(
+            "warning: omitted 3 contended runtime claims that did not complete compatible exact-session admission"
+        )
+    );
+}
