@@ -27,16 +27,28 @@ pub struct CapturedChatRequest {
     pub body: serde_json::Value,
 }
 
-/// Closed three-step response script selected by the fixture.
+/// Closed response script selected by the fixture.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Script {
     /// One throttle followed by two ordinary successful prompts.
     Retry,
     /// One single-tool round, one parallel-tool round, then visible output.
     Qwen,
+    /// Two completed turns followed by llama.cpp overflow retreat and rolling.
+    Compaction,
 }
 
-/// Three-step bounded loopback Chat Completions response script.
+impl Script {
+    /// Return the exact number of accepted requests in this closed script.
+    fn request_count(self) -> usize {
+        match self {
+            Self::Retry | Self::Qwen => 3,
+            Self::Compaction => 7,
+        }
+    }
+}
+
+/// Bounded loopback Chat Completions response script.
 #[derive(Debug)]
 pub(super) struct ScriptedChatServer {
     /// Bound IPv4 loopback address.
@@ -45,6 +57,8 @@ pub(super) struct ScriptedChatServer {
     shutdown: Arc<AtomicBool>,
     /// Number of complete upstream requests the script accepted.
     request_count: Arc<AtomicUsize>,
+    /// Exact number of requests owned by the selected closed script.
+    expected_request_count: usize,
     /// Ordered wake source paired with the listener in the server worker.
     retry_release: Mutex<UnixStream>,
     /// Captured requests in upstream arrival order.
@@ -69,6 +83,20 @@ enum ScriptStep {
     /// Qwen continuation followed by visible output and usage-only terminal
     /// data.
     QwenFinal,
+    /// First ordinary history turn.
+    CompactionHistoryA,
+    /// Second ordinary history turn.
+    CompactionHistoryB,
+    /// Initial HTTP context overflow.
+    CompactionInferenceOverflow,
+    /// Full standalone prefix rejected by SSE typed overflow.
+    CompactionFullPrefixOverflow,
+    /// First successful smaller-prefix summary.
+    CompactionSummaryA,
+    /// Successful rolling summary through the original target.
+    CompactionSummaryB,
+    /// Resumed inference after the recovery chain.
+    CompactionResumed,
 }
 
 impl ScriptedChatServer {
@@ -82,18 +110,28 @@ impl ScriptedChatServer {
         let request_count = Arc::new(AtomicUsize::new(0));
         let worker_request_count = Arc::clone(&request_count);
         let (retry_release, mut worker_retry_release) = UnixStream::pair()?;
-        let (request_tx, request_rx) = mpsc::sync_channel(4);
+        let expected_request_count = script.request_count();
+        let (request_tx, request_rx) = mpsc::sync_channel(expected_request_count + 1);
         let worker = std::thread::spawn(move || {
             let steps = match script {
-                Script::Retry => [
+                Script::Retry => vec![
                     ScriptStep::Throttle,
                     ScriptStep::P1Success,
                     ScriptStep::P2Success,
                 ],
-                Script::Qwen => [
+                Script::Qwen => vec![
                     ScriptStep::QwenSingleTool,
                     ScriptStep::QwenParallelTools,
                     ScriptStep::QwenFinal,
+                ],
+                Script::Compaction => vec![
+                    ScriptStep::CompactionHistoryA,
+                    ScriptStep::CompactionHistoryB,
+                    ScriptStep::CompactionInferenceOverflow,
+                    ScriptStep::CompactionFullPrefixOverflow,
+                    ScriptStep::CompactionSummaryA,
+                    ScriptStep::CompactionSummaryB,
+                    ScriptStep::CompactionResumed,
                 ],
             };
             for step in steps {
@@ -115,7 +153,9 @@ impl ScriptedChatServer {
             let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
             if !worker_shutdown.load(Ordering::SeqCst) {
                 drop(stream);
-                return Err("provider issued more than three upstream requests".to_owned());
+                return Err(format!(
+                    "provider issued more than {expected_request_count} upstream requests"
+                ));
             }
             Ok(())
         });
@@ -126,6 +166,7 @@ impl ScriptedChatServer {
             retry_release: Mutex::new(retry_release),
             request_rx,
             worker: Some(worker),
+            expected_request_count,
         })
     }
 
@@ -174,9 +215,10 @@ impl ScriptedChatServer {
     /// Completes the exact script and joins its worker.
     pub(super) fn finish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let request_count = self.request_count.load(Ordering::SeqCst);
-        if request_count != 3 {
+        if request_count != self.expected_request_count {
             return Err(format!(
-                "loopback Chat Completions script consumed {request_count} requests, expected 3"
+                "loopback Chat Completions script consumed {request_count} requests, expected {}",
+                self.expected_request_count
             )
             .into());
         }
@@ -347,6 +389,59 @@ fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(
              data: {\"choices\":[{\"delta\":{\"content\":\"Qwen complete ✓\"}}]}\n\n\
              data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
              data: {\"choices\":[],\"usage\":{\"prompt_tokens\":101,\"completion_tokens\":17,\"total_tokens\":118}}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::CompactionHistoryA => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"history A complete\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::CompactionHistoryB => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"history B complete\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::CompactionInferenceOverflow => (
+            "400 Bad Request",
+            "application/json",
+            r#"{"error":{"code":400,"message":"request exceeds context","type":"exceed_context_size_error","n_prompt_tokens":9000,"n_ctx":8192}}"#,
+            None,
+        ),
+        ScriptStep::CompactionFullPrefixOverflow => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"error\":{\"code\":400,\"message\":\"request exceeds context\",\
+             \"type\":\"exceed_context_size_error\"}}\n\n",
+            None,
+        ),
+        ScriptStep::CompactionSummaryA => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary A\"},\
+             \"finish_reason\":\"stop\",\"stop_reason\":null,\"token_ids\":null}]}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::CompactionSummaryB => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary B\"},\
+             \"finish_reason\":\"stop\",\"stop_reason\":\"eos\",\"token_ids\":null}]}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::CompactionResumed => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"recovered completion\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
              data: [DONE]\n\n",
             None,
         ),

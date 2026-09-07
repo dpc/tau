@@ -2583,6 +2583,167 @@ fn compact_stream_accepts_only_final_narrative_and_reasoning() {
     );
 }
 
+/// The complete vLLM terminal stream shape pinned at upstream revision
+/// `1f778486fc313f3599a6b59e67f65b1c186477fd` must remain valid without
+/// admitting token tracing or weakening the required `stop` terminal.
+#[test]
+fn compact_stream_accepts_pinned_vllm_terminal_metadata_fixture() {
+    let mut state = StreamState::new_for_attempt(
+        CacheUsageCompat::OpenAi,
+        Some(tau_proto::ByteCount::new(64)),
+    );
+    for event in [
+        serde_json::json!({
+            "id": "chatcmpl-vllm",
+            "object": "chat.completion.chunk",
+            "created": 1_757_141_666_u64,
+            "model": "Qwen/Qwen3-27B",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": ""},
+                "logprobs": null,
+                "finish_reason": null,
+                "token_ids": null,
+            }],
+            "usage": null,
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-vllm",
+            "object": "chat.completion.chunk",
+            "created": 1_757_141_666_u64,
+            "model": "Qwen/Qwen3-27B",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "durable summary"},
+                "logprobs": null,
+                "finish_reason": null,
+                "token_ids": null,
+            }],
+            "usage": null,
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-vllm",
+            "object": "chat.completion.chunk",
+            "created": 1_757_141_666_u64,
+            "model": "Qwen/Qwen3-27B",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": 151645,
+                "token_ids": null,
+            }],
+            "usage": null,
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-vllm",
+            "object": "chat.completion.chunk",
+            "created": 1_757_141_666_u64,
+            "model": "Qwen/Qwen3-27B",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 3,
+                "total_tokens": 14,
+            },
+        }),
+    ] {
+        apply_event(&mut state, &event, &mut |_| {}).expect("pinned vLLM compact event");
+    }
+    let state = state
+        .validate_compaction()
+        .expect("complete vLLM compact response");
+    assert_eq!(state.text, "durable summary");
+    let usage = state.usage().expect("vLLM usage trailer");
+    assert_eq!(usage.prompt_sent_tokens, 11);
+    assert_eq!(usage.response_received_tokens, 3);
+}
+
+/// vLLM's documented null, string, and integer stop metadata is content-free,
+/// while any other type and non-null token trace remains fail-closed.
+#[test]
+fn compact_stream_validates_vllm_terminal_metadata_narrowly() {
+    for stop_reason in [
+        serde_json::Value::Null,
+        serde_json::json!("eos"),
+        serde_json::json!(-1),
+        serde_json::json!(u64::MAX),
+    ] {
+        let mut state = StreamState::new_for_attempt(
+            CacheUsageCompat::None,
+            Some(tau_proto::ByteCount::new(64)),
+        );
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "summary"},
+                    "finish_reason": "stop",
+                    "stop_reason": stop_reason,
+                    "token_ids": null,
+                }],
+            }),
+            &mut |_| {},
+        )
+        .expect("documented vLLM terminal metadata");
+        state
+            .validate_compaction()
+            .expect("metadata must not replace narrative validation");
+    }
+
+    let mut pre_terminal =
+        StreamState::new_for_attempt(CacheUsageCompat::None, Some(tau_proto::ByteCount::new(64)));
+    let error = apply_event(
+        &mut pre_terminal,
+        &serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "summary"},
+                "finish_reason": null,
+                "stop_reason": "eos",
+                "token_ids": null,
+            }],
+        }),
+        &mut |_| {},
+    )
+    .expect_err("non-null stop metadata before the terminal must reject");
+    assert!(matches!(
+        error,
+        LlmError::InvalidCompaction(message)
+            if message == "summary compactor returned invalid stop metadata"
+    ));
+
+    for (field, value) in [
+        ("stop_reason", serde_json::json!(1.5)),
+        ("stop_reason", serde_json::json!(true)),
+        ("stop_reason", serde_json::json!({"opaque": true})),
+        ("token_ids", serde_json::json!([])),
+        ("token_ids", serde_json::json!([1, 2, 3])),
+    ] {
+        let mut state = StreamState::new_for_attempt(
+            CacheUsageCompat::None,
+            Some(tau_proto::ByteCount::new(64)),
+        );
+        let mut event = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "summary"},
+                "finish_reason": "stop",
+            }],
+        });
+        event["choices"][0][field] = value;
+        assert!(
+            matches!(
+                apply_event(&mut state, &event, &mut |_| {}),
+                Err(LlmError::InvalidCompaction(_))
+            ),
+            "{field} must remain narrowly validated"
+        );
+    }
+}
+
 /// llama.cpp sends its final timing metadata after the singleton `stop` event
 /// as an empty-choices usage event. The compact validator must preserve that
 /// ordering while retaining the extracted usage and accepted summary.
@@ -4322,6 +4483,7 @@ fn canonical_context_error_bypasses_retry_scheduler() {
     for body in [
         r#"{"error":{"code":"context_length_exceeded","type":"rate_limit_exceeded"}}"#,
         r#"{"error":{"code":"rate_limit_exceeded","type":"context_length_exceeded"}}"#,
+        r#"{"error":{"code":"rate_limit_exceeded","type":"exceed_context_size_error"}}"#,
     ] {
         let error = LlmError::HttpStatus(429, body.to_owned());
         assert_eq!(error.retry_decision(), None);
@@ -4330,6 +4492,32 @@ fn canonical_context_error_bypasses_retry_scheduler() {
             Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
         );
     }
+}
+
+/// llama.cpp's current HTTP 400 envelope is precise context-capacity feedback,
+/// while an adjacent generic invalid request remains a deterministic rejection.
+#[test]
+fn llama_cpp_http_context_error_is_typed_without_broadening_other_400s() {
+    let context = LlmError::HttpStatus(
+        400,
+        r#"{"error":{"code":400,"message":"request exceeds context","type":"exceed_context_size_error","n_prompt_tokens":4390,"n_ctx":4096}}"#
+            .to_owned(),
+    );
+    assert_eq!(context.retry_decision(), None);
+    assert_eq!(
+        context.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+
+    let invalid = LlmError::HttpStatus(
+        400,
+        r#"{"error":{"code":400,"type":"invalid_request_error"}}"#.to_owned(),
+    );
+    assert_eq!(invalid.retry_decision(), None);
+    assert_eq!(
+        invalid.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
 }
 
 /// Ensures bounded raw HTTP bodies remain private classification/debug input
@@ -4461,6 +4649,113 @@ fn streamed_context_error_is_typed_terminal_without_assistant_output() {
         failure.failure_kind,
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
+}
+
+/// llama.cpp's SSE-wrapped current typed error must terminalize as context
+/// exhaustion rather than becoming an empty or retryable response.
+#[test]
+fn llama_cpp_streamed_context_error_is_typed_terminal() {
+    let bytes = concat!(
+        "data: {\"error\":{\"code\":400,\"message\":\"request exceeds context\",",
+        "\"type\":\"exceed_context_size_error\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let mut state = StreamState::new();
+    let mut raw_events = DebugEventCapture::new(false);
+    let error = read_chat_stream_body(
+        path_std_io::Cursor::new(bytes),
+        &mut state,
+        &mut raw_events,
+        &prompt().agent_prompt_id,
+        &mut |_| {},
+        &mut || false,
+    )
+    .expect_err("typed llama.cpp SSE error must stop parsing");
+    let AttemptOutcome::Terminal(failure) = finish_attempt(Err(error), state.semantic_progress)
+    else {
+        panic!("typed llama.cpp SSE error must terminalize");
+    };
+    assert_eq!(failure.progress, SemanticProgress::None);
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
+/// Provider errors are applied before same-event content, so an error-bearing
+/// event cannot fabricate semantic progress and suppress an otherwise safe
+/// retry.
+#[test]
+fn same_event_error_precedes_content_progress() {
+    let mut state = StreamState::new();
+    let error = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "error": {"code": "server_error"},
+            "choices": [{"delta": {"content": "must not be accepted"}}],
+        }),
+        &mut |_| {},
+    )
+    .expect_err("stream error must own the event");
+    let AttemptOutcome::Retryable { progress, .. } =
+        finish_attempt(Err(error), state.semantic_progress)
+    else {
+        panic!("pre-progress overload remains retryable");
+    };
+    assert_eq!(progress, SemanticProgress::None);
+    assert!(state.output_items().is_empty());
+}
+
+/// Empty or fragmented thinking syntax is parser framing, not accepted model
+/// work; only an actual assistant/reasoning byte may prohibit a finite retry.
+#[test]
+fn thinking_delimiters_do_not_count_as_retry_progress() {
+    for (content, expected_progress) in [
+        ("<thi", SemanticProgress::None),
+        ("<think></think>", SemanticProgress::None),
+        ("<think>x", SemanticProgress::Parsed),
+        ("x", SemanticProgress::Parsed),
+    ] {
+        let events = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n\
+             data: {{malformed-json}}",
+            serde_json::to_string(content).expect("content JSON")
+        );
+        let server = ScriptedTcpServer::spawn(move |mut socket| {
+            let mut request = [0_u8; 16 * 1024];
+            let _ = path_std_io::Read::read(&mut socket, &mut request).expect("read request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{events}",
+                events.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .expect("write streamed response");
+        });
+        let mut configured = provider();
+        configured.base_url = format!("http://{}/v1", server.address());
+        let model = configured.models[0].clone();
+        let resolved = resolved_provider(&configured);
+        let outcome = run_attempt(
+            &prompt(),
+            &resolved,
+            &model,
+            false,
+            &mut |_| {},
+            &mut || false,
+            &tau_provider::OutboundNetworkPolicy::from_environment(
+                path_std_collections::BTreeMap::new(),
+                None,
+            ),
+        );
+        server.finish();
+
+        let AttemptOutcome::Retryable { progress, .. } = outcome else {
+            panic!("malformed stream remains a finite retry candidate");
+        };
+        assert_eq!(progress, expected_progress, "content {content:?}");
+    }
 }
 
 /// Ensures every reviewed streamed context path takes precedence over a known
@@ -4773,13 +5068,13 @@ fn terminal_projection_moves_owned_payload_buffers() {
     );
 }
 
-/// Ensures buffered think-tag prefixes and incomplete tool metadata count as
-/// semantic progress even before either can render as a complete output item.
+/// Buffered think-tag prefixes and tool-call identifiers are framing metadata;
+/// only a non-empty tool name or arguments becomes accepted semantic work.
 #[test]
-fn partial_buffer_and_tool_metadata_are_semantic_progress() {
+fn partial_buffer_and_tool_identifiers_are_not_semantic_progress() {
     let mut content = StreamState::new();
     append_content_delta(&mut content, "<thi").expect("partial think tag");
-    assert_eq!(content.semantic_progress, SemanticProgress::Parsed);
+    assert_eq!(content.semantic_progress, SemanticProgress::None);
     assert!(content.output_items().is_empty());
 
     let mut tool = StreamState::new();
@@ -4793,8 +5088,20 @@ fn partial_buffer_and_tool_metadata_are_semantic_progress() {
         &mut |_| {},
     )
     .expect("partial tool metadata");
-    assert_eq!(tool.semantic_progress, SemanticProgress::Parsed);
+    assert_eq!(tool.semantic_progress, SemanticProgress::None);
     assert!(tool.output_items().is_empty());
+
+    apply_event(
+        &mut tool,
+        &serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "function": {"name": "lookup"}
+            }]}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("accepted tool name");
+    assert_eq!(tool.semantic_progress, SemanticProgress::Parsed);
 }
 
 /// Chat Completions must lower a typed synthetic compaction summary as the

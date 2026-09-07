@@ -106,6 +106,8 @@ impl CompactStreamValidator {
             "index",
             "logprobs",
             "native_finish_reason",
+            "stop_reason",
+            "token_ids",
         ];
         if choice
             .keys()
@@ -121,6 +123,24 @@ impl CompactStreamValidator {
             ));
         }
         if choice.get("logprobs").is_some_and(|value| !value.is_null()) {
+            return Err(invalid(
+                "summary compactor returned unsupported semantic output",
+            ));
+        }
+        let finish_reason = choice.get("finish_reason");
+        if let Some(stop_reason) = choice.get("stop_reason")
+            && !stop_reason.is_null()
+            && ((!stop_reason.is_string()
+                && stop_reason.as_i64().is_none()
+                && stop_reason.as_u64().is_none())
+                || finish_reason.and_then(Value::as_str) != Some("stop"))
+        {
+            return Err(invalid("summary compactor returned invalid stop metadata"));
+        }
+        if choice
+            .get("token_ids")
+            .is_some_and(|value| !value.is_null())
+        {
             return Err(invalid(
                 "summary compactor returned unsupported semantic output",
             ));
@@ -159,7 +179,6 @@ impl CompactStreamValidator {
                 ));
             }
         }
-        let finish_reason = choice.get("finish_reason");
         if choice
             .get("native_finish_reason")
             .is_some_and(|native| !native.is_null() && !native.is_string())

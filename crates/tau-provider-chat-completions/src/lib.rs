@@ -18,7 +18,7 @@ use std::{cell as path_std_cell, io as path_std_io};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use canonical_identifier::CanonicalIdentifierFamily;
+use canonical_identifier::{CanonicalIdentifierFamily, is_context_window_identifier};
 use capture_correlation::CaptureCorrelation;
 use serde::Serialize;
 #[cfg(test)]
@@ -691,7 +691,7 @@ fn http_failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailu
 }
 
 fn classify_structured_identifier(identifier: &str) -> Option<ErrorClassification> {
-    if identifier == "context_length_exceeded" {
+    if is_context_window_identifier(identifier) {
         Some(ErrorClassification::Terminal(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
         ))
@@ -3126,7 +3126,7 @@ fn update_tool_call_metadata(
 ) -> bool {
     let id = non_empty_str(&tool_call["id"]);
     let name = non_empty_str(&function["name"]);
-    if id.is_some() || name.is_some() {
+    if name.is_some() {
         state.semantic_progress = SemanticProgress::Parsed;
     }
     let (changed, accepted_new_name) = {
@@ -3180,9 +3180,6 @@ fn apply_finish_reason(
 }
 
 fn append_content_delta(state: &mut StreamState, content: &str) -> Result<bool, LlmError> {
-    if !content.is_empty() {
-        state.semantic_progress = SemanticProgress::Parsed;
-    }
     state.pending_content.push_str(content);
     let mut changed = false;
     loop {

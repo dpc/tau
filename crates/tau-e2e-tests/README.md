@@ -25,6 +25,12 @@ SSE responses. It covers literal effort and profile fields, reasoning and
 visible output, single and parallel tool calls, byte-exact raw argument replay,
 continuation, and terminal usage without downloading or serving a model.
 
+The llama.cpp compaction case drives the exact production adapter and harness
+through an HTTP overflow, an SSE overflow on the full no-byte-cap compact
+prefix, strict retreat, suffix rolling, and one resumed inference. Its server
+uses only the reviewed `exceed_context_size_error` identifier; adjacent generic
+400 responses remain covered as ordinary request rejection.
+
 ## Deterministic provider tests
 
 The default workspace test run executes a test-only fake provider as a real

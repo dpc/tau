@@ -92,6 +92,117 @@ fn reactive_context_overflow_without_byte_budget_dispatches_exact_target() {
     h.shutdown().expect("shutdown");
 }
 
+/// A provider-owned capacity oracle over the complete materialized logical
+/// request must drive repeated strict retreat and three successful rolling
+/// passes without consulting Tau byte or token estimates.
+#[test]
+fn reactive_no_cap_capacity_oracle_rejects_between_three_successful_passes() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = None;
+    info.standalone_compaction_prefix_budget = None;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    for marker in ["oracle-A", "oracle-B", "oracle-C", "oracle-D"] {
+        h.publish_for_agent(
+            &cid,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
+                agent_id: agent_id.clone(),
+                text: marker.to_owned(),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        );
+    }
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("oracle activation".to_owned()))
+        .expect("dispatch rejected inference");
+    let inference = nth_prompt_created_for_agent(&h, &agent_id, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("provider rejection starts recovery");
+
+    let mut compact_index = 1;
+    let mut accepted_passes = 0;
+    let mut attempted_units = Vec::new();
+    loop {
+        let prompt = nth_prompt_created_for_agent(&h, &agent_id, compact_index);
+        if prompt.operation == tau_proto::PromptOperation::Inference {
+            assert_eq!(accepted_passes, 3);
+            let context = serde_json::to_string(&prompt.context).expect("resumed context");
+            assert!(context.contains("oracle-summary-3"));
+            assert!(context.contains("oracle activation"));
+            for old in ["oracle-A", "oracle-B", "oracle-C", "oracle-D"] {
+                assert!(!context.contains(old), "resumed context resurrected {old}");
+            }
+            break;
+        }
+        assert_eq!(
+            prompt.operation,
+            tau_proto::PromptOperation::StandaloneCompaction
+        );
+        let context = serde_json::to_string(&prompt.context).expect("compact context");
+        assert!(
+            !context.contains("oracle activation"),
+            "activation must remain outside every compact prefix"
+        );
+        let units = ["oracle-A", "oracle-B", "oracle-C", "oracle-D"]
+            .into_iter()
+            .filter(|marker| context.contains(marker))
+            .count()
+            + usize::from(context.contains("oracle-summary-"));
+        attempted_units.push(units);
+        if 2 < units {
+            h.handle_provider_response_finished(context_overflow_response(&prompt))
+                .expect("capacity rejection retreats");
+        } else {
+            accepted_passes += 1;
+            h.handle_provider_response_finished(provider_text_response(
+                &prompt.agent_prompt_id,
+                prompt.agent_id,
+                &format!("oracle-summary-{accepted_passes}"),
+            ))
+            .expect("fitting prefix compacts");
+        }
+        compact_index += 1;
+    }
+
+    assert_eq!(
+        attempted_units,
+        vec![4, 3, 2, 3, 2, 2],
+        "provider capacity must force retreat before and between successful passes"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        2,
+        "only the rejected and final resumed inference may dispatch"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentCompacted(_)))
+            .count(),
+        3,
+        "each fitting pass must commit exactly one replacement boundary"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A restart after the canonical standalone rejection but before its typed
 /// failure must derive and commit the exact retreat successor once.
 #[test]

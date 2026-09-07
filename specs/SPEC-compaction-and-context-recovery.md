@@ -128,12 +128,29 @@ retain only bounded numeric/model/operation categories under normal session
 event retention and never prompt content, provider bodies, credentials,
 headers, account identifiers, or raw error prose. Provider-authored telemetry
 is overwritten, and observations cannot automatically alter safety thresholds.
+Chat Completions recognizes only reviewed structured context identifiers,
+including OpenAI's `context_length_exceeded` and llama.cpp's
+`exceed_context_size_error`; generic HTTP 400, `invalid_request_error`, and
+provider prose remain ordinary request rejection rather than recovery
+authority.
 
 ## Reactive context-overflow recovery
 
 An ordinary inference that receives a canonical, no-output context-window rejection may authorize one durable standalone-compaction chain when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. A context-rejected automatic standalone request durably pre-mints one successor at the immediate previous useful provider-closed cut. Rejection exhaustively repeats that strict retreat until one request succeeds or the history is irreducible. A successful pass then advances toward the immutable logical target by consuming the replacement plus at least one more closed suffix group. The rejected activating input remains in the suffix under the original resume watermark. The finite preceding transcript bounds both phases: retreat strictly moves backward, and forward rolling strictly removes surviving groups. Typed preflight or irreducible failures terminate without recursive inference retry. Inference resumes only after the chain reaches the end of the logical provider window preceding the rejected activation.
 
 Compaction dispatch and continuation reuse the existing durable transaction machinery. A committed partial chain remains owed if its captured route or standalone capability disappears; replay commits one predecessor-linked typed `route_failed` terminal without provider dispatch instead of checkpointing inference. Standalone-compaction overflow, a post-chain inference overflow, a second overflow, and ambiguous dispatch are terminal rather than recursive. Partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never authorize recovery. Replay resumes an unclaimed planned recovery once, continues a committed successful partial chain from its durable predecessor, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
+
+The termination argument is narrower than an unconditional capacity guarantee.
+It proves that one immutable finite target cannot cause infinite retreat or
+forward rolling: every rejected cut is a strict predecessor, and every
+successful continuation consumes at least one surviving closed group.
+Successful completion additionally assumes fixed request overhead leaves
+positive capacity, some replacement-plus-next-group request fits at each
+forward step, the provider emits the reviewed no-output rejection, and each
+accepted summary is valid. Replacement-only reduction, a final summary that
+still cannot fit resumed inference, indivisible oversized groups, provider
+unavailability, cancellation, malformed output, and non-shrinking summaries
+remain explicit terminal boundaries rather than claims of guaranteed recovery.
 
 ## Manual compaction
 

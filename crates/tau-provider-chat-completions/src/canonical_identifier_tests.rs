@@ -13,6 +13,21 @@ fn context_identifier_has_family_wide_precedence() {
     );
 }
 
+/// llama.cpp's exact typed overflow must outrank an earlier known transient
+/// identifier so provider capacity feedback reaches context recovery.
+#[test]
+fn llama_cpp_context_identifier_has_family_wide_precedence() {
+    let value = serde_json::json!({
+        "code": "server_error",
+        "error": {"type": "rate_limit_exceeded"},
+        "response": {"error": {"type": "exceed_context_size_error"}}
+    });
+    assert_eq!(
+        CanonicalIdentifierFamily::from_http_envelope(&value).classified(),
+        Some("exceed_context_size_error")
+    );
+}
+
 /// A known later retry identifier must outrank earlier unknown evidence.
 #[test]
 fn known_transient_outranks_unknown_identifier() {

@@ -197,6 +197,168 @@ fn provider_builtin_qwen_text_tool_continuation_is_exact() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Exercises llama.cpp's exact HTTP and SSE context-overflow identifier through
+/// the production adapter and harness, proving a no-byte-cap full-prefix
+/// rejection retreats once, rolls through the preserved suffix, and resumes the
+/// original activation exactly once.
+#[test]
+fn provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(provider_bin) = provider_builtin_binary()? else {
+        eprintln!(
+            "skipping provider-builtin compaction E2E: \
+             set TAU_E2E_PROVIDER_BUILTIN_BIN to the exact candidate binary"
+        );
+        return Ok(());
+    };
+    let fixture = ProviderBuiltinFixture::new_compaction(
+        "provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix",
+        provider_bin,
+    )?;
+    let socket = fixture.socket_path();
+    fixture.mark_daemon_started();
+    let daemon = DaemonGuard::spawn(&fixture, &socket)?;
+    let mut peer = connect_ui(&socket)?;
+    let mut lifecycle = Lifecycle::default();
+
+    peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+        UiCreateAgent {
+            request_id: "provider-builtin-compaction-create".to_owned(),
+            literal: false,
+            session_id: session_id(),
+            role: "provider-builtin-compaction".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("history A".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("compact-a".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )))?;
+    let history_a = wait_for_created(&mut peer, &mut lifecycle, "compact-a")?;
+    let request_a = fixture.recv_request()?;
+    wait_for_finished(
+        &mut peer,
+        &mut lifecycle,
+        &history_a.agent_prompt_id,
+        "history A complete",
+    )?;
+
+    peer.send(&HarnessInputMessage::emit(Event::UiPromptSubmitted(
+        UiPromptSubmitted {
+            literal: false,
+            session_id: session_id(),
+            text: "history B".to_owned(),
+            agent_id: history_a.agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("compact-b".to_owned()),
+        },
+    )))?;
+    let history_b = wait_for_created(&mut peer, &mut lifecycle, "compact-b")?;
+    let request_b = fixture.recv_request()?;
+    wait_for_finished(
+        &mut peer,
+        &mut lifecycle,
+        &history_b.agent_prompt_id,
+        "history B complete",
+    )?;
+
+    peer.send(&HarnessInputMessage::emit(Event::UiPromptSubmitted(
+        UiPromptSubmitted {
+            literal: false,
+            session_id: session_id(),
+            text: "overflow activation".to_owned(),
+            agent_id: history_a.agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("compact-overflow".to_owned()),
+        },
+    )))?;
+    let _overflow = wait_for_created(&mut peer, &mut lifecycle, "compact-overflow")?;
+    let overflow_request = fixture.recv_request()?;
+    let full_compact = fixture.recv_request()?;
+    let smaller_compact = fixture.recv_request()?;
+    let rolling_compact = fixture.recv_request()?;
+    let resumed = fixture.recv_request()?;
+
+    for request in [
+        &request_a,
+        &request_b,
+        &overflow_request,
+        &full_compact,
+        &smaller_compact,
+        &rolling_compact,
+        &resumed,
+    ] {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v1/chat/completions");
+        assert_eq!(request.body["model"], "llama-compaction-model");
+        assert_eq!(request.body["stream"], true);
+    }
+    let wire = |request: &CapturedChatRequest| {
+        serde_json::to_string(&request.body["messages"]).expect("request messages JSON")
+    };
+    let overflow_wire = wire(&overflow_request);
+    assert!(overflow_wire.contains("history A"));
+    assert!(overflow_wire.contains("history B"));
+    assert!(overflow_wire.contains("overflow activation"));
+
+    let full_wire = wire(&full_compact);
+    assert!(full_wire.contains("history A"));
+    assert!(full_wire.contains("history B"));
+    assert!(!full_wire.contains("overflow activation"));
+    assert!(full_wire.contains("The context window is being compacted"));
+
+    let smaller_wire = wire(&smaller_compact);
+    assert!(smaller_wire.contains("history A"));
+    assert!(smaller_wire.contains("history B"));
+    assert!(!smaller_wire.contains("history B complete"));
+    assert!(!smaller_wire.contains("overflow activation"));
+
+    let rolling_wire = wire(&rolling_compact);
+    assert!(rolling_wire.contains("summary A"));
+    assert!(rolling_wire.contains("history B complete"));
+    assert!(!rolling_wire.contains("history A"));
+    assert!(!rolling_wire.contains("overflow activation"));
+
+    let resumed_wire = wire(&resumed);
+    assert!(resumed_wire.contains("summary B"));
+    assert!(resumed_wire.contains("overflow activation"));
+    assert!(!resumed_wire.contains("history A"));
+    assert!(!resumed_wire.contains("history B"));
+
+    wait_for_any_finished_text(&mut peer, &mut lifecycle, "recovered completion")?;
+
+    disconnect_ui(&mut peer)?;
+    daemon.finish()?;
+    fixture.finish()?;
+    Ok(())
+}
+
+/// Receives one successful canonical provider terminal containing exact
+/// assistant text, regardless of the harness-minted rolling prompt identity.
+fn wait_for_any_finished_text(
+    peer: &mut SocketPeer,
+    lifecycle: &mut Lifecycle,
+    expected_text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        let event = recv_live(peer)?;
+        reject_terminated(&event)?;
+        lifecycle.record(&event);
+        if let Event::ProviderResponseFinished(finished) = event
+            && finished.stop_reason == tau_proto::ProviderStopReason::EndTurn
+            && finished.error.is_none()
+            && has_exact_assistant_text(&finished.output_items, expected_text)
+        {
+            return Ok(());
+        }
+    }
+}
+
 /// Receives the two tool terminals and final Qwen terminal for one logical
 /// harness prompt, checking reasoning and visible output at each phase.
 fn wait_for_qwen_finished(

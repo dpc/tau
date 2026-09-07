@@ -69,13 +69,21 @@ impl<'a> CanonicalIdentifierFamily<'a> {
     #[must_use]
     pub(crate) fn classified(&self) -> Option<&'a str> {
         self.iter()
-            .find(|identifier| *identifier == "context_length_exceeded")
+            .find(|identifier| is_context_window_identifier(identifier))
             .or_else(|| {
                 self.iter()
                     .find(|identifier| classify_error_code(identifier) != RetryClass::Unknown)
             })
             .or_else(|| self.iter().next())
     }
+}
+
+/// Return whether an exact reviewed identifier denotes context exhaustion.
+pub(super) fn is_context_window_identifier(identifier: &str) -> bool {
+    matches!(
+        identifier,
+        "context_length_exceeded" | "exceed_context_size_error"
+    )
 }
 
 #[cfg(test)]

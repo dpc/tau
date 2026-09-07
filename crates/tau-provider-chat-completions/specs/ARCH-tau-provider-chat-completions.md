@@ -60,7 +60,10 @@ nonempty narrative, and independently bounded optional reasoning; tool calls,
 opaque or extra semantic fields, multiple choices, and post-terminal output
 reject the attempt. The compact-only state enforces each semantic channel's
 selected byte limit before appending a delta and rechecks the completed
-projection before release. Ordinary inference keeps its broader parser behavior.
+projection before release. Reviewed vLLM terminal compatibility admits
+`stop_reason` only as null, string, or integer metadata and admits `token_ids`
+only when null; non-null token traces and all other unrecognized choice fields
+remain rejected. Ordinary inference keeps its broader parser behavior.
 The extension sampler exposes only content-free response statistics and existing
 status/activity signals while this validation is pending. It never emits local-summary text or reasoning as a
 transient delta. The backend returns its validated ordinary output projection to
@@ -272,8 +275,9 @@ HTTP classification accepts exact identifiers from root `code`, root `type`,
 `response.error.type`, in that envelope order. Streamed error classification
 accepts `error.code`, `error.type`, and the well-known
 `error.metadata.error_type` provider spelling. These paths accept the exact
-`context_length_exceeded` identifier and the bounded retry-class identifier set
-in `tau_provider::retry_policy::classify_error_code`.
+`context_length_exceeded` and `exceed_context_size_error` context identifiers
+and the bounded retry-class identifier set in
+`tau_provider::retry_policy::classify_error_code`.
 
 New structured paths for terminal context or streamed identifier classification
 may participate only after review documents their exact field path and bounded

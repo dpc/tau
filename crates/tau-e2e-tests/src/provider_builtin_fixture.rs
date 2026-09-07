@@ -22,6 +22,8 @@ enum FixtureScript<'a> {
         /// calls.
         dummy_bin: &'a Path,
     },
+    /// llama.cpp overflow recovery through production Chat Completions.
+    Compaction,
 }
 
 /// Durable session used only by provider-builtin subprocess fixtures.
@@ -87,6 +89,20 @@ impl ProviderBuiltinFixture {
         )
     }
 
+    /// Creates private configuration for the llama.cpp compaction recovery
+    /// script.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the exact provider binary, private directories, or
+    /// generated configuration cannot be prepared.
+    pub fn new_compaction(
+        name: &str,
+        provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_script(name, provider_bin.as_ref(), FixtureScript::Compaction)
+    }
+
     /// Builds one closed production-provider fixture variant.
     fn new_with_script(
         name: &str,
@@ -97,6 +113,7 @@ impl ProviderBuiltinFixture {
         let (server_script, dummy_bin) = match script {
             FixtureScript::Retry => (Script::Retry, None),
             FixtureScript::Qwen { dummy_bin } => (Script::Qwen, Some(exact_binary(dummy_bin)?)),
+            FixtureScript::Compaction => (Script::Compaction, None),
         };
         let tempdir = TempDir::new()?;
         let root = tempdir.path().join(sanitize_name(name));
@@ -118,6 +135,7 @@ impl ProviderBuiltinFixture {
             "models": [{"id": "retry-model"}],
             "credential": {"kind": "none"}
         });
+        let compaction = matches!(server_script, Script::Compaction);
         if qwen {
             profile["extra_body"] = serde_json::json!({
                 "chat_template_kwargs": {
@@ -148,6 +166,11 @@ impl ProviderBuiltinFixture {
                     "single_initial_system_message": true
                 }
             }]);
+        } else if compaction {
+            profile["models"] = serde_json::json!([{
+                "id": "llama-compaction-model",
+                "context_window": 8192,
+            }]);
         }
         std::fs::write(
             profile_dir.join("local.json"),
@@ -155,11 +178,15 @@ impl ProviderBuiltinFixture {
         )?;
         let role = if qwen {
             "provider-builtin-qwen"
+        } else if compaction {
+            "provider-builtin-compaction"
         } else {
             "provider-builtin-retry"
         };
         let model = if qwen {
             "local/Qwen/Qwen3.8-27B"
+        } else if compaction {
+            "local/llama-compaction-model"
         } else {
             "local/retry-model"
         };
