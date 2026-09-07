@@ -30,10 +30,10 @@ inputs. `channel_ids`,
 `listening_scope`, and `send_destinations` were removed and are hard errors.
 Follow the standalone `tau-ext-slack` project's README migration procedure.
 Optional `sender_aliases` bind at most 64 exact U/W ids one-to-one to unique
-lowercase aliases. They are operator presentation only. The native U/W id stays
-authoritative/model-primary; bounded `profile.display_name` from the same
-`users.info` call is untrusted UI-only presentation retained per accepted
-occurrence.
+lowercase aliases. Native U/W identity remains extension-local authority.
+Model-facing facts use an installation-scoped opaque sender reference; a
+configured alias takes display precedence over the bounded
+`profile.display_name`, and both are untrusted presentation only.
 
 For inbound exact mentions of the authenticated installation bot, exactly one
 eligible leading mention is removed for routing/command compatibility and
@@ -229,11 +229,11 @@ message event or both reaction events plus `reactions:read`.
 ## Agent reactions
 
 Grant `slack_react` or `slack:react` separately (it is disabled by default). It
-accepts `{message_ref, emoji, action: add|remove}` only for exact locally written
-incoming create/edit refs or refs returned by successful `slack_send`. Refs use
-the documented `slack:<channel>:<message-ts>` fact-ID form, but it accepts no
-channel IDs or timestamps as separate route selectors, aliases, Unicode emoji,
-list, toggle, or discovery.
+accepts `{message_ref, emoji, action: add|remove}` only for exact Tau-issued
+refs from canonically confirmed incoming create/edit facts or successful
+`slack_send`. Refs use the opaque `slack-message:<digest>` form, but it accepts
+no channel IDs or timestamps as separate route selectors, aliases, Unicode
+emoji, list, toggle, or discovery.
 Removal is limited to same-agent reactions unambiguously added in the current
 runtime. Add `reactions:write`, reinstall the app, and keep the bot a member of
 target conversations. Whole Slack-group grants now include this surface.
@@ -241,12 +241,13 @@ Slack success commits local add/remove ownership only after the successful tool
 result is written and flushed locally. Writer failure retires the whole Slack
 session without retrying or compensating the remote reaction; local flush is
 not a harness commit acknowledgement.
-The CLI renders inbound reaction action, exact actor U/W plus bounded
-display/configured alias, and the exact custom/skin-tone name; it performs no
-Unicode emoji lookup.
+The CLI renders inbound reaction action, the bounded configured alias/display
+when available (otherwise the opaque actor reference), and the exact
+custom/skin-tone name; it performs no Unicode emoji lookup.
 
 Successful `slack_send` results use
-`{"status":"sent","message_ref":"slack:<channel>:<message-ts>","delivery_copies":"one"|"one_or_two_possible"}`
+`{"status":"sent","message_ref":"slack-message:<digest>","delivery_copies":"one"|"one_or_two_possible"}`
 (replacing the former
-plain-text success). The ref activates only after the sent-fact and result frames
-are written and flushed locally; this is not a harness commit acknowledgement.
+plain-text success). The ref remains inert after the local sent-report/result
+write and flush; only the matching canonical `message.sent` downpath echo
+activates it.
