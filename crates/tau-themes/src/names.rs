@@ -5,6 +5,8 @@
 // -- User input --
 pub const USER_PROMPT: &str = "user.prompt";
 pub const USER_PROMPT_QUEUED: &str = "user.prompt.queued";
+/// Synthetic queued-state annotation appended to queued prompt projections.
+pub const USER_PROMPT_QUEUED_MARKER: &str = "user.prompt.queued.marker";
 
 // -- Agent responses --
 pub const AGENT_RESPONSE: &str = "agent.response";

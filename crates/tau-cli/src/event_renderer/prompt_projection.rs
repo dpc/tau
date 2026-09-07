@@ -45,7 +45,7 @@ pub(super) fn queued_prompt_projection(
     prefix: tau_cli_term::StyledText,
     text: &str,
 ) -> tau_cli_term::TwoLineElision {
-    let styled = |value| {
+    let styled_prompt = |value| {
         markdown_block_with_osc8(
             theme,
             tau_themes::names::USER_PROMPT_QUEUED,
@@ -54,16 +54,33 @@ pub(super) fn queued_prompt_projection(
         )
         .content
     };
-    let unabridged_text =
-        (text.len() <= QUEUED_PROJECTION_WINDOW_BYTES).then(|| format!("{text} (queued)"));
-    let unabridged = unabridged_text.as_deref().map(styled);
+    let styled_marker = |value| {
+        markdown_block_with_osc8(
+            theme,
+            tau_themes::names::USER_PROMPT_QUEUED_MARKER,
+            value,
+            osc8_links,
+        )
+        .content
+    };
+    let unabridged = (text.len() <= QUEUED_PROJECTION_WINDOW_BYTES).then(|| {
+        let mut prompt = styled_prompt(text);
+        for span in styled_marker(" (queued)").spans() {
+            prompt.push(span.clone());
+        }
+        prompt
+    });
     tau_cli_term::TwoLineElision {
         prefix,
-        first: styled(bounded_queued_line_start(text)),
-        last: styled(bounded_queued_line_end(text)),
-        first_omissions: vec![styled("   ┄"), styled("┄")],
-        last_omissions: vec![styled("┄ "), styled("┄")],
-        labels: vec![styled(" (queued)"), styled(" (q)"), styled("q")],
+        first: styled_prompt(bounded_queued_line_start(text)),
+        last: styled_prompt(bounded_queued_line_end(text)),
+        first_omissions: vec![styled_prompt("   ┄"), styled_prompt("┄")],
+        last_omissions: vec![styled_prompt("┄ "), styled_prompt("┄")],
+        labels: vec![
+            styled_marker(" (queued)"),
+            styled_marker(" (q)"),
+            styled_marker("q"),
+        ],
         unabridged,
     }
 }

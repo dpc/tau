@@ -10,6 +10,7 @@
   styles: {
     // -- User input --
     "user.prompt":          { fg: "white", bold: true },
+    "user.prompt.queued.marker": { fg: "yellow" },
 
     // -- Agent responses --
     "agent.response":       { fg: "cyan" },

@@ -237,6 +237,22 @@ fn builtin_default_theme_resolves_submitted_user_prompts_as_bright_white() {
     assert_eq!(prompt.fg, Some(Color::White));
 }
 
+/// Built-in themes give synthetic queued-state annotations a consistent warning
+/// color without changing the style used for the prompt text itself.
+#[test]
+fn builtins_render_queued_prompt_annotations_yellow() {
+    let marker = StyleName::new(crate::names::USER_PROMPT_QUEUED_MARKER);
+    for builtin_name in BUILTIN_THEME_NAMES {
+        let theme = Theme::builtin_named(builtin_name)
+            .unwrap_or_else(|| panic!("registered built-in theme `{builtin_name}` must resolve"));
+        assert_eq!(
+            theme.resolve_style(&marker).fg,
+            Some(Color::Yellow),
+            "{builtin_name} queued prompt annotations should be yellow"
+        );
+    }
+}
+
 /// Ensures the built-in theme registry stays synchronized with name lookup and
 /// does not accidentally keep removed legacy aliases selectable as built-ins.
 #[test]

@@ -8,6 +8,7 @@
     // -- User input --
     "user.prompt":          { bold: true },
     "user.prompt.queued":   { fg: "grey" },
+    "user.prompt.queued.marker": { fg: "yellow" },
 
     // -- Agent responses --
     "agent.response":       { fg: "dark_blue" },

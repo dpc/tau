@@ -2087,6 +2087,39 @@ fn queued_prompt_projection_drops_huge_unabridged_content() {
     }
 }
 
+/// Queued prompt text and the synthetic queue-state annotation must retain
+/// independent semantic styles in both full and compact projections.
+#[test]
+fn queued_prompt_projection_styles_synthetic_annotations_separately() {
+    use tau_cli_term::Color;
+
+    let theme = tau_themes::Theme::parse(
+        r#"{
+            styles: {
+                "user.prompt.queued": { fg: "white" },
+                "user.prompt.queued.marker": { fg: "yellow" },
+            }
+        }"#,
+    )
+    .expect("valid queued-prompt theme");
+    let projection = queued_prompt_projection(&theme, false, "◯ ".into(), "Some prompt");
+    let unabridged = projection
+        .unabridged
+        .as_ref()
+        .expect("short queued prompt has an unabridged projection");
+
+    assert_eq!(unabridged.spans().len(), 2);
+    assert_eq!(unabridged.spans()[0].text, "Some prompt");
+    assert_eq!(unabridged.spans()[0].style.fg, Some(Color::White));
+    assert_eq!(unabridged.spans()[1].text, " (queued)");
+    assert_eq!(unabridged.spans()[1].style.fg, Some(Color::Yellow));
+
+    for label in &projection.labels {
+        assert_eq!(label.spans().len(), 1);
+        assert_eq!(label.spans()[0].style.fg, Some(Color::Yellow));
+    }
+}
+
 /// Every bottom-status element must keep the ten-point band documented by
 /// `ARCH-tau-cli`, including shared operational and optional debug bands.
 #[test]
