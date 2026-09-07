@@ -1,3 +1,5 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::{collections as path_std_collections, net as path_std_net};
 
 use rustls::{crypto as path_rustls_crypto, pki_types as path_rustls_pki_types};
@@ -392,6 +394,11 @@ fn websocket_enqueue_rejects_cancellation_before_serialization() {
         .expect_err("cancellation must prevent request build");
 
     assert!(matches!(error, LlmError::Canceled));
+    assert_eq!(
+        Outcome::dispatch_error(&error, false),
+        Outcome::Canceled,
+        "pre-dispatch cancellation must not be labeled as a writer failure"
+    );
     assert_eq!(error.retry_decision(), None);
     assert_eq!(serialization_count.load(Ordering::SeqCst), 0);
     assert!(!dispatched);
@@ -624,7 +631,15 @@ fn closed_writer_capture(compact: bool) {
             |capture| raw = Some(capture),
         )
     });
-    assert!(result.is_err(), "writer cannot accept the request");
+    let error = match result {
+        Ok(_) => panic!("writer cannot accept the request"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        Outcome::dispatch_error(&error, true),
+        Outcome::RequestSendFailure,
+        "a reached but closed writer handoff is an actual send failure"
+    );
     assert_eq!(diagnostic.dispatch_count(), 1);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["wire_dispatch_index"], 1);
@@ -739,7 +754,7 @@ fn test_ws_conn() -> (WsConn, InboundSender, UnboundedReceiver<WsCommand>) {
     let writer_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
     (
         WsConn {
-            diagnostic_epoch: None,
+            diagnostic_epoch: Some(999),
             outbound_tx,
             inbound_rx,
             inbound_control,
@@ -1990,6 +2005,109 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
     assert!(body.contains("partial_output=true"), "{body}");
 }
 
+/// Recognized lifecycle metadata refreshes frame liveness but never counts as
+/// semantic progress; silence afterward still returns the typed idle timeout
+/// consumed by the logical retry policy.
+#[test]
+fn ws_metadata_only_frames_then_silence_returns_nonsemantic_idle_timeout() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let envelope = build_ws_envelope(&config, &fixture.payload(), None, None);
+    let mut abort = NeverAbort;
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.created","response":{"id":"resp-metadata"}}"#.into(),
+        })
+        .expect("queue initial lifecycle metadata");
+    let delayed_metadata = inbound_tx.clone();
+    let sender = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        delayed_metadata
+            .send_blocking(InboundEvent::Event {
+                text: r#"{"type":"response.in_progress","response":{"id":"resp-metadata"}}"#.into(),
+            })
+            .expect("queue delayed lifecycle metadata");
+    });
+
+    let started = Instant::now();
+    let result = conn.run_envelope_with_timeouts(
+        "ap-metadata-silence",
+        &envelope,
+        EnvelopeExecution {
+            on_transport_dispatch: None,
+            after_transport_dispatch: None,
+            recording_stream: None,
+            evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
+            timeouts: EnvelopeTimeouts {
+                idle: Duration::from_secs(1),
+                absolute: None,
+            },
+            response_mode: ResponseMode::Ordinary,
+        },
+        &mut abort,
+        &mut |_| {},
+        &mut |_| {},
+        &mut None,
+    );
+    sender.join().expect("metadata sender");
+
+    let error = match result {
+        Ok(_) => panic!("metadata-only response must time out"),
+        Err(error) => error,
+    };
+    let body = match error.root_error() {
+        LlmError::HttpStatus(0, body) => body,
+        other => panic!("typed idle timeout, got {other:?}"),
+    };
+    assert!(body.contains("provider stream idle timeout"), "{body}");
+    assert!(body.contains("partial_output=false"), "{body}");
+    assert!(
+        started.elapsed() >= Duration::from_millis(1_050),
+        "the delayed metadata frame must refresh raw-frame liveness"
+    );
+    assert_eq!(
+        error.retry_decision().map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Transport)
+    );
+}
+
+/// Aggregate diagnostics consume the owning parser's accepted disposition for
+/// lifecycle, semantic, and ignored future events instead of maintaining a
+/// second event-language table.
+#[test]
+fn websocket_event_diagnostics_use_parser_owned_dispositions() {
+    for (event, expected) in [
+        (
+            serde_json::json!({"type":"response.created"}),
+            ParsedEventDisposition::Recognized,
+        ),
+        (
+            serde_json::json!({
+                "type":"response.output_text.delta",
+                "output_index":0,
+                "delta":"x"
+            }),
+            ParsedEventDisposition::Semantic,
+        ),
+        (
+            serde_json::json!({"type":"response.future_metadata"}),
+            ParsedEventDisposition::Unknown,
+        ),
+    ] {
+        let mut state = StreamState::new();
+        let application = apply_ws_json_event_observed_with_limit(
+            &mut state,
+            &event,
+            None,
+            MAX_RETAINED_STATE_BYTES,
+            &mut |_| {},
+        )
+        .expect("synthetic event accepted");
+        assert_eq!(application.disposition, expected);
+    }
+}
+
 /// Prewarm's elapsed absolute deadline wins even when nonterminal provider
 /// frames are already queued for processing.
 #[test]
@@ -2526,6 +2644,96 @@ fn inbound_data_lane_backpressures_without_drop_or_reorder() {
     };
     assert_eq!(first.as_str(), r#"{"sequence":1}"#);
     assert_eq!(second.as_str(), r#"{"sequence":2}"#);
+}
+
+/// Sink that accepts request frames but fails the first control-ping write.
+struct PingFailSink;
+
+impl futures_util::Sink<Message> for PingFailSink {
+    type Error = ();
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        if matches!(item, Message::Ping(_)) {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// The real asynchronous writer-loop ping failure must wake a synchronous turn
+/// owner blocked on an otherwise silent response lane, rather than consuming
+/// the provider-frame idle timeout.
+#[test]
+fn async_control_ping_write_failure_wakes_blocked_response_reader() {
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+    let (_inbound_tx, inbound_rx) = mpsc::channel(1);
+    let inbound_control = Arc::new(InboundControl::new());
+    let runtime = ws_runtime::handle();
+    let reader_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
+    let writer_abort = runtime
+        .spawn(write_loop(
+            PingFailSink,
+            outbound_rx,
+            Arc::clone(&inbound_control),
+            Duration::from_millis(10),
+            Some(1001),
+        ))
+        .abort_handle();
+    let mut conn = WsConn {
+        diagnostic_epoch: Some(1001),
+        outbound_tx,
+        inbound_rx,
+        inbound_control,
+        reader_abort,
+        writer_abort,
+        opened_at: Instant::now(),
+        bearer: "test-token".to_owned(),
+        cached_response_anchor: None,
+        prewarm_baseline: None,
+        carried_response_bytes: 0,
+    };
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let started = Instant::now();
+    let error = match conn.run_turn(
+        &config,
+        "ap-ping-write-failure",
+        &fixture.payload(),
+        None,
+        None,
+        &mut NeverAbort,
+        &mut |_| {},
+        &mut |_| {},
+    ) {
+        Ok(_) => panic!("control ping write must fail"),
+        Err(error) => error,
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "writer control wake must preempt the five-minute idle deadline"
+    );
+    assert!(matches!(
+        error.evidence(),
+        Some(
+            path_crate_attempt_failure::AttemptFailureEvidence::Transport {
+                kind: path_crate_attempt_failure::TransportFailureKind::WebSocketControlPing,
+                ..
+            }
+        )
+    ));
 }
 
 /// Coalesced cancellation wins over writer failure and provider data without

@@ -30,12 +30,16 @@
 //! main loop, and just marshals envelopes to the writer task and pulls events
 //! back from the reader.
 
+mod envelope_diagnostics;
+
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{io as path_std_io, thread, time as path_std_time};
 
+use envelope_diagnostics::{EnvelopeDiagnostics, Outcome};
+use futures_util::Sink as FuturesSink;
 use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use tau_provider::private_attempt_trace as private_trace;
@@ -55,10 +59,10 @@ use tungstenite::{
 
 use super::compact_stream::CompactStreamShape;
 use super::{
-    CachedResponseAnchor, DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream,
-    ResponsesConfig, apply_parsed_json_event, build_ws_envelope,
-    load_provider_stream_cassette_candidates, projected_retained_state_bytes,
-    record_provider_raw_event_after, stream_idle_timeout_error,
+    CachedResponseAnchor, DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ParsedEventApplication,
+    ParsedEventDisposition, ProviderRawEventStream, ResponsesConfig, apply_parsed_json_event,
+    apply_parsed_json_event_observed, build_ws_envelope, load_provider_stream_cassette_candidates,
+    projected_retained_state_bytes, record_provider_raw_event_after, stream_idle_timeout_error,
 };
 use crate::cache_diagnostic::warm::WarmObservation;
 use crate::common::{LlmError, PromptPayload, StreamState};
@@ -198,13 +202,14 @@ fn apply_ws_json_event(
     raw_item_json: Option<&str>,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
-    apply_ws_json_event_with_limit(
+    apply_ws_json_event_observed_with_limit(
         state,
         event,
         raw_item_json,
         MAX_RETAINED_STATE_BYTES,
         on_update,
     )
+    .map(|application| application.terminal)
 }
 
 fn apply_ws_json_event_with_limit(
@@ -214,18 +219,38 @@ fn apply_ws_json_event_with_limit(
     retained_state_limit: u64,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
+    apply_ws_json_event_observed_with_limit(
+        state,
+        event,
+        raw_item_json,
+        retained_state_limit,
+        on_update,
+    )
+    .map(|application| application.terminal)
+}
+
+fn apply_ws_json_event_observed_with_limit(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    raw_item_json: Option<&str>,
+    retained_state_limit: u64,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<ParsedEventApplication, LlmError> {
     if let Some(observation) = crate::quota::parse_ws_event_value(event) {
         state.quota_observation = Some(observation);
         on_update(state);
-        return Ok(false);
+        return Ok(ParsedEventApplication {
+            terminal: false,
+            disposition: ParsedEventDisposition::Recognized,
+        });
     }
     let retained_state_bytes = projected_retained_state_bytes(state, event, raw_item_json)?;
     if retained_state_limit < retained_state_bytes {
         return Err(response_resource_limit_error());
     }
-    let terminal = apply_parsed_json_event(state, event, raw_item_json, on_update)?;
+    let application = apply_parsed_json_event_observed(state, event, raw_item_json, on_update)?;
     state.commit_retained_state_bytes(retained_state_bytes);
-    Ok(terminal)
+    Ok(application)
 }
 
 fn websocket_config() -> path_tungstenite_protocol::WebSocketConfig {
@@ -538,6 +563,7 @@ impl WsConn {
         .map_err(|error| map_connect_wait_error(error, network, &websocket_url))?;
 
         let (sink, stream) = ws.split();
+        let diagnostic_epoch = next_diagnostic_epoch();
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound_rx) = mpsc::channel(1);
         let inbound_control = Arc::new(InboundControl::new());
@@ -546,7 +572,7 @@ impl WsConn {
             control: Arc::clone(&inbound_control),
         };
         let reader_abort = runtime
-            .spawn(read_loop(stream, inbound_sender))
+            .spawn(read_loop(stream, inbound_sender, diagnostic_epoch))
             .abort_handle();
         let writer_abort = runtime
             .spawn(write_loop(
@@ -554,11 +580,12 @@ impl WsConn {
                 outbound_rx,
                 Arc::clone(&inbound_control),
                 WEBSOCKET_CONTROL_PING_INTERVAL,
+                diagnostic_epoch,
             ))
             .abort_handle();
 
         Ok(Self {
-            diagnostic_epoch: None,
+            diagnostic_epoch,
             outbound_tx,
             inbound_rx,
             inbound_control,
@@ -967,6 +994,7 @@ impl WsConn {
         on_update: &mut impl FnMut(&StreamState),
         private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<StreamState, LlmError> {
+        let mut diagnostics = EnvelopeDiagnostics::new(agent_prompt_id, self.diagnostic_epoch);
         let mut dispatch_attempted = false;
         let dispatch_result = serialize_and_enqueue_envelope_observed(
             envelope,
@@ -999,7 +1027,10 @@ impl WsConn {
                 trace.capture_finished(started);
             }
         }
-        dispatch_result?;
+        if let Err(error) = dispatch_result {
+            diagnostics.set_outcome(Outcome::dispatch_error(&error, dispatch_attempted));
+            return Err(error);
+        }
 
         let mut state = StreamState::new();
         let mut compact_shape =
@@ -1017,6 +1048,7 @@ impl WsConn {
         };
         loop {
             if abort.is_aborted() {
+                diagnostics.set_outcome(Outcome::Canceled);
                 return Err(LlmError::Canceled);
             }
             if execution
@@ -1024,6 +1056,7 @@ impl WsConn {
                 .absolute
                 .is_some_and(|timeout| timeout <= turn_started_at.elapsed())
             {
+                diagnostics.set_outcome(Outcome::AbsoluteTimeout);
                 return Err(LlmError::HttpStatus(
                     0,
                     "websocket prewarm response timeout".to_owned(),
@@ -1041,26 +1074,46 @@ impl WsConn {
                         .unwrap_or(Duration::MAX),
                 );
             let wait = remaining.min(Duration::from_secs(1));
-            self.check_inbound_control(abort)?;
+            if let Err(error) = self.check_inbound_control(abort) {
+                diagnostics.set_outcome(if matches!(error.root_error(), LlmError::Canceled) {
+                    Outcome::Canceled
+                } else {
+                    Outcome::WriterFailure
+                });
+                return Err(error);
+            }
             let event = match self.inbound_rx.try_recv() {
                 Ok(event) => {
-                    // A control arriving concurrently with this dequeue wins.
+                    // A control arriving concurrently with this dequeue
+                    // wins.
                     if abort.is_aborted() {
+                        diagnostics.set_outcome(Outcome::Canceled);
                         return Err(LlmError::Canceled);
                     }
-                    self.check_inbound_control(abort)?;
+                    if let Err(error) = self.check_inbound_control(abort) {
+                        diagnostics.set_outcome(
+                            if matches!(error.root_error(), LlmError::Canceled) {
+                                Outcome::Canceled
+                            } else {
+                                Outcome::WriterFailure
+                            },
+                        );
+                        return Err(error);
+                    }
                     event
                 }
                 Err(TryRecvError::Empty) if last_event_at.elapsed() < execution.timeouts.idle => {
                     thread::park_timeout(wait);
-                    // Provider-owned response liveness is deadline-driven, not
-                    // upstream-event-driven. Wake the outer sampled emitter
+                    // Provider-owned response liveness is deadline-driven,
+                    // not upstream-event-driven.
+                    // Wake the outer sampled emitter
                     // during quiet WebSocket waits; it enforces the 1Hz
                     // cadence.
                     on_update(&state);
                     continue;
                 }
                 Err(TryRecvError::Empty) => {
+                    diagnostics.set_outcome(Outcome::ResponseIdleTimeout);
                     return Err(stream_idle_timeout_error(
                         tau_proto::ProviderBackendTransport::Websocket,
                         agent_prompt_id,
@@ -1079,6 +1132,7 @@ impl WsConn {
                     ));
                 }
                 Err(TryRecvError::Disconnected) => {
+                    diagnostics.set_outcome(Outcome::ReaderTaskGone);
                     return Err(LlmError::HttpStatus(
                         0,
                         "stream error: ws reader task gone".to_owned(),
@@ -1106,9 +1160,11 @@ impl WsConn {
                     ) else {
                         self.reader_abort.abort();
                         self.writer_abort.abort();
+                        diagnostics.set_outcome(Outcome::ResponseResourceLimit);
                         return Err(response_resource_limit_error());
                     };
                     state.record_transport_response_bytes(text.len());
+                    diagnostics.record_frame(text.len());
                     on_update(&state);
                     if let Some(stream) = execution.recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string())?;
@@ -1122,6 +1178,7 @@ impl WsConn {
                             {
                                 trace.decoded(started, false);
                             }
+                            diagnostics.set_outcome(Outcome::MalformedText);
                             return Err(malformed_text_error(text.len()));
                         }
                     };
@@ -1142,21 +1199,27 @@ impl WsConn {
                         }
                         on_update(state);
                     };
-                    let terminal = apply_ws_json_event(
+                    let application = apply_ws_json_event_observed_with_limit(
                         &mut state,
                         decoded.value(),
                         decoded.raw_item(),
+                        MAX_RETAINED_STATE_BYTES,
                         &mut observed_update,
                     );
-                    if terminal.as_ref().is_err_and(is_response_resource_limit) {
+                    if application.as_ref().is_err_and(is_response_resource_limit) {
                         self.reader_abort.abort();
                         self.writer_abort.abort();
+                        diagnostics.set_outcome(Outcome::ResponseResourceLimit);
                     }
-                    if terminal? {
+                    let application = application?;
+                    diagnostics.record_disposition(application.disposition);
+                    if application.terminal {
+                        diagnostics.set_outcome(Outcome::Completed);
                         return Ok(state);
                     }
                 }
                 InboundEvent::Closed { termination } => {
+                    diagnostics.set_outcome(Outcome::WebSocketClosed);
                     let evidence = path_crate_attempt_failure::AttemptFailureEvidence::transport(
                         path_crate_attempt_failure::TransportPhase::ResponseStream,
                         true,
@@ -1167,6 +1230,7 @@ impl WsConn {
                     return Err(LlmError::WsClosed(termination).observed(evidence));
                 }
                 InboundEvent::FrameFailure(frame) => {
+                    diagnostics.set_outcome(Outcome::FrameFailure);
                     state.record_transport_response_bytes(frame.response_bytes());
                     on_update(&state);
                     let evidence = path_crate_attempt_failure::AttemptFailureEvidence::transport(
@@ -1181,6 +1245,7 @@ impl WsConn {
                     .observed(evidence));
                 }
                 InboundEvent::Error { kind } => {
+                    diagnostics.set_outcome(Outcome::ReaderFailure);
                     let evidence = path_crate_attempt_failure::AttemptFailureEvidence::transport(
                         path_crate_attempt_failure::TransportPhase::ResponseStream,
                         true,
@@ -1195,6 +1260,7 @@ impl WsConn {
                 InboundEvent::ResourceLimit => {
                     self.reader_abort.abort();
                     self.writer_abort.abort();
+                    diagnostics.set_outcome(Outcome::ResponseResourceLimit);
                     return Err(response_resource_limit_error());
                 }
             }
@@ -1549,13 +1615,16 @@ fn build_request(config: &ResponsesConfig, thread_id: &str) -> Result<Request, L
 /// transparently inside `tungstenite`'s state machine — they're
 /// buffered on the sink half and flushed by the writer task's next
 /// send (the periodic ping in the steady state).
-async fn read_loop(mut stream: Stream, tx: InboundSender) {
+async fn read_loop(mut stream: Stream, tx: InboundSender, connection_epoch: Option<u64>) {
     while let Some(item) = stream.next().await {
         let (event, terminal) = match item {
             Ok(Message::Text(text)) => (InboundEvent::Event { text }, false),
             Ok(Message::Close(frame)) => {
                 tracing::info!(
                     target: crate::LOG_TARGET,
+                    connection_epoch,
+                    owner = "reader",
+                    reason = "close_frame",
                     "ws server closed connection; it will be reopened on the next turn",
                 );
                 (
@@ -1588,6 +1657,9 @@ async fn read_loop(mut stream: Stream, tx: InboundSender) {
             Err(e) => {
                 tracing::warn!(
                     target: crate::LOG_TARGET,
+                    connection_epoch,
+                    owner = "reader",
+                    reason = "read_failure",
                     "ws read failed — connection will be reopened on next turn",
                 );
                 let _ = e;
@@ -1627,12 +1699,15 @@ async fn read_loop(mut stream: Stream, tx: InboundSender) {
 /// wakes immediately rather than waiting on the
 /// reader to independently notice the close (which it might miss
 /// entirely on a half-open socket).
-async fn write_loop(
-    mut sink: Sink,
+async fn write_loop<S>(
+    mut sink: S,
     mut rx: UnboundedReceiver<WsCommand>,
     inbound_control: Arc<InboundControl>,
     ping_interval: Duration,
-) {
+    connection_epoch: Option<u64>,
+) where
+    S: FuturesSink<Message> + Unpin,
+{
     let mut ticker = tokio::time::interval(ping_interval);
     // First tick fires immediately by default — skip it. Pinging
     // right after a freshly-completed upgrade burns RTT for no
@@ -1644,6 +1719,13 @@ async fn write_loop(
             cmd = rx.recv() => match cmd {
                 Some(WsCommand::SendText(text)) => {
                     if sink.send(Message::Text(text.into())).await.is_err() {
+                        tracing::warn!(
+                            target: crate::LOG_TARGET,
+                            connection_epoch,
+                            owner = "writer",
+                            reason = "request_send_failure",
+                            "ws write failed — waking active turn owner",
+                        );
                         inbound_control.notify_writer_failure(
                             path_crate_attempt_failure::TransportFailureKind::Send,
                         );
@@ -1662,23 +1744,14 @@ async fn write_loop(
             },
             _ = ticker.tick() => {
                 match sink.send(Message::Ping(Vec::new().into())).await {
-                    Ok(()) => {
-                        // WebSocket control pings are 25 s apart — info isn't spammy at
-                        // that cadence, and a runtime log that suddenly
-                        // *stops* showing them is the clearest signal
-                        // that the writer task is stuck (and that the
-                        // upstream's reap timer is therefore counting
-                        // down toward a 1011 close). When we're confident
-                        // the WebSocket control-ping path is solid, demote to debug.
-                        tracing::info!(
-                            target: crate::LOG_TARGET,
-                            "websocket_control_ping sent",
-                        );
-                    }
+                    Ok(()) => {}
                     Err(_) => {
                         tracing::warn!(
                             target: crate::LOG_TARGET,
-                            "websocket_control_ping failed — writer task exiting, next turn will reopen",
+                            connection_epoch,
+                            owner = "writer",
+                            reason = "control_ping_failure",
+                            "websocket_control_ping failed — waking active turn owner",
                         );
                         inbound_control.notify_writer_failure(
                             path_crate_attempt_failure::TransportFailureKind::WebSocketControlPing,

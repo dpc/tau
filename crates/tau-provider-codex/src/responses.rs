@@ -1181,18 +1181,54 @@ pub(super) fn apply_parsed_json_event(
     raw_item_json: Option<&str>,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
+    apply_parsed_json_event_observed(state, event, raw_item_json, on_update)
+        .map(|application| application.terminal)
+}
+
+/// Closed parser disposition for one successfully accepted Responses event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ParsedEventDisposition {
+    /// The event mutated or completed semantic response state.
+    Semantic,
+    /// The event was recognized lifecycle metadata.
+    Recognized,
+    /// The compatibility parser intentionally ignored the event.
+    Unknown,
+}
+
+/// Accepted parser result with both terminal and diagnostic disposition.
+pub(super) struct ParsedEventApplication {
+    /// Whether this event completed the response stream.
+    pub(super) terminal: bool,
+    /// Closed parser-owned event disposition.
+    pub(super) disposition: ParsedEventDisposition,
+}
+
+/// Applies one event and returns the parser-owned accepted disposition.
+pub(super) fn apply_parsed_json_event_observed(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    raw_item_json: Option<&str>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<ParsedEventApplication, LlmError> {
     let event_type = event["type"].as_str().unwrap_or("");
 
     let stream_update_applied =
         apply_stream_update_event(state, event, raw_item_json, event_type, on_update)?;
     if stream_update_applied {
-        return Ok(false);
+        return Ok(ParsedEventApplication {
+            terminal: false,
+            disposition: ParsedEventDisposition::Semantic,
+        });
     }
 
     match event_type {
         "response.completed" | "response.done" => {
             apply_terminal_event(state, event);
-            Ok(true)
+            Ok(ParsedEventApplication {
+                terminal: true,
+                disposition: ParsedEventDisposition::Recognized,
+            })
         }
         "response.incomplete" => Err(response_incomplete_error(
             event,
@@ -1200,7 +1236,14 @@ pub(super) fn apply_parsed_json_event(
         )),
         "response.failed" => Err(response_failed_error(event, state.provider_evidence_mode)),
         "error" => Err(stream_error_event(event, state.provider_evidence_mode)),
-        _ => Ok(false),
+        "response.created" | "response.in_progress" => Ok(ParsedEventApplication {
+            terminal: false,
+            disposition: ParsedEventDisposition::Recognized,
+        }),
+        _ => Ok(ParsedEventApplication {
+            terminal: false,
+            disposition: ParsedEventDisposition::Unknown,
+        }),
     }
 }
 

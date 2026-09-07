@@ -488,6 +488,53 @@ fn cancel_publishes_tool_cancel_request() {
     h.shutdown().expect("shutdown");
 }
 
+/// User cancellation of an active turn discards every ordinary queued
+/// interactive prompt while preserving only the reserved output-length
+/// continuation class.
+#[test]
+fn cancel_clears_ordinary_queued_human_prompts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    seed_agent_thinking(&mut h, &cid, "sp-cancel-queued-human");
+    let target_agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .agent_id
+        .clone()
+        .expect("agent id");
+    let pending = &mut h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .dispatch
+        .pending_prompts;
+    pending.push_back(PendingPrompt::human_ui("first queued prompt".to_owned()));
+    pending.push_back(PendingPrompt::output_length_continuation());
+    pending.push_back(PendingPrompt::human_ui("second queued prompt".to_owned()));
+
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
+
+    let pending = &h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .pending_prompts;
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending
+            .front()
+            .is_some_and(PendingPrompt::is_output_length_continuation)
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Regression: live user cancellation of a turn with an already-backgrounded
 /// call must keep a queued internal completion notice on the live branch. The
 /// notice should not auto-advance immediately, otherwise canceling a turn could

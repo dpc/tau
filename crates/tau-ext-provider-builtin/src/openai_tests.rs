@@ -4360,6 +4360,99 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
     )));
 }
 
+/// A manual retry while the exact logical prompt is still executing must
+/// report `NotParked` and leave the active worker untouched; only delayed
+/// scheduler ownership is transferable.
+#[test]
+fn manual_retry_during_active_attempt_returns_not_parked() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        started_tx.send(()).expect("report active attempt");
+        release_rx
+            .lock()
+            .expect("release receiver")
+            .recv()
+            .expect("release active attempt");
+        let mut writer = execution.frame_writer();
+        writer
+            .send_report(HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                )),
+            ))
+            .expect("finish active attempt");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move |_| prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("active attempt starts");
+
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: tau_proto::RetryPromptRequestId::parse("active-retry")
+                .expect("retry request id"),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            target_agent_id: None,
+            agent_prompt_id: Some(
+                "sp-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
+        }),
+    )]));
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderRetryPromptResultReported(result))
+                    if result.request_id.as_str() == "active-retry"
+                        && result.status == tau_proto::RetryPromptStatus::NotParked
+            )
+        })
+    });
+
+    release_tx.send(()).expect("release active worker");
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        })
+    });
+    input.close();
+    runtime.join().expect("provider exits");
+}
+
 /// Ensures clicking retry does not alter attempt accounting: a retryable manual
 /// attempt re-parks at the next normal backoff step and later completes once.
 #[test]

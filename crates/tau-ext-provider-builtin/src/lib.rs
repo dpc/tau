@@ -5103,6 +5103,14 @@ where
                             );
                     }
                     if let PromptRetryDisposition::Terminal(attempt) = retry_disposition {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            agent_prompt_id = %job.agent_prompt_id,
+                            attempt = job.retry_state.attempts,
+                            retry_class = ?decision.class,
+                            end_reason = "retry_budget_exhausted",
+                            "provider prompt retry ended",
+                        );
                         let mut finished = simple_finished(
                             job.agent_prompt_id,
                             job.prompt.agent_id,
@@ -5116,6 +5124,16 @@ where
                         ))?;
                         continue;
                     }
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        agent_prompt_id = %job.agent_prompt_id,
+                        attempt = job.retry_state.attempts,
+                        retry_class = ?decision.class,
+                        delay_ms = u64::try_from(due.saturating_duration_since(now).as_millis())
+                            .unwrap_or(u64::MAX),
+                        end_reason = "retry_scheduled",
+                        "provider prompt attempt ended",
+                    );
                     emit_retry_status(
                         &job,
                         decision.class,
@@ -5235,6 +5253,12 @@ where
                     } else {
                         tau_proto::RetryPromptStatus::NotParked
                     };
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        agent_prompt_id = %agent_prompt_id,
+                        status = ?status,
+                        "manual provider retry resolved",
+                    );
                     let mut frame_writer = handle_report_sink(handle);
                     frame_writer.send_report(HarnessInputMessage::emit_transient(
                         Event::ProviderRetryPromptResultReported(
