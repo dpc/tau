@@ -2,11 +2,11 @@
   description = "tau";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
     flake-utils.url = "github:numtide/flake-utils";
     flakebox = {
-      url = "github:rustshop/flakebox?rev=e402950dbedc4021d41222c913bc9a7ef0a5fab2";
+      url = "github:dpc/flakebox?rev=105902c66930a9e6a874d27ea8430e8f8db864d7";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     dpc-public-skills = {
