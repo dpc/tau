@@ -4,6 +4,24 @@ use tau_config::settings::AgentWatchRetryNotificationPolicy;
 
 use super::*;
 
+/// A failed delegated operation must use bounded truthful wording without
+/// exposing raw provider diagnostics or claiming that the agent endpoint died.
+#[test]
+fn failed_start_agent_result_uses_sanitized_operation_wording_for_watchers() {
+    let raw_error = "prefix_too_large: private provider diagnostic";
+    let message = path_crate_harness::subagents_tool::start_agent_result_watch_message(
+        &tau_proto::StartAgentResult {
+            query_id: "failed-delegation".to_owned(),
+            text: String::new(),
+            error: Some(raw_error.to_owned()),
+        },
+    )
+    .expect("nonempty failure must produce a watcher notification");
+
+    assert_eq!(message, "agent operation failed");
+    assert!(!message.contains(raw_error));
+}
+
 #[test]
 fn provider_owner_validation_rejects_provider_event_message_emit() {
     let td = TempDir::new().expect("tempdir");

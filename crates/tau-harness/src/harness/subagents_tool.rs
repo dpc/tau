@@ -222,6 +222,24 @@ pub(crate) const PEER_ENTRYPOINT_AGENT_METADATA_KEY: &str = "tau.peer_entrypoint
 pub(crate) const BOOTSTRAP_PROMPT_AGENT_METADATA_KEY: &str = "tau.bootstrap_prompt";
 const INTER_SESSION_UNAVAILABLE: &str = "target session is unavailable for inter-session messaging";
 
+/// Select the bounded watcher-visible response for one completed delegation.
+///
+/// `StartAgentResult` exposes only raw failure prose, not a sanitized
+/// structured category, so failures deliberately omit the diagnostic.
+pub(crate) fn start_agent_result_watch_message(
+    result: &tau_proto::StartAgentResult,
+) -> Option<String> {
+    if result
+        .error
+        .as_deref()
+        .is_some_and(|error| !error.trim().is_empty())
+    {
+        Some("agent operation failed".to_owned())
+    } else {
+        (!result.text.trim().is_empty()).then(|| result.text.clone())
+    }
+}
+
 /// Internal bare-entrypoint resolution error.
 ///
 /// Local callers retain a diagnostic. Remote callers receive only the bounded
@@ -1475,15 +1493,7 @@ impl Harness {
         else {
             return;
         };
-        let message = if result
-            .error
-            .as_deref()
-            .is_some_and(|error| !error.trim().is_empty())
-        {
-            Some("agent failed".to_owned())
-        } else {
-            (!result.text.trim().is_empty()).then(|| result.text.clone())
-        };
+        let message = start_agent_result_watch_message(result);
         let Some(message) = message else {
             return;
         };

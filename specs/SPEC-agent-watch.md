@@ -171,7 +171,10 @@ The watch path must not forward internal steering prompts, background or foregro
 tool-completion prompts, explicit `message` tool deliveries to the watched agent, or
 other hidden/non-user inputs. A completed `agent_start` result is the started child
 agent's terminal final response to its direct delegating watcher and remains watchable
-under the response label.
+under the response label. A failed completed `agent_start` operation projects the
+bounded response text `agent operation failed`, optionally followed only by an
+existing safe structured category. It never forwards raw failure prose or implies
+that the agent endpoint stopped or became unavailable.
 
 User-prompt watch fanout occurs only after the corresponding durable steer
 commits. It uses the exact post-interception sanctioned steer text. A rejected
