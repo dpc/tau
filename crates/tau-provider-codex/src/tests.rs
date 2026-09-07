@@ -1224,6 +1224,43 @@ fn compact_exact_success_returns_one_item() {
     assert!(trace.contains("transport=\"websocket\""), "{trace}");
 }
 
+/// The catalog-enabled Astra route executes the existing native WebSocket
+/// compactor and accepts exactly one opaque replacement without copied history.
+#[test]
+fn astra_native_compaction_returns_one_opaque_item() {
+    let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
+    let mut config = resolved_config_for_model(
+        &ModelName::new("gpt-6-astra"),
+        ResolvedCredentials::new("token".to_owned(), None),
+        CodexMode::Standard,
+    );
+    config.inner.base_url = server.base_url();
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::parse("session-astra-compact").expect("session");
+    let agent_id = tau_proto::AgentId::parse("agent-astra-compact").expect("agent");
+    let context = compact_mixed_prefix_context();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+    let CompactOutcome::Finished {
+        output_items,
+        usage,
+    } = runtime.compact("ap-astra-compact", &config, &request, &mut NeverAbort)
+    else {
+        panic!("Astra native compact response must finish");
+    };
+    assert!(matches!(
+        output_items.as_slice(),
+        [tau_proto::ContextItem::Compaction(_)]
+    ));
+    assert!(usage.is_some());
+    assert_eq!(
+        server
+            .counts()
+            .ws_upgrade_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
 /// Terminalizing one post-progress failure does not poison explicit recovery:
 /// a later user-owned request pays for and dispatches a distinct successful
 /// compact operation.
@@ -2100,14 +2137,17 @@ fn publishes_chatgpt_model_metadata() {
             .all(|model| {
                 model.supports_standalone_compaction
                     && model.standalone_compaction_threshold
-                        == Some(GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD)
+                        == Some(tau_proto::TokenCount::new(334_800))
                     && model.standalone_compaction_prefix_budget.is_none()
             })
     );
     assert!(
         models
             .iter()
-            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
+            .filter(|model| {
+                !model.id.model.as_str().starts_with("gpt-5.6-")
+                    && model.id.model.as_str() != "gpt-6-astra"
+            })
             .all(|model| model.supports_compaction)
     );
     assert!(
@@ -2275,6 +2315,54 @@ fn config_scopes_inline_compaction_away_from_gpt_5_6() {
 
     assert!(!gpt_5_6.supports_compaction);
     assert!(gpt_5_5.supports_compaction);
+}
+
+/// Astra must reach scheduled and explicit native compaction through every
+/// namespace without inheriting GPT-5.6's unrelated Lite or image capabilities.
+#[test]
+fn astra_aliases_publish_native_standalone_compaction_without_surface_changes() {
+    for provider in ["chatgpt", "work-chatgpt"] {
+        for requested_mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+            let provider = ProviderName::new(provider);
+            let models = models_for_provider_mode(&provider, requested_mode);
+            let astra = models
+                .iter()
+                .find(|model| model.id.model.as_str() == "gpt-6-astra")
+                .expect("Astra model");
+            assert_eq!(astra.id.provider, provider);
+            assert!(!astra.supports_compaction);
+            assert!(astra.supports_standalone_compaction);
+            assert!(!astra.standalone_compaction_generation_negative);
+            assert_eq!(
+                astra.standalone_compaction_threshold,
+                Some(tau_proto::TokenCount::new(244_800))
+            );
+            assert!(astra.standalone_compaction_prefix_budget.is_none());
+            assert_eq!(astra.context_window, tau_proto::TokenCount::new(272_000));
+            assert_eq!(
+                astra.max_input_tokens,
+                Some(tau_proto::TokenCount::new(258_400))
+            );
+            assert!(astra.supports_parallel_tool_calls);
+            assert_eq!(astra.input_modalities, vec![tau_proto::InputModality::Text]);
+            assert_eq!(
+                astra.tool_result_modalities,
+                vec![tau_proto::InputModality::Text]
+            );
+            let config = resolved_config_for_provider_model(
+                &provider,
+                &astra.id.model,
+                ResolvedCredentials::new("token".to_owned(), None),
+                requested_mode,
+            );
+            assert_eq!(config.inner.mode, CodexMode::Standard);
+            assert!(!config.inner.supports_compaction);
+            assert_eq!(config.inner.model_id, "gpt-6-astra");
+        }
+    }
+    for model in ["gpt-6-astra-experimental", "gpt-6", "gpt-5.6-experimental"] {
+        assert!(!supports_native_standalone_compaction(model));
+    }
 }
 
 /// The compatibility flag affects only the exact audited GPT-5.6 family and

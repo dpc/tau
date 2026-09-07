@@ -1289,7 +1289,11 @@ The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices.
 Standard mode publishes and requests parallel direct tool calls; Lite
 compatibility publishes its one-call limit. Neither mode emits legacy inline
-context management. Manual and threshold-driven compaction use a fresh ordinary
+context management. Astra also uses native standalone compaction, with a
+244,800-token default threshold over its 272,000-token raw window. It retains
+standard Responses even when the profile enables Lite compatibility. Named
+policies such as `100k` at `outer_turn_finished` may compact earlier.
+Manual and threshold-driven compaction use a fresh ordinary
 Responses WebSocket request with the full window and a final
 `compaction_trigger`. A successful response installs only the one validated
 opaque provider compaction item; Tau does not copy items from the compacted

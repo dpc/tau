@@ -43,7 +43,9 @@ fn compact_route_downgrade_republishes_honest_capability() {
         models
             .iter()
             .filter(|model| {
-                model.id.provider == unavailable && model.id.model.as_str().starts_with("gpt-5.6-")
+                model.id.provider == unavailable
+                    && (model.id.model.as_str().starts_with("gpt-5.6-")
+                        || model.id.model.as_str() == "gpt-6-astra")
             })
             .all(|model| !model.supports_standalone_compaction
                 && model.standalone_compaction_generation_negative
@@ -54,7 +56,9 @@ fn compact_route_downgrade_republishes_honest_capability() {
         models
             .iter()
             .filter(|model| {
-                model.id.provider == unavailable && !model.id.model.as_str().starts_with("gpt-5.6-")
+                model.id.provider == unavailable
+                    && !model.id.model.as_str().starts_with("gpt-5.6-")
+                    && model.id.model.as_str() != "gpt-6-astra"
             })
             .all(|model| !model.supports_standalone_compaction
                 && !model.standalone_compaction_generation_negative

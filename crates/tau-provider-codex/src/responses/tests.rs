@@ -664,6 +664,40 @@ fn build_request_lowers_astra_model_id_verbatim() {
     assert_eq!(body["model"], "gpt-6-astra");
 }
 
+/// Astra's real resolved config must send the complete native compact window,
+/// suppress stale inline metadata, and never opt into Lite through its profile.
+#[test]
+fn build_request_sends_astra_native_compaction_on_unchanged_standard_surface() {
+    for requested_mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+        let config = crate::config_for_model_mode(
+            &tau_proto::ModelName::new("gpt-6-astra"),
+            "token".to_owned(),
+            None,
+            requested_mode,
+        );
+        let items = [
+            user_text("first"),
+            assistant_text("answer"),
+            ContextItem::CompactionTrigger,
+        ];
+        let mut request = request_for_items(&items);
+        request.compaction = Some(tau_proto::PromptCompactionContext {
+            compact_threshold: Some(tau_proto::TokenCount::new(100_000)),
+        });
+        let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+        assert_eq!(body["model"], "gpt-6-astra");
+        assert_eq!(config.mode, ResponsesMode::Standard);
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert!(body.get("context_management").is_none());
+        assert!(body.get("previous_response_id").is_none());
+        let input = body["input"].as_array().expect("input");
+        assert_eq!(input.len(), 3, "no historical prefix is pruned");
+        assert_eq!(input[0]["content"][0]["text"], "first");
+        assert_eq!(input[1]["content"][0]["text"], "answer");
+        assert_eq!(input[2]["type"], "compaction_trigger");
+    }
+}
+
 /// Ensures the enabled real Responses request producer submits typed WebSocket
 /// request metadata through the shared capture boundary.
 #[test]

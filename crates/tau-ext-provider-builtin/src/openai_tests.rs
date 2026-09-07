@@ -2663,9 +2663,9 @@ fn chatgpt_profile_publishes_models_even_without_auth_tokens() {
 }
 
 /// Ensures ChatGPT publication exposes the owned model set and mirrors the
-/// backend capability split: GPT-5.6 uses standalone rather than inline
-/// compaction in its default standard mode, while older models retain inline
-/// compaction.
+/// backend capability split: GPT-5.6 and Astra use standalone rather than
+/// inline compaction in its default standard mode, while older models retain
+/// inline compaction.
 #[test]
 fn chatgpt_oauth_publishes_chatgpt_models() {
     // ChatGPT/Codex is a provider namespace named `chatgpt`; there is no
@@ -2688,19 +2688,28 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
     assert!(
         models
             .iter()
-            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .filter(|model| {
+                model.id.model.as_str().starts_with("gpt-5.6-")
+                    || model.id.model.as_str() == "gpt-6-astra"
+            })
             .all(|model| !model.supports_compaction)
     );
     assert!(
         models
             .iter()
-            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .filter(|model| {
+                model.id.model.as_str().starts_with("gpt-5.6-")
+                    || model.id.model.as_str() == "gpt-6-astra"
+            })
             .all(|model| model.supports_standalone_compaction)
     );
     assert!(
         models
             .iter()
-            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
+            .filter(|model| {
+                !model.id.model.as_str().starts_with("gpt-5.6-")
+                    && model.id.model.as_str() != "gpt-6-astra"
+            })
             .all(|model| model.supports_compaction)
     );
 }

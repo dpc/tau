@@ -36,8 +36,7 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 const DEFAULT_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(272_000);
 const GPT_5_6_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(372_000);
-const GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD: tau_proto::TokenCount =
-    tau_proto::TokenCount::new(334_800);
+const STANDALONE_COMPACTION_CONTEXT_WINDOW_PERCENT: u64 = 90;
 const EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.6-sol",
@@ -1616,7 +1615,7 @@ pub fn resolved_config_for_provider_model(
             supports_verbosity: model_id.starts_with("gpt-5"),
             supports_phase: is_known_phase_capable_model_id(model_id),
             supports_encrypted_reasoning: true,
-            supports_compaction: !is_gpt_5_6(model_id),
+            supports_compaction: !supports_native_standalone_compaction(model_id),
             supports_prompt_cache_key: true,
         },
     }
@@ -1677,11 +1676,16 @@ fn model_info(
             ThinkingSummary::Concise,
             ThinkingSummary::Detailed,
         ],
-        supports_compaction: !is_gpt_5_6(model),
-        supports_standalone_compaction: is_gpt_5_6(model),
+        supports_compaction: !supports_native_standalone_compaction(model),
+        supports_standalone_compaction: supports_native_standalone_compaction(model),
         standalone_compaction_generation_negative: false,
-        standalone_compaction_threshold: is_gpt_5_6(model)
-            .then_some(GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD),
+        standalone_compaction_threshold: supports_native_standalone_compaction(model).then(|| {
+            tau_proto::TokenCount::new(
+                raw_context_window_for_model(model).get()
+                    * STANDALONE_COMPACTION_CONTEXT_WINDOW_PERCENT
+                    / 100,
+            )
+        }),
         standalone_compaction_prefix_budget: None,
         cache_policy: Some(private_response_chain_cache_policy()),
         est_uncached_input_cost_1m_usd: Some(prices.uncached_input),
@@ -1790,6 +1794,13 @@ fn effective_mode(model: &str, requested: responses::ResponsesMode) -> responses
 
 fn is_gpt_5_6(model: &str) -> bool {
     matches!(model, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
+}
+
+/// Exact audited models using the native Responses `compaction_trigger`
+/// contract. Keep this separate from GPT-5.6 image and Lite compatibility
+/// capabilities.
+fn supports_native_standalone_compaction(model: &str) -> bool {
+    is_gpt_5_6(model) || model == "gpt-6-astra"
 }
 
 fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {

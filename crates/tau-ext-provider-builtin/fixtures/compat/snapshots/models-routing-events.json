@@ -641,13 +641,14 @@
         "text"
       ],
       "max_input_tokens": 258400,
+      "standalone_compaction_threshold": 244800,
       "supported_tool_types": [
         "function",
         "custom"
       ],
-      "supports_compaction": true,
+      "supports_compaction": false,
       "supports_parallel_tool_calls": true,
-      "supports_standalone_compaction": false,
+      "supports_standalone_compaction": true,
       "tags": [
         "shell:chatgpt",
         "tools:custom-text"

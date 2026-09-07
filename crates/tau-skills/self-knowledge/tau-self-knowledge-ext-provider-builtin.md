@@ -198,7 +198,8 @@ unnecessarily narrow OpenRouter routing. Tau still owns all tool definitions,
 authorization, and execution.
 `chatgpt` uses the private ChatGPT OAuth/Codex Responses adapter. Its ordinary
 inference is WebSocket-only with no HTTP/SSE fallback. HTTPS is retained only for
-OAuth, quota acquisition, and unary standalone compaction. It is not a public
+OAuth and quota acquisition; native standalone compaction uses the ordinary
+Responses WebSocket route. It is not a public
 API-key OpenAI Responses provider.
 
 `responses` uses a generic API-key `/responses` adapter with explicit SSE or
@@ -434,9 +435,15 @@ standard Responses and parallel direct tool calls by default. Legacy Responses
 Lite is available only by setting `responses_lite_compatibility: true` on that
 ChatGPT profile (or answering Yes during `tau provider add`) and restarting.
 Tau never changes modes as a retry fallback. Both modes omit legacy inline
-context management; manual and automatic compaction use the unary
-`/codex/responses/compact` operation and install one validated
-replacement-window transcript boundary. The startup mode also separates prompt
+context management. Astra also uses native standalone compaction, with a
+244,800-token default threshold (90 percent of its raw 272,000-token window);
+named after-done policies can run earlier. Astra remains on standard Responses
+even when its profile requests Lite compatibility. Manual and automatic native
+compaction send the full closed window plus `compaction_trigger` over the
+ordinary Responses WebSocket route and install exactly one validated opaque
+compaction item. The harness preserves the exact post-cut suffix. There is no
+generic local-summary or surface-switch fallback for ChatGPT.
+The startup mode also separates prompt
 cache/thread/socket identity, causing one cold transition after upgrade, while
 quota and retry identity remain account/provider based.
 
