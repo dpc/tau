@@ -72,6 +72,33 @@ cargo install --git https://github.com/dpc/tau --package dpc-tau
 Official packaging will come later — request a format or upvote existing requests on [GitHub Discussions](https://github.com/dpc/tau/discussions) to help prioritize.
 
 
+## Optional extensions
+
+Tau keeps service integrations in separately maintained process extensions.
+The Tau flake pins and re-exports their Nix packages under one umbrella:
+
+| Integration | What it provides | Flake package | Source |
+|---|---|---|---|
+| Zulip | Bot message bridge with long polling and scoped send/reaction tools | `tau-ext-zulip` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd) |
+| Rostra | Relay-only social client with local state, signed writes, and opt-in notifications | `tau-ext-rostra` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o) |
+| Slack | Socket Mode text bridge with scoped send/reaction tools and multiple-instance prefixes | `tau-ext-slack` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg) |
+| Telegram | Bot API text bridge, plus an optional separately supervised gateway | `tau-ext-telegram`, `tau-telegram-gateway` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r) |
+
+For example:
+
+```sh
+nix profile install github:dpc/tau#tau-ext-slack
+```
+
+Installing a package only puts its executable on `PATH`. Each integration
+remains disabled until you enable its `std-*` instance in `harness.yaml`,
+provide the service account or identity and Tau-managed secrets, and configure
+the allowed senders, routes, and role tool policy. Installation does not create
+an account, add credentials, enable an extension, or authorize any route or
+tool. See [Configuring extensions](docs/extensions.md) and each standalone
+project's README for the full setup.
+
+
 ## Configuration
 
 Use `tau init` to generate config files.

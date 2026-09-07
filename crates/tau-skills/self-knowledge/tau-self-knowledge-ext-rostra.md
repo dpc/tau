@@ -8,9 +8,11 @@ advertise: false
 
 `std-rostra` is Tau's disabled-by-default configuration for the separately
 maintained `tau-ext-rostra` executable. Tau does not bundle or install that
-executable; install it separately and ensure `tau-ext-rostra` is available
-through `PATH` before enabling the instance. Tau still starts it through the
-normal supervised stdio extension route.
+executable. Install the Tau flake's `tau-ext-rostra` package and ensure the
+executable is available through `PATH` before enabling the instance. Tau still
+starts it through the normal supervised stdio extension route. The
+[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o)
+owns its source and detailed operational documentation.
 
 One instance owns one Rostra identity and its private durable local view. It
 uses relay-only Iroh peer transport and Pkarr HTTPS/DNS discovery; it never

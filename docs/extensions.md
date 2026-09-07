@@ -72,10 +72,12 @@ For a content-free mount-namespace diagnostic, see the
 ## Rostra
 
 The separately maintained `std-rostra` instance is disabled by default. Tau
-does not bundle its source or executable: install `tau-ext-rostra` separately
-and ensure it is available through `PATH` before enabling the instance. The
-default configuration launches that executable through Tau's normal supervised
-stdio extension route.
+does not bundle its source or executable. Install the Tau flake's
+`tau-ext-rostra` package, ensure the executable is available through `PATH`,
+and then enable the instance. The default configuration launches that
+executable through Tau's normal supervised stdio extension route. The
+[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o)
+owns its source and detailed operational documentation.
 
 The extension runs one full Rostra client with relay-only Iroh peer transport,
 Pkarr HTTPS/DNS discovery, and no direct peer-IP transport. It derives its
@@ -141,10 +143,12 @@ cannot recover the exact announced batch.
 ## Zulip
 
 The separately maintained `std-zulip` instance is disabled by default. Tau does
-not bundle its source or executable: install `tau-ext-zulip` separately and
-ensure it is available through `PATH` before enabling the instance. The default
-configuration launches that executable through Tau's normal supervised stdio
-extension route.
+not bundle its source or executable. Install the Tau flake's `tau-ext-zulip`
+package, ensure the executable is available through `PATH`, and then enable the
+instance. The default configuration launches that executable through Tau's
+normal supervised stdio extension route. The
+[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd)
+owns its source and detailed operational documentation.
 
 Tau retains the `std-zulip` instance name, empty default configuration,
 managed-secret delivery, per-instance state and checkpoint locations, publisher
@@ -236,10 +240,13 @@ Extension-specific settings remain under `config`. For example, std-slack's
 should retain the legacy `[agent-id] ` presentation.
 
 The separately maintained `std-slack` instance is disabled by default. Tau does
-not bundle its source or executable: install the Cargo package
-`dpc-tau-ext-slack` separately, ensure its `tau-ext-slack` executable is
-available through `PATH`, and then enable the instance. Tau launches it through
-the normal supervised stdio extension route.
+not bundle its source or executable. Install the Tau flake's `tau-ext-slack`
+package, ensure the executable is available through `PATH`, and then enable the
+instance. Tau launches it through the normal supervised stdio extension route.
+The
+[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg)
+owns its source and detailed setup documentation. Its Cargo README installation
+instructions remain conditional on a future registry publication.
 
 Tau retains the `std-slack` name, role, configuration, managed-secret delivery,
 per-instance state and checkpoint locations, publisher identity, tool
@@ -249,12 +256,15 @@ dynamic-DM authority. The standalone project owns the detailed setup,
 migration, security, routing, testing, and troubleshooting documentation.
 
 The separately maintained `std-telegram` instance is disabled by default. Tau
-does not bundle its source or executables: install the Cargo package
-`dpc-tau-ext-telegram` separately, ensure its `tau-ext-telegram` executable is
-available through `PATH`, and then enable the instance. Tau launches it through
-the normal supervised stdio extension route. The same standalone package
-provides the optional `tau-telegram-gateway`; operators must install and
-supervise that daemon separately when using gateway-client mode.
+does not bundle its source or executables. Install the Tau flake's
+`tau-ext-telegram` package, ensure the executable is available through `PATH`,
+and then enable the instance. Tau launches it through the normal supervised
+stdio extension route. The umbrella also exports `tau-telegram-gateway`;
+operators must install and supervise that daemon separately when using
+gateway-client mode. The
+[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r)
+owns its source and detailed setup documentation. Its Cargo README installation
+instructions remain conditional on a future registry publication.
 
 Tau retains the `std-telegram` name, role, configuration, managed-secret
 delivery, per-instance Session-scope desired-registration state, checkpoint

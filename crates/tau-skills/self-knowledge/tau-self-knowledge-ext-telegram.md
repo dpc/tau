@@ -6,11 +6,13 @@ description: Use for Tau std-telegram setup, routing, tools, gateway-client mode
 # Tau std-telegram extension self-knowledge
 
 `std-telegram` is Tau's disabled-by-default configuration for the separately
-maintained Cargo package `dpc-tau-ext-telegram` and its `tau-ext-telegram`
-executable. Tau does not bundle or install that executable; install it
-separately and ensure it is available through `PATH` before enabling the
-instance. Tau still starts it through the normal supervised stdio extension
-route.
+maintained `tau-ext-telegram` executable. Tau does not bundle or install that
+executable. Install the Tau flake's `tau-ext-telegram` package and ensure it is
+available through `PATH` before enabling the instance. Tau still starts it
+through the normal supervised stdio extension route. The
+[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r)
+owns its source and detailed operational documentation; its Cargo README
+installation instructions remain conditional on a future registry publication.
 
 Local-poll mode requires a named bot-token secret, a nonempty numeric
 `allowed_user_ids` list, and an optional exact `chat_id`. Without `chat_id`, an
@@ -28,14 +30,14 @@ managed-secret delivery, startup timeout, state and checkpoint roots, publisher
 identity, desired-registration restoration, network policy, and supervised
 stdio lifecycle when it launches the standalone executable.
 
-The standalone package also provides `tau-telegram-gateway`, which operators
-must install and supervise separately. Gateway-client mode configures an exact
-local gateway socket path and a named per-instance client secret. The sidecar
-does not receive the bot token or choose Telegram destinations in that mode;
-the gateway owns polling, sender and chat admission, durable update
-checkpoints, and outbound routing. Mutual authentication does not contain
-malicious same-UID processes, and external Telegram text always remains
-untrusted content.
+The Tau flake also exports the standalone project's `tau-telegram-gateway`,
+which operators must install and supervise separately. Gateway-client mode
+configures an exact local gateway socket path and a named per-instance client
+secret. The sidecar does not receive the bot token or choose Telegram
+destinations in that mode; the gateway owns polling, sender and chat admission,
+durable update checkpoints, and outbound routing. Mutual authentication does
+not contain malicious same-UID processes, and external Telegram text always
+remains untrusted content.
 
 The standalone project's README, security notes, linked specifications, and
 tests own the detailed command, routing, retry, replay, durability, gateway,

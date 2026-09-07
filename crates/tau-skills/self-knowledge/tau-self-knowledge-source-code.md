@@ -19,4 +19,18 @@ Primary upstream is Radicle:
 
 There is also a GitHub mirror: <https://github.com/dpc/tau>.
 
+## Optional extension projects
+
+Tau's flake pins and re-exports the separately maintained service integrations,
+but Tau does not bundle or enable their executables:
+
+- Zulip: <https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd>
+- Rostra: <https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o>
+- Slack: <https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg>
+- Telegram: <https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r>
+
+Install the corresponding `tau-ext-*` package from the Tau flake, then enable
+and configure its `std-*` instance explicitly. Telegram gateway-client mode also
+uses the flake's `tau-telegram-gateway` package.
+
 When an agent needs a local checkout, prefer a reusable cache location such as `~/.cache/tau/src` to avoid re-downloading the repository for every investigation.

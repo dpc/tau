@@ -7,10 +7,12 @@ description: Use for Tau std-zulip setup, event queues, stream/topic and DM rout
 
 `std-zulip` is Tau's disabled-by-default configuration for the separately
 maintained `tau-ext-zulip` executable. Tau does not bundle or install that
-executable; install it separately and ensure `tau-ext-zulip` is available
-through `PATH` before enabling the instance. Tau still starts it through the
-normal supervised stdio extension route. The bridge uses bot email/API-key HTTP
-Basic authentication, `POST /api/v1/register`, and long-poll
+executable. Install the Tau flake's `tau-ext-zulip` package and ensure the
+executable is available through `PATH` before enabling the instance. Tau still
+starts it through the normal supervised stdio extension route. The
+[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd)
+owns its source and detailed operational documentation. The bridge uses bot
+email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
 `GET /api/v1/events`; it does not use webhooks.
 
 Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_secret`, a nonempty numeric `allowed_user_ids`, optional sender aliases, optional `direct_messages: { receive: all_messages }`, optional `proactive_direct_messages` aliases with one fixed recipient each, and name-based stream/topic routes. Keep the identity key stable across API-key rotation; changing it deliberately starts a new opaque sender/conversation/message namespace. `allowed_user_ids` admits inbound senders only; it does not authorize proactive DMs. Routes independently select `receive: mentions_only|all_messages` and `proactive_send`; every configured channel name resolves to a private native ID before queue registration, and `all_messages` subscribes the bot idempotently before that registration without later unsubscribing. Exact proactive stream names remain the default, while `agent_chosen_topic: true` on a proactive name without `topic` explicitly grants agent topic choice within that configured channel. Production requires HTTPS.

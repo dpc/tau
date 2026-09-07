@@ -13,6 +13,10 @@
       url = "git+https://radicle.dpc.pw/z2HR882B4c4mTdAgdt4SozpdeTuMf.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    tau-ext-rostra.url = "git+https://radicle.dpc.pw/z4LrrRivcgNjJii5wzbjTvA8ttt6o.git?ref=main";
+    tau-ext-slack.url = "git+https://radicle.dpc.pw/z3NJhEtKWCbHPa28wDQSYJ8eEfBjg.git?ref=master";
+    tau-ext-telegram.url = "git+https://radicle.dpc.pw/z3sPdSePnxtBvP9pTLwUwVgpMU68r.git?ref=main";
+    tau-ext-zulip.url = "git+https://radicle.dpc.pw/z2LFTBWK7VpAwC3Bpxohkh91aqXd.git?ref=main";
     selfci = {
       url = "git+https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -29,6 +33,10 @@
       flake-utils,
       flakebox,
       dpc-public-skills,
+      tau-ext-rostra,
+      tau-ext-slack,
+      tau-ext-telegram,
+      tau-ext-zulip,
       selfci,
       ...
     }@inputs:
@@ -533,6 +541,13 @@
           tau = tauPackage;
           site = site;
           "cargo-crap" = cargoCrap;
+          inherit (tau-ext-rostra.packages.${system}) tau-ext-rostra;
+          inherit (tau-ext-slack.packages.${system}) tau-ext-slack;
+          inherit (tau-ext-telegram.packages.${system})
+            tau-ext-telegram
+            tau-telegram-gateway
+            ;
+          inherit (tau-ext-zulip.packages.${system}) tau-ext-zulip;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           inherit release-archives;
