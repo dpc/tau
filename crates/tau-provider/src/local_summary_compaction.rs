@@ -5,9 +5,6 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::Serialize;
 
-/// Default maximum summary generation.
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
-
 /// Invalid Tau-owned summary compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigError {
@@ -22,8 +19,8 @@ pub enum ConfigError {
 pub struct Config {
     /// Independent historical-prefix byte work cap, when configured.
     max_input_bytes: Option<tau_proto::ByteCount>,
-    /// Maximum generated summary tokens.
-    max_output_tokens: NonZeroU32,
+    /// Explicit summary generation override; absence inherits ordinary policy.
+    max_output_tokens: Option<NonZeroU32>,
     /// Maximum accepted narrative or reasoning bytes.
     max_output_bytes: NonZeroU64,
 }
@@ -49,22 +46,19 @@ impl Config {
         }
         Ok(Self {
             max_input_bytes: Some(tau_proto::ByteCount::new(max_input_bytes.get())),
-            max_output_tokens,
+            max_output_tokens: Some(max_output_tokens),
             max_output_bytes,
         })
     }
 
-    /// Build the generic no-prefix-cap fallback using only same-domain token
-    /// output policy and the independent narrative byte cap.
+    /// Build the generic fallback with inherited ordinary generation policy,
+    /// no prefix cap, and the independent narrative byte cap.
     #[must_use]
     pub fn default_for(context_window_tokens: u64) -> Option<Self> {
-        let max_output_tokens = u32::try_from(context_window_tokens / 8)
-            .unwrap_or(u32::MAX)
-            .clamp(1, DEFAULT_MAX_OUTPUT_TOKENS);
         NonZeroU64::new(context_window_tokens)?;
         Some(Self {
             max_input_bytes: None,
-            max_output_tokens: NonZeroU32::new(max_output_tokens)?,
+            max_output_tokens: None,
             max_output_bytes: NonZeroU64::new(
                 tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64,
             )?,
@@ -101,9 +95,10 @@ impl Config {
         };
         let defaults = Self::default_for(context_window_tokens.get())
             .expect("nonzero context window must produce generic summary limits");
-        let max_output_tokens = max_output_tokens.unwrap_or(defaults.max_output_tokens);
         let max_output_bytes = max_output_bytes.unwrap_or(defaults.max_output_bytes);
-        if u64::from(max_output_tokens.get()) > context_window_tokens.get() {
+        if max_output_tokens
+            .is_some_and(|tokens| u64::from(tokens.get()) > context_window_tokens.get())
+        {
             return Err(ConfigError::MaxOutputTokensExceedContextWindow);
         }
         Ok(Some(Self {
@@ -119,10 +114,13 @@ impl Config {
         self.max_input_bytes
     }
 
-    /// Return the output-token request cap.
+    /// Return the explicit summary output-token override, if configured.
     #[must_use]
-    pub const fn max_output_tokens(self) -> u32 {
-        self.max_output_tokens.get()
+    pub const fn max_output_tokens(self) -> Option<u32> {
+        match self.max_output_tokens {
+            Some(tokens) => Some(tokens.get()),
+            None => None,
+        }
     }
 
     /// Return the accepted output byte cap.
@@ -131,12 +129,14 @@ impl Config {
         self.max_output_bytes.get()
     }
 
-    /// Narrow the summary request to a separately published model output
-    /// capability.
+    /// Narrow only an explicit summary override to a published model output
+    /// capability; inherited ordinary policy remains absent here.
     #[must_use]
     pub fn capped_output_tokens(mut self, capability: tau_proto::TokenCount) -> Option<Self> {
         let capability = u32::try_from(capability.get()).unwrap_or(u32::MAX);
-        self.max_output_tokens = NonZeroU32::new(self.max_output_tokens.get().min(capability))?;
+        if let Some(tokens) = self.max_output_tokens {
+            self.max_output_tokens = Some(NonZeroU32::new(tokens.get().min(capability))?);
+        }
         Some(self)
     }
 }

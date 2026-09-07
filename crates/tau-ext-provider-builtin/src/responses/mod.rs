@@ -471,7 +471,8 @@ fn attempt_output_tokens(
 ) -> u32 {
     summary
         .filter(|_| is_compaction)
-        .map_or(ordinary, SummaryCompactionConfig::max_output_tokens)
+        .and_then(SummaryCompactionConfig::max_output_tokens)
+        .unwrap_or(ordinary)
 }
 
 fn materialize_summary_prompt(

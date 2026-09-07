@@ -1,11 +1,11 @@
 use super::*;
 
-/// Generic fallback derives only a same-domain token output cap and publishes
-/// no fabricated prefix byte cap.
+/// Generic fallback inherits ordinary generation policy and publishes no
+/// fabricated prefix byte cap.
 #[test]
 fn defaults_publish_no_cross_unit_limits() {
     let config = Config::default_for(128_000).expect("ordinary model context");
-    assert_eq!(config.max_output_tokens(), 4096);
+    assert_eq!(config.max_output_tokens(), None);
     assert_eq!(config.max_input_bytes(), None);
     assert_eq!(
         config.max_output_bytes(),
@@ -16,7 +16,7 @@ fn defaults_publish_no_cross_unit_limits() {
         Config::default_for(1)
             .expect("small positive context")
             .max_output_tokens(),
-        1
+        None
     );
 }
 
@@ -50,7 +50,7 @@ fn partial_overrides_preserve_independent_generic_defaults() {
         .expect("valid token override")
         .expect("positive context");
     assert_eq!(token_override.max_input_bytes(), None);
-    assert_eq!(token_override.max_output_tokens(), 8_192);
+    assert_eq!(token_override.max_output_tokens(), Some(8_192));
     assert_eq!(
         token_override.max_output_bytes(),
         tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
@@ -68,7 +68,7 @@ fn partial_overrides_preserve_independent_generic_defaults() {
         byte_override.max_input_bytes(),
         Some(tau_proto::ByteCount::new(12_345))
     );
-    assert_eq!(byte_override.max_output_tokens(), 4_096);
+    assert_eq!(byte_override.max_output_tokens(), None);
     assert_eq!(byte_override.max_output_bytes(), 6_789);
 }
 

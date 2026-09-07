@@ -619,7 +619,7 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
         resolved_local_summary_compaction(None, &configured)
             .expect("positive context window")
             .max_output_tokens(),
-        1024
+        None
     );
 
     let defaulted: ChatCompletionsModel =
@@ -684,7 +684,7 @@ fn model_token_limits_are_independent_from_provider_output_policy() {
         resolved_local_summary_compaction(None, &summary_limited)
             .expect("summary support")
             .max_output_tokens(),
-        64
+        None
     );
 }
 
@@ -744,7 +744,7 @@ fn local_summary_compaction_defaults_without_model_profile() {
         &provider.models[2],
     )
     .expect("partial override remains enabled");
-    assert_eq!(resolved.max_output_tokens(), 512);
+    assert_eq!(resolved.max_output_tokens(), Some(512));
     assert_eq!(
         resolved.max_output_bytes(),
         tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64

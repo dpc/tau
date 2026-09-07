@@ -2259,16 +2259,18 @@ fn build_request_after_prefix_admission(
             None
         }
     };
-    let (max_tokens, max_completion_tokens) = summary_config.map_or_else(
-        || output_token_cap_fields(provider),
-        |config| {
-            if provider.compat.max_completion_tokens {
-                (None, Some(config.max_output_tokens()))
-            } else {
-                (Some(config.max_output_tokens()), None)
-            }
-        },
-    );
+    let (max_tokens, max_completion_tokens) = summary_config
+        .and_then(LocalSummaryCompactionConfig::max_output_tokens)
+        .map_or_else(
+            || output_token_cap_fields(provider),
+            |tokens| {
+                if provider.compat.max_completion_tokens {
+                    (None, Some(tokens))
+                } else {
+                    (Some(tokens), None)
+                }
+            },
+        );
     let request = ChatRequest {
         model: model.id.as_str().to_owned(),
         messages,

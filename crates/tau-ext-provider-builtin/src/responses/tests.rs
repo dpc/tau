@@ -467,9 +467,9 @@ fn local_summary_compaction_uses_generic_defaults_and_partial_overrides() {
     );
 
     let defaults = resolved_summary_config(&provider.models[0]).expect("generic fallback");
-    assert_eq!(defaults.max_output_tokens(), 1024);
+    assert_eq!(defaults.max_output_tokens(), None);
     let partial = resolved_summary_config(&provider.models[1]).expect("partial override");
-    assert_eq!(partial.max_output_tokens(), 2048);
+    assert_eq!(partial.max_output_tokens(), Some(2048));
     assert_eq!(
         partial.max_output_bytes(),
         tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
@@ -782,7 +782,7 @@ fn context_window_token_count_preserves_profile_and_summary_behavior() {
         })
         .expect("positive context window")
         .max_output_tokens(),
-        1024
+        None
     );
 
     let defaulted: ResponsesModel =
@@ -847,7 +847,7 @@ fn model_token_limits_are_independent_from_provider_output_policy() {
         resolved_summary_config(&summary_limited)
             .expect("summary support")
             .max_output_tokens(),
-        64
+        None
     );
 }
 
@@ -956,6 +956,28 @@ fn summary_retry_policy_terminalizes_only_after_semantic_output() {
     assert!(!summary_retry_is_terminal(false, &progress(true)));
     let config = summary_config();
     assert_eq!(attempt_output_tokens(99, Some(config), true), 4096);
+}
+
+/// Public Responses summary fallback inherits ordinary output policy, including
+/// zero omission, while explicit summary limits remain independent overrides.
+#[test]
+fn summary_output_policy_inherits_ordinary_unless_overridden() {
+    let inherited = SummaryCompactionConfig::default_for(32768).expect("summary support");
+    let explicit = SummaryCompactionConfig::with_overrides(32768, None, NonZeroU32::new(321), None)
+        .expect("valid override")
+        .expect("summary support");
+    for ordinary in [0, 8192, 12345] {
+        assert_eq!(
+            attempt_output_tokens(ordinary, Some(inherited), true),
+            ordinary
+        );
+        assert_eq!(attempt_output_tokens(ordinary, Some(explicit), true), 321);
+        assert_eq!(
+            attempt_output_tokens(ordinary, Some(explicit), false),
+            ordinary
+        );
+        assert_eq!(attempt_output_tokens(ordinary, None, true), ordinary);
+    }
 }
 
 /// Proves public Responses models publish explicitly configured cache metadata

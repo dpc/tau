@@ -30,11 +30,12 @@ Chat Completions, OpenRouter, and public Responses models use the shared
 Tau-owned cache-aligned local summary fallback when they lack provider-native
 compaction. It preserves the ordinary provider request prefix and appends the
 harness summary instruction last. Its generic profile publishes no prefix byte
-cap or proactive threshold; its output-token cap and narrative byte bound remain
-independent resource limits. `local_summary_compaction` contains only optional,
+cap or proactive threshold; absent a summary output override it inherits ordinary
+request output policy, including zero meaning omission. Its narrative byte bound
+remains independent. `local_summary_compaction` contains only optional,
 independent prefix-byte, output-token, and output-byte overrides. Resolution uses
-the selected model's `context_window`, then narrows the requested output against
-a published `max_output_tokens`; startup rejects obsolete duplicate-context
+the selected model's `context_window`, then narrows explicit summary output overrides
+against a published `max_output_tokens`; startup rejects obsolete duplicate-context
 and serialization-selector keys, or limits that exceed their owning boundary,
 before publishing any model. ChatGPT/Codex continues to prefer unchanged native
 inline or standalone compaction.

@@ -43,13 +43,15 @@ summarize an old image away like any other input fact. This behavior is confirme
 
 The Tau-owned summary fallback for Chat Completions, OpenRouter, and public
 Responses models uses cache-aligned ordinary-prefix compaction. Its generic
-profile publishes no prefix byte cap or proactive threshold; its output-token
-cap is derived only within the token domain and its narrative byte cap is an
+profile publishes no prefix byte cap or proactive threshold; absent an explicit
+summary output-token override it inherits ordinary request output policy,
+including zero meaning omission. Its narrative byte cap is an
 independent resource bound. `local_summary_compaction` contains only independent
 optional prefix-byte, output-token, and output-byte overrides layered over those
 defaults; the selected provider-qualified model's `context_window` is the sole
-context source for those defaults and override validation. A separately
-published model `max_output_tokens` then narrows the resolved summary request.
+context source for support and override validation. A separately
+published model `max_output_tokens` narrows explicit summary overrides;
+inherited output policy retains ordinary capability handling.
 Removed duplicate-context and serialization-selector fields are
 configuration errors with migration diagnostics. Override validation occurs
 before any model publication or Ready signal. These bounds publish no proactive

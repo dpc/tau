@@ -542,12 +542,13 @@ cap or override object; acceptance bounds do not limit remote generation.
 
 Chat Completions, OpenRouter, and public Responses models advertise standalone
 summary compaction by default when their configured context window is nonzero.
-Omitting `local_summary_compaction` uses no prefix byte cap, derives the
-output-token cap by clamping `context_window / 8` to `1..=4096`, uses a 256 KiB output-byte
+Omitting `local_summary_compaction` uses no prefix byte cap, inherits ordinary
+request output policy (including zero to omit the limit), uses a 256 KiB output-byte
 bound, and publishes no proactive threshold. The object accepts independent
 optional `max_input_bytes`, `max_output_tokens`, and `max_output_bytes`
-overrides; `{}` keeps all defaults. The model output capability narrows the
-resolved summary request when present. Tau rejects the retired `serialization_profile` and
+overrides; `{}` keeps all defaults. There is no separate default summary generation
+cap. The model output capability narrows explicit summary overrides when present;
+inherited policy keeps ordinary capability handling. Tau rejects the retired `serialization_profile` and
 `context_window_tokens` keys with migration guidance and rejects output limits
 that exceed the model token window or Tau's byte ceiling before model
 publication. Tau sends the ordinary provider request prefix for the immutable cut,

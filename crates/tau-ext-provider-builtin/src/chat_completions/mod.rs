@@ -95,7 +95,8 @@ pub struct ChatCompletionsModel {
     pub supports_parallel_tool_calls: bool,
     /// Optional independent overrides for Tau-owned summary compaction limits.
     ///
-    /// Absence derives conservative defaults from the model context window.
+    /// Absence or an empty object inherits ordinary request output policy.
+    /// The context window controls support and explicit-override validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_summary_compaction: Option<LocalSummaryCompactionConfig>,
     /// Optional operator-declared runtime cache contract for this exact model.
@@ -135,7 +136,8 @@ pub struct LocalSummaryCompactionConfig {
 }
 
 impl LocalSummaryCompactionConfig {
-    /// Layer these serialized overrides over the generic model-derived limits.
+    /// Validate explicit overrides against the model window while retaining
+    /// ordinary output policy when no summary token override is supplied.
     pub(crate) fn validated_for(
         self,
         model_context_window: TokenCount,

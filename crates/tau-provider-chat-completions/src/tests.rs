@@ -2229,6 +2229,51 @@ fn local_summary_without_prefix_cap_skips_measurement() {
     .expect("no-cap admission is inert");
 }
 
+/// Summary generation inherits the ordinary wire policy, including omission,
+/// unless an explicit summary override selects a different allowance.
+#[test]
+fn local_summary_inherits_ordinary_output_policy_unless_overridden() {
+    let mut created = prompt();
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
+    for completion_field in [false, true] {
+        for ordinary in [0, 8192, 12345] {
+            for override_tokens in [None, NonZeroU32::new(321)] {
+                let mut config = resolved_provider(&provider());
+                config.compat.max_completion_tokens = completion_field;
+                config.max_output_tokens = ordinary;
+                config.local_summary_compaction = LocalSummaryCompactionConfig::with_overrides(
+                    32768,
+                    None,
+                    override_tokens,
+                    None,
+                )
+                .expect("valid summary configuration");
+                let request = try_build_request(&config, &provider().models[0], &created)
+                    .expect("summary request");
+                let expected = override_tokens
+                    .map(NonZeroU32::get)
+                    .or_else(|| (ordinary != 0).then_some(ordinary));
+                assert_eq!(
+                    request.max_tokens,
+                    if completion_field { None } else { expected }
+                );
+                assert_eq!(
+                    request.max_completion_tokens,
+                    if completion_field { expected } else { None }
+                );
+            }
+        }
+    }
+}
+
 /// Production request construction must reject an over-budget historical prefix
 /// before lowering tool definitions or expanding image data URLs.
 #[test]

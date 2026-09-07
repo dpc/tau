@@ -972,8 +972,9 @@ empty or dummy API-key record.
 Tau enables its summary compaction fallback for Chat Completions, OpenRouter,
 and public Responses models whose configured context window is nonzero. Omit
 `local_summary_compaction` to use the generic fallback: no historical-prefix
-byte cap, an output-token cap of `clamp(context_window / 8, 1, 4096)`, and a
-256 KiB output-byte bound. The fallback publishes no proactive threshold.
+byte cap, the ordinary request's output-token policy (including zero to omit
+the limit), and a 256 KiB output-byte bound. There is no separate default
+summary generation cap. The fallback publishes no proactive threshold.
 
 An explicit object supplies independent optional overrides. An empty object is
 equivalent to omission:
@@ -990,7 +991,8 @@ equivalent to omission:
 ```
 
 `max_input_bytes` bounds the canonical JSON-serialized historical prompt prefix.
-`max_output_tokens` controls the summary request. `max_output_bytes` independently
+An explicit `max_output_tokens` overrides the ordinary policy for the summary
+request. `max_output_bytes` independently
 bounds accepted narrative and reasoning output and defaults to 256 KiB. Explicit
 values must be positive; output tokens cannot exceed the model `context_window`,
 and output bytes cannot exceed 256 KiB.
