@@ -6143,6 +6143,105 @@ fn render_tool_use_state_diff_payload_adds_plus_minus_chips() {
     ));
 }
 
+/// Ensures producer-supplied file counts render before aggregate diff totals,
+/// leaving lifecycle duration and outcome free to follow them.
+#[test]
+fn render_tool_use_state_places_file_count_before_diff_totals() {
+    use tau_proto::{DiffSummary, FileDiffSummary, ToolUsePayload, ToolUseState, ToolUseStatus};
+
+    let display = ToolUseState {
+        args: "some/path,…".into(),
+        info_chips: vec!["3F".into()],
+        status: ToolUseStatus::Success,
+        status_text: "ok".into(),
+        payload: Some(ToolUsePayload::Diffs {
+            files: vec![FileDiffSummary {
+                path: "some/path".into(),
+                diff: DiffSummary {
+                    added: 338,
+                    removed: 111,
+                    hunks: vec![],
+                },
+            }],
+        }),
+        ..Default::default()
+    };
+
+    let rendered = render_tool_use_state("apply_patch", &display);
+    let texts: Vec<&str> = rendered
+        .suffixes
+        .iter()
+        .map(|suffix| suffix.text.as_str())
+        .collect();
+
+    assert_eq!(rendered.args, "some/path,…");
+    assert_eq!(texts, vec!["3F", "+338", "-111", "ok"]);
+}
+
+/// Ensures a completed patch row presents path, file count, aggregate line
+/// totals, duration, and outcome in the requested compact order.
+#[test]
+fn apply_patch_status_row_uses_changed_file_summary() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let arguments = CborValue::Text("*** Begin Patch\n*** End Patch".into());
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "sp-0",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-patch".into(),
+                name: tau_proto::ToolName::new("apply_patch"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: arguments.clone(),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started("call-patch", "apply_patch", arguments),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
+            call_id: "call-patch".into(),
+            tool_name: tau_proto::ToolName::new("apply_patch"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "some/path,…".into(),
+                info_chips: vec!["3F".into()],
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "ok".into(),
+                payload: Some(tau_proto::ToolUsePayload::Diffs {
+                    files: vec![tau_proto::FileDiffSummary {
+                        path: "some/path".into(),
+                        diff: tau_proto::DiffSummary {
+                            added: 338,
+                            removed: 111,
+                            hunks: Vec::new(),
+                        },
+                    }],
+                }),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+
+    sync(&handle);
+    assert!(vt.screen_contains(100, "apply_patch some/path,… 3F +338-111 0s ok"));
+}
+
 #[test]
 fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     use tau_proto::{DiffHunk, DiffLine, DiffSegment, DiffSummary, ToolUseState, ToolUseStatus};

@@ -1,5 +1,6 @@
 //! `apply_patch` custom tool: parse Codex-style patch text and apply it.
 
+use std::collections::HashSet;
 use std::io as path_std_io;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,7 @@ pub(crate) fn apply_patch(
             let details = failure_details(&failure);
             let mut tool_failure = ToolFailure::new(failure.message)
                 .with_payload(display_payload_for_failure(&failure.changes));
+            populate_change_display(&mut tool_failure.display, &failure.changes);
             if let Some(details) = details {
                 tool_failure = tool_failure.with_details(details);
             }
@@ -41,7 +43,8 @@ pub(crate) fn apply_patch(
     let payload = display_payload_for_changes(&changes, &summary);
     let result = CborValue::Text(summary.clone());
 
-    let mut display = crate::display::ok_display("apply_patch");
+    let mut display = crate::display::ok_display("");
+    populate_change_display(&mut display, &changes);
     display.payload = payload;
     Ok(ToolOutput {
         result,
@@ -455,6 +458,23 @@ fn display_payload_for_failure(changes: &[AppliedChange]) -> Option<ToolUsePaylo
 
     let summary = format_partial_summary(changes);
     display_payload_for_changes(changes, &summary)
+}
+
+fn populate_change_display(display: &mut tau_proto::ToolUseState, changes: &[AppliedChange]) {
+    let Some(first) = changes.first() else {
+        return;
+    };
+    let mut distinct_paths = HashSet::new();
+    for change in changes {
+        distinct_paths.insert(change.display_path.as_str());
+    }
+    display.args = first.display_path.clone();
+    if distinct_paths.len() > 1 {
+        display.args.push_str(",…");
+    }
+    display
+        .info_chips
+        .push(format!("{}F", distinct_paths.len()));
 }
 
 fn failure_details(failure: &ApplyPatchFailure) -> Option<CborValue> {

@@ -208,7 +208,8 @@ fn oversized_success_diff_retains_result_and_changed_path_evidence() {
         CborValue::Text(summary.to_owned()),
         Vec::new(),
         ToolUseState {
-            args: "apply_patch".to_owned(),
+            args: "src/large.rs".to_owned(),
+            info_chips: vec!["1F".to_owned()],
             status: ToolUseStatus::Success,
             status_text: "ok".to_owned(),
             payload: Some(oversized_diff_payload("src/large.rs")),
@@ -222,7 +223,8 @@ fn oversized_success_diff_retains_result_and_changed_path_evidence() {
     };
     let display = result.display.as_ref().expect("retained display");
     assert_eq!(result.result, CborValue::Text(summary.to_owned()));
-    assert_eq!(display.args, "apply_patch");
+    assert_eq!(display.args, "src/large.rs");
+    assert_eq!(display.info_chips, ["1F"]);
     assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");
     assert_eq!(
@@ -250,7 +252,8 @@ fn oversized_failure_diff_retains_partial_change_details() {
         message: "later hunk failed".to_owned(),
         details: Some(details.clone()),
         display: Some(ToolUseState {
-            args: "apply_patch".to_owned(),
+            args: "src/applied.rs".to_owned(),
+            info_chips: vec!["1F".to_owned()],
             status: ToolUseStatus::Error,
             status_text: "later hunk failed".to_owned(),
             payload: Some(oversized_diff_payload("src/applied.rs")),
@@ -265,7 +268,8 @@ fn oversized_failure_diff_retains_partial_change_details() {
     };
     let display = error.display.as_ref().expect("retained display");
     assert_eq!(error.details.as_ref(), Some(&details));
-    assert_eq!(display.args, "apply_patch");
+    assert_eq!(display.args, "src/applied.rs");
+    assert_eq!(display.info_chips, ["1F"]);
     assert_eq!(display.status, ToolUseStatus::Error);
     assert_eq!(display.status_text, "later hunk failed");
     assert_eq!(
@@ -296,7 +300,8 @@ fn oversized_path_label_marker_compacts_and_final_frame_fits() {
         CborValue::Text(summary.clone()),
         Vec::new(),
         ToolUseState {
-            args: "apply_patch".to_owned(),
+            args: format!("{},…", paths[0]),
+            info_chips: vec![format!("{}F", paths.len())],
             status: ToolUseStatus::Success,
             status_text: "ok".to_owned(),
             payload: Some(ToolUsePayload::Diffs { files }),

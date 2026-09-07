@@ -163,7 +163,9 @@ For complete terminal-frame budgeting, verify an oversized `read_image` result
 fails as typed content without base64/text fallback. For an oversized
 `edit`/`apply_patch` structured diff, verify only the optional UI diff becomes
 an explicit truncation marker while success or partial failure and changed-file
-evidence remain truthful.
+evidence remain truthful. Verify `apply_patch` headers name the first changed
+path instead of repeating the tool name, append `,…` when other distinct paths
+changed, and show the `NF` file count before aggregate `+N/-M` diff totals.
 
 `grep` renders matches heading-grouped: each file's path appears once as a
 heading line, followed by `LINE:CONTENT` for match lines and `LINE-CONTENT`

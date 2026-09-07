@@ -512,6 +512,8 @@ fn extension_apply_patch_updates_file() {
         ))
     );
     let display = result.display.expect("apply_patch display");
+    assert_eq!(display.args, file_path.display().to_string());
+    assert_eq!(display.info_chips, ["1F"]);
     let Some(ToolUsePayload::Diffs { files }) = display.payload else {
         panic!("single-file apply_patch must retain its structured display path");
     };
@@ -570,6 +572,9 @@ fn extension_apply_patch_reports_context_mismatch_without_writing() {
         fs::read_to_string(&file_path).expect("read back"),
         "before\n"
     );
+    let display = error.display.expect("failed apply_patch display");
+    assert!(display.args.is_empty());
+    assert!(display.info_chips.is_empty());
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -787,6 +792,8 @@ fn extension_apply_patch_move_renames_file() {
         panic!("expected tool result");
     };
     let display = result.display.expect("apply_patch display");
+    assert_eq!(display.args, dst.display().to_string());
+    assert_eq!(display.info_chips, ["1F"]);
     let Some(ToolUsePayload::Diffs { files }) = display.payload else {
         panic!("moved apply_patch file must retain its destination path");
     };
@@ -901,6 +908,8 @@ fn extension_apply_patch_applies_multiple_operations() {
         ))
     );
     let display = result.display.expect("apply_patch display");
+    assert_eq!(display.args, format!("{},…", add_path.display()));
+    assert_eq!(display.info_chips, ["3F"]);
     let Some(ToolUsePayload::Diffs { files }) = display.payload else {
         panic!("expected multi-file structured diff payload");
     };
@@ -1062,6 +1071,8 @@ fn extension_apply_patch_context_mismatch_after_partial_success_leaves_changes()
             if key == "path" && value == &created_path.display().to_string()
     )));
     let display = error.display.expect("error display");
+    assert_eq!(display.args, created_path.display().to_string());
+    assert_eq!(display.info_chips, ["1F"]);
     let Some(ToolUsePayload::Diffs { files }) = display.payload else {
         panic!("expected structured diff payload for partial apply_patch failure");
     };

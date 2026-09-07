@@ -800,17 +800,6 @@ fn render_tool_use_state_inner(
         ToolPayloadProjection::RetainDescriptor => display.payload.as_ref(),
         ToolPayloadProjection::BorrowCounters(payload) => Some(payload),
     };
-    let (added, removed) = counter_payload.map(diff_payload_counts).unwrap_or_default();
-    if 0 < added {
-        suffixes.push(tool_suffix(format!("+{added}"), ToolStatus::DiffAdded));
-    }
-    if 0 < removed {
-        suffixes.push(ToolLineSegment {
-            text: format!("-{removed}"),
-            status: ToolStatus::DiffRemoved,
-            no_leading_space: 0 < added,
-        });
-    }
     let stats_chip = format_tool_use_state_stats(&display.stats);
     if !stats_chip.is_empty() {
         suffixes.push(info_suffix(stats_chip));
@@ -827,6 +816,17 @@ fn render_tool_use_state_inner(
                 ToolStatus::Info
             },
         ));
+    }
+    let (added, removed) = counter_payload.map(diff_payload_counts).unwrap_or_default();
+    if 0 < added {
+        suffixes.push(tool_suffix(format!("+{added}"), ToolStatus::DiffAdded));
+    }
+    if 0 < removed {
+        suffixes.push(ToolLineSegment {
+            text: format!("-{removed}"),
+            status: ToolStatus::DiffRemoved,
+            no_leading_space: 0 < added,
+        });
     }
     if include_status {
         let status_kind = match display.status {

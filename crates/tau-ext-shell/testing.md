@@ -149,7 +149,10 @@ discovery.
 `apply_patch` regressions keep expected-context mismatch headers single-line,
 place bounded multiline recovery in `details.output`, and combine that recovery
 with truthful `partial_changes` plus UI-only diffs when a later hunk fails after
-an earlier mutation.
+an earlier mutation. Display-state coverage requires successful and partially
+successful patches to name the first changed path, append `,…` for multiple
+distinct paths, and report the distinct count as `NF`; failures before any
+filesystem effect leave both fields absent.
 
 The `shell` and model-visible `shell_command` accounting tests construct exact
 rendered stdout/stderr records, including stream prefixes, line-ending/UTF-8

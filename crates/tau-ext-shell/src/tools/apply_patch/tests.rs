@@ -166,6 +166,72 @@ fn single_file_diff_payload_keeps_the_escaped_file_path() {
     assert_eq!(files[0].diff.removed, 1);
 }
 
+/// Ensures one changed file replaces the redundant tool-name argument and
+/// carries an explicit file-count chip.
+#[test]
+fn single_file_display_names_the_changed_path() {
+    let changes = [AppliedChange {
+        display_path: "line\\tbreak.txt".to_owned(),
+        path: PathBuf::from("file.txt"),
+        status: ChangeStatus::Modify,
+        old_content: "before\n".to_owned(),
+        new_content: Some("after\n".to_owned()),
+    }];
+    let mut display = tau_proto::ToolUseState::default();
+
+    populate_change_display(&mut display, &changes);
+
+    assert_eq!(display.args, "line\\tbreak.txt");
+    assert_eq!(display.info_chips, ["1F"]);
+}
+
+/// Ensures multiple distinct changed files keep the first applied path,
+/// advertise omitted paths, and report the distinct file total.
+#[test]
+fn multi_file_display_summarizes_distinct_paths() {
+    let changes = [
+        AppliedChange {
+            display_path: "first.rs".to_owned(),
+            path: PathBuf::from("first.rs"),
+            status: ChangeStatus::Modify,
+            old_content: "old\n".to_owned(),
+            new_content: Some("new\n".to_owned()),
+        },
+        AppliedChange {
+            display_path: "second.rs".to_owned(),
+            path: PathBuf::from("second.rs"),
+            status: ChangeStatus::Add,
+            old_content: String::new(),
+            new_content: Some("new\n".to_owned()),
+        },
+        AppliedChange {
+            display_path: "first.rs".to_owned(),
+            path: PathBuf::from("first.rs"),
+            status: ChangeStatus::Modify,
+            old_content: "new\n".to_owned(),
+            new_content: Some("newer\n".to_owned()),
+        },
+    ];
+    let mut display = tau_proto::ToolUseState::default();
+
+    populate_change_display(&mut display, &changes);
+
+    assert_eq!(display.args, "first.rs,…");
+    assert_eq!(display.info_chips, ["2F"]);
+}
+
+/// Ensures failures before the first filesystem effect do not fabricate a path
+/// or zero-file chip.
+#[test]
+fn empty_change_display_stays_unlabelled() {
+    let mut display = tau_proto::ToolUseState::default();
+
+    populate_change_display(&mut display, &[]);
+
+    assert!(display.args.is_empty());
+    assert!(display.info_chips.is_empty());
+}
+
 /// Ensures `*** Add File` cannot silently clobber an existing path; callers
 /// must use an update hunk when they intend to overwrite content.
 #[test]
