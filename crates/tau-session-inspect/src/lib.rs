@@ -145,8 +145,14 @@ pub fn session_lines(
     if !path.try_exists()? {
         return Ok(vec![format!("session {session_id} not found")]);
     }
-    let store = open_session_store(path)?;
-    let Some(tree) = store.session(session_id.as_str()) else {
+    std::fs::read_dir(path).map_err(|source| {
+        InspectError::SessionStore(SessionStoreError::Read {
+            path: path.to_path_buf(),
+            source,
+        })
+    })?;
+    let mut store = SessionStore::open_lazy(path)?;
+    let Some(tree) = store.load_session(session_id.as_str())? else {
         return Ok(vec![format!("session {session_id} not found")]);
     };
     Ok(tree

@@ -743,6 +743,26 @@ fn invalid_inspection_roots_return_errors() {
     );
 }
 
+/// Ensures exact session inspection preserves the store-level error for an
+/// existing root that is not a directory while avoiding unrelated journals.
+#[test]
+fn session_show_rejects_non_directory_store_root() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let sessions_path = temp_dir.path().join("sessions");
+    path_std_fs::write(&sessions_path, b"not a directory").expect("marker file");
+
+    let error = session_lines(
+        &sessions_path,
+        &SessionId::parse("target").expect("known-safe SessionId must be valid"),
+    )
+    .expect_err("non-directory session root must fail");
+    assert!(matches!(
+        error,
+        InspectError::SessionStore(tau_core::SessionStoreError::Read { path, .. })
+            if path == sessions_path
+    ));
+}
+
 /// Native trace output keeps complete prompt content, emits independently
 /// parseable lines, and preserves authoritative per-agent sequence order.
 #[test]
@@ -1868,6 +1888,68 @@ fn session_list_isolates_invalid_session_journals() {
     );
 }
 
+/// Ensures exact session inspection loads only the requested journal, so an
+/// incompatible unrelated journal cannot hide a healthy target session.
+#[test]
+fn session_show_ignores_incompatible_unrelated_session_journal() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp_dir.path().join("sessions");
+    let mut store = SessionStore::open(&sessions_dir).expect("session store");
+    store
+        .append_session_event(
+            "target",
+            None,
+            Event::SessionAgentLoaded(SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
+                session_id: SessionId::parse("target").expect("known-safe SessionId must be valid"),
+                agent_id: AgentId::parse("agent-good").expect("agent id"),
+                ephemeral: false,
+            }),
+        )
+        .expect("membership append");
+    drop(store);
+
+    write_incompatible_session_journal(&sessions_dir.join("unrelated").join("events.cbor"));
+
+    assert_eq!(
+        session_lines(
+            &sessions_dir,
+            &SessionId::parse("target").expect("known-safe SessionId must be valid"),
+        )
+        .expect("target session inspection"),
+        vec!["1: loaded agent agent-good"]
+    );
+    assert!(
+        session_list_lines(&sessions_dir)
+            .expect("session list")
+            .iter()
+            .any(|line| line.starts_with("unrelated (invalid session state:")),
+        "session listing must continue to diagnose the incompatible journal"
+    );
+}
+
+/// Ensures exact session inspection still rejects an incompatible requested
+/// journal instead of treating targeted lazy loading as a compatibility path.
+#[test]
+fn session_show_rejects_incompatible_requested_session_journal() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp_dir.path().join("sessions");
+    let journal_path = sessions_dir.join("target").join("events.cbor");
+    write_incompatible_session_journal(&journal_path);
+
+    let error = session_lines(
+        &sessions_dir,
+        &SessionId::parse("target").expect("known-safe SessionId must be valid"),
+    )
+    .expect_err("requested incompatible session must fail");
+    assert!(matches!(
+        error,
+        InspectError::SessionStore(tau_core::SessionStoreError::Decode { path, .. })
+            if path == journal_path
+    ));
+}
+
 /// Writes one deliberately framed session record, keeping corruption fixtures
 /// independent from the serializer's incidental map-key ordering.
 fn write_framed_session_event(path: &std::path::Path, event: &tau_core::PersistedSessionEvent) {
@@ -1877,6 +1959,20 @@ fn write_framed_session_event(path: &std::path::Path, event: &tau_core::Persiste
     let mut frame = length.to_le_bytes().to_vec();
     frame.extend(payload);
     path_std_fs::write(path, frame).expect("write framed session fixture");
+}
+
+/// Writes a framed but semantically incompatible session record at `path`.
+fn write_incompatible_session_journal(path: &std::path::Path) {
+    path_std_fs::create_dir_all(path.parent().expect("journal parent")).expect("session directory");
+    let mut payload = Vec::new();
+    ciborium::into_writer(&serde_json::json!({"future_schema":99}), &mut payload)
+        .expect("encode incompatible fixture");
+    let mut frame = u64::try_from(payload.len())
+        .expect("fixture payload length fits u64")
+        .to_le_bytes()
+        .to_vec();
+    frame.extend(payload);
+    path_std_fs::write(path, frame).expect("write incompatible session fixture");
 }
 /// Offline cache reports preserve accepted accounting while excluding private
 /// terminal bodies, raw IDs, and provider reports from completion counts.
