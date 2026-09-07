@@ -72,6 +72,10 @@ fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn
         tau_proto::PROTOCOL_VERSION.major,
         tau_proto::PROTOCOL_VERSION.minor + 1,
     );
+    let expected_warning = format!(
+        "`tau-e2e-minor-skew`, minor protocol mismatch {peer_version} vs harness {}",
+        tau_proto::PROTOCOL_VERSION
+    );
     peer.send(&HarnessInputMessage::Hello(Hello {
         protocol_version: peer_version,
         client_name: "tau-e2e-minor-skew".parse()?,
@@ -95,7 +99,7 @@ fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn
         if matches!(
             &observed.event,
             Event::HarnessNotice(notice)
-                if notice.message.contains("protocol version skew for peer")
+                if notice.message == expected_warning
         ) {
             break observed;
         }
@@ -103,14 +107,7 @@ fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn
     let Event::HarnessNotice(notice) = &observed.event else {
         unreachable!("loop exits only for a harness notice");
     };
-    assert!(notice.message.contains("tau-e2e-minor-skew"));
-    assert!(notice.message.contains(&peer_version.to_string()));
-    assert!(
-        notice
-            .message
-            .contains(&tau_proto::PROTOCOL_VERSION.to_string())
-    );
-    assert!(notice.message.contains("continuing best-effort"));
+    assert_eq!(notice.message, expected_warning);
     assert!(
         observed.replay,
         "late subscription must replay the live alert"

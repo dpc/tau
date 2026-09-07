@@ -26,16 +26,17 @@ Every producer of the shared Hello message advertises the revision compiled into
 configuration:
 
 - equal revisions continue without a warning;
-- equal majors with different minors emit one visible warning for that
+- equal majors with different minors emit one concise visible warning for that
   connection and continue best-effort in either direction;
 - different majors reject the connection before configuration, declarations,
   subscriptions, or extension state initialization.
 
-The diagnostic identifies the peer and both revisions and recommends rebuilding
-or updating the peer. It is live-only, remains replayable to late UI subscribers
-for the current process, and does not enter a journal. Reconnection may warn
-again. Admission adds no negotiation round trip, and Configure remains the first
-harness response to an admitted configured extension.
+The diagnostic concisely identifies the peer and both revisions. A major-skew
+diagnostic also says that the peer was rejected; minor-skew admission is implied
+by its warning severity. It is live-only, remains replayable to late UI
+subscribers for the current process, and does not enter a journal. Reconnection
+may warn again. Admission adds no negotiation round trip, and Configure remains
+the first harness response to an admitted configured extension.
 
 This policy changes neither session-target validation nor capability, cleanup,
 security, and connection-ownership semantics. It makes no compatibility

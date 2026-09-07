@@ -1624,32 +1624,31 @@ impl Harness {
         }
         match message {
             HarnessInputMessage::Hello(hello) => {
-                let protocol_version_warning = match validate_protocol_version(&hello) {
+                let configured_instance = self
+                    .extensions
+                    .entries
+                    .get(source_id)
+                    .map(|entry| entry.name.clone());
+                let protocol_version_warning = match validate_protocol_version_for_display(
+                    &hello,
+                    configured_instance.as_ref().unwrap_or(&hello.client_name),
+                    tau_proto::PROTOCOL_VERSION,
+                ) {
                     Ok(warning) => warning,
                     Err(error) => {
-                        return self.handle_extension_protocol_failure(
-                            source_id,
-                            format!("extension protocol handshake failed: {error}"),
-                        );
+                        return self
+                            .handle_extension_protocol_failure(source_id, error.to_string());
                     }
                 };
                 if let Some(entry) = self.extensions.entries.get_mut(source_id) {
                     entry.peer_capabilities = hello.capabilities.into_iter().collect();
                 }
-                if let Some(mut warning) = protocol_version_warning
+                if let Some(warning) = protocol_version_warning
                     && self
                         .runtime_io
                         .protocol_version_skew_warned
                         .insert(source_id.clone())
                 {
-                    let configured_instance = self
-                        .extensions
-                        .entries
-                        .get(source_id)
-                        .map(|entry| entry.name.clone());
-                    if let Some(instance) = &configured_instance {
-                        warning = format!("configured extension instance `{instance}`: {warning}");
-                    }
                     tracing::warn!(
                         extension_instance = ?configured_instance,
                         peer = %hello.client_name,

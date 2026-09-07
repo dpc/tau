@@ -1476,28 +1476,40 @@ fn response_requests_tool_calls(response: &ProviderResponseFinished) -> bool {
         .any(|item| matches!(item, ContextItem::ToolCall(_)))
 }
 fn validate_protocol_version(hello: &Hello) -> Result<Option<String>, HarnessError> {
-    validate_protocol_version_against(hello, PROTOCOL_VERSION)
+    validate_protocol_version_for_display(hello, &hello.client_name, PROTOCOL_VERSION)
 }
 
+#[cfg(test)]
 fn validate_protocol_version_against(
     hello: &Hello,
     harness_version: tau_proto::ProtocolVersion,
 ) -> Result<Option<String>, HarnessError> {
+    validate_protocol_version_for_display(hello, &hello.client_name, harness_version)
+}
+
+/// Validates one peer version with the identity shown in its terminal-facing
+/// diagnostic.
+///
+/// Keep mismatch diagnostics built here short and to the point because they
+/// consume scarce terminal space; use existing concise diagnostics as a guide
+/// while retaining the identity, versions, and outcome.
+fn validate_protocol_version_for_display(
+    hello: &Hello,
+    display_name: &tau_proto::ExtensionName,
+    harness_version: tau_proto::ProtocolVersion,
+) -> Result<Option<String>, HarnessError> {
     if hello.protocol_version.major != harness_version.major {
         return Err(HarnessError::Participant(format!(
-            "unsupported protocol version from {}: peer uses {}, harness uses {}; \
-             rebuild or update the peer for protocol major {}",
-            hello.client_name, hello.protocol_version, harness_version, harness_version.major
+            "`{display_name}`, major protocol mismatch {} vs harness {harness_version}; rejected",
+            hello.protocol_version,
         )));
     }
     if hello.protocol_version.minor == harness_version.minor {
         return Ok(None);
     }
     Ok(Some(format!(
-        "protocol version skew for peer `{}`: peer uses {}, harness uses {}; \
-         continuing best-effort because the major versions match. Rebuild or update the peer \
-         if protocol behavior fails",
-        hello.client_name, hello.protocol_version, harness_version
+        "`{display_name}`, minor protocol mismatch {} vs harness {harness_version}",
+        hello.protocol_version,
     )))
 }
 
