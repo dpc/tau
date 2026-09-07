@@ -519,17 +519,16 @@ watching, and messaging are irrelevant to that explicit capability.
 `self_info({})` is enabled by default and returns the calling agent's
 authoritative runtime metadata as deterministic `key: value` lines. It accepts
 no input fields and reports `agent_id`, `session_id`, `session_dir`, the exact
-prompt-owned `model`, `effort_requested`, `effort_effective`, the latest
-model-qualified provider-reported input and cached token counts, the model's
-provider-advertised total context window and effective input-token capacity,
-effective inference and named standalone compaction settings, optional validated
-current-provider quota windows, `status`, and `status_task_name`. Context counts
-are the last provider observation rather than a reconstruction of suffix growth
-after that observation. Quota records
-retain provider-normalized pool/window identity, observation age, reset and
-relative remaining timing when available, and exact-model pool applicability;
-they do not infer billing limits or make a pacing policy decision. Before the
-first `status` call, it reports `status: unreported` and
+running-harness `tau` version/build, prompt-owned `model`, `effort_requested`,
+`effort_effective`, `status`, and `status_task_name`. When available, it adds one
+`context_usage` estimate from the latest model-qualified provider input count and
+effective input capacity, active compaction thresholds or overflow recovery, and
+quota usage for windows bound to the exact model. Context usage is the last
+provider observation rather than a reconstruction of suffix growth after that
+observation. Quota output includes reset seconds when known and adds pool/window
+identity only when several applicable windows require disambiguation; it does not
+infer billing limits or make a pacing policy decision. Before the first `status`
+call, it reports `status: unreported` and
 `status_task_name: (none)`. An unavailable session directory is also `(none)`.
 The built-in prompt templates omit agent identity; custom templates retain the
 explicit `agent_id` input.

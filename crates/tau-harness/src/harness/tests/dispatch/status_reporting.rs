@@ -1098,7 +1098,8 @@ fn self_info_uses_prompt_authority_and_current_runtime_status() {
         info.context.context_window,
         Some(tau_proto::TokenCount::new(128_000))
     );
-    assert_eq!(info.compaction.inference, "disabled");
+    assert_eq!(info.compaction.inference, None);
+    assert!(!info.compaction.overflow);
     let post_response = info
         .compaction
         .named
@@ -1700,14 +1701,15 @@ fn self_info_production_dispatch_reports_memory_only_current_status() {
     assert_eq!(
         result,
         format!(
-            "agent_id: {}\nsession_id: s1\nsession_dir: (none)\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: working\nstatus_task_name: Inspect runtime identity\ncontext_input_tokens: unavailable (latest_provider_reported)\ncontext_cached_tokens: unavailable (latest_provider_reported)\ncontext_window_tokens: 128000 (provider_advertised_total)\ncontext_input_capacity_tokens: 128000 (effective_input_limit)\ncontext_input_used_percent: unavailable\ncompaction_inference: provider_default; inline=enabled; reactive_context_overflow=unsupported\ncompaction_policy: name=default threshold_tokens=unavailable at=before_inference statuses=any state=unsupported\nprovider_quota: unavailable",
+            "agent_id: {}\nsession_id: s1\nsession_dir: (none)\ntau: {}\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: working\nstatus_task_name: Inspect runtime identity",
             prompt.agent_id,
+            crate::self_info_tool::tau_version_label(),
             prompt.model,
             prompt.model_params.effort.requested,
             prompt.model_params.effort.effective
         )
     );
-    assert_eq!(result.lines().count(), 16);
+    assert_eq!(result.lines().count(), 9);
     h.shutdown().expect("shutdown");
 }
 

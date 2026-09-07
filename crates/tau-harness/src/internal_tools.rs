@@ -249,8 +249,10 @@ pub(crate) struct InternalSelfContext {
 /// Effective compaction configuration exposed to the calling agent.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct InternalSelfCompaction {
-    /// Compact description of provider-inline and reactive-overflow behavior.
-    pub inference: String,
+    /// Actionable provider-inline compaction trigger, when supported.
+    pub inference: Option<String>,
+    /// Whether context overflow can trigger standalone recovery.
+    pub overflow: bool,
     /// Deterministically ordered named standalone compaction policies.
     pub named: Vec<InternalSelfCompactionPolicy>,
 }
@@ -338,28 +340,18 @@ impl Harness {
             info.supports_standalone_compaction && !info.standalone_compaction_generation_negative
         });
         let inference = match inference_policy {
-            RoleCompaction::Disabled => "disabled".to_owned(),
-            RoleCompaction::ProviderDefault => format!(
-                "provider_default; inline={}; reactive_context_overflow={}",
-                support_state(inline),
-                support_state(standalone)
-            ),
-            RoleCompaction::Threshold(tokens) => format!(
-                "threshold_tokens={tokens}; inline={}; reactive_context_overflow={}",
-                support_state(inline),
-                support_state(standalone)
-            ),
+            RoleCompaction::Disabled => None,
+            RoleCompaction::ProviderDefault => None,
+            RoleCompaction::Threshold(tokens) => inline.then(|| format!("threshold={tokens}")),
             RoleCompaction::Reserve(reserve) => {
                 let threshold =
                     crate::model::compaction_threshold_from_reserve(model, model_info, reserve)
                         .ok()
                         .map(tau_proto::TokenCount::get);
-                format!(
-                    "reserve_tokens={reserve}; threshold_tokens={}; inline={}; reactive_context_overflow={}",
-                    threshold.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
-                    support_state(inline),
-                    support_state(standalone)
-                )
+                inline
+                    .then_some(threshold)
+                    .flatten()
+                    .map(|threshold| format!("threshold={threshold}"))
             }
         };
         let named = role
@@ -396,7 +388,11 @@ impl Harness {
                 }
             })
             .collect();
-        InternalSelfCompaction { inference, named }
+        InternalSelfCompaction {
+            inference,
+            overflow: standalone && inference_policy != RoleCompaction::Disabled,
+            named,
+        }
     }
 
     /// Project the existing validated provider quota cache for the prompt
@@ -453,11 +449,6 @@ impl Harness {
 #[cfg(test)]
 #[path = "internal_tools/tests.rs"]
 mod tests;
-
-/// Return a compact effective capability label.
-fn support_state(supported: bool) -> &'static str {
-    if supported { "enabled" } else { "unsupported" }
-}
 
 /// Return elapsed whole seconds when the provider timestamp is not in the
 /// future.
