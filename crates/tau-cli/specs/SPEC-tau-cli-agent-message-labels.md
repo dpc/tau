@@ -107,7 +107,10 @@ stable id form the mandatory leftmost prefix;
 the display name is optional persisted UI metadata; phase/title are the watched
 agent's own structured `WorkStatus` report. Under width pressure the display
 name yields before the title, while identity and phase retain their existing
-higher priority. An otherwise non-Running edge whose target watches an effective
+higher priority. The title uses available terminal columns up to 72 columns,
+shrinks toward a five-column middle-truncated form before it disappears by
+priority, and preserves full Unicode graphemes and semantic styling. An
+otherwise non-Running edge whose target watches an effective
 descendant adds `watching -> @witness`, where the witness is the nearest directly
 running descendant and equal-depth candidates use stable agent-id order. Direct
 activity wins when both apply. Indirect `@parent -> @id` attribution and

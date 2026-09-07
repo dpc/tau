@@ -133,8 +133,9 @@ exact result/lifecycle status `10`, error details `20`, arguments `30`, agent id
 `40`, mode `50`, range `60`, diff or progress counters `70`, generic
 informational chips `80`, and duration `90`. Identity truncates within `4..=32`
 columns, error details and arguments within `5..=48`, agent ids within
-`5..=32`, mode within `3..=16`, and range within `5..=32`; all use the exact
-middle marker `┄`. Status and numeric/informational chips remain atomic. Tool
+`5..=32`, mode within `3..=16`, range within `5..=32`, and watched-agent work
+titles within `5..=72`; all use the exact middle marker `┄`. Status and
+numeric/informational chips remain atomic. Tool
 identity and every present status-band item form an essential set, so terminals
 too narrow for both show no ambiguous header rather than hiding whether a call
 succeeded or failed. Expanded payload and diff bodies remain ordinary detail

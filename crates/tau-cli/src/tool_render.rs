@@ -1275,6 +1275,7 @@ fn render_tool_block_with_payload(
     const AGENT_ID_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(5, 32);
     const MODE_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(3, 16);
     const RANGE_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(5, 32);
+    const WORK_TITLE_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(5, 72);
 
     let left = PriorityLineAlignment::Left;
     let mut line = PriorityLine::new();
@@ -1320,10 +1321,16 @@ fn render_tool_block_with_payload(
                     line.push_truncated(element.priority(), left, text, AGENT_ID_BOUNDS);
                 }
             }
-            ToolLineElement::WorkTitle | ToolLineElement::Info if !attached => {
+            ToolLineElement::WorkTitle if !attached => {
+                line.push_truncated(element.priority(), left, text, WORK_TITLE_BOUNDS);
+            }
+            ToolLineElement::WorkTitle => {
+                line.push_truncated_attached(element.priority(), left, text, WORK_TITLE_BOUNDS);
+            }
+            ToolLineElement::Info if !attached => {
                 line.push_truncated(element.priority(), left, text, ARGUMENT_BOUNDS);
             }
-            ToolLineElement::WorkTitle | ToolLineElement::Info => {
+            ToolLineElement::Info => {
                 line.push_truncated_attached(element.priority(), left, text, ARGUMENT_BOUNDS);
             }
             _ if attached => line.push_attached(element.priority(), left, text),

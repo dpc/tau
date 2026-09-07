@@ -2047,6 +2047,92 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(watching.style.fg, Some(Color::DarkYellow));
 }
 
+/// A watched work title should use wide-terminal space beyond the generic
+/// argument cap, then shrink by display columns before whole lower-priority
+/// fields disappear, without losing its semantic style or splitting Unicode.
+#[test]
+fn watched_agent_work_title_fits_wide_medium_and_tiny_rows() {
+    let theme = cli_test_theme();
+    let stats = tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Responding,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 1,
+            started_total: 14,
+        },
+        context: tau_proto::AgentContextStats {
+            input_tokens: Some(63_000),
+            cached_tokens: None,
+            context_window: Some(353_000),
+            percent_used: Some(18),
+        },
+        inner_turns_total: Some(14),
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+        work_status: Default::default(),
+    };
+    let title = "界".repeat(30);
+    let status = tau_proto::AgentWatchWorkStatusNotification {
+        session_id: test_session_id("s1"),
+        subscription_id: "watch-1".to_owned(),
+        status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
+        phase: tau_proto::AgentWorkStatusPhase::Working,
+        title: Some(title.clone()),
+        initial: false,
+    };
+    let display = watched_agent_tool_display(
+        None,
+        "engineer_1",
+        None,
+        Some(&stats),
+        WatchedAgentActivity::Running,
+        Some(&status),
+    );
+    let block = render_tool_block(&theme, &display);
+
+    let wide = priority_header_text(&block, 120);
+    assert!(wide.contains(&title), "{wide:?}");
+    assert!(!wide.contains('┄'), "{wide:?}");
+    assert!(wide.contains("%13/14"), "{wide:?}");
+    assert!(wide.contains("#63k/353k"), "{wide:?}");
+    assert!(wide.contains("*14"), "{wide:?}");
+
+    let medium_cells = priority_header_cells(&block, 80);
+    let medium: String = medium_cells.iter().map(|cell| cell.ch).collect();
+    assert!(medium.contains('界'), "{medium:?}");
+    assert!(medium.contains('┄'), "{medium:?}");
+    assert!(medium.contains("%13/14"), "{medium:?}");
+    assert!(medium.contains("#63k/353k"), "{medium:?}");
+    assert!(medium.contains("*14"), "{medium:?}");
+    assert_eq!(
+        medium_cells
+            .iter()
+            .find(|cell| cell.ch == '┄')
+            .expect("work-title truncation marker")
+            .style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_INFO)
+    );
+    assert_eq!(
+        medium_cells
+            .iter()
+            .map(tau_cli_term::Cell::col_width)
+            .sum::<usize>(),
+        80,
+        "layout must consume terminal display columns rather than Unicode scalar count"
+    );
+
+    let tiny = priority_header_text(&block, 27);
+    assert!(tiny.starts_with("🚀✨ @"), "{tiny:?}");
+    assert!(!tiny.contains('界'), "{tiny:?}");
+    assert!(
+        tiny.contains("%13/14") || tiny.contains("#63k/353k"),
+        "{tiny:?}"
+    );
+}
+
 /// Replay-boundary abandonment removes only the unconfirmed lifecycle from
 /// every renderer owner while preserving unrelated and current lifecycles.
 #[test]
@@ -5154,7 +5240,7 @@ fn tool_error_line_degrades_at_exact_priority_boundaries() {
 fn tool_line_truncation_maxima_cover_every_category() {
     use tau_proto::{ToolUseRange, ToolUseState, ToolUseStatus};
 
-    let display = render_tool_use_state(
+    let mut display = render_tool_use_state(
         &"i".repeat(40),
         &ToolUseState {
             mode: "m".repeat(30),
@@ -5169,19 +5255,32 @@ fn tool_line_truncation_maxima_cover_every_category() {
             ..Default::default()
         },
     );
+    display
+        .leading_segments
+        .push(crate::tool_render::ToolLineSegment {
+            text: "w".repeat(80),
+            status: ToolStatus::WorkTitle,
+            no_leading_space: false,
+        });
     assert!(matches!(display.suffixes[0].status, ToolStatus::Agent));
     let header = priority_header_text(&render_tool_block(&cli_test_theme(), &display), 300);
     let fields: Vec<&str> = header.split_whitespace().collect();
 
     assert_eq!(fields[0].chars().count(), 32, "{header:?}");
-    assert_eq!(fields[1].chars().count(), 16, "{header:?}");
-    assert_eq!(fields[2].chars().count(), 48, "{header:?}");
-    assert_eq!(fields[3].chars().count(), 32, "{header:?}");
+    assert_eq!(
+        fields[1],
+        format!("{}┄{}", "w".repeat(36), "w".repeat(35)),
+        "{header:?}"
+    );
+    assert_eq!(tau_term_screen::display_width(fields[1]), 72, "{header:?}");
+    assert_eq!(fields[2].chars().count(), 16, "{header:?}");
+    assert_eq!(fields[3].chars().count(), 48, "{header:?}");
     assert_eq!(fields[4].chars().count(), 32, "{header:?}");
-    assert_eq!(fields[5], "err:");
-    assert_eq!(fields[6].chars().count(), 46, "{header:?}");
+    assert_eq!(fields[5].chars().count(), 32, "{header:?}");
+    assert_eq!(fields[6], "err:");
+    assert_eq!(fields[7].chars().count(), 46, "{header:?}");
     for field in [
-        &fields[0], &fields[1], &fields[2], &fields[3], &fields[4], &fields[6],
+        &fields[0], &fields[1], &fields[2], &fields[3], &fields[4], &fields[5], &fields[7],
     ] {
         assert!(field.contains('┄'), "{field:?} in {header:?}");
     }
