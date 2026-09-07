@@ -997,6 +997,14 @@ bounds accepted narrative and reasoning output and defaults to 256 KiB. Explicit
 values must be positive; output tokens cannot exceed the model `context_window`,
 and output bytes cannot exceed 256 KiB.
 
+Chat Completions summary output-limit hits retain provisional narrative and full
+reasoning for another request. Each continuation appends to the same draft;
+only the completed assembled summary replaces context. If the continuation is
+canonically rejected for context capacity, Tau discards its draft and reasoning
+and restarts at the immediately smaller closed original prefix. Independent
+byte bounds and deadlines still apply. Each output-limit hit warns in the UI:
+check both Tau's request/summary output policy and the server generation limit.
+
 The old duplicate context and serialization-selector fields are rejected with
 migration guidance:
 

@@ -961,6 +961,15 @@ pub enum StandaloneCompactionRecovery {
         /// Exact successor plan authorized by that failure.
         plan: tau_proto::ContextRetreatPlan,
     },
+    /// A provisional local summary awaits its uniquely planned same-cut start.
+    AwaitingOutputLengthContinuation {
+        /// Durable failure holding only the last attempt's provisional output.
+        failed: tau_proto::AgentStandaloneCompactionFailed,
+        /// Exact original start whose source and owner the successor preserves.
+        started: tau_proto::AgentStandaloneCompactionStarted,
+        /// Pre-minted successor identities.
+        plan: tau_proto::LocalSummaryContinuationPlan,
+    },
     /// Success still owes a durable inference-dispatch checkpoint.
     AwaitingCheckpoint {
         /// Successful transaction id.
@@ -1024,6 +1033,46 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
 }
 
 impl AgentTree {
+    /// Reconstruct only the provisional response chain for this compact prompt.
+    /// A context retreat or any other trigger ends the chain without retaining
+    /// generated material from an older original-context prefix.
+    #[must_use]
+    pub fn local_summary_continuation_responses(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> Vec<tau_proto::AssistantResponseBlock> {
+        let Some(mut transaction) = self
+            .compaction_transactions
+            .values()
+            .find(|transaction| &transaction.started.compact_prompt_id == prompt_id)
+        else {
+            return Vec::new();
+        };
+        let mut responses = Vec::new();
+        while let tau_proto::StandaloneCompactionTrigger::AutomaticOutputLengthContinuation {
+            failed_transaction_id,
+        } = &transaction.started.trigger
+        {
+            let Some(previous) = self.compaction_transactions.get(failed_transaction_id) else {
+                break;
+            };
+            let Some(CompactionTransactionOutcome::Failed(failed)) = &previous.outcome else {
+                break;
+            };
+            let Some(incomplete) = &failed.incomplete_response else {
+                break;
+            };
+            responses.push(tau_proto::AssistantResponseBlock {
+                provider_response_id: incomplete.provider_response_id.clone(),
+                backend: Some(incomplete.backend.clone()),
+                output_items: incomplete.output_items.clone(),
+                usage: incomplete.usage.clone(),
+            });
+            transaction = previous;
+        }
+        responses.reverse();
+        responses
+    }
     /// Return the immutable provider window captured by a standalone start,
     /// independently of whether that request owes an inference continuation.
     #[must_use]
@@ -1100,6 +1149,12 @@ impl AgentTree {
                 if let Some(plan) = failed.context_retreat.clone() {
                     Some(StandaloneCompactionRecovery::AwaitingContextRetreat {
                         failed: failed.clone(),
+                        plan,
+                    })
+                } else if let Some(plan) = failed.output_length_continuation.clone() {
+                    Some(StandaloneCompactionRecovery::AwaitingOutputLengthContinuation {
+                        failed: failed.clone(),
+                        started: transaction.started.clone(),
                         plan,
                     })
                 } else {
@@ -1252,6 +1307,9 @@ impl AgentTree {
                 tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
                     previous_transaction_id,
                 }
+                | tau_proto::StandaloneCompactionTrigger::AutomaticOutputLengthContinuation {
+                    failed_transaction_id: previous_transaction_id,
+                }
                 | tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
                     previous_transaction_id: Some(previous_transaction_id),
                     ..
@@ -1288,6 +1346,9 @@ impl AgentTree {
                 tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
                     failed_transaction_id,
                     ..
+                }
+                | tau_proto::StandaloneCompactionTrigger::AutomaticOutputLengthContinuation {
+                    failed_transaction_id,
                 } => {
                     transaction = self.compaction_transactions.get(failed_transaction_id)?;
                 }
@@ -1361,7 +1422,7 @@ impl AgentTree {
                             .as_ref()
                             .filter(|outcome| {
                                 !matches!(outcome, CompactionTransactionOutcome::Failed(failed)
-                                if failed.context_retreat.is_some())
+                                if failed.context_retreat.is_some() || failed.output_length_continuation.is_some())
                             })
                             .map(|outcome| {
                                 Box::new(match outcome {
@@ -3052,6 +3113,9 @@ impl AgentTree {
                 if let tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
                     failed_transaction_id,
                     ..
+                }
+                | tau_proto::StandaloneCompactionTrigger::AutomaticOutputLengthContinuation {
+                    failed_transaction_id,
                 } = &started.trigger
                 {
                     for request in self.manual_compaction_requests.values_mut() {
@@ -4786,7 +4850,14 @@ impl AgentTree {
                     ..
                 } if failed_transaction_id == id
             );
+            let output_continuation = matches!(
+                &started.trigger,
+                tau_proto::StandaloneCompactionTrigger::AutomaticOutputLengthContinuation {
+                    failed_transaction_id,
+                } if failed_transaction_id == id
+            );
             if !automatic_retreat
+                && !output_continuation
                 && !matches!(
                     started.trigger,
                     tau_proto::StandaloneCompactionTrigger::Manual
@@ -4838,6 +4909,28 @@ impl AgentTree {
                 {
                     return Err(AgentEventValidationError::new(
                         "automatic context retreat does not exactly claim its committed strict-predecessor plan",
+                    ));
+                }
+            }
+            if output_continuation {
+                let Some(CompactionTransactionOutcome::Failed(failed)) = previous.outcome.as_ref()
+                else {
+                    unreachable!("failed outcome checked above");
+                };
+                if !failed
+                    .output_length_continuation
+                    .as_ref()
+                    .is_some_and(|plan| {
+                        plan.transaction_id == started.transaction_id
+                            && plan.compact_prompt_id == started.compact_prompt_id
+                    })
+                    || started.cut != previous.started.cut
+                    || started.model != previous.started.model
+                    || started.originator != previous.started.originator
+                    || started.resume_through != previous.started.resume_through
+                {
+                    return Err(AgentEventValidationError::new(
+                        "summary continuation does not exactly claim its committed same-cut plan",
                     ));
                 }
             }
@@ -5674,7 +5767,11 @@ impl AgentTree {
     ) -> Result<(), AgentEventValidationError> {
         if let Some(incomplete) = &failed.incomplete_response
             && (failed.reason != tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
-                || incomplete.backend.kind != tau_proto::ProviderBackendKind::PublicResponses)
+                || !matches!(
+                    incomplete.backend.kind,
+                    tau_proto::ProviderBackendKind::PublicResponses
+                        | tau_proto::ProviderBackendKind::ChatCompletions
+                ))
         {
             return Err(AgentEventValidationError::new(
                 "standalone incomplete response mismatched reason or backend",
@@ -5725,6 +5822,29 @@ impl AgentTree {
                 "standalone incomplete response mismatched transaction",
             ));
         }
+        if let Some(plan) = &failed.output_length_continuation {
+            let valid_output = failed
+                .incomplete_response
+                .as_ref()
+                .is_some_and(|incomplete| {
+                    incomplete.backend.kind == tau_proto::ProviderBackendKind::ChatCompletions
+                        && tau_proto::local_summary_output_parts(&incomplete.output_items)
+                            .is_ok_and(|(text, reasoning)| !text.is_empty() || reasoning != 0)
+                });
+            if !valid_output
+                || failed.context_retreat.is_some()
+                || failed.reason
+                    != tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
+                || self
+                    .compaction_transactions
+                    .contains_key(&plan.transaction_id)
+                || self.prompt_starts.contains_key(&plan.compact_prompt_id)
+            {
+                return Err(AgentEventValidationError::new(
+                    "summary continuation requires replayable output and fresh successor identities",
+                ));
+            }
+        }
         if matches!(
             failed.reason,
             tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
@@ -5750,6 +5870,16 @@ impl AgentTree {
                     roll_through,
                     ..
                 } => Some(*roll_through),
+                tau_proto::StandaloneCompactionTrigger::AutomaticOutputLengthContinuation {
+                    ..
+                } => Some(
+                    match self.reactive_compaction_progress(&transaction.started.transaction_id) {
+                        Some(ReactiveCompactionProgress::NeedsContinuation { target_cut }) => {
+                            target_cut
+                        }
+                        _ => transaction.started.cut,
+                    },
+                ),
                 tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
                     previous_transaction_id,
                 } => match self.reactive_compaction_progress(previous_transaction_id) {

@@ -1316,6 +1316,9 @@ fn trigger_kind(trigger: &StandaloneCompactionTrigger) -> &'static str {
         }
         StandaloneCompactionTrigger::AutomaticContinuation { .. } => "automatic_continuation",
         StandaloneCompactionTrigger::AutomaticContextRetreat { .. } => "automatic_context_retreat",
+        StandaloneCompactionTrigger::AutomaticOutputLengthContinuation { .. } => {
+            "automatic_output_length_continuation"
+        }
         StandaloneCompactionTrigger::AutomaticPreflightFailure { .. } => {
             "automatic_preflight_failure"
         }

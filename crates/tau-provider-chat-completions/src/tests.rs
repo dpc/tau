@@ -1641,6 +1641,7 @@ fn prompt() -> tau_proto::AgentPromptCreated {
         },
         tools: Vec::new(),
         tools_ref: None,
+        local_summary_continuation: Vec::new(),
         hosted_tools: Vec::new(),
         model: "test/model".parse().expect("model id"),
         model_params: tau_proto::ModelParams::default(),
@@ -3236,7 +3237,7 @@ fn compact_stream_requires_one_final_stop_terminal() {
             "choices": [{
                 "index": 0,
                 "delta": {"content": "truncated"},
-                "finish_reason": "length"
+                "finish_reason": "content_filter"
             }]
         })],
         vec![
@@ -3286,6 +3287,94 @@ fn compact_stream_requires_one_final_stop_terminal() {
             );
         }
         assert!(rejected, "invalid compact terminal shape must reject");
+    }
+}
+
+/// Length terminals retain private reasoning and prose, including an empty
+/// output hit; request replay keeps two attempts separated by exact steers.
+#[test]
+fn local_summary_length_replay_preserves_attempt_boundaries() {
+    let mut empty = StreamState::new_for_attempt(
+        CacheUsageCompat::None,
+        Some(tau_proto::ByteCount::new(1024)),
+    );
+    apply_event(
+        &mut empty,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+        }),
+        &mut |_| {},
+    )
+    .expect("empty length event");
+    let empty = empty
+        .validate_compaction()
+        .expect("empty hit remains observable");
+    assert_eq!(empty.stop_reason, ProviderStopReason::Length);
+    assert!(empty.output_items().is_empty());
+    let mut created = prompt();
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
+    let mut config = resolved_provider(&provider());
+    config.local_summary_compaction = LocalSummaryCompactionConfig::default_for(8192);
+    for (text, reasoning) in [("first-", "reason-one"), ("second", "reason-two")] {
+        let mut state = StreamState::new_for_attempt(
+            CacheUsageCompat::None,
+            Some(tau_proto::ByteCount::new(1024)),
+        );
+        apply_event(&mut state, &serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": text, "reasoning_content": reasoning}, "finish_reason": "length"}]
+        }), &mut |_| {}).expect("length event");
+        state = state.validate_compaction().expect("provisional output");
+        assert_eq!(state.stop_reason, ProviderStopReason::Length);
+        created
+            .local_summary_continuation
+            .push(tau_proto::LocalSummaryContinuationStep {
+                response: tau_proto::AssistantResponseBlock {
+                    provider_response_id: None,
+                    backend: None,
+                    output_items: state.output_items(),
+                    usage: None,
+                },
+                steer: tau_proto::local_summary_continuation_steer(),
+            });
+    }
+    for replay in [
+        ReasoningReplay::ReasoningContent,
+        ReasoningReplay::Reasoning,
+        ReasoningReplay::Both,
+    ] {
+        config.compat.reasoning_replay = replay;
+        let request = try_build_request(&config, &provider().models[0], &created)
+            .expect("continuation request");
+        let suffix = &request.messages[request.messages.len() - 4..];
+        assert_eq!(suffix[0]["content"], "first-");
+        assert_eq!(suffix[2]["content"], "second");
+        for (index, reasoning) in [(0, "reason-one"), (2, "reason-two")] {
+            for (field, enabled) in [
+                ("reasoning_content", replay != ReasoningReplay::Reasoning),
+                ("reasoning", replay != ReasoningReplay::ReasoningContent),
+            ] {
+                if enabled {
+                    assert_eq!(suffix[index][field], reasoning);
+                } else {
+                    assert!(suffix[index].get(field).is_none());
+                }
+            }
+        }
+        assert_eq!(suffix[1], suffix[3]);
+        assert!(
+            suffix[1]["content"]
+                .as_str()
+                .expect("steer")
+                .contains(tau_proto::LOCAL_SUMMARY_CONTINUATION_INSTRUCTION)
+        );
     }
 }
 

@@ -1628,6 +1628,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         },
     ));
@@ -2283,6 +2284,12 @@ fn compaction_lifecycle_notice_uses_info_style() {
 fn renderer_output_length_diagnostics_match_disposition_and_visible_output() {
     let cases = [
         (
+            Vec::new(),
+            tau_proto::OutputLengthDisposition::None,
+            "Output-token limit reached. No output was produced; check the request and server generation limits.",
+            None,
+        ),
+        (
             vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
                 kind: tau_proto::ReasoningTextKind::Full,
                 text: "retained private reasoning".to_owned(),
@@ -2358,6 +2365,55 @@ fn renderer_output_length_diagnostics_match_disposition_and_visible_output() {
         );
         assert_eq!(renderer.test_active_tool_count(), 0);
     }
+}
+
+/// Each standalone output-limit fact produces a warning even when it contains
+/// no output and no continuation; the row lifecycle cannot suppress the notice.
+#[test]
+fn renderer_warns_on_each_empty_summary_output_limit() {
+    let (_term, handle, vt) = setup(160, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    for index in 0..2 {
+        renderer.handle(&Event::AgentStandaloneCompactionFailed(
+            AgentStandaloneCompactionFailed {
+                agent_id: agent_id("agent"),
+                transaction_id: tau_proto::CompactionTransactionId::parse(format!(
+                    "ct-empty-{index}"
+                ))
+                .expect("id"),
+                cut: tau_proto::AgentHead::Root,
+                reason: tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded,
+                resume_through: None,
+                context_retreat: None,
+                output_length_continuation: None,
+                incomplete_response: Some(Box::new(tau_proto::StandaloneCompactionIncomplete {
+                    agent_prompt_id: test_agent_prompt_id(format!("ap-empty-{index}")),
+                    output_items: Vec::new(),
+                    usage: None,
+                    provider_response_id: None,
+                    provider_attempt: Default::default(),
+                    backend: tau_proto::ProviderBackend {
+                        kind: tau_proto::ProviderBackendKind::ChatCompletions,
+                        base_url: "http://localhost/v1".to_owned(),
+                        transport: Default::default(),
+                        stale_chain_fallback: false,
+                    },
+                })),
+            },
+        ));
+    }
+    sync(&handle);
+    assert_eq!(
+        vt.screen_text(160)
+            .iter()
+            .filter(|line| line.contains("Summary output-token limit reached."))
+            .count(),
+        2
+    );
 }
 
 /// Ensures live, final, and cold-replayed assistant tables share the display
@@ -2851,6 +2907,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         },
     ));

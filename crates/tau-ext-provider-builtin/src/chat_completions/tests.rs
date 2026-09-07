@@ -848,20 +848,27 @@ fn openrouter_defaults_to_telemetry_without_cache_policy() {
 
 /// Ensures a provider output-token stop cannot commit a truncated checkpoint.
 #[test]
-fn run_prompt_attempt_terminalizes_truncated_local_summary() {
+fn run_prompt_attempt_retains_truncated_local_summary_privately() {
     let (outcome, updates) = run_scripted_local_summary_attempt_with_updates(concat!(
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Goal:\\ngoal\\nConstraints:\\nnone\\nDecisions:\\none\\nProgress:\\ndone\\nOpen Work:\\nnext\\nCritical Facts:\\nfact\"}}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Goal:\\ngoal\\nConstraints:\\nnone\\nDecisions:\\none\\nProgress:\\ndone\\nOpen Work:\\nnext\\nCritical Facts:\\nfact\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         "data: [DONE]\n\n"
     ));
-    let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
-        panic!("truncated compact output must terminalize");
+    let PromptAttemptOutcome::Finished(finished) = outcome else {
+        panic!("truncated compact output must retain a length terminal");
     };
     assert_eq!(
         finished.provider_attempt,
         tau_proto::ProviderAttempt::new(3).expect("attempt")
     );
     assert!(finished.backend.is_some());
+    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Length);
+    assert!(
+        finished
+            .output_items
+            .iter()
+            .all(|item| !matches!(item, tau_proto::ContextItem::LocalCompactionNarrative(_)))
+    );
     assert!(updates.iter().all(|update| update.deltas.is_empty()));
 }
 
@@ -1060,6 +1067,7 @@ fn run_scripted_local_summary_attempt_with_updates(
         },
         tools: Vec::new(),
         tools_ref: None,
+        local_summary_continuation: Vec::new(),
         hosted_tools: Vec::new(),
         model: tau_proto::ModelId::new(tau_proto::ProviderName::new("local"), model.id.clone()),
         model_params: tau_proto::ModelParams::default(),

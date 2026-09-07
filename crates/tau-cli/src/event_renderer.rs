@@ -9627,6 +9627,20 @@ impl EventRenderer {
                 true
             }
             Event::AgentStandaloneCompactionFailed(failed) => {
+                if failed.reason
+                    == tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
+                {
+                    self.retain_harness_notice("summary-output-limit",
+                        tau_proto::HarnessNotice::alert(
+                            tau_proto::notice_kind::HARNESS_NOTICE,
+                            if failed.output_length_continuation.is_some() {
+                                "Summary output-token limit reached; continuing from retained output. Check Tau's summary and server generation limits."
+                            } else {
+                                "Summary output-token limit reached. Check Tau's summary and server generation limits."
+                            },
+                            tau_proto::NoticeLevel::Warning,
+                        ));
+                }
                 if let Some(prompt_id) = self
                     .transcript
                     .runtime
@@ -9635,7 +9649,11 @@ impl EventRenderer {
                 {
                     self.complete_standalone_compaction_prompt(
                         &prompt_id,
-                        Some(("failed", CompactionStatus::Failure)),
+                        if failed.output_length_continuation.is_some() {
+                            Some(("continuing", CompactionStatus::Progress))
+                        } else {
+                            Some(("failed", CompactionStatus::Failure))
+                        },
                     );
                 }
                 true

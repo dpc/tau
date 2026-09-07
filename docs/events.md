@@ -954,11 +954,16 @@ terminal silently no-op. See
   rewritten.
 - **`agent.standalone_compaction_failed`** — Harness-owned terminal transaction
   failure with a safe categorical reason and retained resume obligation. A
-  public Responses output-limit failure also retains its typed partial output,
+  public Responses or Chat Completions local-summary output-limit failure also retains its typed partial output,
   usage, response id, attempt, and backend in a non-context projection; replay
   requires the matching `output_length_exceeded` reason and never treats that
   projection as a replacement window. Raw provider
-  diagnostics are deliberately excluded.
+  diagnostics are deliberately excluded. Eligible Chat Completions fragments
+  additionally pre-mint `output_length_continuation` successor identities.
+  `automatic_output_length_continuation` starts preserve the failed source cut
+  and owner. Grouped provisional responses and harness-framed steers cross the
+  transient `agent.prompt_created.local_summary_continuation` seam, not transcript
+  context. Only successful assembled narrative becomes `agent.compacted`.
 - **`agent.inference_dispatch_started`** — Durable checkpoint committed before
   provider inference dispatch. Its `through` head acknowledges only activation
   nodes represented by that immutable prompt snapshot. A checkpoint without a

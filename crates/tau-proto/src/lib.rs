@@ -27,6 +27,8 @@ mod estimated_cost;
 mod event_name;
 mod events;
 mod interception;
+mod local_summary_continuation;
+pub use local_summary_continuation::*;
 mod message_extension_data;
 mod message_fact;
 mod messages;
@@ -97,7 +99,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(3, 1);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(4, 0);
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

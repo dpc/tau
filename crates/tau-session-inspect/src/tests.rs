@@ -398,6 +398,7 @@ fn append_trace_compaction_correction(
                 reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
                 resume_through: None,
                 context_retreat: None,
+                output_length_continuation: None,
                 incomplete_response: None,
             }),
             tau_proto::UnixMicros::new(timestamp + 3),

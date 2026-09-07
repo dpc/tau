@@ -558,6 +558,14 @@ message. Any tool call fails without execution. Tau accepts one nonempty bounded
 assistant final text, discards reasoning and opaque replay data, and stores the
 exact text once as one synthetic user checkpoint without a wrapper or
 deterministic supplement. Ordinary opted-in debug capture applies.
+Chat Completions output-limit terminals retain provisional prose and full
+reasoning, replayed as distinct attempts with harness-authored continuation
+steers. Success publishes only the byte-exact assembled narrative. A canonical
+no-output continuation capacity rejection discards the draft and reasoning and
+retreats to the immediate previous closed original prefix. Each output-limit hit
+warns; check both Tau's request/summary policy and the server generation cap.
+Configured byte bounds apply separately to the assembled narrative and retained
+reasoning; deadlines remain unchanged.
 Unsupported output, insufficient context, cancellation, route loss, stale state,
 and post-output failures end the durable transaction without inference fallback
 or ambiguous resend.

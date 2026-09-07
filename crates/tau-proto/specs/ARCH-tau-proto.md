@@ -5,10 +5,16 @@ ordinary quit versus explicit daemon-lifetime detach intent, and
 `ui_quit_result` reports the harness's committed disposition. The directed
 `ui_quit_disposition_changed` projection supplies each participating UI's current
 ordinary-quit presentation state, while execution recomputes it atomically.
-Unconditional shutdown retains `ui_shutdown_request`. Protocol revision 3.1
+Unconditional shutdown retains `ui_shutdown_request`. Protocol major revision 3
 rejects older UIs before an unsolicited quit-state projection could reach a
 decoder that does not recognize it.
 See [SPEC-tau-cli-command-mode](../../tau-cli/specs/SPEC-tau-cli-command-mode.md).
+
+Protocol revision `4.0` adds typed local-summary continuation steps and the
+durable output-length successor trigger. Major-skew admission rejects all older
+extensions and UI clients: silently ignoring the request field would redraft
+instead of continuing, and older event consumers cannot decode the new trigger.
+The harness and all peers require compatible rebuilds or updates.
 
 `SessionId` and `AgentPromptId` are controlled wire and journal identifiers.
 Both accept 1 through 128 bytes containing only ASCII letters, digits, `_`, and

@@ -7374,6 +7374,30 @@ fn hello_protocol_version_admission_matrix_is_explicit() {
     }
 }
 
+/// Local-summary continuation requires every peer to understand protocol 4.
+#[test]
+fn local_summary_continuation_rejects_protocol_three_peers() {
+    assert_eq!(
+        tau_proto::PROTOCOL_VERSION,
+        tau_proto::ProtocolVersion::new(4, 0)
+    );
+    for client_kind in [
+        tau_proto::ClientKind::Provider,
+        tau_proto::ClientKind::Tool,
+        tau_proto::ClientKind::Core,
+        tau_proto::ClientKind::Ui,
+    ] {
+        let hello = tau_proto::Hello {
+            protocol_version: tau_proto::ProtocolVersion::new(3, 1),
+            client_name: crate::test_extension_name("old-peer"),
+            client_kind,
+            expected_session_id: None,
+            capabilities: Default::default(),
+        };
+        assert!(validate_protocol_version_against(&hello, tau_proto::PROTOCOL_VERSION).is_err());
+    }
+}
+
 /// An admitted configured extension with minor skew receives Configure first,
 /// emits one process-replayable live warning, and keeps journal history clean.
 #[test]
@@ -7392,7 +7416,7 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
         TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::ProtocolVersion::new(
                 tau_proto::PROTOCOL_VERSION.major,
-                tau_proto::PROTOCOL_VERSION.minor - 1,
+                tau_proto::PROTOCOL_VERSION.minor + 1,
             ),
             client_name: crate::test_extension_name("minor-skew"),
             client_kind: tau_proto::ClientKind::Tool,

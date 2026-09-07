@@ -55,8 +55,8 @@ with these typed top-level members.
 
 Standalone local-summary output uses a compact-only validator over original
 stream events before the ordinary compatibility projection can discard unknown
-fields or collapse terminal shape. It requires one final `stop`, one bounded
-nonempty narrative, and independently bounded optional reasoning; tool calls,
+fields or collapse terminal shape. It requires one final `stop` or `length`,
+at most one bounded narrative fragment, and independently bounded optional reasoning; tool calls,
 opaque or extra semantic fields, multiple choices, and post-terminal output
 reject the attempt. The compact-only state enforces each semantic channel's
 selected byte limit before appending a delta and rechecks the completed
@@ -68,7 +68,12 @@ The extension sampler exposes only content-free response statistics and existing
 status/activity signals while this validation is pending. It never emits local-summary text or reasoning as a
 transient delta. The backend returns its validated ordinary output projection to
 the built-in extension, whose terminal validator alone wraps the accepted
-narrative in the private extension-to-harness envelope. Invalid and canceled
+assembled narrative in the private extension-to-harness envelope on success.
+Output-limited fragments remain provisional; same-cut successors replay separate
+assistant responses with harness-assembled internal steers, and canonical
+continuation capacity rejection discards the chain before original-prefix retreat.
+The extension checks nonempty assembled narrative and cumulative channel bounds.
+Invalid and canceled
 attempts release no semantic output.
 
 ## Cache telemetry route capabilities

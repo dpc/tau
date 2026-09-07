@@ -512,6 +512,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
         checkpoint("ap-second"),

@@ -133,7 +133,10 @@ impl CompactStreamValidator {
             && ((!stop_reason.is_string()
                 && stop_reason.as_i64().is_none()
                 && stop_reason.as_u64().is_none())
-                || finish_reason.and_then(Value::as_str) != Some("stop"))
+                || !matches!(
+                    finish_reason.and_then(Value::as_str),
+                    Some("stop" | "length")
+                ))
         {
             return Err(invalid("summary compactor returned invalid stop metadata"));
         }
@@ -189,7 +192,9 @@ impl CompactStreamValidator {
         }
         match finish_reason {
             None | Some(Value::Null) => {}
-            Some(Value::String(reason)) if reason == "stop" => self.completed = true,
+            Some(Value::String(reason)) if reason == "stop" || reason == "length" => {
+                self.completed = true
+            }
             Some(_) => {
                 return Err(invalid(
                     "summary compactor did not produce the required stop terminal",
@@ -240,9 +245,9 @@ impl CompactStreamValidator {
                 return Err(output_limit_error());
             }
         }
-        if narrative_count != 1 || state.text.trim().is_empty() {
+        if 1 < narrative_count {
             return Err(invalid(
-                "summary compactor did not return exactly one nonempty message",
+                "summary compactor returned multiple narrative messages",
             ));
         }
         Ok(())

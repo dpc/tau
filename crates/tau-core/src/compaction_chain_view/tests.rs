@@ -177,6 +177,7 @@ fn cost_knowledge_distinguishes_dispatch_ambiguity_from_preflight() {
             reason: StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );
@@ -230,6 +231,7 @@ fn cost_knowledge_distinguishes_dispatch_ambiguity_from_preflight() {
             reason: StandaloneCompactionFailureReason::RouteFailed,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );
@@ -287,6 +289,7 @@ fn unstarted_decision_and_stale_terminal_have_explicit_completion() {
             reason: StandaloneCompactionFailureReason::StaleBranch,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );
@@ -339,6 +342,7 @@ fn elapsed_reports_missing_and_reversed_clock_quality() {
             reason: StandaloneCompactionFailureReason::Cancelled,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );

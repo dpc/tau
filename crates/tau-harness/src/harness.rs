@@ -1530,6 +1530,7 @@ mod context_discovery_state;
 mod extension_activation;
 mod extension_lifecycle;
 mod harness_config_state;
+mod local_summary_continuation;
 mod notification_delivery;
 mod operator_agent_unload;
 mod ordinary_no_tool_terminal_reducer;

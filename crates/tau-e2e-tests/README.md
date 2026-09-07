@@ -31,6 +31,9 @@ prefix, provider-order retreat, and immediate summary-only ordinary resume
 after the first successful summary. Its server
 uses only the reviewed `exceed_context_size_error` identifier; adjacent generic
 400 responses remain covered as ordinary request rejection.
+The companion summary-output case retains two distinct length-limited responses,
+rejects their continuation for capacity, discards their draft and reasoning, and
+assembles a fresh two-part summary before ordinary resume through the real adapter.
 
 ## Deterministic provider tests
 

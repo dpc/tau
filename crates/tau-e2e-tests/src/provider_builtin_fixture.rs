@@ -24,6 +24,8 @@ enum FixtureScript<'a> {
     },
     /// llama.cpp overflow recovery through production Chat Completions.
     Compaction,
+    /// Summary output limits followed by continuation capacity retreat.
+    CompactionContinuation,
 }
 
 /// Durable session used only by provider-builtin subprocess fixtures.
@@ -103,6 +105,23 @@ impl ProviderBuiltinFixture {
         Self::new_with_script(name, provider_bin.as_ref(), FixtureScript::Compaction)
     }
 
+    /// Prepare the closed output-limit continuation and capacity-reset script.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the exact binary or private fixture cannot be
+    /// prepared.
+    pub fn new_compaction_continuation(
+        name: &str,
+        provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_script(
+            name,
+            provider_bin.as_ref(),
+            FixtureScript::CompactionContinuation,
+        )
+    }
+
     /// Builds one closed production-provider fixture variant.
     fn new_with_script(
         name: &str,
@@ -114,6 +133,7 @@ impl ProviderBuiltinFixture {
             FixtureScript::Retry => (Script::Retry, None),
             FixtureScript::Qwen { dummy_bin } => (Script::Qwen, Some(exact_binary(dummy_bin)?)),
             FixtureScript::Compaction => (Script::Compaction, None),
+            FixtureScript::CompactionContinuation => (Script::CompactionContinuation, None),
         };
         let tempdir = TempDir::new()?;
         let root = tempdir.path().join(sanitize_name(name));
@@ -135,7 +155,10 @@ impl ProviderBuiltinFixture {
             "models": [{"id": "retry-model"}],
             "credential": {"kind": "none"}
         });
-        let compaction = matches!(server_script, Script::Compaction);
+        let compaction = matches!(
+            server_script,
+            Script::Compaction | Script::CompactionContinuation
+        );
         if qwen {
             profile["extra_body"] = serde_json::json!({
                 "chat_template_kwargs": {

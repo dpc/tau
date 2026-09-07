@@ -1615,6 +1615,7 @@ fn append_seed_standalone_accounting(
             reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
             resume_through: Some(tau_proto::AgentHead::Root),
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );

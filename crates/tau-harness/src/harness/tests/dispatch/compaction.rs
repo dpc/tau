@@ -2541,6 +2541,7 @@ fn manual_self_compaction_failure_delivers_error_once() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );
@@ -2684,6 +2685,7 @@ fn manual_self_compaction_cold_failure_before_delivery() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );
@@ -2784,6 +2786,18 @@ fn start_seeded_self_compaction(
 /// that owner.
 #[test]
 fn explicit_compaction_capacity_retreat_preserves_one_request_owner() {
+    assert_explicit_compaction_successor_preserves_owner(false);
+}
+
+/// Local-summary output continuation preserves UI, self-tool, and cross-tool
+/// owners across both the failure and successor cold-replay cuts.
+#[test]
+fn explicit_compaction_length_continuation_preserves_one_request_owner() {
+    assert_explicit_compaction_successor_preserves_owner(true);
+}
+
+/// Exercise the shared owner lifecycle with either exact successor authority.
+fn assert_explicit_compaction_successor_preserves_owner(output_length: bool) {
     for kind in ["ui", "self", "cross"] {
         let td = TempDir::new().expect("tempdir");
         let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
@@ -2836,7 +2850,22 @@ fn explicit_compaction_capacity_retreat_preserves_one_request_owner() {
                 _ => None,
             })
             .expect("target compaction");
-        h.handle_provider_response_finished(context_overflow_response(&first))
+        let response = if output_length {
+            let mut response =
+                provider_text_response(&first.agent_prompt_id, first.agent_id.clone(), "draft");
+            response.originator = first.originator.clone();
+            response.stop_reason = tau_proto::ProviderStopReason::Length;
+            response.backend = Some(tau_proto::ProviderBackend {
+                kind: tau_proto::ProviderBackendKind::ChatCompletions,
+                base_url: "http://localhost/v1".to_owned(),
+                transport: Default::default(),
+                stale_chain_fallback: false,
+            });
+            response
+        } else {
+            context_overflow_response(&first)
+        };
+        h.handle_provider_response_finished(response)
             .expect("capacity rejection");
         let successor = event_log_events(&h)
             .into_iter()
@@ -2844,7 +2873,7 @@ fn explicit_compaction_capacity_retreat_preserves_one_request_owner() {
                 Event::AgentStandaloneCompactionStarted(started) => Some(started),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("successor");
         assert!(successor.supersedes.is_some(), "{kind}");
         let records = h
@@ -5003,6 +5032,7 @@ fn manual_compaction_lifecycle_distinguishes_status_from_failure() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );
@@ -5422,6 +5452,7 @@ fn manual_cross_compaction_starts_for_unrelated_loaded_agent() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );
@@ -5603,7 +5634,7 @@ fn manual_cross_compaction_post_start_cancel_is_exact() {
             }
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("successor");
     assert!(successor.supersedes.is_some());
     h.cancel_remaining_tool_calls(
@@ -8652,6 +8683,7 @@ fn model_tool_terminal_with_equal_local_id_keeps_other_agent_owner() {
             reason: tau_proto::StandaloneCompactionFailureReason::Interrupted,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
         true,

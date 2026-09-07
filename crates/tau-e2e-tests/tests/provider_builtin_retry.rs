@@ -206,6 +206,20 @@ fn provider_builtin_qwen_text_tool_continuation_is_exact() -> Result<(), Box<dyn
 #[test]
 fn provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success()
 -> Result<(), Box<dyn std::error::Error>> {
+    run_compaction_recovery(false)
+}
+
+/// The real adapter replays two grouped length attempts, discards them after
+/// canonical capacity rejection, and publishes only an assembled fresh summary.
+#[test]
+fn provider_builtin_summary_length_continues_and_resets_on_capacity()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_compaction_recovery(true)
+}
+
+/// Drive one closed production compaction script through the normal UI
+/// boundary.
+fn run_compaction_recovery(continue_summary: bool) -> Result<(), Box<dyn std::error::Error>> {
     let Some(provider_bin) = provider_builtin_binary()? else {
         eprintln!(
             "skipping provider-builtin compaction E2E: \
@@ -213,10 +227,17 @@ fn provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success
         );
         return Ok(());
     };
-    let fixture = ProviderBuiltinFixture::new_compaction(
-        "provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success",
-        provider_bin,
-    )?;
+    let fixture = if continue_summary {
+        ProviderBuiltinFixture::new_compaction_continuation(
+            "provider_builtin_summary_length_continues_and_resets_on_capacity",
+            provider_bin,
+        )?
+    } else {
+        ProviderBuiltinFixture::new_compaction(
+            "provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success",
+            provider_bin,
+        )?
+    };
     let socket = fixture.socket_path();
     fixture.mark_daemon_started();
     let daemon = DaemonGuard::spawn(&fixture, &socket)?;
@@ -282,7 +303,28 @@ fn provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success
     let _overflow = wait_for_created(&mut peer, &mut lifecycle, "compact-overflow")?;
     let overflow_request = fixture.recv_request()?;
     let full_compact = fixture.recv_request()?;
+    if continue_summary {
+        let first_continuation = fixture.recv_request()?;
+        let second_continuation = fixture.recv_request()?;
+        let messages = second_continuation.body["messages"]
+            .as_array()
+            .expect("messages");
+        let tail = &messages[messages.len() - 4..];
+        assert_eq!(tail[0]["content"], "discarded-draft-");
+        assert_eq!(tail[0]["reasoning_content"], "discarded-thinking-one");
+        assert_eq!(tail[2]["content"], "continued");
+        assert_eq!(tail[2]["reasoning_content"], "discarded-thinking-two");
+        assert_eq!(tail[1], tail[3]);
+        assert!(serde_json::to_string(&first_continuation.body)?.contains("discarded-draft-"));
+    }
     let smaller_compact = fixture.recv_request()?;
+    if continue_summary {
+        assert!(!serde_json::to_string(&smaller_compact.body)?.contains("discarded-"));
+        let final_continuation = fixture.recv_request()?;
+        let wire = serde_json::to_string(&final_continuation.body)?;
+        assert!(wire.contains("fresh-thinking"));
+        assert!(!wire.contains("discarded-"));
+    }
     let resumed = fixture.recv_request()?;
 
     for request in [
@@ -323,6 +365,8 @@ fn provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success
     assert!(!resumed_wire.contains("overflow activation"));
     assert!(!resumed_wire.contains("history A"));
     assert!(!resumed_wire.contains("history B"));
+    assert!(!resumed_wire.contains("thinking"));
+    assert!(!resumed_wire.contains("discarded-"));
 
     wait_for_any_finished_text(&mut peer, &mut lifecycle, "recovered completion")?;
 

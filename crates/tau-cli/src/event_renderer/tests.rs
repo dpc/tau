@@ -2592,7 +2592,8 @@ fn cold_attach_suppresses_routine_snapshots_and_announces_session_once() {
         tau_proto::UnixMicros::new(3),
         RendererDeliveryId::new(3),
     );
-    let screen = vt.wait_for_frame_after(generation);
+    vt.wait_for_frame_containing_after(generation, "attached session: s1, dir: /tmp/s1/");
+    let screen = vt.screen_text(100);
     assert!(!screen.iter().any(|row| row.contains("/tmp/AGENTS.md")));
     assert!(
         screen

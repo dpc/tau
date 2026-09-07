@@ -19,6 +19,9 @@ replacement-boundary cut meaning and requested protocol minor revision `3.1`;
 there is no legacy cut discriminator or migration.
 The user also approved the native Codex semantic-progress retry and cost
 boundary for ticket `gtdq`, satisfying the same gate.
+The user separately approved protocol revision `4.0` for typed local-summary
+continuation requests and their durable successor trigger, including rejection
+of all `3.x` extensions and UI clients until compatible rebuilds or updates.
 The user separately approved the Chat Completions local-summary semantic-idle
 and absolute request deadlines for ticket `boo4`, satisfying the same gate.
 The user separately approved public Responses max-output incompletion,
@@ -75,7 +78,8 @@ provider behavior, not a Tau guarantee.
 
 Any returned tool call or other semantic output rejects the compaction and is
 never executed, including when assistant text is also present. Exactly one
-nonempty bounded final assistant text is accepted. Provider reasoning may be
+nonempty bounded final assistant text is accepted, assembled from provisional
+fragments under the local-summary continuation contract below. Provider reasoning may be
 separately bounded and discarded; attempted tool calls, reasoning, and opaque
 replay items do not become semantic history. The accepted text becomes exactly
 one synthetic user-role replacement message, with no wrapper, escaping,
@@ -181,7 +185,8 @@ with the existing built-in local summary implementation otherwise.
 Each start, failure, replacement boundary, and inference checkpoint uses normal
 atomic publication. Replay claims an unstarted retreat once, resumes ordinary
 inference after a committed success without rerunning the summary, and leaves
-ambiguous dispatched work blocked. Partial semantic output, cancellation,
+ambiguous dispatched work blocked. Outside the local-summary output-limit
+exception below, partial semantic output, cancellation,
 unsupported policy, and branch/model mismatch do not grant automatic recovery.
 A viable configuration assumes useful shrinking prefixes exist; fixed overhead
 or an indivisible smallest prefix that the backend rejects terminates as
@@ -624,7 +629,7 @@ Crossing, queued-delivery, and one-shot suppression state remains runtime-only;
 cleared alerts do not gain synthetic history.
 
 Output-length continuation and context recovery have separate authority.
-Compaction output never creates output-length eligibility, and a `Length`
+Compaction output never creates ordinary-inference output-length eligibility, and a `Length`
 terminal never masquerades as context overflow. If the reserved successor
 receives the existing eligible no-output context-window rejection, reactive
 compaction may run under its existing one-shot rules, but the outer turn's
@@ -650,5 +655,29 @@ output-length continuation; prose or tool output cannot. Standalone compaction
 preserves the incomplete terminal for accounting but never splices its partial
 window or retries it automatically. Unknown incomplete reasons remain provider
 failures.
+
+Chat Completions local summaries separately continue clean output-limited
+attempts containing replayable full reasoning or assistant narrative fragments.
+Each durable failure retains only that attempt's provisional output and
+pre-mints one same-cut successor; repeated eligible hits have no separate attempt
+budget. Empty or unsupported output grants no continuation. Original context,
+excluded suffix, captured model, owner, and resume obligation remain unchanged.
+The materialized provider request preserves per-attempt assistant response
+grouping and interleaves the exact harness-framed internal continuation steer.
+Only a successful terminal publishes the byte-exact concatenation of narrative
+fragments, without inserted separators or deduplication. An empty final fragment
+is valid when the assembled narrative is nonempty. The configured narrative and
+reasoning byte bounds apply separately across the retained chain; reasoning
+never becomes the accepted summary.
+
+A canonical no-output context-window rejection of that continuation discards
+the entire provisional chain and retreats to the immediate previous eligible
+provider-closed original cut. Cancellation, stale branch, other failures, and
+started-request interruption do not authorize continuation. Each failure commits
+before its successor start; restart repairs an unstarted reserved successor
+once, without repeating an already started provider request. Intermediate
+attempt failures leave the overall manual/tool request pending. Every durable
+output-limit hit warns in the UI, including empty and noncontinuable hits, without
+attributing the cap exclusively to server configuration.
 
 New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).

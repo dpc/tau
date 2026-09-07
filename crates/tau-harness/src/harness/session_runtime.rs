@@ -2484,6 +2484,15 @@ impl Harness {
                 }) => {
                     self.start_context_retreat_from_plan(&cid, failed, plan.clone());
                 }
+                Some(
+                    tau_core::StandaloneCompactionRecovery::AwaitingOutputLengthContinuation {
+                        ref failed,
+                        ref started,
+                        ref plan,
+                    },
+                ) => {
+                    self.start_local_summary_continuation(&cid, failed, started, plan.clone());
+                }
                 Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
                     ref started,
                     ref response,
@@ -2884,6 +2893,7 @@ impl Harness {
                             reason,
                             resume_through: started.resume_through,
                             context_retreat: None,
+                            output_length_continuation: None,
                             incomplete_response: None,
                         },
                     ),

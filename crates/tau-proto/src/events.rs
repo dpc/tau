@@ -4832,6 +4832,11 @@ pub enum StandaloneCompactionTrigger {
         /// another summary after success.
         roll_through: AgentHead,
     },
+    /// Resume a provisional local summary at the same original historical cut.
+    AutomaticOutputLengthContinuation {
+        /// Failed attempt whose committed plan uniquely authorizes this start.
+        failed_transaction_id: CompactionTransactionId,
+    },
     /// Automatic or rolling reactive planning found a deterministic local
     /// reason not to dispatch provider work. The matching start makes the
     /// reason replay-stable until its terminal failure commits.
@@ -4899,10 +4904,23 @@ pub struct AgentStandaloneCompactionFailed {
     /// Exact automatic successor plan committed before a strict retreat start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_retreat: Option<ContextRetreatPlan>,
-    /// Canonical public Responses output-limit terminal retained for accounting
-    /// and inspection without installing its partial output as context.
+    /// Same-cut successor authorized by validated provisional local output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_length_continuation: Option<LocalSummaryContinuationPlan>,
+    /// Canonical public Responses or Chat Completions local-summary
+    /// output-limit terminal retained without installing provisional output
+    /// as context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete_response: Option<Box<StandaloneCompactionIncomplete>>,
+}
+
+/// Pre-minted successor for one output-limited local-summary attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LocalSummaryContinuationPlan {
+    /// Unique successor transaction identity.
+    pub transaction_id: CompactionTransactionId,
+    /// Unique successor provider prompt identity.
+    pub compact_prompt_id: AgentPromptId,
 }
 
 /// Durable non-context projection of one output-limited standalone response.
@@ -4922,7 +4940,8 @@ pub struct StandaloneCompactionIncomplete {
     /// Finite provider attempt that produced this terminal.
     #[serde(default, skip_serializing_if = "ProviderAttempt::is_one")]
     pub provider_attempt: ProviderAttempt,
-    /// Public Responses backend and transport that produced this terminal.
+    /// Public Responses or Chat Completions backend that produced this
+    /// terminal.
     pub backend: ProviderBackend,
 }
 
@@ -5243,6 +5262,9 @@ pub struct PromptToolsRef {
 /// response path. Semantic journals must never persist this payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptCreated {
+    /// Provisional local-summary attempts, outside original transcript context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_summary_continuation: Vec<crate::LocalSummaryContinuationStep>,
     pub agent_prompt_id: AgentPromptId,
     /// Agent transcript this prompt belongs to.
     pub agent_id: AgentId,

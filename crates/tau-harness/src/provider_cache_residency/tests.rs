@@ -185,6 +185,7 @@ pub(crate) fn prompt(provider: &str, id: &str) -> AgentPromptCreated {
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
         tools_ref: None,
+        local_summary_continuation: Vec::new(),
         hosted_tools: Vec::new(),
         model: format!("{provider}/model").parse().expect("model"),
         model_params: Default::default(),

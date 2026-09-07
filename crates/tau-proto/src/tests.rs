@@ -1696,6 +1696,7 @@ fn representative_events() -> Vec<Event> {
             reason: StandaloneCompactionFailureReason::InvalidWindow,
             resume_through: Some(AgentHead::Node(NodeId::new(1))),
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
         Event::AgentInferenceDispatchStarted(AgentInferenceDispatchStarted {
@@ -1727,6 +1728,7 @@ fn representative_events() -> Vec<Event> {
                 format: None,
             }],
             tools_ref: None,
+            local_summary_continuation: Vec::new(),
             hosted_tools: Vec::new(),
             model: "test/model".parse().expect("model id"),
             model_params: ModelParams::default(),
@@ -4322,7 +4324,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 3, "minor": 1})
+        serde_json::json!({"major": 4, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -5317,6 +5319,7 @@ fn standalone_compaction_incomplete_round_trips_in_json_and_cbor() {
         reason: StandaloneCompactionFailureReason::OutputLengthExceeded,
         resume_through: Some(AgentHead::Node(NodeId::new(6))),
         context_retreat: None,
+        output_length_continuation: None,
         incomplete_response: Some(Box::new(StandaloneCompactionIncomplete {
             agent_prompt_id: test_agent_prompt_id("ap-incomplete"),
             output_items: vec![ContextItem::Reasoning(

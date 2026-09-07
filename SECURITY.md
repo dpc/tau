@@ -473,8 +473,8 @@ same ordinary context; cache alignment avoids a second cold prefill when the
 provider cache retains that prefix.
 
 The extension rejects any tool call or other semantic output without execution,
-accepts exactly one nonempty bounded assistant final text, and discards reasoning
-and opaque replay items. The harness persists that text exactly once as one
+accepts one nonempty bounded assembled assistant narrative, and excludes reasoning
+and opaque replay items from the accepted summary. The harness persists that text exactly once as one
 synthetic user-role checkpoint, with no deterministic supplement or wrapper.
 Before that terminal validation, standalone local-summary attempts publish only
 the existing bounded content-free response byte/timing statistics and
@@ -483,6 +483,20 @@ not cross in transient updates; invalid and canceled attempts publish no
 content-bearing update. The validated narrative crosses once in the private
 terminal envelope. Ordinary inference streaming and opted-in private provider
 debug capture are unchanged.
+Chat Completions output-limit continuation is a distinct sensitive-data exception:
+after validating an incomplete terminal, the harness journals that attempt's
+bounded provisional narrative and full replayable reasoning in
+`agent.standalone_compaction_failed`. Grouped provisional output crosses the
+provider seam on subsequent summary requests and supports restart recovery of an
+unstarted successor. Configured narrative and reasoning byte bounds apply
+separately across the retained chain; partial output never becomes a context
+replacement. Success, cancellation, other terminal failure, or a canonical
+continuation capacity rejection ends active provisional replay. Capacity rejection
+restarts at the immediate smaller closed original prefix without the draft or
+reasoning. This logical discard does not erase prior immutable journal records:
+they remain sensitive stored model output, available to journal/trace readers and
+exports under ordinary retention, even with debug capture disabled. Treat such
+journals and exports as potentially containing secrets and private reasoning.
 Events committed after the immutable cut remain suffix history. Ordinary
 opted-in provider debug captures apply to compaction; they are sensitive,
 best-effort observability artifacts and never journal, transcript, replay, or

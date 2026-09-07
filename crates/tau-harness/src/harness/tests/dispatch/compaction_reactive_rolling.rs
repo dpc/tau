@@ -3,6 +3,258 @@
 
 use super::*;
 
+/// Build one clean local-summary length terminal without publishing context.
+fn local_summary_length_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    text: &str,
+) -> ProviderResponseFinished {
+    let mut response =
+        provider_text_response(&prompt.agent_prompt_id, prompt.agent_id.clone(), text);
+    response.originator = prompt.originator.clone();
+    response.stop_reason = tau_proto::ProviderStopReason::Length;
+    response.backend = Some(tau_proto::ProviderBackend {
+        kind: tau_proto::ProviderBackendKind::ChatCompletions,
+        base_url: "http://localhost/v1".to_owned(),
+        transport: Default::default(),
+        stale_chain_fallback: false,
+    });
+    response
+}
+
+/// Cancellation owns the summary even when a delayed output-limit terminal
+/// arrives afterward; neither that draft nor another successor may be
+/// published.
+#[test]
+fn local_summary_length_cancel_rejects_late_successor_authority() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_backend_capacity_compaction(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    append_capacity_history(&mut h, &cid, "history");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation".to_owned()))
+        .expect("inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("recovery");
+    let first = read_nth_prompt_created(&h, 1);
+    h.handle_provider_response_finished(local_summary_length_response(&first, "draft"))
+        .expect("continue");
+    let second = read_nth_prompt_created(&h, 2);
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(second.agent_id.clone()),
+            agent_prompt_id: Some(second.agent_prompt_id.clone()),
+        },
+    );
+    h.handle_provider_response_finished(local_summary_length_response(&second, "late draft"))
+        .expect("late terminal");
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        3
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::AgentCompacted(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Repeated output limits preserve one original cut and grouped provisional
+/// output; a later canonical capacity rejection discards that chain and
+/// retreats.
+#[test]
+fn local_summary_length_chain_replays_then_retreats_original_prefix() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_backend_capacity_compaction(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    append_capacity_history(&mut h, &cid, "old-A");
+    append_capacity_history(&mut h, &cid, "old-B");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation".to_owned()))
+        .expect("inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("recovery");
+    let original = read_nth_prompt_created(&h, 1);
+    for index in 1..=2 {
+        let prompt = read_nth_prompt_created(&h, index);
+        assert_eq!(prompt.context, original.context);
+        assert_eq!(prompt.local_summary_continuation.len(), index - 1);
+        let mut response = provider_text_response(
+            &prompt.agent_prompt_id,
+            prompt.agent_id.clone(),
+            &format!("fragment-{index}"),
+        );
+        response.originator = prompt.originator.clone();
+        response.stop_reason = tau_proto::ProviderStopReason::Length;
+        response.backend = Some(tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::ChatCompletions,
+            base_url: "http://localhost/v1".to_owned(),
+            transport: Default::default(),
+            stale_chain_fallback: false,
+        });
+        h.handle_provider_response_finished(response)
+            .expect("length successor");
+    }
+    let continuation = read_nth_prompt_created(&h, 3);
+    assert_eq!(continuation.local_summary_continuation.len(), 2);
+    let events = event_log_events(&h);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::AgentCompacted(_)))
+    );
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        Event::AgentStandaloneCompactionFailed(failed)
+            if failed.reason == tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
+                && failed.output_length_continuation.is_some()
+    )).count(), 2);
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(continuation.agent_id.as_str())
+        .expect("tree");
+    assert_eq!(
+        tree.local_summary_continuation_responses(&continuation.agent_prompt_id),
+        continuation
+            .local_summary_continuation
+            .iter()
+            .map(|step| step.response.clone())
+            .collect::<Vec<_>>(),
+    );
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(continuation.agent_id.as_str())
+        .expect("records");
+    let cold = tau_core::AgentTree::from_events(continuation.agent_id.clone(), &records);
+    assert_eq!(
+        cold.local_summary_continuation_responses(&continuation.agent_prompt_id),
+        tree.local_summary_continuation_responses(&continuation.agent_prompt_id),
+    );
+    h.handle_provider_response_finished(context_overflow_response(&continuation))
+        .expect("retreat");
+    let retreated = read_nth_prompt_created(&h, 4);
+    assert!(retreated.local_summary_continuation.is_empty());
+    assert_ne!(retreated.context, original.context);
+    assert!(
+        !serde_json::to_string(&retreated.context)
+            .expect("context")
+            .contains("fragment-")
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &retreated.agent_prompt_id,
+        retreated.agent_id.clone(),
+        "completed-summary",
+    ))
+    .expect("summary success");
+    assert_eq!(
+        read_nth_prompt_created(&h, 5).operation,
+        tau_proto::PromptOperation::Inference
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentCompacted(_)))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A crash after the committed length failure repairs its reserved successor
+/// once; a second restart must not redispatch that already-started summary.
+#[test]
+fn local_summary_length_restart_claims_unstarted_successor_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (agent_id, started, partial);
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_backend_capacity_compaction(&mut h);
+        let cid = ensure_test_user_agent(&mut h);
+        agent_id = durable_agent_id_for_conversation(&h, &cid);
+        append_capacity_history(&mut h, &cid, "old-A");
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation".to_owned()))
+            .expect("inference");
+        let inference = read_nth_prompt_created(&h, 0);
+        h.handle_provider_response_finished(context_overflow_response(&inference))
+            .expect("recovery");
+        let prompt = read_nth_prompt_created(&h, 1);
+        started = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentStandaloneCompactionStarted(started) => Some(started),
+                _ => None,
+            })
+            .expect("start");
+        partial = provider_text_response(&prompt.agent_prompt_id, prompt.agent_id, "provisional");
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+    let plan = tau_proto::LocalSummaryContinuationPlan {
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-length-successor")
+            .expect("id"),
+        compact_prompt_id: tau_proto::AgentPromptId::parse("ap-length-successor").expect("id"),
+    };
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+                agent_id: agent_id.clone(),
+                transaction_id: started.transaction_id.clone(),
+                cut: started.cut,
+                resume_through: started.resume_through,
+                reason: tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded,
+                context_retreat: None,
+                output_length_continuation: Some(plan.clone()),
+                incomplete_response: Some(Box::new(tau_proto::StandaloneCompactionIncomplete {
+                    agent_prompt_id: started.compact_prompt_id,
+                    output_items: partial.output_items,
+                    usage: None,
+                    provider_response_id: None,
+                    provider_attempt: Default::default(),
+                    backend: tau_proto::ProviderBackend {
+                        kind: tau_proto::ProviderBackendKind::ChatCompletions,
+                        base_url: "http://localhost/v1".to_owned(),
+                        transport: Default::default(),
+                        stale_chain_fallback: false,
+                    },
+                })),
+            }),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("failure crash cut");
+    drop(store);
+    for restart in 0..2 {
+        let mut resumed =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let events = event_log_events(&resumed);
+        let starts = events.iter().filter(|event| matches!(event,
+            Event::AgentStandaloneCompactionStarted(start) if start.transaction_id == plan.transaction_id
+        )).count();
+        assert_eq!(starts, usize::from(restart == 0));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AgentCompacted(_)))
+        );
+        resumed.shutdown().expect("shutdown");
+        wait_for_session_unlock(&state, "s1");
+    }
+}
+
 /// Locate a provider request with compact, content-free recovery diagnostics.
 fn read_nth_prompt_created(h: &Harness, index: usize) -> tau_proto::AgentPromptCreated {
     let events = event_log_events(h);
@@ -481,7 +733,7 @@ fn idle_explicit_compaction_anchors_logical_suffix_at_start_parent() {
                     }
                     _ => None,
                 })
-                .last()
+                .next_back()
                 .expect("explicit start");
             assert_eq!(started.cut, suffix, "{kind} restart={restart}");
             assert_eq!(started.resume_through, None);

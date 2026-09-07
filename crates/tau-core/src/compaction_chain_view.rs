@@ -240,7 +240,9 @@ impl CompactionChainIndex {
                         | tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
                 ) && facts.attempts.is_empty();
                 facts.boundary = Some(BoundaryFacts {
-                    state: if failed.context_retreat.is_some() {
+                    state: if failed.context_retreat.is_some()
+                        || failed.output_length_continuation.is_some()
+                    {
                         BoundaryState::AwaitingContinuation
                     } else {
                         BoundaryState::Complete

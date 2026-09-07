@@ -1427,6 +1427,7 @@ impl Harness {
                         reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
                         resume_through,
                         context_retreat: None,
+                        output_length_continuation: None,
                         incomplete_response: None,
                     },
                 ),

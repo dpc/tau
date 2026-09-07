@@ -383,6 +383,7 @@ fn lazy_event_broadcast_skips_payload_without_candidate() {
             context: Default::default(),
             tools: Vec::new(),
             tools_ref: None,
+            local_summary_continuation: Vec::new(),
             hosted_tools: Vec::new(),
             model: "test/model".parse().expect("model"),
             model_params: Default::default(),

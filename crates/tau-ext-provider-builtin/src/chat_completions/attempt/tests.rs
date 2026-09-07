@@ -4,6 +4,107 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use super::*;
 
+/// Preserve whitespace and split words across several allowances, allow an
+/// empty successful last fragment, and reject accumulated channel overflows.
+#[test]
+fn summary_continuation_assembles_exact_fragments_only_on_success() {
+    let fragment = |text: &str, reasoning: &str| {
+        vec![
+            tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: reasoning.to_owned(),
+            }),
+            tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::Assistant,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: text.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }),
+        ]
+    };
+    let steps = vec![
+        tau_proto::LocalSummaryContinuationStep {
+            response: tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: fragment("sum", "think"),
+                usage: None,
+            },
+            steer: tau_proto::local_summary_continuation_steer(),
+        },
+        tau_proto::LocalSummaryContinuationStep {
+            response: tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: fragment("mary\n ", "more"),
+                usage: None,
+            },
+            steer: tau_proto::local_summary_continuation_steer(),
+        },
+    ];
+    let config = SummaryCompactionConfig::default_for(8192).expect("summary support");
+    let tail = fragment("done", "");
+    assert_eq!(
+        validate_local_summary_terminal(
+            &tail,
+            &steps,
+            tau_proto::ProviderStopReason::Length,
+            config
+        )
+        .expect("provisional"),
+        tail,
+    );
+    for (tail, expected) in [(&tail[..], "summary\n done"), (&[][..], "summary\n ")] {
+        assert_eq!(
+            validate_local_summary_terminal(
+                tail,
+                &steps,
+                tau_proto::ProviderStopReason::EndTurn,
+                config
+            )
+            .expect("assembled summary"),
+            vec![tau_proto::ContextItem::LocalCompactionNarrative(
+                tau_proto::LocalCompactionNarrativeItem {
+                    narrative: expected.to_owned()
+                }
+            )],
+        );
+    }
+    let narrow = SummaryCompactionConfig::with_overrides(8192, None, None, NonZeroU64::new(8))
+        .expect("valid byte bound")
+        .expect("summary support");
+    assert!(
+        validate_local_summary_terminal(
+            &[],
+            &steps,
+            tau_proto::ProviderStopReason::EndTurn,
+            narrow
+        )
+        .is_err()
+    );
+    let reasoning_only = fragment("", "thinking");
+    assert!(
+        validate_local_summary_terminal(
+            &reasoning_only,
+            &[],
+            tau_proto::ProviderStopReason::Length,
+            config
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_local_summary_terminal(
+            &reasoning_only,
+            &[],
+            tau_proto::ProviderStopReason::EndTurn,
+            config
+        )
+        .is_err()
+    );
+}
+
 /// The serialized cache usage capability reaches the finite backend attempt
 /// without URL- or model-based inference.
 #[test]

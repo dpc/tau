@@ -2208,6 +2208,30 @@ fn build_request_after_prefix_admission(
         tau_provider::local_summary_compaction::replace_trailing_trigger(&mut context)
             .map_err(|error| LlmError::InvalidCompaction(error.to_owned()))?;
     }
+    if !prompt.local_summary_continuation.is_empty() {
+        if summary_config.is_none() {
+            return Err(LlmError::InvalidCompaction(
+                "summary continuation requires standalone compaction".to_owned(),
+            ));
+        }
+        for step in &prompt.local_summary_continuation {
+            if step.steer != tau_proto::local_summary_continuation_steer() {
+                return Err(LlmError::InvalidCompaction(
+                    "summary continuation has an invalid steer".to_owned(),
+                ));
+            }
+            tau_proto::local_summary_output_parts(&step.response.output_items)
+                .map_err(|error| LlmError::InvalidCompaction(error.to_owned()))?;
+            context
+                .blocks
+                .push(tau_proto::ContextBlock::AssistantResponse(
+                    step.response.clone(),
+                ));
+            context
+                .blocks
+                .push(tau_proto::ContextBlock::UserInput(step.steer.clone()));
+        }
+    }
     let mut messages = Vec::new();
     if !prompt.system_prompt.trim().is_empty() {
         messages.push(serde_json::json!({

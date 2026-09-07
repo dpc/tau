@@ -3003,6 +3003,9 @@ impl Harness {
             if let tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
                 failed_transaction_id,
                 ..
+            }
+            | tau_proto::StandaloneCompactionTrigger::AutomaticOutputLengthContinuation {
+                failed_transaction_id,
             } = &started.trigger
             {
                 self.prompt_coordination
@@ -3112,6 +3115,7 @@ impl Harness {
                                     reason,
                                     resume_through: started.resume_through,
                                     context_retreat: None,
+                                    output_length_continuation: None,
                                     incomplete_response: None,
                                 },
                             ),
@@ -3135,6 +3139,7 @@ impl Harness {
                                     reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
                                     resume_through: started.resume_through,
                                     context_retreat: None,
+                                    output_length_continuation: None,
                                     incomplete_response: None,
                                 },
                             ),
@@ -3179,6 +3184,7 @@ impl Harness {
                                 reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
                                 resume_through: started.resume_through,
                                 context_retreat: None,
+                                output_length_continuation: None,
                                 incomplete_response: None,
                             },
                         ),
@@ -3231,6 +3237,22 @@ impl Harness {
                 self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
         {
             self.start_context_retreat_from_plan(&cid, failed, plan);
+            return;
+        }
+        if let Event::AgentStandaloneCompactionFailed(failed) = event
+            && let Some(tau_core::StandaloneCompactionRecovery::AwaitingOutputLengthContinuation {
+                started,
+                plan,
+                ..
+            }) = self
+                .session_runtime
+                .agent_store
+                .agent(failed.agent_id.as_str())
+                .and_then(|tree| tree.standalone_compaction_recovery())
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
+        {
+            self.start_local_summary_continuation(&cid, failed, &started, plan);
             return;
         }
         if let Event::AgentManualCompactionRequestFailed(failed) = event

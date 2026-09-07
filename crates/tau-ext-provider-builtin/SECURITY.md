@@ -227,9 +227,20 @@ sends the ordinary provider request prefix for the
 immutable cut, including the normal system prompt, tools, history, images, raw
 tool arguments, and cache controls, then appends one harness-authored
 `<tau_internal>` user message. Any tool call fails without execution. Tau accepts
-one nonempty bounded assistant final text, discards reasoning and opaque replay
-data, and stores the exact text once as one synthetic user checkpoint without a
+one nonempty bounded assembled assistant narrative, excludes reasoning and opaque replay
+data from that summary, and stores the exact text once as one synthetic user checkpoint without a
 wrapper or deterministic supplement. Ordinary opted-in debug capture applies.
+For Chat Completions, validated output-limit terminals instead retain bounded
+provisional narrative and full reasoning in durable standalone failure facts.
+Successors replay separate response groups with harness-framed steers; configured
+narrative and reasoning byte bounds apply separately across the retained chain.
+Only successful assembled narrative replaces context. Canonical no-output
+continuation capacity rejection discards active provisional material and retreats
+to the immediate smaller closed original prefix; cancellation and other terminal
+failure also end active replay. None of these outcomes erase earlier immutable
+failure facts. Those journals, traces, and exports can contain sensitive model
+reasoning and narrative even when debug capture is disabled, and require the same
+private handling as other stored provider output.
 Unsupported output, insufficient context, cancellation, route loss, stale state,
 and post-output failures end the durable transaction without inference fallback
 or ambiguous resend.

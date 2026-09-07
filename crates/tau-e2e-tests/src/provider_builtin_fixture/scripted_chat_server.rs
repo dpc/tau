@@ -36,6 +36,8 @@ pub(super) enum Script {
     Qwen,
     /// Two completed turns followed by llama.cpp overflow retreat and resume.
     Compaction,
+    /// Two length hits, continuation overflow, then a completed split summary.
+    CompactionContinuation,
 }
 
 impl Script {
@@ -44,6 +46,7 @@ impl Script {
         match self {
             Self::Retry | Self::Qwen => 3,
             Self::Compaction => 6,
+            Self::CompactionContinuation => 9,
         }
     }
 }
@@ -93,6 +96,14 @@ enum ScriptStep {
     CompactionFullPrefixOverflow,
     /// First successful smaller-prefix summary.
     CompactionSummaryA,
+    /// First provisional fragment on the original prefix.
+    SummaryLengthFirst,
+    /// Second provisional fragment on the original prefix.
+    SummaryLengthSecond,
+    /// Fresh provisional fragment after discarding the old draft.
+    SummaryLengthFresh,
+    /// Successful final fragment appended to the fresh draft.
+    SummaryTail,
     /// Resumed inference after the recovery chain.
     CompactionResumed,
 }
@@ -128,6 +139,17 @@ impl ScriptedChatServer {
                     ScriptStep::CompactionInferenceOverflow,
                     ScriptStep::CompactionFullPrefixOverflow,
                     ScriptStep::CompactionSummaryA,
+                    ScriptStep::CompactionResumed,
+                ],
+                Script::CompactionContinuation => vec![
+                    ScriptStep::CompactionHistoryA,
+                    ScriptStep::CompactionHistoryB,
+                    ScriptStep::CompactionInferenceOverflow,
+                    ScriptStep::SummaryLengthFirst,
+                    ScriptStep::SummaryLengthSecond,
+                    ScriptStep::CompactionFullPrefixOverflow,
+                    ScriptStep::SummaryLengthFresh,
+                    ScriptStep::SummaryTail,
                     ScriptStep::CompactionResumed,
                 ],
             };
@@ -424,6 +446,30 @@ fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary A\"},\
              \"finish_reason\":\"stop\",\"stop_reason\":null,\"token_ids\":null}]}\n\n\
              data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::SummaryLengthFirst => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"discarded-draft-\",\"reasoning_content\":\"discarded-thinking-one\"},\"finish_reason\":\"length\"}]}\n\n",
+            None,
+        ),
+        ScriptStep::SummaryLengthSecond => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"continued\",\"reasoning_content\":\"discarded-thinking-two\"},\"finish_reason\":\"length\"}]}\n\n",
+            None,
+        ),
+        ScriptStep::SummaryLengthFresh => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary \",\"reasoning_content\":\"fresh-thinking\"},\"finish_reason\":\"length\"}]}\n\n",
+            None,
+        ),
+        ScriptStep::SummaryTail => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"A\"},\"finish_reason\":\"stop\"}]}\n\n",
             None,
         ),
         ScriptStep::CompactionResumed => (

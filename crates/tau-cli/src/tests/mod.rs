@@ -425,6 +425,7 @@ fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptC
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
         tools_ref: None,
+        local_summary_continuation: Vec::new(),
         hosted_tools: Vec::new(),
         model: "test/model".parse().expect("model id"),
         model_params: tau_proto::ModelParams::default(),

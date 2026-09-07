@@ -631,7 +631,11 @@ impl EventRenderer {
     ) -> Option<tau_cli_term::StyledBlock> {
         use tau_themes::names;
 
-        let text = if finished.output_items.is_empty() {
+        let text = if finished.stop_reason == tau_proto::ProviderStopReason::Length
+            && finished.output_items.is_empty()
+        {
+            "Output-token limit reached. No output was produced; check the request and server generation limits."
+        } else if finished.output_items.is_empty() {
             finished.error.as_deref()?
         } else if finished.stop_reason != tau_proto::ProviderStopReason::Length {
             return None;

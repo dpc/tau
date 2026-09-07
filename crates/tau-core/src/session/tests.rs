@@ -1312,6 +1312,7 @@ fn compaction_chain_view_is_live_cold_and_restart_equivalent() {
             reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
             resume_through: started.resume_through,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
         130,
@@ -1843,6 +1844,7 @@ fn fail_compaction(tree: &mut AgentTree, started: &tau_proto::AgentStandaloneCom
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         },
     ));
@@ -2245,6 +2247,7 @@ fn automatic_context_retreat_claims_exact_strict_predecessor_plan() {
         reason: tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded,
         resume_through: rejected.resume_through,
         context_retreat: Some(plan.clone()),
+        output_length_continuation: None,
         incomplete_response: None,
     };
     let mut skipped_failure = failure.clone();
@@ -2717,6 +2720,7 @@ fn compaction_fold_rejects_duplicate_start_and_outcome() {
         reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
         resume_through: Some(AgentHead::Root),
         context_retreat: None,
+        output_length_continuation: None,
         incomplete_response: None,
     };
     tree.validate_event(&Event::AgentStandaloneCompactionFailed(failed.clone()))
@@ -2994,6 +2998,7 @@ fn compaction_start_uses_explicit_parent_with_divergent_write_cursor() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         })
     };
@@ -8249,6 +8254,7 @@ fn persisted_full_prompt_record_is_explicitly_unsupported() {
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
         tools_ref: None,
+        local_summary_continuation: Vec::new(),
         hosted_tools: Vec::new(),
         model: "provider/model".into(),
         model_params: Default::default(),
@@ -8567,6 +8573,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         });
     let Event::AgentStandaloneCompactionFailed(mut stale_with_incomplete) = stale.clone() else {
@@ -8637,6 +8644,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
         reason: tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded,
         resume_through: Some(cut),
         context_retreat: None,
+        output_length_continuation: None,
         incomplete_response: Some(Box::new(tau_proto::StandaloneCompactionIncomplete {
             agent_prompt_id: tau_proto::AgentPromptId::parse("compact-eager").expect("prompt"),
             output_items: Vec::new(),
@@ -8696,6 +8704,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             reason: tau_proto::StandaloneCompactionFailureReason::Interrupted,
             resume_through: None,
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         },
     ));

@@ -1790,6 +1790,7 @@ fn seed_historical_open_prefix_failure(
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: Some(results),
             context_retreat: None,
+            output_length_continuation: None,
             incomplete_response: None,
         }),
     );

@@ -819,6 +819,7 @@ impl Harness {
                     reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                     resume_through: *resume_through,
                     context_retreat: None,
+                    output_length_continuation: None,
                     incomplete_response: None,
                 })
             }),
@@ -925,6 +926,7 @@ impl Harness {
                     reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                     resume_through: *resume_through,
                     context_retreat: None,
+                    output_length_continuation: None,
                     incomplete_response: None,
                 })
             }
@@ -1356,6 +1358,18 @@ impl Harness {
                 recipients: 0,
             });
         }
+        let local_summary_continuation = self
+            .session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .map(|tree| tree.local_summary_continuation_responses(&agent_prompt_id))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|response| tau_proto::LocalSummaryContinuationStep {
+                response,
+                steer: tau_proto::local_summary_continuation_steer(),
+            })
+            .collect();
         Some(AgentPromptCreated {
             agent_prompt_id,
             agent_id,
@@ -1364,6 +1378,7 @@ impl Harness {
             context,
             tools,
             tools_ref: None,
+            local_summary_continuation,
             hosted_tools,
             model,
             model_params: prompt_params,

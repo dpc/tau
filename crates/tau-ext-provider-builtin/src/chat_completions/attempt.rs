@@ -153,7 +153,10 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     match outcome {
         tau_provider_chat_completions::AttemptOutcome::Completed(mut success) => {
             if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
-                if success.stop_reason != tau_proto::ProviderStopReason::EndTurn {
+                if !matches!(
+                    success.stop_reason,
+                    tau_proto::ProviderStopReason::EndTurn | tau_proto::ProviderStopReason::Length
+                ) {
                     return PromptAttemptOutcome::Terminal {
                         finished: Box::new(finished(
                             agent_prompt_id,
@@ -170,12 +173,14 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                         progress: tau_provider_chat_completions::SemanticProgress::Parsed,
                     };
                 }
-                match validate_resolved_narrative_output(
-                    success.output_items,
+                match validate_local_summary_terminal(
+                    &success.output_items,
+                    &prompt.local_summary_continuation,
+                    success.stop_reason,
                     super::resolved_local_summary_compaction(model.local_summary_compaction, model)
                         .expect("standalone compaction is dispatched only for a supported model"),
                 ) {
-                    Ok(output) => success.output_items = vec![output],
+                    Ok(output) => success.output_items = output,
                     Err(error) => {
                         return PromptAttemptOutcome::Terminal {
                             finished: Box::new(finished(
@@ -262,6 +267,49 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
             }
         }
     }
+}
+
+/// Keep length fragments provisional and assemble exact narrative bytes only
+/// after a successful terminal; both accumulated channels retain byte bounds.
+fn validate_local_summary_terminal(
+    items: &[tau_proto::ContextItem],
+    continuation: &[tau_proto::LocalSummaryContinuationStep],
+    stop: tau_proto::ProviderStopReason,
+    config: SummaryCompactionConfig,
+) -> Result<Vec<tau_proto::ContextItem>, String> {
+    if continuation.is_empty() && stop == tau_proto::ProviderStopReason::EndTurn {
+        return validate_resolved_narrative_output(items.to_vec(), config).map(|item| vec![item]);
+    }
+    let mut narrative = String::new();
+    let mut reasoning_bytes = 0_u64;
+    for prior in continuation
+        .iter()
+        .map(|step| step.response.output_items.as_slice())
+        .chain(std::iter::once(items))
+    {
+        let (text, reasoning) =
+            tau_proto::local_summary_output_parts(prior).map_err(str::to_owned)?;
+        reasoning_bytes = reasoning_bytes
+            .checked_add(reasoning as u64)
+            .ok_or_else(|| "summary reasoning exceeds its byte limit".to_owned())?;
+        if reasoning_bytes > config.max_output_bytes()
+            || narrative.len() as u64 + text.len() as u64 > config.max_output_bytes()
+        {
+            return Err(
+                "summary narrative or retained reasoning exceeds its byte limit".to_owned(),
+            );
+        }
+        narrative.push_str(&text);
+    }
+    if stop == tau_proto::ProviderStopReason::Length {
+        return Ok(items.to_vec());
+    }
+    if narrative.trim().is_empty() {
+        return Err("summary compactor output is empty".to_owned());
+    }
+    Ok(vec![tau_proto::ContextItem::LocalCompactionNarrative(
+        tau_proto::LocalCompactionNarrativeItem { narrative },
+    )])
 }
 
 /// Lower serialized route capabilities into one backend attempt.

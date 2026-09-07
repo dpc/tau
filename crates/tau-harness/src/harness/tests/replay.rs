@@ -3147,6 +3147,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
             context: tau_proto::PromptContext { blocks: Vec::new() }, // Vec::new(),
             tools: Vec::new(),
             tools_ref: None,
+            local_summary_continuation: Vec::new(),
             hosted_tools: Vec::new(),
             model: "test/model".parse().expect("model id"),
             model_params: Default::default(),

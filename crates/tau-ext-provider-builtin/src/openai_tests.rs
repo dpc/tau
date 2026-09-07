@@ -470,6 +470,7 @@ pub(super) fn prompt() -> tau_proto::AgentPromptCreated {
         },
         tools: Vec::new(),
         tools_ref: None,
+        local_summary_continuation: Vec::new(),
         hosted_tools: Vec::new(),
         model: model_id(CHATGPT_PROVIDER_NAME, "gpt-5.6-sol"),
         model_params: Default::default(),
