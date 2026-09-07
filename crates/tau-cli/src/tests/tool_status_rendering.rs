@@ -1950,10 +1950,40 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         .iter()
         .position(|cell| cell.ch == '*')
         .expect("inner-turn counter span");
+    let tools_start = wide_cells
+        .iter()
+        .position(|cell| cell.ch == '%')
+        .expect("tools counter span");
+    let context_start = wide_cells
+        .iter()
+        .position(|cell| cell.ch == '#')
+        .expect("context counter span");
+    assert_eq!(
+        wide_cells[tools_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_TOOLS),
+        "tools retain their independently configurable status style"
+    );
+    assert_eq!(
+        wide_cells[context_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_CONTEXT),
+        "context retains its independently configurable status style"
+    );
     assert_eq!(
         wide_cells[inner_turn_start].style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_INNER_TURNS),
         "inner turns retain their independently configurable status style"
+    );
+    assert_ne!(
+        wide_cells[tools_start].style,
+        wide_cells[context_start].style
+    );
+    assert_ne!(
+        wide_cells[context_start].style,
+        wide_cells[inner_turn_start].style
+    );
+    assert_ne!(
+        wide_cells[tools_start].style,
+        wide_cells[inner_turn_start].style
     );
     let without_display_name = priority_header_text(&block, 40);
     assert!(!without_display_name.contains("(review)"));
@@ -3478,8 +3508,9 @@ fn model_status_shows_context_window_until_usage_is_known() {
     assert!(status_row.ends_with("#-/200k"));
 }
 
-/// The selected-agent status shows the canonical ordinary-turn count, while a
-/// narrow status line retains context before the lower-priority turn counter.
+/// The selected-agent status uses independent styles for context,
+/// ordinary-turn, and estimated-cost metrics, while a narrow line retains
+/// context before the lower-priority turn counter.
 #[test]
 fn model_status_shows_inner_turns_after_context() {
     let (_term, handle, vt) = setup(100, 24);
@@ -3510,8 +3541,10 @@ fn model_status_shows_inner_turns_after_context() {
             percent_used: Some(6),
         },
         inner_turns_total: Some(123),
-        estimated_api_cost: Default::default(),
-        creator_subtree_estimated_api_cost: Default::default(),
+        estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(3_100_000_000_000),
+        creator_subtree_estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(
+            10_000_000_000_000,
+        ),
         work_status: Default::default(),
     }));
     renderer.handle(&Event::HarnessAgentContextUsageChanged(
@@ -3530,7 +3563,10 @@ fn model_status_shows_inner_turns_after_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row");
-    assert!(status_row.contains("#12k/200k *123"), "{status_row:?}");
+    assert!(
+        status_row.contains("#12k/200k *123 $3.1/$10"),
+        "{status_row:?}"
+    );
     let status_cells = priority_header_cells(&renderer.build_model_status_block(), 100);
     let context_start = status_cells
         .iter()
@@ -3540,6 +3576,10 @@ fn model_status_shows_inner_turns_after_context() {
         .iter()
         .position(|cell| cell.ch == '*')
         .expect("inner-turn status chip");
+    let cost_start = status_cells
+        .iter()
+        .position(|cell| cell.ch == '$')
+        .expect("estimated-cost status chip");
     assert_eq!(
         status_cells[context_start].style,
         tau_cli_term::resolve::resolve(&cli_test_theme(), tau_themes::names::STATUS_CONTEXT)
@@ -3548,9 +3588,21 @@ fn model_status_shows_inner_turns_after_context() {
         status_cells[inner_turn_start].style,
         tau_cli_term::resolve::resolve(&cli_test_theme(), tau_themes::names::STATUS_INNER_TURNS)
     );
+    assert_eq!(
+        status_cells[cost_start].style,
+        tau_cli_term::resolve::resolve(&cli_test_theme(), tau_themes::names::STATUS_COST)
+    );
     assert_ne!(
         status_cells[context_start].style, status_cells[inner_turn_start].style,
         "the test theme keeps inner-turn styling independent from context"
+    );
+    assert_ne!(
+        status_cells[context_start].style,
+        status_cells[cost_start].style
+    );
+    assert_ne!(
+        status_cells[inner_turn_start].style,
+        status_cells[cost_start].style
     );
 
     let (_term, narrow_handle, narrow_vt) = setup(24, 24);

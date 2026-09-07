@@ -281,17 +281,24 @@ fn builtin_watching_name_differs_from_tool_name() {
     }
 }
 
-/// Ensures inner-turn counters initially follow each built-in theme's context
-/// color while retaining a separately configurable semantic style name.
+/// Ensures every built-in uses brown defaults for independently configurable
+/// agent tools, context, cost, and inner-turn metrics.
 #[test]
-fn builtin_inner_turns_match_context_style() {
+fn builtin_agent_status_metrics_default_to_brown() {
     for name in BUILTIN_THEME_NAMES {
         let theme = Theme::builtin_named(name).expect("built-in theme");
-        assert_eq!(
-            theme.resolve_style(&StyleName::new(crate::names::STATUS_INNER_TURNS)),
-            theme.resolve_style(&StyleName::new(crate::names::STATUS_CONTEXT)),
-            "{name} must default inner turns to the context style"
-        );
+        for style_name in [
+            crate::names::STATUS_TOOLS,
+            crate::names::STATUS_CONTEXT,
+            crate::names::STATUS_COST,
+            crate::names::STATUS_INNER_TURNS,
+        ] {
+            assert_eq!(
+                theme.resolve_style(&StyleName::new(style_name)).fg,
+                Some(Color::DarkYellow),
+                "{name} must default {style_name} to brown"
+            );
+        }
     }
 }
 

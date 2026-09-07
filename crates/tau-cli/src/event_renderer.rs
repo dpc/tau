@@ -3792,7 +3792,7 @@ impl EventRenderer {
                 right,
                 status_chip(
                     &self.resources.theme,
-                    names::STATUS_CONTEXT,
+                    names::STATUS_COST,
                     crate::estimated_cost::format_snapshot(costs),
                 ),
             );

@@ -45,8 +45,9 @@
     "system.path":          { fg: "cyan" },
 
     // -- Status bar --
-    "status.context":       { fg: "cyan" },
-    "status.inner_turns":   { fg: "cyan" },
+    "status.context":       { fg: "dark_yellow" },
+    "status.cost":          { fg: "dark_yellow" },
+    "status.inner_turns":   { fg: "dark_yellow" },
     "status.quota.under":   { fg: "green", bold: true },
     "status.quota.aligned": { fg: "green" },
     "status.quota.over":    { fg: "yellow" },
@@ -54,7 +55,7 @@
     "status.quota.unknown": { },
     "status.effort":        { fg: "yellow" },
     "status.service_tier":  { fg: "green" },
-    "status.tools":         { fg: "yellow" },
+    "status.tools":         { fg: "dark_yellow" },
     "status.agents":        { fg: "cyan" },
     "status.ui_io.medium":  { fg: "yellow" },
     "status.ui_io.high":    { fg: "red" },
