@@ -972,10 +972,10 @@ fn status_agent_chip_truncates_multiple_current_agent_watchers() {
     assert!(!status_row.contains("reviewer-Zz99"));
 }
 
-/// Main-tool progress and context retain their relative order while quota
-/// pacing occupies the final, rightmost status position.
+/// Active side-agent activity precedes main-tool progress, which remains before
+/// context while quota pacing occupies the final, rightmost status position.
 #[test]
-fn model_status_shows_main_tools_then_context_then_quota() {
+fn model_status_shows_active_agents_then_tools_context_and_quota() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1000,10 +1000,11 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     ));
     renderer.handle(&danger_quota_event(&model));
 
-    // Regression coverage for the bottom status bar: main-agent tool
-    // usage should mirror generic tool progress chips (`%complete/total`)
-    // and should render immediately before the context chip. Quota remains
-    // final, while side-conversation calls stay rolled up under their delegate.
+    // Regression coverage for the bottom status bar: main-agent tool usage
+    // should mirror generic tool progress chips (`%complete/total`) and render
+    // immediately before the context chip. Active side-agent activity precedes
+    // tool progress. Quota remains final, while side-conversation calls stay
+    // rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1138,7 +1139,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .find(|row| row.contains("@main"))
         .expect("status row after side prompt starts");
     assert!(
-        status_row.ends_with("%1/2 @1 #12k/200k -/- Q!"),
+        status_row.ends_with("@1 %1/2 #12k/200k -/- Q!"),
         "unexpected status row: {status_row:?}"
     );
     assert!(status_row.contains('%'));
@@ -1161,7 +1162,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after second main tool result during side turn");
-    assert!(status_row.ends_with("%2/2 @1 #12k/200k -/- Q!"));
+    assert!(status_row.ends_with("@1 %2/2 #12k/200k -/- Q!"));
     assert!(status_row.contains('%'));
 
     // Main tool completions that arrive while a side conversation is active
@@ -1176,7 +1177,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after main prompt resumes");
-    assert!(status_row.ends_with("%2/2 @1 #12k/200k -/- Q!"));
+    assert!(status_row.ends_with("@1 %2/2 #12k/200k -/- Q!"));
 
     // The main agent's final no-tool response ends the tool-using turn and
     // hides the chip while preserving context stats.
@@ -3902,7 +3903,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row during delegate side conversation");
-    assert!(status_row.ends_with("%0/1 @1 #12k/200k -/-"));
+    assert!(status_row.ends_with("@1 %0/1 #12k/200k -/-"));
 
     // Generic watched-agent stats no longer mutate the parent tool status chip.
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
@@ -3928,7 +3929,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .find(|row| row.contains("#12k/200k"))
         .expect("status row after watched-agent stats");
     assert!(status_row.contains("@main"));
-    assert!(status_row.ends_with("%0/1 @1 #12k/200k -/-"));
+    assert!(status_row.ends_with("@1 %0/1 #12k/200k -/-"));
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
         presentation: Default::default(),

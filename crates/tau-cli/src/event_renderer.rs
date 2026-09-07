@@ -3739,17 +3739,6 @@ impl EventRenderer {
                 ),
             );
         }
-        if let Some(tools) = self.main_tools_status_chip() {
-            line.push(
-                StatusElement::Tools.priority(),
-                right,
-                status_chip(
-                    &self.resources.theme,
-                    names::STATUS_TOOLS,
-                    format!("%{tools}"),
-                ),
-            );
-        }
         let active_agents = self.active_side_agent_count();
         if 0 < active_agents {
             line.push(
@@ -3759,6 +3748,17 @@ impl EventRenderer {
                     &self.resources.theme,
                     names::STATUS_AGENTS,
                     format!("@{active_agents}"),
+                ),
+            );
+        }
+        if let Some(tools) = self.main_tools_status_chip() {
+            line.push(
+                StatusElement::Tools.priority(),
+                right,
+                status_chip(
+                    &self.resources.theme,
+                    names::STATUS_TOOLS,
+                    format!("%{tools}"),
                 ),
             );
         }
