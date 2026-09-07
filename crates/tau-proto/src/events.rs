@@ -4760,6 +4760,8 @@ impl AgentManualCompactionRequested {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManualCompactionRequestFailureReason {
+    /// No closed prefix fits the adapter's standalone request byte cap.
+    PrefixTooLarge,
     /// The original background tool call was cancelled.
     Cancelled,
     /// The target left the loaded session before dispatch.
@@ -4814,8 +4816,8 @@ pub enum StandaloneCompactionTrigger {
         /// this proactive root.
         evidence: ProactiveCompactionEvidence,
     },
-    /// A provider-rejected recovery chain successfully compacted one prefix and
-    /// still has provider-closed history before its immutable target.
+    /// Legacy successful-pass link, retained for replay only. New requests
+    /// finish on their first successful summary.
     AutomaticContinuation {
         /// Immediately preceding successful transaction whose checkpoint this
         /// start claims instead.
@@ -4823,10 +4825,11 @@ pub enum StandaloneCompactionTrigger {
     },
     /// Canonical standalone rejection authorized one strict predecessor retry.
     AutomaticContextRetreat {
-        /// Failed automatic transaction that pre-minted this successor.
+        /// Failed transaction that pre-minted this successor, for any
+        /// entrypoint.
         failed_transaction_id: CompactionTransactionId,
-        /// Immutable logical target retained across retreat and forward
-        /// rolling.
+        /// Historical chain correlation retained for replay; never authorizes
+        /// another summary after success.
         roll_through: AgentHead,
     },
     /// Automatic or rolling reactive planning found a deterministic local
@@ -4923,7 +4926,7 @@ pub struct StandaloneCompactionIncomplete {
     pub backend: ProviderBackend,
 }
 
-/// Pre-minted strict-predecessor successor for automatic context rejection.
+/// Pre-minted strict-predecessor successor for standalone context rejection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContextRetreatPlan {
     /// Successor transaction identity.
@@ -4932,7 +4935,7 @@ pub struct ContextRetreatPlan {
     pub compact_prompt_id: AgentPromptId,
     /// Immediate previous useful provider-closed cut.
     pub cut: AgentHead,
-    /// Fixed logical recovery target.
+    /// Historical chain correlation, not a successful-pass scheduling target.
     pub roll_through: AgentHead,
     /// Captured provider-qualified model.
     pub model: ModelId,

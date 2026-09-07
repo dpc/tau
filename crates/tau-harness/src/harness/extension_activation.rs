@@ -6,7 +6,6 @@
 #[cfg(test)]
 use std::cell::Cell;
 
-use super::compaction_runtime::RollingCompactionPass;
 use super::*;
 
 #[cfg(test)]
@@ -698,11 +697,6 @@ impl Harness {
             let absence_is_authoritative = all_absence_is_authoritative
                 || authoritatively_removed_models.is_some_and(|models| models.contains(model));
             if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
-                continue;
-            }
-            if self.start_rolling_compaction_pass(&checkpoint.cid, model, checkpoint.through)
-                != RollingCompactionPass::NotNeeded
-            {
                 continue;
             }
             let key = (

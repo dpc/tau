@@ -1018,6 +1018,7 @@ fn manual_request_failure_message(
     reason: tau_proto::ManualCompactionRequestFailureReason,
 ) -> &'static str {
     match reason {
+        tau_proto::ManualCompactionRequestFailureReason::PrefixTooLarge => "prefix_too_large",
         tau_proto::ManualCompactionRequestFailureReason::Cancelled => "compaction_cancelled",
         tau_proto::ManualCompactionRequestFailureReason::TargetUnloaded => "target_unloaded",
         tau_proto::ManualCompactionRequestFailureReason::ModelChanged => "model_changed",

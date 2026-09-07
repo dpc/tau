@@ -1109,11 +1109,13 @@ impl Harness {
         };
         let head = conv.selected_prompt_context_head();
         let standalone_window = match &conv.dispatch.activation_dispatch {
-            path_crate_agent::ActivationDispatchState::Running {
-                cut,
-                resume_through,
-                ..
-            } => Some((resume_through.unwrap_or(*cut), *cut)),
+            path_crate_agent::ActivationDispatchState::Running { id, cut, .. } => conv
+                .identity
+                .agent_id
+                .as_deref()
+                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+                .and_then(|tree| tree.standalone_compaction_active_head(id))
+                .map(|active_head| (active_head, *cut)),
             _ => None,
         };
 

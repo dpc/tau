@@ -27,7 +27,8 @@ continuation, and terminal usage without downloading or serving a model.
 
 The llama.cpp compaction case drives the exact production adapter and harness
 through an HTTP overflow, an SSE overflow on the full no-byte-cap compact
-prefix, strict retreat, suffix rolling, and one resumed inference. Its server
+prefix, provider-order retreat, and immediate summary-only ordinary resume
+after the first successful summary. Its server
 uses only the reviewed `exceed_context_size_error` identifier; adjacent generic
 400 responses remain covered as ordinary request rejection.
 

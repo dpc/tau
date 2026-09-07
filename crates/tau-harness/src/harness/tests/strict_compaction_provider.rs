@@ -81,7 +81,17 @@ fn reply_for_prompt(prompt: &AgentPromptCreated) -> StrictProviderReply {
                 usage: None,
                 control: ReplyControl::Continue,
             },
-            |()| StrictProviderReply::text("strict compact summary", ReplyControl::Continue),
+            |()| {
+                let summary = if serde_json::to_string(&prompt.context)
+                    .expect("serialize compact context")
+                    .contains("later queued prompt")
+                {
+                    "strict compact summary: later queued prompt remains owed"
+                } else {
+                    "strict compact summary"
+                };
+                StrictProviderReply::text(summary, ReplyControl::Continue)
+            },
         );
     }
     let timeline: Vec<_> = prompt.context.flatten_iter().collect();
@@ -95,14 +105,20 @@ fn reply_for_prompt(prompt: &AgentPromptCreated) -> StrictProviderReply {
         matches!(
             item,
             ContextItem::Message(message)
-                if message.role == ContextRole::User
-                    && message.content.iter().any(|part| {
+                if message.content.iter().any(|part| {
                         matches!(part, ContentPart::Text { text } if text.contains("later"))
                     })
         )
     });
     if is_later_prompt {
         return StrictProviderReply::text("later prompt complete", ReplyControl::Disconnect);
+    }
+    if timeline.iter().any(|item| {
+        matches!(item, ContextItem::Message(message) if message.content.iter().any(|part| {
+            matches!(part, ContentPart::Text { text } if text == "strict compact summary")
+        }))
+    }) {
+        return StrictProviderReply::text("tool continuation complete", ReplyControl::Continue);
     }
     StrictProviderReply {
         output_items: vec![ContextItem::ToolCall(ToolCallItem {

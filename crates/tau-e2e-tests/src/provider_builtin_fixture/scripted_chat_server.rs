@@ -34,7 +34,7 @@ pub(super) enum Script {
     Retry,
     /// One single-tool round, one parallel-tool round, then visible output.
     Qwen,
-    /// Two completed turns followed by llama.cpp overflow retreat and rolling.
+    /// Two completed turns followed by llama.cpp overflow retreat and resume.
     Compaction,
 }
 
@@ -43,7 +43,7 @@ impl Script {
     fn request_count(self) -> usize {
         match self {
             Self::Retry | Self::Qwen => 3,
-            Self::Compaction => 7,
+            Self::Compaction => 6,
         }
     }
 }
@@ -93,8 +93,6 @@ enum ScriptStep {
     CompactionFullPrefixOverflow,
     /// First successful smaller-prefix summary.
     CompactionSummaryA,
-    /// Successful rolling summary through the original target.
-    CompactionSummaryB,
     /// Resumed inference after the recovery chain.
     CompactionResumed,
 }
@@ -130,7 +128,6 @@ impl ScriptedChatServer {
                     ScriptStep::CompactionInferenceOverflow,
                     ScriptStep::CompactionFullPrefixOverflow,
                     ScriptStep::CompactionSummaryA,
-                    ScriptStep::CompactionSummaryB,
                     ScriptStep::CompactionResumed,
                 ],
             };
@@ -426,14 +423,6 @@ fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(
             "text/event-stream",
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary A\"},\
              \"finish_reason\":\"stop\",\"stop_reason\":null,\"token_ids\":null}]}\n\n\
-             data: [DONE]\n\n",
-            None,
-        ),
-        ScriptStep::CompactionSummaryB => (
-            "200 OK",
-            "text/event-stream",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary B\"},\
-             \"finish_reason\":\"stop\",\"stop_reason\":\"eos\",\"token_ids\":null}]}\n\n\
              data: [DONE]\n\n",
             None,
         ),

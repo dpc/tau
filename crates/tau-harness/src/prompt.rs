@@ -1522,8 +1522,9 @@ fn assemble_prompt_context_window(
             tau_proto::AgentHead::Node(node_id)
                 if active_window.replacement_boundary == Some(node_id) =>
             {
-                // A physical head at the replacement boundary names the whole
-                // logical active window, including its preserved suffix.
+                // A replacement is itself a useful closed prefix. Retrying
+                // this cut must not resend the suffix that exceeded capacity.
+                active_window.transcript.clear();
             }
             tau_proto::AgentHead::Node(node_id) => {
                 if let Some(index) = active_window
@@ -1547,6 +1548,11 @@ fn assemble_prompt_context_window(
     }
     let mut measurement_state = measurements
         .map(|measurements| PromptContextMeasurementState::new(tree, &blocks, measurements));
+    if let Some(boundary) = active_window.replacement_boundary
+        && let Some(measurement_state) = measurement_state.as_mut()
+    {
+        measurement_state.record(boundary);
+    }
 
     for (node_id, entry) in active_window.transcript {
         if matches!(entry, AgentEntry::AgentMessage { .. })

@@ -7392,7 +7392,7 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
         TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::ProtocolVersion::new(
                 tau_proto::PROTOCOL_VERSION.major,
-                tau_proto::PROTOCOL_VERSION.minor + 1,
+                tau_proto::PROTOCOL_VERSION.minor - 1,
             ),
             client_name: crate::test_extension_name("minor-skew"),
             client_kind: tau_proto::ClientKind::Tool,

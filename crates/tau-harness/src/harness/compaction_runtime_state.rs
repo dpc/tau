@@ -259,6 +259,24 @@ impl CompactionRuntimeState {
             .or_insert(ManualCompactionStartOwner::ModelTool(pending));
     }
 
+    /// Move explicit-request delivery ownership to its committed capacity
+    /// retry.
+    pub(super) fn transfer_manual_start(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        predecessor: tau_proto::CompactionTransactionId,
+        successor: tau_proto::CompactionTransactionId,
+    ) {
+        if let Some(owner) = self
+            .active_manual_transactions
+            .remove(&CompactionTransaction::new(agent_id.clone(), predecessor))
+        {
+            self.active_manual_transactions
+                .entry(CompactionTransaction::new(agent_id, successor))
+                .or_insert(owner);
+        }
+    }
+
     /// Return whether an open UI transaction belongs to `agent_id`.
     pub(super) fn has_ui_start_for_agent(&self, agent_id: &tau_proto::AgentId) -> bool {
         self.active_manual_transactions.iter().any(|(key, owner)| {

@@ -75,10 +75,9 @@ fn standalone_prefix_byte_fit_matches_fully_materialized_context() {
     let safe_budget = materialized_bytes(safe);
     assert!(materialized_bytes(incident) > safe_budget);
     assert_eq!(
-        h.fitting_automatic_compaction_cut(
+        h.fitting_standalone_compaction_cut(
             &agent_id,
             tau_proto::AgentHead::Node(incident),
-            None,
             safe_budget,
         ),
         Some(tau_proto::AgentHead::Node(safe))
@@ -129,7 +128,7 @@ fn provider_report_below_threshold_never_schedules_from_suffix_size() {
             .get_mut(&"test/model".into())
             .expect("test model")
             .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(200_000));
-        assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+        assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true));
         assert_eq!(
             event_log_count(&h, |event| matches!(
                 event,
@@ -161,7 +160,7 @@ fn provider_report_below_threshold_never_schedules_from_suffix_size() {
         info.supports_standalone_compaction = true;
         info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(200_000));
         info.standalone_compaction_prefix_budget = None;
-        assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+        assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true));
         h.shutdown().expect("shutdown");
     }
     wait_for_session_unlock(&state, "s1");
@@ -265,8 +264,8 @@ fn provider_report_at_threshold_schedules_once_despite_tiny_transcript() {
         .expect("test model")
         .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(200_000));
 
-    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
-    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true));
+    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true));
     let starts: Vec<_> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -312,7 +311,7 @@ fn provider_report_threshold_boundary_remains_exact() {
         establish_exact_provider_usage(&mut h, &cid, input_tokens);
 
         assert_eq!(
-            h.schedule_standalone_auto_compaction_for_activation(&cid, true, None),
+            h.schedule_standalone_auto_compaction_for_activation(&cid, true),
             expected_schedule,
             "input tokens: {input_tokens}"
         );
@@ -392,7 +391,7 @@ fn newest_missing_or_zero_usage_blocks_older_compaction_authority() {
                 .context_input_tokens,
             newest_input_tokens.map(tau_proto::TokenCount::new)
         );
-        assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+        assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true));
         assert!(
             event_log_events(&h)
                 .iter()
@@ -538,7 +537,7 @@ fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
             Some(test_agent_prompt_id("ap-test-provider-usage"));
     }
 
-    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true));
     h.agent_runtime
         .agent_registry
         .agents
@@ -784,10 +783,24 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
         .expect("start reactive compaction");
     let compact = read_nth_prompt_created(&h, 1);
     assert!(
+        strict_fake_compact_response(&compact).is_ok(),
+        "the entire closed tool round must remain provider-valid"
+    );
+    assert_eq!(
         compact
             .context
             .flatten_iter()
-            .all(|item| !matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_)))
+            .filter(|item| matches!(item, ContextItem::ToolCall(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        compact
+            .context
+            .flatten_iter()
+            .filter(|item| matches!(item, ContextItem::ToolResult(_)))
+            .count(),
+        1
     );
     let started = event_log_events(&h)
         .into_iter()
@@ -796,8 +809,8 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             _ => None,
         })
         .expect("reactive compaction start");
-    assert_eq!(started.cut, prefix);
-    assert_eq!(started.resume_through, Some(results));
+    assert_eq!(started.resume_through, Some(started.cut));
+    assert_ne!(started.cut, prefix);
 
     h.handle_provider_response_finished(provider_text_response(
         &compact.agent_prompt_id,
@@ -812,14 +825,14 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             .iter()
             .filter(|item| matches!(item, ContextItem::ToolCall(_)))
             .count(),
-        1
+        0
     );
     assert_eq!(
         timeline
             .iter()
             .filter(|item| matches!(item, ContextItem::ToolResult(_)))
             .count(),
-        1
+        0
     );
     h.shutdown().expect("shutdown");
 }
@@ -2764,6 +2777,253 @@ fn start_seeded_self_compaction(
         None,
     );
     read_nth_prompt_created(h, 0)
+}
+
+/// UI, self, and cross requests keep their one delivery owner through a
+/// capacity retry. Both intermediate-failure and successor crash cuts rebuild
+/// that owner.
+#[test]
+fn explicit_compaction_capacity_retreat_preserves_one_request_owner() {
+    for kind in ["ui", "self", "cross"] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("model")
+            .supports_standalone_compaction = true;
+        let caller = ensure_test_user_agent(&mut h);
+        let (target, target_id) = if kind == "cross" {
+            install_manual_compaction_target(&mut h, "capacity-target")
+        } else {
+            (
+                caller.clone(),
+                durable_agent_id_for_conversation(&h, &caller),
+            )
+        };
+        seed_reactive_compaction_prefix(&mut h, &target);
+        seed_reactive_compaction_prefix(&mut h, &target);
+        let call_id = ToolCallId::from(format!("call-capacity-{kind}"));
+        match kind {
+            "self" => {
+                start_seeded_self_compaction(&mut h, &target, call_id.clone());
+            }
+            "cross" => {
+                let call = register_manual_cross_compaction_call(&mut h, &caller, call_id.as_str());
+                h.request_agent_tool_compaction(
+                    &caller,
+                    &call,
+                    ToolName::new("agent_compact"),
+                    Some(&target_id),
+                );
+            }
+            _ => h.handle_compact_request(
+                crate::harness::harness_connection_id(),
+                test_session_id("s1"),
+                Some(target_id.as_str()),
+            ),
+        }
+        let first = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentPromptCreated(prompt)
+                    if prompt.agent_id == target_id
+                        && prompt.operation == tau_proto::PromptOperation::StandaloneCompaction =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+            .expect("target compaction");
+        h.handle_provider_response_finished(context_overflow_response(&first))
+            .expect("capacity rejection");
+        let successor = event_log_events(&h)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::AgentStandaloneCompactionStarted(started) => Some(started),
+                _ => None,
+            })
+            .last()
+            .expect("successor");
+        assert!(successor.supersedes.is_some(), "{kind}");
+        let records = h
+            .session_runtime
+            .agent_store
+            .agent_events(target_id.as_str())
+            .expect("records");
+        let failed_index = records
+            .iter()
+            .position(|record| matches!(record.event, Event::AgentStandaloneCompactionFailed(_)))
+            .expect("failure");
+        let before_start =
+            tau_core::AgentTree::from_events(target_id.clone(), &records[..=failed_index]);
+        assert!(
+            matches!(
+                before_start.manual_compaction_recoveries().as_slice(),
+                [tau_core::ManualCompactionRecovery::Started { outcome: None, .. }]
+            ),
+            "intermediate failure is not a request terminal: {kind}"
+        );
+        let cold = tau_core::AgentTree::from_events(target_id.clone(), &records);
+        assert!(
+            matches!(cold.manual_compaction_recoveries().as_slice(),
+                [tau_core::ManualCompactionRecovery::Started { started, outcome: None, .. }]
+                    if started.transaction_id == successor.transaction_id
+            ),
+            "cold replay moves request ownership: {kind}"
+        );
+        assert!(
+            !event_log_events(&h).iter().any(|event| matches!(event,
+                Event::ToolBackgroundError(error) if error.call_id == call_id
+            )),
+            "retreat must not fail the tool: {kind}"
+        );
+        let retry = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentPromptCreated(prompt)
+                    if prompt.agent_prompt_id == successor.compact_prompt_id =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+            .expect("successor prompt");
+        assert!(strict_fake_compact_response(&retry).is_ok(), "{kind}");
+        h.handle_provider_response_finished(provider_text_response(
+            &retry.agent_prompt_id,
+            retry.agent_id,
+            "capacity summary",
+        ))
+        .expect("success");
+        let records = h
+            .session_runtime
+            .agent_store
+            .agent_events(target_id.as_str())
+            .expect("records");
+        let cold = tau_core::AgentTree::from_events(target_id.clone(), &records);
+        assert!(
+            matches!(cold.manual_compaction_recoveries().as_slice(),
+                [tau_core::ManualCompactionRecovery::Started {
+                    started, outcome: Some(outcome), ..
+                }] if started.transaction_id == successor.transaction_id
+                    && matches!(outcome.as_ref(), tau_core::ManualCompactionOutcome::Succeeded(_))
+            ),
+            "one successful explicit request: {kind}"
+        );
+        if kind == "self" {
+            assert_eq!(event_log_events(&h).iter().filter(|event| matches!(event,
+                Event::AgentPromptSteered(steered)
+                    if steered.self_compaction_terminal.as_ref().is_some_and(|terminal|
+                        terminal.tool_call_id == call_id
+                            && terminal.transaction_id.as_ref() == Some(&successor.transaction_id))
+            )).count(), 1);
+            assert!(!h.wait_completion_is_retained_for_test(&caller, &call_id));
+        } else if kind == "cross" {
+            assert_eq!(
+                event_log_events(&h)
+                    .iter()
+                    .filter(|event| matches!(event,
+                        Event::ToolBackgroundResult(result) if result.call_id == call_id
+                    ))
+                    .count(),
+                1
+            );
+        }
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// Every explicit entrypoint terminalizes no-fit admission durably without a
+/// standalone dispatch, preserving self and cross delivery exactly once.
+#[test]
+fn explicit_compaction_no_fitting_prefix_fails_before_provider_dispatch() {
+    for kind in ["ui", "self", "cross"] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("model");
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(1));
+        let caller = ensure_test_user_agent(&mut h);
+        let (target, target_id) = if kind == "cross" {
+            install_manual_compaction_target(&mut h, "no-fit-target")
+        } else {
+            (
+                caller.clone(),
+                durable_agent_id_for_conversation(&h, &caller),
+            )
+        };
+        seed_reactive_compaction_prefix(&mut h, &target);
+        let call_id = ToolCallId::from(format!("call-no-fit-{kind}"));
+        match kind {
+            "self" => {
+                start_seeded_self_compaction(&mut h, &target, call_id.clone());
+            }
+            "cross" => {
+                let call = register_manual_cross_compaction_call(&mut h, &caller, call_id.as_str());
+                h.request_agent_tool_compaction(
+                    &caller,
+                    &call,
+                    ToolName::new("agent_compact"),
+                    Some(&target_id),
+                );
+            }
+            _ => h.handle_compact_request(
+                crate::harness::harness_connection_id(),
+                test_session_id("s1"),
+                Some(target_id.as_str()),
+            ),
+        }
+        assert!(
+            !event_log_events(&h)
+                .iter()
+                .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_))),
+            "no-fit must never create provider work: {kind}"
+        );
+        let records = h
+            .session_runtime
+            .agent_store
+            .agent_events(target_id.as_str())
+            .expect("records");
+        let cold = tau_core::AgentTree::from_events(target_id, &records);
+        assert!(
+            matches!(cold.manual_compaction_recoveries().as_slice(),
+                [tau_core::ManualCompactionRecovery::Failed { failed, .. }]
+                    if failed.reason == tau_proto::ManualCompactionRequestFailureReason::PrefixTooLarge
+            ),
+            "no-fit is a durable request terminal: {kind}"
+        );
+        if kind == "self" {
+            assert_eq!(
+                event_log_events(&h)
+                    .iter()
+                    .filter(|event| matches!(event,
+                        Event::AgentPromptSteered(steered)
+                            if steered.self_compaction_terminal.as_ref().is_some_and(|terminal|
+                                terminal.tool_call_id == call_id)
+                    ))
+                    .count(),
+                1
+            );
+        } else if kind == "cross" {
+            assert_eq!(
+                event_log_events(&h)
+                    .iter()
+                    .filter(|event| matches!(event,
+                        Event::ToolBackgroundError(error) if error.call_id == call_id
+                    ))
+                    .count(),
+                1
+            );
+        }
+        h.shutdown().expect("shutdown");
+    }
 }
 
 /// Live self-compaction success resumes from the replacement window with one
@@ -5308,17 +5568,44 @@ fn manual_cross_compaction_starts_fresh_after_branch_change() {
     h.shutdown().expect("shutdown");
 }
 
-/// Cancelling after a cross-agent transaction starts targets that exact compact
-/// prompt and completes the original background call once.
+/// Cancelling after a capacity retry targets the successor compact prompt and
+/// completes the original background call once, not its intermediate failure.
 #[test]
 fn manual_cross_compaction_post_start_cancel_is_exact() {
-    let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
+    let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
+    seed_reactive_compaction_prefix(&mut h, &target);
+    seed_reactive_compaction_prefix(&mut h, &target);
     h.request_agent_tool_compaction(
         &caller,
         &call,
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
+    let first = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_id == target_id
+                    && prompt.operation == tau_proto::PromptOperation::StandaloneCompaction =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("target compact");
+    h.handle_provider_response_finished(context_overflow_response(&first))
+        .expect("retreat");
+    let successor = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) if started.agent_id == target_id => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .last()
+        .expect("successor");
+    assert!(successor.supersedes.is_some());
     h.cancel_remaining_tool_calls(
         &caller,
         vec![call.id.clone()],
@@ -5333,6 +5620,7 @@ fn manual_cross_compaction_post_start_cancel_is_exact() {
                 Event::AgentStandaloneCompactionFailed(failed)
                     if failed.reason
                         == tau_proto::StandaloneCompactionFailureReason::Cancelled
+                        && failed.transaction_id == successor.transaction_id
             ))
             .count(),
         1
@@ -6062,7 +6350,9 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
         h.handle_provider_response_finished(context_overflow_response(&inference))
             .expect("start reactive recovery");
         let compact = read_nth_prompt_created(&h, 1);
-        h.handle_provider_response_finished(context_overflow_response(&compact))
+        let mut failed = context_overflow_response(&compact);
+        failed.failure_kind = None;
+        h.handle_provider_response_finished(failed)
             .expect("fail reactive compaction");
         assert!(
             h.agent_runtime.agent_registry.agents[&worker_cid]
@@ -6826,14 +7116,14 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
     );
 
     h.handle_provider_response_finished(context_overflow_response(&continuation))
-        .expect("post-compaction overflow is terminal");
+        .expect("fresh post-compaction overflow authorizes another request");
     assert_eq!(
         event_log_events(&h)
             .iter()
             .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
             .count(),
-        1,
-        "post-compaction inference cannot recursively compact"
+        2,
+        "fresh no-output rejection authorizes another compaction"
     );
     h.shutdown().expect("shutdown");
 }
@@ -7314,7 +7604,9 @@ fn reactive_context_overflow_side_failure_completes_request() {
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("start recovery");
     let compact = read_nth_prompt_created(&h, 1);
-    h.handle_provider_response_finished(context_overflow_response(&compact))
+    let mut failed = context_overflow_response(&compact);
+    failed.failure_kind = None;
+    h.handle_provider_response_finished(failed)
         .expect("fail compact");
 
     assert!(
@@ -7399,10 +7691,10 @@ fn reactive_context_overflow_claimed_crash_is_not_redispatched() {
     resumed.shutdown().expect("shutdown");
 }
 
-/// Facts committed while reactive compaction is pending stay in the suffix,
-/// while the durable start retains the original pre-activation cut.
+/// The cut includes current eligible activation; facts committed during the
+/// request remain unsummarized suffix rather than triggering a second pass.
 #[test]
-fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
+fn reactive_context_overflow_includes_activation_and_preserves_late_suffix() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     h.provider_runtime
@@ -7446,7 +7738,12 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
             _ => None,
         })
         .expect("start");
-    assert_eq!(start.cut, prefix);
+    assert_ne!(start.cut, prefix);
+    assert!(
+        serde_json::to_string(&compact.context)
+            .expect("context")
+            .contains("activation A")
+    );
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .identity
         .agent_id
@@ -7474,16 +7771,16 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
     .expect("accept compact");
     let continuation = read_nth_prompt_created(&h, 2);
     let context = serde_json::to_string(&continuation.context).expect("context");
-    assert_eq!(context.matches("activation A").count(), 1);
+    assert_eq!(context.matches("activation A").count(), 0);
     assert_eq!(context.matches("suffix B").count(), 1);
     h.shutdown().expect("shutdown");
 }
 
-/// A reactive rejection must retain the checkpoint cut before the earliest of
-/// multiple coalesced agent-message wakes and replay both wakes in the exact
-/// suffix.
+/// Coalesced wakes retain their original activation checkpoint while all of
+/// their eligible content participates in the next full-context compact
+/// request.
 #[test]
-fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
+fn reactive_compaction_includes_coalesced_agent_message_wakes() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     h.provider_runtime
@@ -7611,20 +7908,28 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             _ => None,
         })
         .expect("reactive compaction start");
-    assert_eq!(started.cut, tau_proto::AgentHead::Node(prefix));
+    assert_ne!(started.cut, tau_proto::AgentHead::Node(prefix));
+    let compact_context = serde_json::to_string(&compact.context).expect("context");
+    for marker in [
+        "coalesced body one",
+        "coalesced body two",
+        "mixed activation after coalesced wakes",
+    ] {
+        assert_eq!(compact_context.matches(marker).count(), 1, "{marker}");
+    }
     h.handle_provider_response_finished(
         strict_fake_compact_response(&compact).expect("valid compact response"),
     )
     .expect("finish compaction");
     let continuation = read_nth_prompt_created(&h, 2);
     let context = serde_json::to_string(&continuation.context).expect("context");
-    assert_eq!(context.matches("coalesced body one").count(), 1);
-    assert_eq!(context.matches("coalesced body two").count(), 1);
+    assert_eq!(context.matches("coalesced body one").count(), 0);
+    assert_eq!(context.matches("coalesced body two").count(), 0);
     assert_eq!(
         context
             .matches("mixed activation after coalesced wakes")
             .count(),
-        1
+        0
     );
     h.shutdown().expect("shutdown");
 }
@@ -8997,6 +9302,11 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
         Some(&agent_id),
     );
     let retry_compact = read_nth_prompt_created(&h, 2);
+    assert!(
+        serde_json::to_string(&retry_compact.context)
+            .expect("context")
+            .contains("activation A")
+    );
     h.handle_provider_response_finished(provider_text_response(
         &retry_compact.agent_prompt_id,
         retry_compact.agent_id,
@@ -9006,7 +9316,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
 
     let inference = read_nth_prompt_created(&h, 3);
     let context = serde_json::to_string(&inference.context).expect("context");
-    assert_eq!(context.matches("activation A").count(), 1);
+    assert_eq!(context.matches("activation A").count(), 0);
     assert_eq!(context.matches("activation B").count(), 1);
     assert_eq!(
         event_log_events(&h)
@@ -9023,10 +9333,10 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
 }
 
 /// A threshold reached immediately after a mixed parallel tool round must
-/// compact only a closed provider prefix and preserve every success, error, and
-/// cancellation result exactly in the one resumed inference.
+/// compact a closed provider prefix containing every success, error, and
+/// cancellation result, then resume without replaying the summarized round.
 #[test]
-fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
+fn standalone_auto_compaction_includes_complete_mixed_tool_round() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
@@ -9178,7 +9488,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
         .expect("agent")
         .execution
         .context_usage_model = Some("test/model".into());
-    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true));
 
     let started = event_log_events(&h)
         .into_iter()
@@ -9187,19 +9497,14 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             _ => None,
         })
         .expect("compaction start");
-    assert_eq!(started.cut, tau_proto::AgentHead::Node(prefix));
+    assert_ne!(started.cut, tau_proto::AgentHead::Node(prefix));
+    assert_eq!(started.cut, tau_proto::AgentHead::Node(results));
     assert_eq!(
         started.resume_through,
         Some(tau_proto::AgentHead::Node(results))
     );
     let compact = read_nth_prompt_created(&h, 1);
-    assert!(
-        compact
-            .context
-            .flatten_iter()
-            .all(|item| !matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_))),
-        "compact input must end before the complete mixed tool round"
-    );
+    validate_closed_tool_timeline(&compact.context).expect("closed compact input");
     h.provider_runtime
         .model_info
         .get_mut(&"test/model".into())
@@ -9212,7 +9517,14 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     )
     .expect("accept compaction");
     let inference = read_nth_prompt_created(&h, 2);
-    let timeline: Vec<_> = inference.context.flatten_iter().collect();
+    assert!(
+        inference
+            .context
+            .flatten_iter()
+            .all(|item| !matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_))),
+        "the complete round was summarized"
+    );
+    let timeline: Vec<_> = compact.context.flatten_iter().collect();
     let call_types: std::collections::HashMap<_, _> = timeline
         .iter()
         .filter_map(|item| match item {

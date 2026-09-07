@@ -10,6 +10,13 @@ and successor semantics added for ticket `9dvw`, satisfying
 The user separately approved the bounded, durable rolling recovery semantics
 for ticket `b1yw`, including provider-rejection authority, per-pass progress,
 replay, and typed no-progress termination, satisfying the same gate.
+The user subsequently approved replacing successful rolling with ordinary
+outer-loop recurrence for `xs14`: all entrypoints retreat on canonical capacity
+rejection, complete on the first successful prefix summary, and rely on fresh
+ordinary usage or no-output rejection to authorize further compaction.
+The user explicitly accepted breaking historical journal compatibility for the
+replacement-boundary cut meaning and requested protocol minor revision `3.1`;
+there is no legacy cut discriminator or migration.
 The user also approved the native Codex semantic-progress retry and cost
 boundary for ticket `gtdq`, satisfying the same gate.
 The user separately approved the Chat Completions local-summary semantic-idle
@@ -118,10 +125,11 @@ repaired without resending ambiguous provider work or duplicating a background
 completion.
 Every newly selected compact cut is a provider-valid closed prefix. A tool-calling assistant
 response and the one terminal results node that closes its complete function,
-custom, or mixed parallel round are indivisible at this boundary. A provisional
-pre-activation cut at the assistant response retreats to its parent, retaining
-the exact call-and-result round in the suffix rather than consuming the owed
-activation.
+custom, or mixed parallel round are indivisible at this boundary. Selection
+considers the whole current eligible candidate, including complete closed
+activation rounds. A provisional head inside an open tool round retreats to
+the preceding provider-closed boundary; an excluded round stays intact in the
+suffix. Resume ownership does not impose a pre-activation content ceiling.
 Immutable historical failed starts with an open prefix remain replay-valid only
 so explicit recovery can supersede them at a normalized closed ancestor without
 rewriting durable history.
@@ -138,21 +146,45 @@ authority.
 
 ## Reactive context-overflow recovery
 
-An ordinary inference that receives a canonical, no-output context-window rejection may authorize one durable standalone-compaction chain when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. A context-rejected automatic standalone request durably pre-mints one successor at the immediate previous useful provider-closed cut. Rejection exhaustively repeats that strict retreat until one request succeeds or the history is irreducible. A successful pass then advances toward the immutable logical target by consuming the replacement plus at least one more closed suffix group. The rejected activating input remains in the suffix under the original resume watermark. The finite preceding transcript bounds both phases: retreat strictly moves backward, and forward rolling strictly removes surviving groups. Typed preflight or irreducible failures terminate without recursive inference retry. Inference resumes only after the chain reaches the end of the logical provider window preceding the rejected activation.
+An ordinary inference that receives a canonical, no-output context-window
+rejection may authorize standalone compaction when the captured model still
+matches, advertises standalone support, and role policy permits compaction.
+This includes inference resumed after an earlier successful compaction. Its
+canonical terminal and recovery disposition commit before a uniquely correlated
+start, preserving the owed activation without submitting it a second time.
 
-Compaction dispatch and continuation reuse the existing durable transaction machinery. A committed partial chain remains owed if its captured route or standalone capability disappears; replay commits one predecessor-linked typed `route_failed` terminal without provider dispatch instead of checkpointing inference. Standalone-compaction overflow, a post-chain inference overflow, a second overflow, and ambiguous dispatch are terminal rather than recursive. Partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never authorize recovery. Replay resumes an unclaimed planned recovery once, continues a committed successful partial chain from its durable predecessor, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
+UI, self, cross-agent, and automatic standalone compaction share prefix fitting.
+Each new request considers the whole current eligible provider window: installed
+summary, remaining conversation, and newly committed eligible inputs. A fitting
+prefix never splits a complete tool round. An optional adapter byte cap bounds
+compact-request admission only; absent that cap, the first attempt may select
+the whole closed window. A canonical no-output compact capacity rejection
+durably pre-mints one immediate smaller closed-prefix successor, including the
+installed summary alone. Every rejection retreats until a request succeeds or
+the window is irreducible. Retry attempts retain the captured model, request
+ownership, and owed resume watermark. Intermediate failures do not complete an
+explicit request; its first success or final failure produces one terminal.
+A cut naming the installed replacement boundary selects only that replacement,
+not its preserved suffix; new live fold and cold replay share this meaning.
 
-The termination argument is narrower than an unconditional capacity guarantee.
-It proves that one immutable finite target cannot cause infinite retreat or
-forward rolling: every rejected cut is a strict predecessor, and every
-successful continuation consumes at least one surviving closed group.
-Successful completion additionally assumes fixed request overhead leaves
-positive capacity, some replacement-plus-next-group request fits at each
-forward step, the provider emits the reviewed no-output rejection, and each
-accepted summary is valid. Replacement-only reduction, a final summary that
-still cannot fit resumed inference, indivisible oversized groups, provider
-unavailability, cancellation, malformed output, and non-shrinking summaries
-remain explicit terminal boundaries rather than claims of guaranteed recovery.
+The first successful prefix summary completes the request and preserves all
+unsummarized suffix material. It does not authorize another summary merely
+because a suffix remains or new input arrived. Ordinary execution supplies the
+outer loop: fresh provider input usage can trigger the configured threshold,
+and a fresh canonical no-output overflow can authorize another compaction.
+Pre-summary usage is invalidated; unknown post-summary size is not inferred from
+JSON bytes or asserted to fit. Native backend summarization remains preferred,
+with the existing built-in local summary implementation otherwise.
+
+Each start, failure, replacement boundary, and inference checkpoint uses normal
+atomic publication. Replay claims an unstarted retreat once, resumes ordinary
+inference after a committed success without rerunning the summary, and leaves
+ambiguous dispatched work blocked. Partial semantic output, cancellation,
+unsupported policy, and branch/model mismatch do not grant automatic recovery.
+A viable configuration assumes useful shrinking prefixes exist; fixed overhead
+or an indivisible smallest prefix that the backend rejects terminates as
+irreducible. There is no arbitrary successful-pass count or serialized-byte
+progress rank.
 
 ## Manual compaction
 
@@ -171,9 +203,9 @@ or pre-start failure.
 An already committed automatic recovery chain retains priority. New proactive
 work is suppressed behind a queued UI intent. Automatic success satisfies the
 manual intent without redundant provider work; an automatic failure or block
-permits the pending explicit request to make one existing manual recovery
-attempt. Provider and context-window failure consume that attempt, and explicit
-manual context rejection never enters automatic strict-predecessor retreat.
+permits the pending explicit request to make one manual recovery request.
+Capacity rejection can retreat within that request; its first successful prefix
+or final failure consumes the intent.
 
 UI `:compact` may preempt a busy target only when its sole remaining foreground
 call is the same still-installed harness-owned exact, bare, or activating-input
@@ -214,16 +246,17 @@ ordinary Responses WebSocket capture contract and never become journal, event,
 UI, or recovery authority.
 The model-callable path accepts work only when the exact captured
 provider-qualified model supports standalone compaction and its route exists.
-It has no inline fallback. Provider terminal errors, including context-window
-rejection during standalone compaction, produce one terminal transaction
-failure and are not retried indefinitely. Before any semantic compact output is
+It has no inline fallback. Provider terminal errors produce one terminal
+transaction failure. Canonical no-output context rejection may authorize the
+shared smaller-prefix successor, but other deterministic failures do not.
+Before any semantic compact output is
 accepted, standalone compaction uses the shared transient-failure classifier
 and jittered Fibonacci scheduler with a named five-attempt policy, including the
 first attempt. A same-event error processed before content is accepted remains
 pre-progress. After semantic compact output is accepted, a later failure
 discards the uncommitted output and terminalizes without automatic retry;
 recovery requires a distinct explicit request. Deterministic failures,
-including context-window exhaustion, are terminal immediately. Ordinary
+other than the shared capacity-retreat case, are terminal immediately. Ordinary
 inference deliberately retains its unbounded transient-retry policy.
 The Codex adapter selects native compaction privately when the model supports
 its wire contract, otherwise local summary. It serializes the first native probe
@@ -532,18 +565,25 @@ context fits it. Complete tool call/result rounds and each replacement remain
 indivisible. When absent, Tau dispatches the full selected closed prefix and lets
 the provider's canonical token-capacity rejection decide recovery. The durable
 start records `cut` and `resume_through`, so success installs `compact(P)`
-followed by the exact logical suffix. No fitting progress-making group produces
-a bounded typed preflight failure without provider work.
+followed by the exact logical suffix. The durable start's publication parent
+anchors its active window independently of `resume_through`, which records only
+whether inference is owed. Idle explicit requests therefore retain the installed
+replacement even when their logical suffix cut physically predates it.
+No fitting closed prefix produces a bounded typed preflight failure without
+provider work. Explicit requests use the durable pre-start manual-request failure
+with reason `prefix_too_large`; automatic starts retain their typed preflight
+failure.
 
 Only a canonical typed, no-output `context_window_exceeded` terminal authorizes
 automatic retreat. Its failure record pre-mints one successor at the immediate
-previous useful provider-closed cut. Each rejection strictly retreats; the first
-success begins target-based forward rolling, where each successful continuation
-consumes another closed suffix group. These monotonic phases prove termination
-without a pass ceiling. Generic provider failures, cancellation, route loss,
-manual compaction, and irreducible history terminalize without automatic retry.
-A deterministic byte-budget preflight failure records its reason in the start,
-so live execution and restart commit the same terminal without provider work.
+previous useful provider-closed cut, including a replacement-only prefix.
+Each rejection strictly retreats; the first success returns to ordinary
+execution, which alone supplies fresh evidence for another compaction.
+This method also applies to explicit requests. Generic provider failures,
+cancellation, route loss, and irreducible history terminalize without automatic retry.
+A deterministic automatic byte-budget preflight failure records its reason in
+the start, so live execution and restart commit the same terminal without
+provider work.
 
 `before_inference` policies otherwise retain the deferred runtime behavior above.
 `outer_turn_finished` policies that match the logical terminal status coalesce

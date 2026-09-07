@@ -5,17 +5,6 @@
 
 use super::*;
 
-/// Result of checking one durable successful compaction for rolling work.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RollingCompactionPass {
-    /// No additional pass is authorized.
-    NotNeeded,
-    /// A provider-backed continuation start was published.
-    Started,
-    /// A linked typed local failure start was published and is terminalizing.
-    Terminalizing,
-}
-
 impl Harness {
     /// Claim a queued UI request at a provider-closed boundary before ordinary
     /// inference can advance.
@@ -979,10 +968,34 @@ impl Harness {
             );
             return false;
         }
+        let initial_cut = self.closed_provider_prefix_for_agent(
+            accepted.request.target_agent_id.as_str(),
+            current_head,
+        );
+        let initial_cut = self
+            .provider_runtime
+            .model_info
+            .get(&accepted.request.model)
+            .and_then(|info| info.standalone_compaction_prefix_budget)
+            .map_or(Some(initial_cut), |budget| {
+                self.fitting_standalone_compaction_cut(
+                    accepted.request.target_agent_id.as_str(),
+                    current_head,
+                    budget,
+                )
+            });
+        let Some(initial_cut) = initial_cut else {
+            self.fail_accepted_manual_compaction(
+                target_cid,
+                &accepted.request,
+                tau_proto::ManualCompactionRequestFailureReason::PrefixTooLarge,
+            );
+            return false;
+        };
         let (cut, resume_through, supersedes) = blocked_recovery.map_or_else(
             || {
                 (
-                    current_head,
+                    initial_cut,
                     (accepted
                         .request
                         .tool_source()
@@ -1152,7 +1165,13 @@ impl Harness {
             .agent_store
             .agent(agent_id)
             .map_or(provisional_cut, |tree| {
-                tree.closed_provider_prefix_at_or_before(provisional_cut)
+                let closed = tree.closed_provider_prefix_at_or_before(provisional_cut);
+                let window = tree.active_provider_window(closed.as_option());
+                window
+                    .transcript
+                    .last()
+                    .map(|(node, _)| tau_proto::AgentHead::Node(*node))
+                    .unwrap_or(closed)
             })
     }
 
@@ -1163,28 +1182,33 @@ impl Harness {
     /// never resurrects history that an earlier boundary removed. Tool-calling
     /// assistant nodes are not candidates until their complete results node has
     /// closed the round.
-    pub(super) fn fitting_automatic_compaction_cut(
+    pub(super) fn fitting_standalone_compaction_cut(
         &self,
         agent_id: &str,
         active_head: tau_proto::AgentHead,
-        maximum_cut: Option<tau_proto::AgentHead>,
         budget: tau_proto::ByteCount,
     ) -> Option<tau_proto::AgentHead> {
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
         let window = tree.active_provider_window(active_head.as_option());
+        if window.replacement.is_none() && window.transcript.is_empty() {
+            let context = tau_proto::PromptContext {
+                blocks: crate::prompt::initialization_agents_context_block(tree)
+                    .into_iter()
+                    .collect(),
+            };
+            let bytes = u64::try_from(serde_json::to_vec(&context).ok()?.len()).ok()?;
+            return (tau_proto::ByteCount::new(bytes) <= budget)
+                .then_some(tau_proto::AgentHead::Root);
+        }
         let measurements =
             crate::prompt::active_prompt_prefix_json_measurements(tree, active_head.as_option())?;
-        // A replacement alone is not a progress-making rolling pass: it can
-        // produce an equally large replacement forever. Every automatic pass
-        // must also consume at least one surviving transcript group.
-        let candidates = window
-            .transcript
-            .iter()
-            .zip(measurements)
-            .filter_map(|((id, entry), (measured_id, bytes))| {
-                if *id != measured_id {
-                    return None;
+        measurements
+            .into_iter()
+            .filter_map(|(id, bytes)| {
+                if window.replacement_boundary == Some(id) {
+                    return Some((tau_proto::AgentHead::Node(id), bytes));
                 }
+                let entry = &tree.node(id)?.entry;
                 let open_tool_round = matches!(
                     entry,
                     tau_core::AgentEntry::AssistantResponse { output_items, .. }
@@ -1192,21 +1216,8 @@ impl Harness {
                             .iter()
                             .any(|item| matches!(item, tau_proto::ContextItem::ToolCall(_)))
                 );
-                (!open_tool_round).then_some((tau_proto::AgentHead::Node(*id), bytes))
+                (!open_tool_round).then_some((tau_proto::AgentHead::Node(id), bytes))
             })
-            .collect::<Vec<_>>();
-        let candidate_limit = match maximum_cut {
-            None => candidates.len(),
-            Some(tau_proto::AgentHead::Node(maximum)) => candidates
-                .iter()
-                .position(|(cut, _)| *cut == tau_proto::AgentHead::Node(maximum))
-                .map(|index| index + 1)
-                .unwrap_or(0),
-            Some(tau_proto::AgentHead::Root) => 0,
-        };
-        candidates
-            .into_iter()
-            .take(candidate_limit)
             .take_while(|(_, bytes)| *bytes <= budget)
             .map(|(cut, _)| cut)
             .last()
@@ -1221,212 +1232,6 @@ impl Harness {
     ) -> Option<tau_proto::AgentHead> {
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
         tree.previous_provider_closed_cut_in_active_window(active_head, rejected_cut)
-    }
-
-    /// Starts another bounded rolling pass after a durable successful boundary.
-    ///
-    /// Automatic work requires the active window to reach its local scheduling
-    /// threshold. An unfinished chain rooted at a provider context rejection
-    /// instead retains its durable recovery authority until it reaches the end
-    /// of the logical provider window preceding the rejected activation.
-    pub(super) fn start_rolling_compaction_pass(
-        &mut self,
-        cid: &AgentId,
-        model: &ModelId,
-        selected: tau_proto::AgentHead,
-    ) -> RollingCompactionPass {
-        let Some(agent_id) = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(cid)
-            .and_then(|agent| agent.identity.agent_id.clone())
-        else {
-            return RollingCompactionPass::NotNeeded;
-        };
-        let Some(tree) = self.session_runtime.agent_store.agent(&agent_id) else {
-            return RollingCompactionPass::NotNeeded;
-        };
-        let (previous_transaction_id, _automatic) = match tree.standalone_compaction_recovery() {
-            Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
-                transaction_id,
-                through,
-                automatic,
-                ..
-            }) if through == selected => (transaction_id, automatic),
-            _ => return RollingCompactionPass::NotNeeded,
-        };
-        let reactive_progress = tree.reactive_compaction_progress(&previous_transaction_id);
-        if reactive_progress == Some(tau_core::ReactiveCompactionProgress::ReachedTargetCut) {
-            return RollingCompactionPass::NotNeeded;
-        }
-        let reactive_target_cut = match reactive_progress {
-            Some(tau_core::ReactiveCompactionProgress::NeedsContinuation { target_cut }) => {
-                Some(target_cut)
-            }
-            _ => None,
-        };
-        let reactive_continuation = reactive_target_cut.is_some();
-        if !reactive_continuation {
-            return RollingCompactionPass::NotNeeded;
-        }
-        let info = self.provider_runtime.model_info.get(model);
-        let route_supports_standalone = info.is_some_and(|info| {
-            info.supports_standalone_compaction
-                && self.provider_runtime.model_routes.contains_key(model)
-        });
-        let budget = info.and_then(|info| info.standalone_compaction_prefix_budget);
-        let role_name = self.role_name_for_agent_id(cid);
-        let role = self.config.available_roles.get(&role_name);
-        let status_available = self
-            .gather_effective_tool_specs_for_role_model(&role_name, Some(model))
-            .iter()
-            .any(|spec| self.tool_model_visible_name(spec).as_str() == "status");
-        let logical_status = if status_available {
-            self.agent_runtime
-                .agent_registry
-                .agents
-                .get(cid)
-                .map_or(tau_proto::AgentWorkStatusPhase::Working, |agent| {
-                    agent.turn.work_status.phase()
-                })
-        } else {
-            tau_proto::AgentWorkStatusPhase::Working
-        };
-        let threshold = role
-            .and_then(|role| {
-                if role.compactions.is_empty() {
-                    return match role
-                        .compaction
-                        .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
-                    {
-                        path_tau_config_settings::RoleCompaction::ProviderDefault => {
-                            info.and_then(|info| info.standalone_compaction_threshold)
-                        }
-                        path_tau_config_settings::RoleCompaction::Threshold(tokens) => {
-                            Some(tau_proto::TokenCount::new(tokens))
-                        }
-                        path_tau_config_settings::RoleCompaction::Reserve(reserve) => {
-                            compaction_threshold_from_reserve(model, info, reserve).ok()
-                        }
-                        path_tau_config_settings::RoleCompaction::Disabled => None,
-                    };
-                }
-                role.compactions
-                    .values()
-                    .filter(|policy| {
-                        policy.enable
-                            && policy.when.at
-                                == path_tau_config_settings::ContextPolicyPoint::BeforeInference
-                            && policy
-                                .when
-                                .statuses
-                                .as_ref()
-                                .is_none_or(|statuses| statuses.contains(&logical_status))
-                    })
-                    .filter_map(|policy| {
-                        resolve_compaction_policy_threshold(model, info, policy.threshold)
-                            .ok()
-                            .flatten()
-                            .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO)
-                    })
-                    .min()
-            })
-            .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO);
-        let reported_input = self
-            .automatic_compaction_reported_input_tokens(cid, model)
-            .unwrap_or(tau_proto::TokenCount::ZERO);
-        if !reactive_continuation {
-            let Some(threshold) = threshold else {
-                return RollingCompactionPass::NotNeeded;
-            };
-            if reported_input < threshold {
-                return RollingCompactionPass::NotNeeded;
-            }
-        }
-        let provisional_cut = reactive_target_cut.unwrap_or(selected);
-        let failure_reason = if route_supports_standalone {
-            tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
-        } else {
-            tau_proto::StandaloneCompactionFailureReason::RouteFailed
-        };
-        let fitting = route_supports_standalone.then(|| {
-            budget.map_or(Some(provisional_cut), |budget| {
-                self.fitting_automatic_compaction_cut(
-                    &agent_id,
-                    selected,
-                    reactive_target_cut,
-                    budget,
-                )
-            })
-        });
-        let fitting = fitting.flatten();
-        let cut = fitting.unwrap_or(provisional_cut);
-        let Some((next, originator)) =
-            self.agent_runtime
-                .agent_registry
-                .agents
-                .get(cid)
-                .map(|agent| {
-                    (
-                        agent.dispatch.next_prompt_index,
-                        agent.identity.originator.clone(),
-                    )
-                })
-        else {
-            return RollingCompactionPass::NotNeeded;
-        };
-        let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
-            .expect("generated compaction transaction id is valid");
-        let compact_prompt_id = tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{next}"))
-            .expect("known-safe AgentPromptId must be valid");
-        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
-        }
-        if fitting.is_none() {
-            self.prompt_coordination
-                .compaction_runtime
-                .suppress_start_for_preflight(
-                    agent_id.clone(),
-                    transaction_id.clone(),
-                    failure_reason,
-                );
-        }
-        let trigger = fitting.map_or_else(
-            || tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
-                decision_id: None,
-                previous_transaction_id: Some(previous_transaction_id.clone()),
-                reason: failure_reason,
-            },
-            |_| tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-                previous_transaction_id: previous_transaction_id.clone(),
-            },
-        );
-        self.publish_event_for_agent_with_completion(
-            cid,
-            None,
-            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-                agent_id,
-                transaction_id,
-                compact_prompt_id,
-                cut,
-                resume_through: Some(selected),
-                model: model.clone(),
-                operation: tau_proto::PromptOperation::StandaloneCompaction,
-                originator,
-                supersedes: None,
-                trigger,
-            }),
-            Some(AgentPublishCompletion::RollingCompactionStart {
-                owned_publication: None,
-            }),
-            false,
-        );
-        if fitting.is_some() {
-            RollingCompactionPass::Started
-        } else {
-            RollingCompactionPass::Terminalizing
-        }
     }
 
     /// Returns the normalized failed cut only when the selected head still
@@ -1480,47 +1285,15 @@ impl Harness {
 
     /// Inserts one automatic standalone compaction boundary before inference
     /// when the last accepted context usage reaches the role/model threshold.
-    #[cfg(test)]
     pub(crate) fn schedule_standalone_auto_compaction(&mut self, cid: &AgentId) -> bool {
-        self.schedule_standalone_auto_compaction_with_wake_view(cid, None)
+        self.schedule_standalone_auto_compaction_for_activation(cid, false)
     }
 
-    /// Schedules automatic compaction using an existing selected-wake
-    /// projection.
-    pub(crate) fn schedule_standalone_auto_compaction_with_wake_view(
-        &mut self,
-        cid: &AgentId,
-        selected_wakes: Option<&super::selected_branch_wake_view::SelectedBranchWakeView>,
-    ) -> bool {
-        self.schedule_standalone_auto_compaction_for_activation_with_wake_view(
-            cid,
-            false,
-            None,
-            selected_wakes,
-        )
-    }
-
+    /// Schedule compaction while preserving any already committed activation.
     pub(super) fn schedule_standalone_auto_compaction_for_activation(
         &mut self,
         cid: &AgentId,
         committed_activation: bool,
-        activation_cut: Option<tau_proto::AgentHead>,
-    ) -> bool {
-        self.schedule_standalone_auto_compaction_for_activation_with_wake_view(
-            cid,
-            committed_activation,
-            activation_cut,
-            None,
-        )
-    }
-
-    /// Schedules activation-aware compaction with one optional wake projection.
-    fn schedule_standalone_auto_compaction_for_activation_with_wake_view(
-        &mut self,
-        cid: &AgentId,
-        committed_activation: bool,
-        activation_cut: Option<tau_proto::AgentHead>,
-        selected_wakes: Option<&super::selected_branch_wake_view::SelectedBranchWakeView>,
     ) -> bool {
         let owed = self
             .agent_runtime
@@ -1565,9 +1338,7 @@ impl Harness {
         self.schedule_standalone_auto_compaction_at(
             cid,
             committed_activation,
-            activation_cut,
             path_tau_config_settings::ContextPolicyPoint::BeforeInference,
-            selected_wakes,
         )
     }
 
@@ -1763,7 +1534,7 @@ impl Harness {
             .and_then(|info| info.standalone_compaction_prefix_budget);
         let fitting_cut = match prefix_budget {
             None => Some(cut),
-            Some(budget) => self.fitting_automatic_compaction_cut(&agent_id, cut, None, budget),
+            Some(budget) => self.fitting_standalone_compaction_cut(&agent_id, cut, budget),
         };
         let cut = fitting_cut.unwrap_or(cut);
         let compact_prompt_id = tau_proto::AgentPromptId::parse(format!(
@@ -1821,9 +1592,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         committed_activation: bool,
-        activation_cut: Option<tau_proto::AgentHead>,
         point: path_tau_config_settings::ContextPolicyPoint,
-        selected_wakes: Option<&super::selected_branch_wake_view::SelectedBranchWakeView>,
     ) -> bool {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
@@ -1960,61 +1729,10 @@ impl Harness {
         let resume_through = (committed_activation
             || !conv.dispatch.pending_message_wakes.is_empty())
         .then_some(selected_head);
-        let owned_selected_wakes;
-        let selected_wakes = if let Some(view) = selected_wakes {
-            Some(view)
-        } else {
-            owned_selected_wakes = self.selected_branch_wake_view(cid);
-            owned_selected_wakes.as_ref()
-        };
-        let selected_message_cut =
-            selected_wakes.and_then(|view| view.earliest_activation_cut(None));
-        let activation_cut = if activation_cut.is_some() || selected_message_cut.is_some() {
-            let Some(cut) = selected_wakes.map_or_else(
-                || self.earliest_activation_cut(cid, activation_cut),
-                |view| view.earliest_activation_cut(activation_cut),
-            ) else {
-                return false;
-            };
-            Some(cut)
-        } else {
-            None
-        };
-        let provisional_cut = activation_cut.unwrap_or_else(|| {
-            if resume_through.is_some() {
-                self.session_runtime
-                    .agent_store
-                    .agent(&agent_id)
-                    .and_then(|tree| conv.identity.head.and_then(|head| tree.node(head)))
-                    .and_then(|node| node.parent_id)
-                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-            } else {
-                conv.identity
-                    .head
-                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-            }
-        });
+        let provisional_cut = self.closed_provider_prefix_for_agent(&agent_id, selected_head);
         let fitting_cut = prefix_budget.map_or(Some(provisional_cut), |budget| {
-            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, None, budget)
+            self.fitting_standalone_compaction_cut(&agent_id, selected_head, budget)
         });
-        if fitting_cut.is_none()
-            && self
-                .session_runtime
-                .agent_store
-                .agent(&agent_id)
-                .is_some_and(|tree| {
-                    tree.active_provider_window_replacement(provisional_cut.as_option())
-                        .is_some()
-                        && tree.active_provider_window_transcript_count(provisional_cut.as_option())
-                            == 0
-                })
-        {
-            // A replacement-only window has no progress-making automatic cut.
-            // Let the already-durable activation claim ordinary inference
-            // rather than terminally blocking it with an impossible
-            // compaction pass.
-            return false;
-        }
         let cut = fitting_cut
             .unwrap_or_else(|| self.closed_provider_prefix_for_agent(&agent_id, provisional_cut));
         let resume_through = resume_through.or(Some(selected_head));

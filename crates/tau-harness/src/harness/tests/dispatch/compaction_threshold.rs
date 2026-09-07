@@ -36,7 +36,7 @@ fn reserve_policy_schedules_at_selected_model_boundary() {
         },
     );
 
-    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true));
     let evidence = event_log_events(&h)
         .into_iter()
         .find_map(|event| match event {
@@ -84,7 +84,7 @@ fn reserve_equal_to_context_window_does_not_gain_zero_threshold_authority() {
         },
     );
 
-    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true));
     h.shutdown().expect("shutdown");
 }
 
@@ -249,7 +249,7 @@ fn legacy_reserve_fallback_records_role_threshold_source() {
     role.compaction = Some(path_tau_config_settings::RoleCompaction::Reserve(10));
     role.inference_compaction = None;
 
-    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true));
     let evidence = event_log_events(&h)
         .into_iter()
         .find_map(|event| match event {
@@ -401,7 +401,7 @@ fn zero_provider_threshold_does_not_schedule_automatic_compaction() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(tau_proto::TokenCount::ZERO);
 
-    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true));
     assert!(
         event_log_events(&h)
             .iter()
@@ -445,7 +445,7 @@ fn zero_named_policy_does_not_suppress_positive_before_inference_sibling() {
         );
     }
 
-    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true));
     let starts = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {

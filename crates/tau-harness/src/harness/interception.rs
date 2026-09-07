@@ -3346,13 +3346,7 @@ impl Harness {
                 break;
             }
             if deferred.obligation.is_committed()
-                && self.schedule_standalone_auto_compaction_for_activation(
-                    &cid,
-                    true,
-                    deferred
-                        .activation_cut
-                        .or_else(|| self.activation_cut_before_current_head(&cid)),
-                )
+                && self.schedule_standalone_auto_compaction_for_activation(&cid, true)
             {
                 if self
                     .runtime_io

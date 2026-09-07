@@ -1013,9 +1013,13 @@ authority. `automatic_policy` uniquely claims a terminal-owned eager decision,
 whose evidence carries the same exact fields. `reactive_context_overflow`
 carries the failed inference prompt id and claims that planned recovery.
 A typed standalone context rejection may commit a `context_retreat` successor
-plan; its `automatic_context_retreat` start must claim that exact plan and strict
-previous provider-closed cut. `automatic_continuation` links only a successful
-rejection-authorized forward-rolling pass to its immediate durable predecessor.
+plan for any compaction entrypoint; its `automatic_context_retreat` start must
+claim that exact plan and strict previous provider-closed cut, including the
+replacement alone. An explicit request retains its one delivery owner across
+these starts. The first successful prefix completes the request; fresh ordinary
+usage or no-output rejection can authorize a new one. Legacy
+`automatic_continuation` and `roll_through` remain replay vocabulary, not live
+successful-pass scheduling authority.
 `automatic_preflight_failure` commits a typed no-provider-dispatch byte-budget or
 route terminal under its correlated authority.
 

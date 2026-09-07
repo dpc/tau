@@ -493,11 +493,7 @@ impl Harness {
                         timing.set_preflight(started.elapsed());
                     }
                 }
-                if !output_length_owner_ready
-                    && self.schedule_standalone_auto_compaction_with_wake_view(
-                        &agent_id,
-                        selected_wakes.as_ref(),
-                    )
+                if !output_length_owner_ready && self.schedule_standalone_auto_compaction(&agent_id)
                 {
                     continue;
                 }

@@ -9,6 +9,80 @@ use tau_proto::{
 use super::*;
 use crate::discovery as path_crate_discovery;
 
+/// Explicit-parent compaction materializes the owning branch even when another
+/// branch holds the tree write cursor, identically after cold replay.
+#[test]
+fn compaction_prompt_uses_explicit_start_parent_not_write_cursor() {
+    let agent_id: tau_proto::AgentId = "parent-agent".parse().expect("agent");
+    let mut tree = tau_core::AgentTree::from_events(agent_id.clone(), &[]);
+    let mut records = Vec::new();
+    let start = tau_proto::AgentStandaloneCompactionStarted {
+        agent_id: agent_id.clone(),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-parent")
+            .expect("transaction"),
+        compact_prompt_id: "ap-parent".parse().expect("prompt"),
+        cut: tau_proto::AgentHead::Node(tau_proto::NodeId::new(0)),
+        resume_through: None,
+        model: "test/model".into(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: tau_proto::PromptOriginator::User,
+        supersedes: None,
+        trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+    };
+    for (index, (parent, event)) in [
+        (
+            tau_core::AgentEventParent::Root,
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "owning branch".to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+        ),
+        (
+            tau_core::AgentEventParent::Root,
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "unrelated cursor".to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+        ),
+        (
+            tau_core::AgentEventParent::Under(tau_proto::NodeId::new(0)),
+            Event::AgentStandaloneCompactionStarted(start.clone()),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let record = tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0; 16]),
+            seq: tau_core::PersistedAgentEventSeq::new(index as u64),
+            source: None,
+            event,
+            parent,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::default(),
+        };
+        tree.apply_persisted_record(&record).expect("append");
+        records.push(record);
+    }
+    let cold = tau_core::AgentTree::try_from_events(agent_id, &records).expect("replay");
+    for tree in [&tree, &cold] {
+        let active_head = tree
+            .standalone_compaction_active_head(&start.transaction_id)
+            .expect("parent");
+        assert_ne!(active_head.as_option(), tree.head());
+        let context = assemble_prompt_context_prefix_from(tree, active_head.as_option(), start.cut)
+            .expect("compact prefix")
+            .context;
+        let text = serde_json::to_string(&context).expect("context");
+        assert!(text.contains("owning branch"));
+        assert!(!text.contains("unrelated cursor"));
+    }
+}
+
 /// Work-status prompts use one generic state/title shape and prevent
 /// model-authored titles from injecting invisible structure.
 #[test]
@@ -2443,7 +2517,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
         vec!["summary C1", "suffix one"]
     );
     let manual_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), first_boundary)
-        .expect("manual full active prefix");
+        .expect("replacement-only prefix");
     assert_eq!(
         manual_prefix
             .context
@@ -2451,7 +2525,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .iter()
             .filter_map(context_text)
             .collect::<Vec<_>>(),
-        vec!["summary C1", "suffix one", "suffix two"]
+        vec!["summary C1"]
     );
     let mut manual_tree = tree.clone();
     manual_tree.apply_event(&boundary(
@@ -2465,7 +2539,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .iter()
             .filter_map(context_text)
             .collect::<Vec<_>>(),
-        vec!["manual summary"]
+        vec!["manual summary", "suffix one", "suffix two"]
     );
 
     tree.apply_event(&boundary("ct-2", suffix_one, first_boundary, "summary C2"));

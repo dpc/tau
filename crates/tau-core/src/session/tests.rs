@@ -160,7 +160,7 @@ fn reference_active_provider_window(
             match cut {
                 Some(AgentHead::Root) => {}
                 Some(AgentHead::Node(cut)) if window.replacement_boundary == Some(*cut) => {
-                    window.transcript.clear();
+                    // Replacing only the installed summary retains its suffix.
                 }
                 Some(AgentHead::Node(cut)) => {
                     if let Some(index) = window
@@ -2675,6 +2675,13 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
                 response_node: None,
             },
         );
+        if mutate == 0 {
+            tree.validate_event(&Event::AgentStandaloneCompactionStarted(claim(
+                checkpoint.agent_prompt_id.as_str(),
+            )))
+            .expect("a fresh rejection after successful compaction remains eligible");
+            continue;
+        }
         assert!(
             validation_error(
                 &tree,
@@ -2839,6 +2846,201 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
                 .contains("mismatches its transaction")
         );
     }
+}
+
+/// A standalone start belongs to its explicit record parent, not the unrelated
+/// global write cursor, in both validation and live/cold active-window capture.
+#[test]
+fn compaction_start_uses_explicit_parent_with_divergent_write_cursor() {
+    fn append_control(
+        tree: &mut AgentTree,
+        records: &mut Vec<PersistedAgentEvent>,
+        parent: NodeId,
+        event: Event,
+    ) {
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0; 16]),
+            seq: tree.next_event_seq,
+            source: None,
+            event,
+            parent: AgentEventParent::Under(parent),
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::default(),
+        };
+        tree.apply_persisted_record(&record).expect("control");
+        records.push(record);
+    }
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    for text in ["branch A", "branch B"] {
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0; 16]),
+            seq: tree.next_event_seq,
+            source: None,
+            event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id(),
+                text: text.to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+            parent: AgentEventParent::Root,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::default(),
+        };
+        tree.apply_persisted_record(&record).expect("branch");
+        records.push(record);
+    }
+    let a = NodeId::new(0);
+    let b = NodeId::new(1);
+    assert_eq!(tree.head(), Some(b));
+    let start = tau_proto::AgentStandaloneCompactionStarted {
+        cut: AgentHead::Node(a),
+        resume_through: None,
+        ..compaction_start("ct-explicit-parent")
+    };
+    let mut ui_tree = tree.clone();
+    let mut ui_records = records.clone();
+    let mut request = manual_request("cr-explicit-parent-ui");
+    request.requested_target_head = AgentHead::Node(a);
+    request.source = tau_proto::ManualCompactionSource::UiCompact {
+        ui_compact: tau_proto::UiManualCompactionSource {
+            eligible_automatic_transaction_id: None,
+            target_role: "default".to_owned(),
+        },
+    };
+    append_control(
+        &mut ui_tree,
+        &mut ui_records,
+        a,
+        Event::AgentManualCompactionRequested(request.clone()),
+    );
+    let ui_start = tau_proto::AgentStandaloneCompactionStarted {
+        resume_through: Some(AgentHead::Node(a)),
+        trigger: tau_proto::StandaloneCompactionTrigger::ManualUi {
+            request_id: request.request_id,
+        },
+        ..start.clone()
+    };
+    assert!(
+        ui_tree
+            .validate_event_at(
+                AgentEventParent::Under(a),
+                &Event::AgentStandaloneCompactionStarted(
+                    tau_proto::AgentStandaloneCompactionStarted {
+                        resume_through: Some(AgentHead::Node(b)),
+                        ..ui_start.clone()
+                    }
+                ),
+            )
+            .is_err(),
+        "UI resume must match explicit parent, not cursor"
+    );
+    append_control(
+        &mut ui_tree,
+        &mut ui_records,
+        a,
+        Event::AgentStandaloneCompactionStarted(ui_start),
+    );
+    let ui_cold = AgentTree::try_from_events(agent_id(), &ui_records).expect("UI cold fold");
+    assert_eq!(
+        ui_cold.standalone_compaction_active_head(&start.transaction_id),
+        Some(AgentHead::Node(a))
+    );
+    let wrong =
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            cut: AgentHead::Node(b),
+            ..start.clone()
+        });
+    assert!(
+        tree.validate_event_at(AgentEventParent::Under(a), &wrong)
+            .is_err()
+    );
+    let record = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0; 16]),
+        seq: tree.next_event_seq,
+        source: None,
+        event: Event::AgentStandaloneCompactionStarted(start.clone()),
+        parent: AgentEventParent::Under(a),
+        fold_semantics: AgentJournalFoldSemantics::Legacy,
+        recorded_at: tau_proto::UnixMicros::default(),
+    };
+    tree.apply_persisted_record(&record)
+        .expect("off-cursor start");
+    records.push(record);
+    let cold = AgentTree::try_from_events(agent_id(), &records).expect("cold fold");
+    for tree in [&tree, &cold] {
+        assert_eq!(
+            tree.head(),
+            Some(b),
+            "control event must not move the write cursor"
+        );
+        assert_eq!(
+            tree.standalone_compaction_active_head(&start.transaction_id),
+            Some(AgentHead::Node(a))
+        );
+        let window = tree.active_provider_window(
+            tree.standalone_compaction_active_head(&start.transaction_id)
+                .expect("anchor")
+                .as_option(),
+        );
+        assert_eq!(window.transcript.len(), 1);
+        assert_eq!(window.transcript[0].0, a);
+    }
+    let failed = |started: &tau_proto::AgentStandaloneCompactionStarted| {
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: agent_id(),
+            transaction_id: started.transaction_id.clone(),
+            cut: started.cut,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: started.resume_through,
+            context_retreat: None,
+            incomplete_response: None,
+        })
+    };
+    append_control(&mut tree, &mut records, a, failed(&start));
+    let sibling = tau_proto::AgentStandaloneCompactionStarted {
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-sibling")
+            .expect("transaction"),
+        compact_prompt_id: "ap-sibling".parse().expect("prompt"),
+        cut: AgentHead::Node(b),
+        ..start.clone()
+    };
+    append_control(
+        &mut tree,
+        &mut records,
+        b,
+        Event::AgentStandaloneCompactionStarted(sibling.clone()),
+    );
+    append_control(&mut tree, &mut records, b, failed(&sibling));
+    let successor = tau_proto::AgentStandaloneCompactionStarted {
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-successor")
+            .expect("transaction"),
+        compact_prompt_id: "ap-successor".parse().expect("prompt"),
+        supersedes: Some(start.transaction_id.clone()),
+        ..start
+    };
+    assert!(
+        tree.validate_event_at(
+            AgentEventParent::Under(a),
+            &Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                supersedes: Some(sibling.transaction_id),
+                ..successor.clone()
+            }),
+        )
+        .is_err(),
+        "newer sibling failure is not the latest failure on branch A"
+    );
+    append_control(
+        &mut tree,
+        &mut records,
+        a,
+        Event::AgentStandaloneCompactionStarted(successor.clone()),
+    );
+    let cold = AgentTree::try_from_events(agent_id(), &records).expect("supersession cold fold");
+    assert_eq!(
+        cold.standalone_compaction_active_head(&successor.transaction_id),
+        Some(AgentHead::Node(a))
+    );
 }
 
 /// Explicit-parent validation must compare suffix_end with the selected branch
@@ -3773,7 +3975,11 @@ fn provider_window_index_transition_arms_match_allocating_reference() {
             "equal",
         ),
     );
-    assert_queries(&equal, equal_boundary, "replacement-boundary cut clears");
+    assert_queries(
+        &equal,
+        equal_boundary,
+        "replacement-boundary cut retains suffix",
+    );
 
     let mut legacy = base.clone();
     let legacy_boundary = legacy.append_node_at(

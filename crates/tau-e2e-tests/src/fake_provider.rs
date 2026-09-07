@@ -2969,11 +2969,11 @@ impl FakeState {
                 if prompt.context.blocks.is_empty()
                     || !context_has_text(prompt, ContextRole::User, removed_user_text)
                     || !context_has_text(prompt, ContextRole::Assistant, removed_assistant_text)
-                    || context_has_text(prompt, ContextRole::User, overflow_user_text)
+                    || !context_has_text(prompt, ContextRole::User, overflow_user_text)
                 {
                     return Err(self.mismatch(
                         cursor,
-                        "reactive compaction request did not preserve the closed pre-cut round",
+                        "reactive compaction request did not include the whole closed context",
                     ));
                 }
             }
@@ -3095,7 +3095,7 @@ impl FakeState {
                             == CANONICAL_OPAQUE_COMPACTION_JSON
                 ) || context_has_text(prompt, ContextRole::User, removed_user_text)
                     || context_has_text(prompt, ContextRole::Assistant, removed_assistant_text)
-                    || !context_has_text(prompt, ContextRole::User, overflow_user_text)
+                    || context_has_text(prompt, ContextRole::User, overflow_user_text)
                 {
                     return Err(self.mismatch(
                         cursor,

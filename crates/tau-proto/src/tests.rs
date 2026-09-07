@@ -4322,7 +4322,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 3, "minor": 0})
+        serde_json::json!({"major": 3, "minor": 1})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {

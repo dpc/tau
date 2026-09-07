@@ -965,7 +965,13 @@ impl Harness {
                     Some(tau_core::AgentEventParent::from_head(*batch_parent))
                 }
                 AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
-                    Some(tau_core::AgentEventParent::from_head(checkpoint.through))
+                    let active_head = match &event {
+                        Event::AgentStandaloneCompactionStarted(started) => {
+                            started.resume_through.unwrap_or(checkpoint.through)
+                        }
+                        _ => checkpoint.through,
+                    };
+                    Some(tau_core::AgentEventParent::from_head(active_head))
                 }
                 AgentPublishCompletion::OwedCompactionFact { batch_parent, .. } => {
                     Some(tau_core::AgentEventParent::from_head(*batch_parent))

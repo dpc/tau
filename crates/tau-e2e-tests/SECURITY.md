@@ -184,8 +184,8 @@ the exact model final text as one synthetic user checkpoint, removed source
 context, byte-identical clean-restart replay, and resumed continuation.
 One closed reactive sequence additionally
 accepts a canonical no-output context-window failure, one correlated compact
-request for a verified pre-cut round, and one replacement/suffix continuation
-that retains the overflowing prompt while excluding that pre-cut round. The
+request for the complete eligible context, and one replacement continuation
+that excludes both the old round and summarized overflowing prompt. The
 shared `tau-provider` policy owns the exact trailing summary instruction. The
 Chat Completions adapter owns its cache-aligned ordinary-prefix wire lowering, while
 provider-builtin owns public Responses fallback dispatch and validation.

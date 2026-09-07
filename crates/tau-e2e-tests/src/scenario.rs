@@ -120,7 +120,7 @@ pub enum ScenarioActionV2 {
         removed_user_text: String,
         /// Assistant text that closes the pre-cut user round.
         removed_assistant_text: String,
-        /// Exact ordinary inference prompt retained after replacement.
+        /// Exact rejected ordinary input included in this compact request.
         overflow_user_text: String,
     },
     /// Complete the one ordinary continuation after a reactive opaque
@@ -131,7 +131,8 @@ pub enum ScenarioActionV2 {
         removed_user_text: String,
         /// Assistant text that closes the pre-cut user round.
         removed_assistant_text: String,
-        /// Exact ordinary inference prompt retained after replacement.
+        /// Exact rejected ordinary input removed by this full-prefix
+        /// replacement.
         overflow_user_text: String,
         /// Complete assistant response after recovery.
         response: String,

@@ -458,7 +458,7 @@ impl Harness {
             .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .and_then(|tree| {
-                tree.marked_inference_through(&response.agent_prompt_id)
+                tree.unresolved_inference_through(&response.agent_prompt_id)
                     .map(|through| {
                         tree.is_ancestor_head(
                             through,
@@ -1353,8 +1353,7 @@ impl Harness {
         if checkpoint.activation_cut.is_none() {
             return ProviderTerminalPlan::Other;
         }
-        if checkpoint.transaction_id.is_some()
-            || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
+        if checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
             || checkpoint.agent_prompt_id != response.agent_prompt_id
             || self
                 .prompt_coordination
@@ -1666,9 +1665,9 @@ impl Harness {
         let Some(model) = checkpoint.model.clone() else {
             return;
         };
-        let Some(activation_cut) = checkpoint.activation_cut else {
+        if checkpoint.activation_cut.is_none() {
             return;
-        };
+        }
         let Some(agent_id) = self
             .agent_runtime
             .agent_registry
@@ -1684,25 +1683,22 @@ impl Harness {
             .agents
             .get(cid)
             .map_or(0, |agent| agent.dispatch.next_prompt_index);
-        let provisional_cut = self
-            .session_runtime
-            .agent_store
-            .agent(agent_id.as_str())
-            .and_then(|tree| tree.reactive_compaction_target(&checkpoint.agent_prompt_id))
-            .unwrap_or(activation_cut);
+        let active_head = self
+            .selected_head_for_agent(cid)
+            .unwrap_or(checkpoint.through);
+        let provisional_cut = self.closed_provider_prefix_for_agent(&agent_id, active_head);
         let prefix_budget = self
             .provider_runtime
             .model_info
             .get(&model)
             .and_then(|info| info.standalone_compaction_prefix_budget);
         let fitting_cut = if provisional_cut == tau_proto::AgentHead::Root {
-            // Reactive recovery retains the established root-cut transaction:
-            // the activating input remains exact suffix and the compact request
-            // contains only fixed provider/system surface. Later inference may
-            // still reject one oversized indivisible activating item.
+            // An empty closed window retains the existing root transaction.
+            // Backend capacity remains authoritative for fixed request
+            // overhead.
             Some(tau_proto::AgentHead::Root)
         } else if let Some(prefix_budget) = prefix_budget {
-            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, None, prefix_budget)
+            self.fitting_standalone_compaction_cut(&agent_id, active_head, prefix_budget)
         } else {
             Some(provisional_cut)
         };
@@ -1744,7 +1740,7 @@ impl Harness {
                 transaction_id: transaction_id.clone(),
                 compact_prompt_id,
                 cut,
-                resume_through: Some(checkpoint.through),
+                resume_through: Some(active_head),
                 model,
                 operation: tau_proto::PromptOperation::StandaloneCompaction,
                 originator,
@@ -2203,60 +2199,29 @@ impl Harness {
         let Some((transaction_id, cut, resume_through)) = transaction else {
             return;
         };
-        let automatic_context_recovery = self
-            .session_runtime
-            .agent_store
-            .agent(response.agent_id.as_str())
-            .and_then(|tree| match tree.standalone_compaction_recovery() {
-                Some(tau_core::StandaloneCompactionRecovery::Interrupted(started))
-                | Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
-                    started,
-                    ..
-                }) if started.transaction_id == transaction_id => Some(matches!(
-                    started.trigger,
-                    tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence { .. }
-                        | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
-                        | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
-                        | tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat { .. }
-                        | tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
-                )),
-                _ => None,
-            })
-            .unwrap_or(false);
-        let automatic_context_irreducible = automatic_context_recovery
-            && self
-                .previous_useful_compaction_cut(
-                    response.agent_id.as_str(),
-                    self.selected_head_for_agent(cid).unwrap_or(cut),
-                    cut,
-                )
-                .is_none();
-        let retreat_plan = if reason
-            == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
-        {
-            let agent_id = response.agent_id.as_str();
-            let started = self
-                .session_runtime
-                .agent_store
-                .agent(agent_id)
-                .and_then(|tree| match tree.standalone_compaction_recovery() {
-                    Some(tau_core::StandaloneCompactionRecovery::Interrupted(started))
-                    | Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
-                        started,
-                        ..
-                    }) if started.transaction_id == transaction_id => Some(started),
-                    _ => None,
-                });
-            started.and_then(|started| {
-                let automatic = matches!(
-                    started.trigger,
-                    tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence { .. }
-                        | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
-                        | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
-                        | tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat { .. }
-                        | tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
-                );
-                automatic.then_some(started).and_then(|started| {
+        let context_irreducible = self
+            .previous_useful_compaction_cut(
+                response.agent_id.as_str(),
+                self.selected_head_for_agent(cid).unwrap_or(cut),
+                cut,
+            )
+            .is_none();
+        let retreat_plan =
+            if reason == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded {
+                let agent_id = response.agent_id.as_str();
+                let started = self
+                    .session_runtime
+                    .agent_store
+                    .agent(agent_id)
+                    .and_then(|tree| match tree.standalone_compaction_recovery() {
+                        Some(tau_core::StandaloneCompactionRecovery::Interrupted(started))
+                        | Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
+                            started,
+                            ..
+                        }) if started.transaction_id == transaction_id => Some(started),
+                        _ => None,
+                    });
+                started.and_then(|started| {
                     let active_head = self.selected_head_for_agent(cid).unwrap_or(started.cut);
                     let predecessor =
                         self.previous_useful_compaction_cut(agent_id, active_head, started.cut)?;
@@ -2306,17 +2271,16 @@ impl Harness {
                                 .agent_store
                                 .agent(agent_id)?
                                 .reactive_compaction_target(failed_agent_prompt_id)?,
-                            _ => return None,
+                            _ => started.cut,
                         },
                         model: started.model,
                         originator: started.originator,
                         resume_through: started.resume_through,
                     })
                 })
-            })
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         if retreat_plan.is_some()
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
         {
@@ -2350,7 +2314,7 @@ impl Harness {
         let final_reason = if reason
             == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
             && retreat_plan.is_none()
-            && automatic_context_irreducible
+            && context_irreducible
         {
             tau_proto::StandaloneCompactionFailureReason::ContextIrreducible
         } else {

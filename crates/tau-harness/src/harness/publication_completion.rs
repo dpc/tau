@@ -4,7 +4,6 @@
 //! This boundary preserves the publication and recovery contracts governed by
 //! `GATE-persistence-and-extension-interface-change-approval`.
 
-use super::compaction_runtime::RollingCompactionPass;
 use super::compaction_runtime_state::SuppressedStart;
 use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublicationRetryPolicy};
 use super::prompt_materialization_timing::PromptMaterializationTiming;
@@ -1006,11 +1005,6 @@ impl Harness {
                     path_crate_agent::ActivationDispatchState::None;
             }
             self.try_advance_queue();
-            return;
-        }
-        if self.start_rolling_compaction_pass(cid, &model, through)
-            != RollingCompactionPass::NotNeeded
-        {
             return;
         }
         let Some((agent_id, agent_prompt_id)) = self
@@ -3006,6 +3000,19 @@ impl Harness {
             }
         }
         if let Event::AgentStandaloneCompactionStarted(started) = event {
+            if let tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
+                failed_transaction_id,
+                ..
+            } = &started.trigger
+            {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .transfer_manual_start(
+                        started.agent_id.clone(),
+                        failed_transaction_id.clone(),
+                        started.transaction_id.clone(),
+                    );
+            }
             if let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
                 &started.trigger
                 && let Some(cid) =

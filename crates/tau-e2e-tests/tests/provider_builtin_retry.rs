@@ -199,10 +199,12 @@ fn provider_builtin_qwen_text_tool_continuation_is_exact() -> Result<(), Box<dyn
 
 /// Exercises llama.cpp's exact HTTP and SSE context-overflow identifier through
 /// the production adapter and harness, proving a no-byte-cap full-prefix
-/// rejection retreats once, rolls through the preserved suffix, and resumes the
-/// original activation exactly once.
+/// rejection retreats once and the first successful summary resumes ordinary
+/// inference immediately. The retreat drops an empty terminal node, so both
+/// compact inputs contain the activation and the resumed context is
+/// summary-only.
 #[test]
-fn provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix()
+fn provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(provider_bin) = provider_builtin_binary()? else {
         eprintln!(
@@ -212,7 +214,7 @@ fn provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix()
         return Ok(());
     };
     let fixture = ProviderBuiltinFixture::new_compaction(
-        "provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix",
+        "provider_builtin_llama_cpp_overflow_retreats_then_resumes_after_first_success",
         provider_bin,
     )?;
     let socket = fixture.socket_path();
@@ -281,7 +283,6 @@ fn provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix()
     let overflow_request = fixture.recv_request()?;
     let full_compact = fixture.recv_request()?;
     let smaller_compact = fixture.recv_request()?;
-    let rolling_compact = fixture.recv_request()?;
     let resumed = fixture.recv_request()?;
 
     for request in [
@@ -290,7 +291,6 @@ fn provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix()
         &overflow_request,
         &full_compact,
         &smaller_compact,
-        &rolling_compact,
         &resumed,
     ] {
         assert_eq!(request.method, "POST");
@@ -309,24 +309,18 @@ fn provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix()
     let full_wire = wire(&full_compact);
     assert!(full_wire.contains("history A"));
     assert!(full_wire.contains("history B"));
-    assert!(!full_wire.contains("overflow activation"));
+    assert_eq!(full_wire.matches("overflow activation").count(), 1);
     assert!(full_wire.contains("The context window is being compacted"));
 
     let smaller_wire = wire(&smaller_compact);
     assert!(smaller_wire.contains("history A"));
     assert!(smaller_wire.contains("history B"));
-    assert!(!smaller_wire.contains("history B complete"));
-    assert!(!smaller_wire.contains("overflow activation"));
-
-    let rolling_wire = wire(&rolling_compact);
-    assert!(rolling_wire.contains("summary A"));
-    assert!(rolling_wire.contains("history B complete"));
-    assert!(!rolling_wire.contains("history A"));
-    assert!(!rolling_wire.contains("overflow activation"));
+    assert!(smaller_wire.contains("history B complete"));
+    assert_eq!(smaller_wire.matches("overflow activation").count(), 1);
 
     let resumed_wire = wire(&resumed);
-    assert!(resumed_wire.contains("summary B"));
-    assert!(resumed_wire.contains("overflow activation"));
+    assert_eq!(resumed_wire.matches("summary A").count(), 1);
+    assert!(!resumed_wire.contains("overflow activation"));
     assert!(!resumed_wire.contains("history A"));
     assert!(!resumed_wire.contains("history B"));
 
@@ -339,7 +333,7 @@ fn provider_builtin_llama_cpp_overflow_recovers_with_smaller_prefix()
 }
 
 /// Receives one successful canonical provider terminal containing exact
-/// assistant text, regardless of the harness-minted rolling prompt identity.
+/// assistant text, regardless of the harness-minted recovery prompt identity.
 fn wait_for_any_finished_text(
     peer: &mut SocketPeer,
     lifecycle: &mut Lifecycle,

@@ -21,8 +21,10 @@ and `tau_client`.
 ## Package and protocol versions
 
 The initial SDK package set is `0.1.0` and currently advertises extension
-protocol revision `3.0`. This rejects older UIs before the harness can send the
-unsolicited quit-disposition projection that their decoders do not recognize.
+protocol revision `3.1`. The `3.x` major rejects older UIs before the harness can
+send the unsolicited quit-disposition projection their decoders do not recognize.
+The `3.1` minor revision accompanies uniform compaction prefix recovery; `3.0`
+peers receive the existing minor-skew warning and continue best-effort.
 
 Cargo package versions describe Rust source API compatibility. During the
 pre-1.0 series, compatible releases remain within `0.1.x`; a source-incompatible
