@@ -728,6 +728,14 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
         "Replace the editor with a configured custom prompt template",
     ),
     (
+        ":edit-prompt",
+        "Edit the prompt with a recent agent response (`:edit-prompt [response_rel_idx]`)",
+    ),
+    (
+        ":edit-prompt-chat",
+        "Edit the prompt with the complete durable Markdown conversation",
+    ),
+    (
         ":skill",
         "Invoke a user-invocable skill (e.g. :skill jujutsu optional args)",
     ),
@@ -3226,6 +3234,7 @@ impl<'a> TerminalInputSession<'a> {
             "agent-pick-all" => {
                 return self.pick_agent(path_crate_list_agents::AgentPickerFilter::All);
             }
+            "shell-prompt-edit-chat" => return self.edit_prompt_chat(),
             _ => self
                 .output
                 .command_feedback(&format!("binding: unknown application action `{action}`")),
@@ -3282,6 +3291,18 @@ impl<'a> TerminalInputSession<'a> {
                 Ok(filter) => self.pick_agent(filter)?,
                 Err(message) => self.output.command_feedback(message),
             }
+            return Ok(CommandOutcome::Continue);
+        }
+        if text == ":edit-prompt-chat" {
+            self.edit_prompt_chat()?;
+            return Ok(CommandOutcome::Continue);
+        }
+        if text.starts_with(":edit-prompt-chat ") {
+            self.output.command_feedback("usage: :edit-prompt-chat");
+            return Ok(CommandOutcome::Continue);
+        }
+        if text == ":edit-prompt" || text.starts_with(":edit-prompt ") {
+            self.edit_prompt_response(text)?;
             return Ok(CommandOutcome::Continue);
         }
         if self.handle_non_session_command(text) {
@@ -3789,6 +3810,82 @@ impl<'a> TerminalInputSession<'a> {
 
     fn selected_agent_id(&self) -> Option<tau_proto::AgentId> {
         self.ctx.routing.selected_agent_id()
+    }
+
+    /// Loads the selected durable conversation and opens the existing external
+    /// prompt editor with its exact Markdown projection below the marker.
+    fn edit_prompt_chat(&mut self) -> Result<(), CliError> {
+        let Some(chat) = self.load_selected_agent_chat() else {
+            return Ok(());
+        };
+        self.term
+            .edit_prompt_with_chat(chat.to_markdown())
+            .map_err(prompt_editor_error)?;
+        self.update_draft();
+        Ok(())
+    }
+
+    /// Opens the prompt editor with one assistant response selected relative to
+    /// the newest response.
+    fn edit_prompt_response(&mut self, text: &str) -> Result<(), CliError> {
+        let argument = text.strip_prefix(":edit-prompt").unwrap_or("").trim();
+        let relative_index = if argument.is_empty() {
+            0
+        } else {
+            match argument.parse::<usize>() {
+                Ok(index) => index,
+                Err(_) => {
+                    self.output
+                        .command_feedback("usage: :edit-prompt [response_rel_idx]");
+                    return Ok(());
+                }
+            }
+        };
+        let Some(chat) = self.load_selected_agent_chat() else {
+            return Ok(());
+        };
+        let Some(response) = chat.response_relative(relative_index) else {
+            self.output.command_feedback(&format!(
+                ":edit-prompt: response index {relative_index} is out of range"
+            ));
+            return Ok(());
+        };
+        self.term
+            .edit_prompt_with_response(response.to_owned())
+            .map_err(prompt_editor_error)?;
+        self.update_draft();
+        Ok(())
+    }
+
+    /// Loads the current durable journal without substituting retained UI
+    /// fragments when no exact full-history source exists.
+    fn load_selected_agent_chat(&self) -> Option<tau_session_inspect::AgentChat> {
+        let Some(agent_id) = self.selected_agent_id() else {
+            self.output
+                .command_feedback("select an agent before editing with conversation history");
+            return None;
+        };
+        if self.ctx.routing.agent_is_ephemeral(&agent_id) {
+            self.output.command_feedback(
+                "conversation history editing is unavailable for memory-only agents; ordinary C-o prompt editing remains available",
+            );
+            return None;
+        }
+        let agents_dir = self
+            .ctx
+            .dirs
+            .state_dir
+            .clone()
+            .unwrap_or_else(tau_session_inspect::default_state_dir)
+            .join("agents");
+        match tau_session_inspect::load_agent_chat(&agents_dir, &agent_id) {
+            Ok(chat) => Some(chat),
+            Err(error) => {
+                self.output
+                    .command_feedback(&format!("could not load conversation history: {error}"));
+                None
+            }
+        }
     }
 
     fn handle_agent_new(&mut self, role: Option<&str>) {
@@ -5109,11 +5206,27 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
             | ":theme"
             | ":role"
             | ":prompt"
+            | ":edit-prompt"
+            | ":edit-prompt-chat"
             | ":model"
             | ":version"
             | ":debug-show-ui-event-stats"
             | ":debug-show-event-stats"
     )
+}
+
+/// Preserves the attachment fail-stop used by the ordinary external editor.
+fn prompt_editor_error(error: std::io::Error) -> CliError {
+    if let Some(diagnostic) = tau_cli_term::foreground_restoration_diagnostic(&error) {
+        CliError::ForegroundOwnershipUnconfirmed {
+            message: error.to_string(),
+            diagnostic,
+        }
+    } else if tau_cli_term::is_output_failure(&error) {
+        CliError::TerminalOutputFailed(error.to_string())
+    } else {
+        CliError::Io(error)
+    }
 }
 
 /// Parse and dispatch `:set <name> <value>`. Validation lives here

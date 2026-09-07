@@ -85,6 +85,8 @@ C-o:
   action: shell-prompt-edit
   command: >-
     $TAU_EDITOR "$TAU_PROMPT_PATH"
+C-O:
+  action: shell-prompt-edit-chat
 C-g:
   action: shell-prompt-edit
   command: >-

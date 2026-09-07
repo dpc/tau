@@ -93,6 +93,12 @@ per-agent summaries. `--mode full` is invalid for this format.
 See [`docs/agent-trace.md`](../../docs/agent-trace.md) for the output contracts,
 failure behavior, and sensitive-data warning.
 
+`tau agent export chat <agent-id>` emits the selected durable branch as a human
+conversation: metadata followed by authenticated user prompts and assistant
+response text. Markdown is the default; `--toons` selects the existing strict
+TOON serializer, and `--markdown` selects Markdown explicitly. The projection
+omits reasoning, tools, cross-agent messages, and internal prompts.
+
 `tau session list` prints one escaped row per distinct current session id
 reported by responsive local harnesses. Runtime paths only locate socket
 candidates; each daemon reports its in-memory current session and immutable

@@ -517,6 +517,81 @@ impl HighTerm {
         self.editor_context = editor_context;
     }
 
+    /// Opens the ordinary prompt editor with one explicitly selected response.
+    ///
+    /// The selected response temporarily replaces the renderer-published
+    /// response context. Existing editor recovery survives the invocation,
+    /// and any newly edited trailer text becomes the next recovery value.
+    pub fn edit_prompt_with_response(&mut self, response: String) -> io::Result<()> {
+        let mut context = self
+            .editor_context
+            .lock()
+            .expect("editor context mutex poisoned")
+            .clone();
+        context.current_response = None;
+        context.last_response = Some(response);
+        context.previous_prompt = None;
+        context.chat_markdown = None;
+        self.edit_prompt_with_context(context, None)
+    }
+
+    /// Opens the ordinary prompt editor with an exact Markdown chat export
+    /// below the established trailer marker.
+    ///
+    /// Terminal pause/resume, command failure, prompt replacement, and edited
+    /// trailer recovery use the same path as `shell-prompt-edit`.
+    pub fn edit_prompt_with_chat(&mut self, chat_markdown: String) -> io::Result<()> {
+        let recovery = self
+            .editor_context
+            .lock()
+            .expect("editor context mutex poisoned")
+            .edited_trailer_recovery
+            .clone();
+        self.edit_prompt_with_context(
+            EditorContext {
+                chat_markdown: Some(chat_markdown),
+                edited_trailer_recovery: recovery.clone(),
+                ..EditorContext::default()
+            },
+            recovery,
+        )
+    }
+
+    /// Runs one editor invocation with an isolated trailer projection.
+    fn edit_prompt_with_context(
+        &mut self,
+        context: EditorContext,
+        hidden_recovery: Option<String>,
+    ) -> io::Result<()> {
+        let temporary = Arc::new(Mutex::new(context));
+        let outcome = self.run_prompt_action_with_context(
+            PromptShellAction::Edit(PromptShellCommand {
+                command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
+                trim: false,
+            }),
+            temporary.clone(),
+        );
+        let edited_recovery = temporary
+            .lock()
+            .expect("editor context mutex poisoned")
+            .edited_trailer_recovery
+            .clone()
+            .or(hidden_recovery);
+        self.editor_context
+            .lock()
+            .expect("editor context mutex poisoned")
+            .edited_trailer_recovery = edited_recovery;
+        if !matches!(outcome, PromptActionOutcome::Fatal(_)) {
+            self.handle.redraw_sync();
+        }
+        match outcome {
+            PromptActionOutcome::Fatal(error) => Err(error),
+            PromptActionOutcome::BufferChanged
+            | PromptActionOutcome::Continue
+            | PromptActionOutcome::Return(_) => Ok(()),
+        }
+    }
+
     /// Replaces the prompt UI theme for future local rendering.
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
@@ -834,10 +909,19 @@ impl HighTerm {
     /// input buffer. Errors (spawn failure, bad utf-8, no editor)
     /// surface as a themed info line above the prompt.
     fn run_prompt_action(&mut self, action: PromptShellAction) -> PromptActionOutcome {
+        self.run_prompt_action_with_context(action, self.editor_context.clone())
+    }
+
+    /// Runs a prompt action against one explicit editor-context projection.
+    fn run_prompt_action_with_context(
+        &mut self,
+        action: PromptShellAction,
+        editor_context: Arc<Mutex<EditorContext>>,
+    ) -> PromptActionOutcome {
         match run_prompt_shell_action(
             &self.term,
             &self.handle,
-            self.editor_context.clone(),
+            editor_context,
             self.external_editor.as_deref(),
             &self.prompt_history,
             action,
@@ -1333,6 +1417,9 @@ pub struct EditorContext {
     /// Previous submitted prompt text, included as read-only context when
     /// editing the next prompt.
     pub previous_prompt: Option<String>,
+    /// Exact Markdown conversation rendered directly below the trailer marker
+    /// for a history-aware editor invocation.
+    pub chat_markdown: Option<String>,
     /// Text recovered from a previous edit where the normally ignored trailer
     /// section was modified before the editor exited. This is set only when the
     /// edited trailer differs from the generated trailer, cleared when the
@@ -1852,6 +1939,7 @@ fn append_prompt_trailer(current: &str, editor_context: &Arc<Mutex<EditorContext
     if context.current_response.is_none()
         && context.last_response.is_none()
         && context.previous_prompt.is_none()
+        && context.chat_markdown.is_none()
         && context.edited_trailer_recovery.is_none()
     {
         return current.to_owned();
@@ -1861,6 +1949,10 @@ fn append_prompt_trailer(current: &str, editor_context: &Arc<Mutex<EditorContext
     out.push_str("\n\n");
     out.push_str(PROMPT_TRAILER_MARKER);
     out.push('\n');
+    if let Some(chat_markdown) = context.chat_markdown {
+        out.push_str(&chat_markdown);
+        return out;
+    }
     if let Some(text) = context
         .current_response
         .as_deref()

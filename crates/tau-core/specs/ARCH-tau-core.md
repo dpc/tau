@@ -64,8 +64,10 @@ assembly may then apply the source-specific presentation required by
 UI/history/navigation continue to consume canonical facts rather than that late
 provider projection.
 
-`AgentTreeIndexes` also records the exact materialized nodes whose committed source
-prompt fact carried `internal_kind=background_tool_completion`. The bit follows the
+`AgentTreeIndexes` maps durable context and assistant-response occurrences to
+their eventual materialized nodes, including deferred inputs, and records the
+exact nodes whose committed source prompt fact carried
+`internal_kind=background_tool_completion`. The bit follows the
 durable event sequence through both marked-inference and open-tool-round deferred
 queues and enters the index atomically with eventual node materialization. Full
 journal-prefix replay and snapshots rebuild it without a dispatch-time journal scan;

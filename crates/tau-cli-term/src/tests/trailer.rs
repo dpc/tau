@@ -61,6 +61,27 @@ fn empty_section_strings_are_skipped() {
     assert!(!edited.contains("Previous prompt"));
 }
 
+/// Full-chat editing must place the byte-identical Markdown export immediately
+/// below the existing trailer marker without ordinary response headings.
+#[test]
+fn chat_context_is_exact_below_marker() {
+    let chat = "# Tau conversation\n\n- Agent: `helper`\n\n## User\n\nhello\n";
+    let edited = append_prompt_trailer(
+        "draft",
+        &ctx(EditorContext {
+            chat_markdown: Some(chat.to_owned()),
+            last_response: Some("must not appear".to_owned()),
+            ..EditorContext::default()
+        }),
+    );
+    let suffix = edited
+        .strip_prefix(&format!("draft\n\n{PROMPT_TRAILER_MARKER}\n"))
+        .expect("generated marker");
+
+    assert_eq!(suffix, chat);
+    assert_eq!(strip_prompt_trailer(&edited), "draft");
+}
+
 #[test]
 fn strip_without_marker_is_identity() {
     assert_eq!(strip_prompt_trailer("just text"), "just text");

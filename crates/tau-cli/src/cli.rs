@@ -335,6 +335,8 @@ fn parse_canonical_directory(value: &str) -> Result<PathBuf, String> {
 pub enum AgentCommand {
     /// Inspect durable cache accounting and private capture coverage offline.
     Cache(AgentCacheArgs),
+    /// Export a durable agent artifact for offline use.
+    Export(AgentExportArgs),
     /// List agents known to a running session.
     List(AgentListArgs),
     /// Unload one idle saved agent without deleting its transcript or session
@@ -347,6 +349,37 @@ pub enum AgentCommand {
     /// Project a validated durable agent snapshot (defaults to compact TOON
     /// lite).
     Trace(AgentTraceArgs),
+}
+
+/// Options for `tau agent export`.
+#[derive(Args, Clone)]
+pub struct AgentExportArgs {
+    /// Artifact to export.
+    #[command(subcommand)]
+    pub command: AgentExportCommand,
+}
+
+/// Durable agent artifacts available for export.
+#[derive(Subcommand, Clone)]
+pub enum AgentExportCommand {
+    /// Export user prompts and agent responses from the selected branch.
+    Chat(AgentExportChatArgs),
+}
+
+/// Options for `tau agent export chat`.
+#[derive(Args, Clone)]
+pub struct AgentExportChatArgs {
+    /// Durable agent journal to export.
+    pub agent_id: tau_proto::AgentId,
+    /// Emit the existing strict TOON serialization instead of Markdown.
+    #[arg(long, conflicts_with = "markdown")]
+    pub toons: bool,
+    /// Explicitly select Markdown, which is already the default.
+    #[arg(long, conflicts_with = "toons")]
+    pub markdown: bool,
+    /// Durable agent journal root.
+    #[arg(long, default_value_os_t = default_agents_dir())]
+    pub agents_dir: PathBuf,
 }
 
 /// Offline cache report options shared by agent and session scopes.

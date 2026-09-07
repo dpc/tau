@@ -507,8 +507,9 @@ impl CliSettings {
 #[serde(default, deny_unknown_fields)]
 pub struct CliBindingAction {
     /// Action name, e.g. `submit-prompt`, `insert-newline`,
-    /// `shell-prompt-insert`, `shell-prompt-edit`, `fast-toggle`,
-    /// `cycle-role`, `cycle-role-group`, `agent-previous`, or `agent-next`.
+    /// `shell-prompt-insert`, `shell-prompt-edit`, `shell-prompt-edit-chat`,
+    /// `fast-toggle`, `cycle-role`, `cycle-role-group`, `agent-previous`,
+    /// or `agent-next`.
     pub action: String,
     /// Shell command to execute. `None` for actions that don't shell
     /// out (e.g. `submit-prompt`, `insert-newline`,

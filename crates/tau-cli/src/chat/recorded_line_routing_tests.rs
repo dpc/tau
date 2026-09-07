@@ -359,6 +359,22 @@ fn retry_is_static_exact_and_never_falls_through_to_prompt_submission() {
     );
 }
 
+/// Both history-aware editor commands must remain discoverable and keep
+/// malformed argument variants inside local command handling.
+#[test]
+fn history_editor_commands_are_static_and_descriptive() {
+    for (name, description_fragment) in [
+        (":edit-prompt", "response_rel_idx"),
+        (":edit-prompt-chat", "complete durable Markdown"),
+    ] {
+        assert!(BUILTIN_COMMANDS.iter().any(|(candidate, description)| {
+            *candidate == name && description.contains(description_fragment)
+        }));
+        assert!(is_known_static_command(name));
+        assert!(is_known_static_command(&format!("{name} unexpected")));
+    }
+}
+
 /// UI-only quit and global session quit must both be discoverable with help
 /// that makes their distinct lifetimes explicit.
 #[test]

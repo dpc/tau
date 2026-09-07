@@ -123,7 +123,7 @@ including model-facing internal prompts even when `show-internal-prompts` is on.
 
 ## Prompt history and editing
 
-Submitted prompts are kept in the current process and persisted under the state directory as `prompt-history.cbor`. Up/Down navigate prompt history. Built-in key bindings also support prompt undo/redo, Ctrl-R history search, Ctrl-O/Ctrl-G external editor integration, and shell-backed prompt insertion commands.
+Submitted prompts are kept in the current process and persisted under the state directory as `prompt-history.cbor`. Up/Down navigate prompt history. Built-in key bindings also support prompt undo/redo, Ctrl-R history search, Ctrl-O/Ctrl-G external editor integration, and shell-backed prompt insertion commands. `:edit-prompt [response_rel_idx]` opens the editor with a selected prior response, where zero is newest. `:edit-prompt-chat` and the shifted `C-O` binding place the complete durable Markdown conversation below the existing trailer marker; terminals that report bare `^O` keep ordinary `C-o`.
 
 ## Verbose and compact transcript modes
 
@@ -187,7 +187,8 @@ Available completers:
   script for complex shell snippets or argv entries containing spaces.
 
 `shell-prompt-insert` and `prompt-history-search` capture at most 1 MiB of
-stdout and discard stderr. `shell-prompt-edit` inherits terminal stdio so
+stdout and discard stderr. `shell-prompt-edit` and `shell-prompt-edit-chat`
+inherit terminal stdio so
 interactive editors can use the terminal directly. All prompt shell actions time
 out after 1 hour and show failures as local prompt notices. History search uses
 the newest 200 non-empty prompts, truncates row summaries to 240 characters, and

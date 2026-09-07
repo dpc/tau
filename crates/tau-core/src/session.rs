@@ -2318,6 +2318,19 @@ impl AgentTree {
             .copied()
     }
 
+    /// Return the single assistant-response node materialized for a durable
+    /// provider-response occurrence.
+    #[must_use]
+    pub fn assistant_response_node_for_durable_event_seq(
+        &self,
+        durable_event_seq: PersistedAgentEventSeq,
+    ) -> Option<NodeId> {
+        self.indexes
+            .assistant_response_nodes_by_event_seq
+            .get(&durable_event_seq)
+            .copied()
+    }
+
     /// Return whether this exact materialized node came from a committed
     /// background-completion prompt event.
     #[must_use]

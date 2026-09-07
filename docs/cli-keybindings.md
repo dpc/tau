@@ -39,6 +39,7 @@ sample `config/cli.yaml`.
 | `C-z` | `prompt-undo` | Undo the last edit in the current prompt/history entry. |
 | `C-y` | `shell-prompt-insert` | Pick a jj change or git commit with `fzf` and insert its id at the cursor. |
 | `C-o`, `C-g` | `shell-prompt-edit` | Edit the current prompt with `$TAU_EDITOR`, falling back through `$EDITOR`, `$VISUAL`, `hx`, `vim`, `vi`, then `nano`. |
+| `C-O` | `shell-prompt-edit-chat` | Edit the prompt with the complete durable Markdown conversation below the trailer marker. Terminals that report bare `^O` without Shift keep ordinary `C-o`; use `:edit-prompt-chat` when the distinction is unavailable. |
 ## Built-in file completion triggers
 
 Typing any of the following prefixes at the prompt triggers inline path completion:
@@ -154,6 +155,8 @@ users may override `C-v` like any other built-in binding.
   text below TAU trailer` on the next editor open so you can manually move it
   above the marker. Leaving the trailer unchanged clears old recovery. Deleting
   the marker makes the whole file prompt-owned and also clears old recovery.
+- `shell-prompt-edit-chat` — open the ordinary external editor with the selected
+  durable agent's complete Markdown conversation below the trailer marker.
 
 ## Prompt-history persistence
 
@@ -166,7 +169,8 @@ writes, and it does not drain the worker on exit. See
 cooperative multi-process file contract.
 
 `shell-prompt-insert` and `prompt-history-search` capture at most 1 MiB of
-stdout and discard stderr. `shell-prompt-edit` inherits terminal stdio so
+stdout and discard stderr. `shell-prompt-edit` and `shell-prompt-edit-chat`
+inherit terminal stdio so
 interactive editors can use the terminal directly. All prompt shell actions time
 out after 1 hour. `complete_with_command` completion commands capture at most
 256 KiB of stdout, discard stderr, and time out after 10 seconds. Failures are

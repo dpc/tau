@@ -879,6 +879,66 @@ fn agent_trace_command_parses_defaults() {
     ));
 }
 
+/// Conversation export requires one durable agent target and defaults to
+/// Markdown under the ordinary Tau agent journal root.
+#[test]
+fn agent_export_chat_parses_markdown_defaults() {
+    let cli = path_super_cli::Cli::parse_from(["tau", "agent", "export", "chat", "agent-root"]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::super::cli::Command::Agent {
+            command: super::super::cli::AgentCommand::Export(
+                super::super::cli::AgentExportArgs {
+                    command: super::super::cli::AgentExportCommand::Chat(args),
+                },
+            ),
+        })
+            if args.agent_id.as_str() == "agent-root"
+                && !args.toons
+                && !args.markdown
+                && args.agents_dir == tau_session_inspect::default_agents_dir()
+    ));
+}
+
+/// The literal `--toons` spelling selects TOON and remains mutually exclusive
+/// with the redundant explicit Markdown selector.
+#[test]
+fn agent_export_chat_accepts_toons_and_rejects_two_formats() {
+    let cli = path_super_cli::Cli::parse_from([
+        "tau",
+        "agent",
+        "export",
+        "chat",
+        "agent-root",
+        "--toons",
+        "--agents-dir",
+        "/tmp/agents",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Some(super::super::cli::Command::Agent {
+            command: super::super::cli::AgentCommand::Export(
+                super::super::cli::AgentExportArgs {
+                    command: super::super::cli::AgentExportCommand::Chat(args),
+                },
+            ),
+        }) if args.toons && args.agents_dir == std::path::Path::new("/tmp/agents")
+    ));
+    assert!(
+        path_super_cli::Cli::try_parse_from([
+            "tau",
+            "agent",
+            "export",
+            "chat",
+            "agent-root",
+            "--toons",
+            "--markdown",
+        ])
+        .is_err()
+    );
+}
+
 /// Agent trace accepts the lossy OTLP adapter, descendant workflow inclusion,
 /// and an explicit offline journal root together.
 #[test]

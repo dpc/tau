@@ -3,6 +3,7 @@
 //! Operates entirely on `tau-core` types and on-disk session formats. It has no
 //! dependency on the harness daemon, keeping inspection dependency-light.
 
+mod agent_chat;
 mod agent_trace;
 mod cache;
 mod lossless_json;
@@ -11,6 +12,7 @@ mod session_stats;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
+pub use agent_chat::*;
 pub use agent_trace::*;
 pub use cache::*;
 pub use session_stats::*;

@@ -932,6 +932,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::AgentCommand::Unload(_) => "agent unload",
                     cli::AgentCommand::Trace(_) => "agent trace",
                     cli::AgentCommand::Cache(_) => "agent cache",
+                    cli::AgentCommand::Export(_) => "agent export",
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
@@ -1144,6 +1145,21 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     include_descendants: args.include_descendants,
                 },
             ),
+            DispatchCommand::Other(cli::Command::Agent {
+                command:
+                    cli::AgentCommand::Export(cli::AgentExportArgs {
+                        command: cli::AgentExportCommand::Chat(args),
+                    }),
+            }) => {
+                reject_harness_config_overrides(&harness_config_overrides, "agent export chat")?;
+                let chat = tau_session_inspect::load_agent_chat(&args.agents_dir, &args.agent_id)?;
+                let output = if args.toons {
+                    chat.to_toon()?
+                } else {
+                    chat.to_markdown()
+                };
+                line_output::stream_stdout(|writer| writer.write_all(output.as_bytes()))
+            }
             DispatchCommand::Other(cli::Command::Session {
                 command: cli::SessionCommand::Cache(args),
             }) => run_cache_report(

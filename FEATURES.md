@@ -288,6 +288,9 @@ explicit directional agent messages, activations, and typed causal relationships
 Every item retains journal-relative and qualified absolute append time plus
 authoritative journal sequence. Lite retains exact content metrics and at most
 4 KiB of each semantic text/output item; full retains complete content.
+For a human-only artifact, `tau agent export chat <agent-id>` emits metadata,
+user prompts, and assistant responses from the selected durable branch. It
+defaults to Markdown and accepts the literal `--toons` selector for strict TOON.
 Completion-delivering waits reference source-owned output without copying it.
 Agent trace defaults to TOON lite.
 `agent-performance-jsonl` instead emits content-free provider-prompt accounting,

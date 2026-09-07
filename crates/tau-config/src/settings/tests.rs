@@ -1696,6 +1696,21 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert!(cr.trim);
 }
 
+/// The shifted chat-editor default must coexist with ordinary Ctrl-O rather
+/// than replacing its established prompt-editor action.
+#[test]
+fn built_in_bindings_distinguish_ctrl_o_and_ctrl_shift_o() {
+    let bindings = super::default_cli_bindings();
+    assert_eq!(
+        bindings.get("C-o").map(|binding| binding.action.as_str()),
+        Some("shell-prompt-edit")
+    );
+    assert_eq!(
+        bindings.get("C-O").map(|binding| binding.action.as_str()),
+        Some("shell-prompt-edit-chat")
+    );
+}
+
 /// Ensures a user Meta binding survives YAML parsing even though Tau does not
 /// ship a built-in Meta chord.
 #[test]
