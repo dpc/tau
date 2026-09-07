@@ -623,7 +623,7 @@ impl EventRenderer {
         items
     }
 
-    /// Renders the optional empty or output-length terminal placeholder.
+    /// Renders an error or output-length terminal placeholder.
     fn stage_finished_placeholder(
         &self,
         finished: &tau_proto::ProviderResponseFinished,
@@ -632,10 +632,7 @@ impl EventRenderer {
         use tau_themes::names;
 
         let text = if finished.output_items.is_empty() {
-            finished
-                .error
-                .as_deref()
-                .unwrap_or("(provider returned an empty response)")
+            finished.error.as_deref()?
         } else if finished.stop_reason != tau_proto::ProviderStopReason::Length {
             return None;
         } else if matches!(

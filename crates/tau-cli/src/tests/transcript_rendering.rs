@@ -588,15 +588,17 @@ fn hidden_provider_final_stays_off_screen_without_redraw() {
     assert_eq!(renderer.test_active_tool_count(), 0);
 }
 
-/// Empty and output-length finals must replace the complete live frame together
-/// with their terminal placeholder rather than drawing either half first.
+/// Empty and output-length finals must atomically replace their live frames
+/// without retaining stale output or adding a synthetic empty response row.
 #[test]
 fn empty_and_output_length_finals_publish_complete_frames() {
-    for (prompt_id, finished, final_markers) in [
+    for (prompt_id, finished, final_markers, frame_completion_marker, final_status) in [
         (
             "atomic-empty",
             finished_response("atomic-empty", Vec::new()),
-            vec!["◆ (provider returned an empty response)"],
+            Vec::new(),
+            "💤 @main",
+            "💤 @main",
         ),
         (
             "atomic-length",
@@ -622,6 +624,8 @@ fn empty_and_output_length_finals_publish_complete_frames() {
                 "◆ partial terminal",
                 "Model reached its output-token limit while producing a tool call",
             ],
+            "◆ partial terminal",
+            "✨ @main",
         ),
     ] {
         let (_term, handle, vt) = setup(100, 12);
@@ -645,22 +649,20 @@ fn empty_and_output_length_finals_publish_complete_frames() {
         }));
 
         renderer.handle(&Event::ProviderResponseFinished(finished));
-        let final_generation = vt.wait_for_frame_containing_after(generation, final_markers[0]);
+        let final_generation =
+            vt.wait_for_frame_containing_after(generation, frame_completion_marker);
         let frames = vt.frames.0.lock().expect("frames");
-        let final_status = if prompt_id == "atomic-length" {
-            "✨ @main"
-        } else {
-            "💤 @main"
-        };
         for frame in &frames[generation..final_generation] {
             let text = frame.join("\n");
             let live = text.contains("◇ old live terminal")
-                && final_markers.iter().all(|marker| !text.contains(marker));
+                && final_markers.iter().all(|marker| !text.contains(marker))
+                && !text.contains(frame_completion_marker);
             let settled = final_markers.iter().all(|marker| text.contains(marker))
                 && text.contains(final_status)
                 && !text.contains("%0/")
                 && !text.contains("◇ old live terminal")
-                && !text.contains("old live terminal");
+                && !text.contains("old live terminal")
+                && !text.contains("(provider returned an empty response)");
             assert!(live || settled, "partial terminal frame: {frame:?}");
         }
         assert_eq!(renderer.test_active_tool_count(), 0);
@@ -2782,8 +2784,10 @@ fn streaming_indicator_appends_during_updates() {
     assert!(!vt.screen_contains(80, "Hello …"));
 }
 
+/// A no-output, no-error provider final must not consume a transcript row with
+/// a synthetic assistant response.
 #[test]
-fn render_empty_provider_response_placeholder_without_context_item() {
+fn empty_provider_response_final_omits_synthetic_response_row() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -2791,15 +2795,13 @@ fn render_empty_provider_response_placeholder_without_context_item() {
         cli_test_theme(),
     );
 
-    // Regression: the empty-response notice is a CLI presentation fallback, not
-    // a provider-authored assistant message inserted into durable output_items.
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-empty",
         Vec::new(),
     )));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "(provider returned an empty response)"));
+    assert!(!vt.screen_contains(80, "(provider returned an empty response)"));
 }
 
 #[test]
