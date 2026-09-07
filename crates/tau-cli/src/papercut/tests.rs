@@ -124,14 +124,20 @@ fn empty_storage_formats_as_an_empty_history() {
         format_markdown(&records).expect("format Markdown"),
         "# Papercuts\n\nNo papercut reports.\n"
     );
-    assert_eq!(store.clear().expect("clear absent records"), 0);
+    assert_eq!(
+        store.clear().expect("clear absent records"),
+        PapercutClearResult {
+            count: 0,
+            archive: None,
+        }
+    );
     assert!(!store.root.exists());
 }
 
-/// Ensures clear removes every record in its canonical locked snapshot and
-/// reports how many records it removed.
+/// Ensures clear removes every record from the active listing while preserving
+/// the exact canonical bytes in the surfaced archive.
 #[test]
-fn clear_removes_listed_records() {
+fn clear_archives_listed_records() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = store(&tempdir);
     write_records(
@@ -141,16 +147,34 @@ fn clear_removes_listed_records() {
             record(2_000_000, "agent-b", "session-b", "second"),
         ],
     );
+    let original = path_std_fs::read(store.file()).expect("read original records");
 
-    assert_eq!(store.clear().expect("clear records"), 2);
+    let result = store.clear().expect("clear records");
+
+    assert_eq!(result.count, 2);
     assert!(store.list().expect("list cleared records").is_empty());
     assert!(!store.file().exists());
+    let archive = result.archive.expect("archive path");
+    assert_eq!(
+        path_std_fs::read(&archive).expect("read archived records"),
+        original
+    );
+    assert_eq!(
+        format_clear_result(&PapercutClearResult {
+            count: 2,
+            archive: Some(archive.clone()),
+        }),
+        format!(
+            "cleared 2 papercut report(s); archived at {}\n",
+            archive.display()
+        )
+    );
 }
 
 /// Ensures an already-cleared history remains a successful no-op, so scripts
-/// can safely repeat cleanup after a prior successful clear.
+/// can safely repeat cleanup without overwriting the existing archive.
 #[test]
-fn repeated_clear_is_a_successful_no_op() {
+fn repeated_clear_is_a_successful_no_op_without_overwriting_archive() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = store(&tempdir);
     write_records(
@@ -158,9 +182,115 @@ fn repeated_clear_is_a_successful_no_op() {
         &[record(1_000_000, "agent-a", "session-a", "first")],
     );
 
-    assert_eq!(store.clear().expect("first clear"), 1);
-    assert_eq!(store.clear().expect("second clear"), 0);
+    let first = store.clear().expect("first clear");
+    let archive = first.archive.expect("first archive");
+    let archived = path_std_fs::read(&archive).expect("read first archive");
+    assert_eq!(first.count, 1);
+    assert_eq!(
+        store.clear().expect("second clear"),
+        PapercutClearResult {
+            count: 0,
+            archive: None,
+        }
+    );
+    assert_eq!(
+        path_std_fs::read(&archive).expect("reread first archive"),
+        archived
+    );
     assert!(store.list().expect("list cleared records").is_empty());
+}
+
+/// Ensures separate non-empty clears preserve distinct snapshots when a fresh
+/// active file is appended between them.
+#[test]
+fn repeated_non_empty_clears_create_distinct_archives() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = store(&tempdir);
+    let first_record = record(1_000_000, "agent-a", "session-a", "first");
+    let second_record = record(2_000_000, "agent-b", "session-b", "second");
+    write_records(&store, std::slice::from_ref(&first_record));
+
+    let first = store.clear().expect("first clear");
+    append_report(&store, &second_record);
+    let second = store.clear().expect("second clear");
+
+    let first_archive = first.archive.expect("first archive");
+    let second_archive = second.archive.expect("second archive");
+    assert_ne!(first_archive, second_archive);
+    assert_eq!(
+        store
+            .read_records_from(&first_archive)
+            .expect("read first archive"),
+        vec![first_record]
+    );
+    assert_eq!(
+        store
+            .read_records_from(&second_archive)
+            .expect("read second archive"),
+        vec![second_record]
+    );
+}
+
+/// Ensures an existing archive candidate is never overwritten and a later
+/// clear advances to a distinct preserved path.
+#[test]
+fn clear_never_overwrites_an_existing_archive() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = store(&tempdir);
+    path_std_fs::create_dir_all(&store.root).expect("create reporter root");
+    let existing = store
+        .root
+        .join(format!("{PAPERCUT_ARCHIVE_PREFIX}{:016}.jsonl", 1));
+    path_std_fs::write(&existing, b"historical bytes\n").expect("write existing archive");
+    write_records(&store, &[record(1_000_000, "agent-a", "session-a", "new")]);
+
+    let result = store.clear().expect("clear records");
+
+    assert_eq!(
+        path_std_fs::read(&existing).expect("read existing archive"),
+        b"historical bytes\n"
+    );
+    assert_eq!(
+        result.archive,
+        Some(
+            store
+                .root
+                .join(format!("{PAPERCUT_ARCHIVE_PREFIX}{:016}.jsonl", 2))
+        )
+    );
+}
+
+/// Ensures archive selection treats directories and dangling symlinks as
+/// occupied entries instead of replacing them during clear.
+#[test]
+#[cfg(unix)]
+fn clear_skips_non_regular_and_dangling_archive_entries() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = store(&tempdir);
+    path_std_fs::create_dir_all(&store.root).expect("create reporter root");
+    let directory = store
+        .root
+        .join(format!("{PAPERCUT_ARCHIVE_PREFIX}{:016}.jsonl", 1));
+    path_std_fs::create_dir(&directory).expect("create occupied archive directory");
+    let dangling = store
+        .root
+        .join(format!("{PAPERCUT_ARCHIVE_PREFIX}{:016}.jsonl", 2));
+    path_unix_fs::symlink(store.root.join("missing-target"), &dangling)
+        .expect("create dangling archive symlink");
+    write_records(&store, &[record(1_000_000, "agent-a", "session-a", "new")]);
+
+    let result = store.clear().expect("clear records");
+
+    assert!(directory.is_dir());
+    assert!(path_std_fs::symlink_metadata(&dangling).is_ok());
+    assert_eq!(
+        result.archive,
+        Some(
+            store
+                .root
+                .join(format!("{PAPERCUT_ARCHIVE_PREFIX}{:016}.jsonl", 3))
+        )
+    );
 }
 
 /// Ensures malformed, unsupported, invalid-identity, and unrenderable-timestamp
@@ -251,9 +381,22 @@ fn clear_preserves_reports_appended_after_its_lock_boundary() {
     });
 
     midpoint.wait();
-    assert_eq!(clear_thread.join().expect("clear thread"), 1);
+    let clear_result = clear_thread.join().expect("clear thread");
+    assert_eq!(clear_result.count, 1);
     reporter_thread.join().expect("reporter thread");
 
+    let archive = clear_result.archive.expect("archive path");
+    assert_eq!(
+        PapercutStore::new(tempdir.path())
+            .read_records_from(&archive)
+            .expect("read archive"),
+        vec![record(
+            1_000_000,
+            "agent-before",
+            "session-before",
+            "before"
+        )]
+    );
     assert_eq!(
         store.list().expect("list post-boundary record"),
         vec![record(2_000_000, "agent-after", "session-after", "after")]

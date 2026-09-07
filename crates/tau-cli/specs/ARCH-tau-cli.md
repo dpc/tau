@@ -1,5 +1,14 @@
 # ARCH-tau-cli: tau-cli architecture
 
+`tau dev papercut clear` validates the normal `std-utils` instance's active
+papercut JSONL file under the shared User-scope append lock, then atomically
+renames it to a non-overwriting numbered archive. The command prints the archive
+path; `list` remains active-only, and later appends create a fresh active file.
+Archives preserve the original private bytes indefinitely without enumeration,
+expiration, or automatic deletion. This externally meaningful persistence
+choice was approved under
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
+
 `tau serve --session ID --create|--existing|--create-or-existing` is the
 supported foreground owner for one fixed session. Exactly one mode is mandatory.
 `--create` atomically

@@ -29,11 +29,14 @@ selects arbitrary extension data or exposes other extension payloads. Both
 commands use the ordinary Tau state root or their explicit `--state-dir`;
 absent standard-instance storage is an empty history and clear is a successful
 zero-record no-op. They take the same extension-directory lock as `AppendFile`.
-Clear validates then deletes the complete file while holding that lock, so
-records appended before its lock boundary are removed and appenders released
-after the boundary create a new preserved file. Malformed, unsupported,
-oversized, symlinked, non-regular, or unrenderable records fail closed and
-remain intact.
+Clear validates then atomically renames the complete file to the first unused
+numbered archive while holding that lock. It reports the locked record count and
+archive path; list remains active-only. Records appended before the lock boundary
+remain recoverable in that archive, while appenders released after the boundary
+create a fresh active file. Archives preserve the original private bytes
+indefinitely without enumeration, expiration, or automatic deletion. Malformed,
+unsupported, oversized, symlinked, non-regular, or unrenderable active records
+fail closed and remain intact, and clear never replaces an occupied archive path.
 This exception uses the explicit semantics approval in
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 

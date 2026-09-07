@@ -279,7 +279,8 @@ instance config sets `papercut.enable: true`. See the
 [std-utils README](../crates/tau-ext-utils/README.md) for its exact JSONL
 record, per-instance User-storage location, limits, privacy, retention, and
 inspection contract. `tau dev papercut list [--markdown]` inspects the normal
-instance's records; `tau dev papercut clear` clears its locked snapshot.
+instance's active records; `tau dev papercut clear` atomically renames its
+locked snapshot to a preserved archive and prints that archive's path.
 The model-visible tool is conditional: agents use it only for an incidental
 Tau harness, tooling, environment, confusing, or suspicious problem, never
 merely to state that no problem occurred.

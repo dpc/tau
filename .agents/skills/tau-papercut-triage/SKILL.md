@@ -139,29 +139,23 @@ Shared reports may use an unpredictable `mktemp
 tracking: preserve the sanitized findings and coverage in the project's
 ticket/report workflow before removal of the source reports.
 
-## Clear only through supported preservation semantics
+## Clear only through supported archival semantics
 
 Recheck the installed clear behavior before acting. In the current CLI, `list`
-is lock-consistent and `clear` takes the same cross-process append lock, but
-deletes **every record present at its serialized clear boundary**. It reports
-`cleared N papercut report(s)`; appends admitted after that boundary remain.
-The interface has no ID selection, snapshot token, `--before`, `--dry-run`, or
-compare-and-clear option.
-
-While that delete-all behavior remains, a final re-list followed by clear is
-**not atomic**: a stable count, timestamp, or hash cannot rule out an
-unreviewed arrival between the two commands. Do not clear unless an explicitly
-supported quiet period covers all reporters sharing the selected state root.
-Otherwise report **analysis complete, clear deferred**, preserve the private
-snapshot and durable report, and do not invent store locks or direct
-rename/truncate/delete workarounds.
+is lock-consistent and `clear` takes the same cross-process append lock, validates
+the active file, then atomically renames it to a non-overwriting numbered archive.
+It reports the cleared record count and archive path. Reports admitted before
+the serialized clear boundary are recoverable from that archive; appends admitted
+after it create a fresh active file and remain visible to `list`. Archives retain
+the original private bytes indefinitely and are not listed, expired, or deleted
+automatically. The interface has no ID selection, snapshot token, `--before`,
+`--dry-run`, or compare-and-clear option.
 
 1. Confirm clearing is authorized and the report/queue entries are durable.
    If the original user request already authorized clear after triage, do not
    ask for duplicate approval; coordinate the execution boundary with the
    parent/coordinator.
-2. Under a confirmed quiet period, capture and compare the final complete record
-   sequence, then analyze/report/queue every late arrival before running:
+2. Capture and compare the final complete active sequence, then run:
 
    ```sh
    tau dev papercut clear &&
@@ -170,14 +164,12 @@ rename/truncate/delete workarounds.
    ```
 
    Add the same `--state-dir <STATE_DIR>` to both if a non-default root was used.
-   Record the exact clear count and a sanitized post-clear status. Keep any
-   remaining report text and attribution private. New post-clear reports are not
-   evidence that clearing failed; do not blindly clear again.
-3. If a later installed CLI provides a supported archive/preservation clear
-   operation, follow its actual documented semantics instead. Verify its
-   preservation and append boundary against the current implementation and
-   ask the coordinator to arrange any needed skill update; never emulate it by
-   manipulating the reporter store directly.
+   Record the exact clear count, archive path, and a sanitized post-clear status.
+   Compare the archived record sequence with the reviewed snapshot and
+   analyze/report/queue any additions that arrived before the clear boundary.
+   Keep archive contents, remaining report text, and attribution private. New
+   post-clear reports are not evidence that clearing failed; do not blindly clear
+   again. Do not manipulate the reporter store directly or delete the archive.
 
 Finish with a concise summary of what was analyzed, what deserves user review,
 which reports were cleared (or why none were), and where the durable report

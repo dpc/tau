@@ -99,11 +99,14 @@ report; Markdown retains report line boundaries inside a literal code block.
 Both sort the same v1 records by timestamp, agent, session, and report.
 
 `clear` takes the reporter's existing per-instance extension-directory lock,
-reads and removes the canonical JSONL file while holding it, then reports the
-number of records removed. An append completed before that lock boundary is
-cleared. An append that waits for or starts after it writes a new file and is
-preserved. The command does not create storage for an absent reporter and
-repeating clear on an empty history succeeds with a zero count.
+reads and atomically renames the canonical JSONL file while holding it, then
+reports the number of records removed from the active listing and the preserved
+archive path. Archives use the first unused
+`papercuts.archive-NNNNNNNNNNNNNNNN.jsonl` name. An append completed before that
+lock boundary is preserved in the archive. An append that waits for or starts
+after it writes a new active file and remains visible to `list`. The command
+does not create storage for an absent reporter, and repeating clear on an empty
+history succeeds with a zero count and no new archive.
 
 
 ## Limits and behavior
@@ -122,7 +125,9 @@ race can leave a report unrecorded. Ephemeral sessions use the same
 durable per-instance file. The tool returns a concise recorded/not-recorded outcome
 and tells the agent to continue its primary task without retrying.
 
-Reports are plaintext operational notes retained with per-instance extension state.
+Reports and clear-created archives are plaintext operational notes retained
+indefinitely with per-instance extension state; Tau does not enumerate, expire,
+or delete archives automatically.
 Do not put secrets, credentials, private keys, access tokens, or unnecessary
 personal data in a report. Operators who can inspect Tau state can read
 papercuts. Older per-session papercut files remain historical artifacts; Tau

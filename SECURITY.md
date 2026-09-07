@@ -765,10 +765,14 @@ unsupported, oversized, symlinked, non-regular, or unrenderable records fail
 closed without exposing raw data.
 
 Clear takes the same exclusive extension-directory lock as harness User-scope
-appends, validates the same file, and removes it only while holding that lock.
-It reports the number in its locked snapshot. An append that completed before
-the lock boundary is cleared; an appender that waits for or starts after it
-creates a new file and remains visible. A rejected input is never cleared.
+appends, validates the same file, and atomically renames it to the first unused
+`papercuts.archive-NNNNNNNNNNNNNNNN.jsonl` path while holding that lock. It
+reports the number in its locked snapshot and the archive path. List remains
+active-only. An append that completed before the lock boundary is preserved in
+the archive; an appender that waits for or starts after it creates a new active
+file and remains visible. A rejected input is never cleared. Archives retain
+the original bytes and access boundary indefinitely; Tau does not enumerate,
+expire, or delete them automatically.
 Review this boundary when changing the papercut record schema, extension-data
 file limit, User-scope lock, normal `std-utils` instance naming, or CLI output
 sanitization.

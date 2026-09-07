@@ -73,10 +73,11 @@ contributions rather than only parsed overrides or child-command construction.
 
 Papercut tests serialize records through `tau_ext_utils::PapercutRecord`, the
 same contract used by the reporter, then exercise the CLI reader's bounded,
-no-follow storage path. They cover plain and Markdown rendering, empty and
-repeated clear, rejected malformed/unsupported/unsafe storage, and a
-test-only post-delete midpoint that proves a real `clear()` preserves a waiting
-reporter append after its shared-lock boundary.
+no-follow storage path. They cover plain and Markdown rendering, exact-byte
+archives, empty and repeated clear, non-overwriting archive selection, rejected
+malformed/unsupported/unsafe storage, and a test-only post-rename midpoint that
+proves a real `clear()` archives the locked snapshot while preserving a waiting
+reporter append in the fresh active file.
 
 Renderer transitions are checked at flush-delimited virtual-terminal frames with
 bounded waits. Tests do not request a post-operation `redraw_sync`, which could

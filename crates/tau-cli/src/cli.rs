@@ -701,8 +701,8 @@ pub enum PapercutCommand {
         state_dir: PathBuf,
     },
 
-    /// Remove every papercut report present at this command's serialized clear
-    /// boundary.
+    /// Archive every active papercut report at this command's serialized clear
+    /// boundary and print the preserved file's path.
     Clear {
         /// Tau state directory containing the standard reporter's records.
         #[arg(long, default_value_os_t = default_state_dir())]
