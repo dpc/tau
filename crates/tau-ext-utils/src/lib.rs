@@ -1594,15 +1594,15 @@ fn timer_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TIMER_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Schedule, cancel, and list session-scoped timer reminders. Use delay_seconds for relative timers or daily_time for a daily HH:MM wall-clock timer; daily timers use the host local timezone unless utc is true. Timers wake the agent with internal prompts.".to_owned()),
+        description: Some("Schedule, cancel, and list session-scoped timer reminders. A relative schedule must include delay_seconds for its initial firing; interval_seconds optionally sets the repeat cadence after that initial firing. Alternatively, use daily_time for a daily HH:MM wall-clock timer; daily timers use the host local timezone unless utc is true. Timers wake the agent with internal prompts.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["schedule", "cancel", "list"]},
                 "timer_id": {"type": "string", "maxLength": MAX_TIMER_ID_BYTES, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Path-safe id. Required for cancel; optional for schedule."},
-                "delay_seconds": {"type": "integer", "minimum": MIN_DELAY_SECONDS, "maximum": MAX_DELAY_SECONDS},
-                "interval_seconds": {"type": "integer", "minimum": MIN_INTERVAL_SECONDS, "maximum": MAX_DELAY_SECONDS},
+                "delay_seconds": {"type": "integer", "minimum": MIN_DELAY_SECONDS, "maximum": MAX_DELAY_SECONDS, "description": "Initial delay before the first relative firing. Required for every relative schedule, including one with interval_seconds."},
+                "interval_seconds": {"type": "integer", "minimum": MIN_INTERVAL_SECONDS, "maximum": MAX_DELAY_SECONDS, "description": "Optional fixed recurrence after the first firing. Requires delay_seconds to set that initial firing."},
                 "daily_time": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "description": "Daily wall-clock time in exact HH:MM format. Mutually exclusive with delay_seconds and interval_seconds."},
                 "utc": {"type": "boolean", "description": "Use UTC for daily_time. Omitted or false uses the running host's local timezone."},
                 // Keep the byte limit in runtime validation: JSON Schema
@@ -1706,6 +1706,14 @@ fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String>
             } else {
                 if tau_proto::cbor_field(value, "utc").is_some() {
                     return Err("utc requires daily_time".to_owned());
+                }
+                if tau_proto::cbor_field(value, "delay_seconds").is_none()
+                    && tau_proto::cbor_field(value, "interval_seconds").is_some()
+                {
+                    return Err(
+                        "delay_seconds is required with interval_seconds to set the initial delay"
+                            .to_owned(),
+                    );
                 }
                 let delay_seconds =
                     bounded_seconds(value, "delay_seconds", MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)?;

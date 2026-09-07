@@ -269,9 +269,10 @@ fn timer_wakeup_message_uses_persist_false() {
 }
 
 /// Timer schemas describe the runtime byte limit without a large grammar
-/// repetition and expose the closed daily wall-clock input.
+/// repetition, expose the closed daily wall-clock input, and make the relative
+/// schedule's required initial delay clear before a model invokes the tool.
 #[test]
-fn timer_tool_schema_omits_message_max_length() {
+fn timer_tool_schema_clarifies_relative_schedule_requirements() {
     let spec = timer_tool_spec();
     let parameters = spec.parameters.expect("timer parameters");
     let message = parameters
@@ -297,6 +298,28 @@ fn timer_tool_schema_omits_message_max_length() {
             .pointer("/properties/utc/type")
             .and_then(serde_json::Value::as_str),
         Some("boolean")
+    );
+    assert_eq!(
+        parameters
+            .pointer("/properties/delay_seconds/description")
+            .and_then(serde_json::Value::as_str),
+        Some(
+            "Initial delay before the first relative firing. Required for every relative schedule, including one with interval_seconds."
+        )
+    );
+    assert_eq!(
+        parameters
+            .pointer("/properties/interval_seconds/description")
+            .and_then(serde_json::Value::as_str),
+        Some(
+            "Optional fixed recurrence after the first firing. Requires delay_seconds to set that initial firing."
+        )
+    );
+    assert_eq!(
+        spec.description.as_deref(),
+        Some(
+            "Schedule, cancel, and list session-scoped timer reminders. A relative schedule must include delay_seconds for its initial firing; interval_seconds optionally sets the repeat cadence after that initial firing. Alternatively, use daily_time for a daily HH:MM wall-clock timer; daily timers use the host local timezone unless utc is true. Timers wake the agent with internal prompts."
+        )
     );
 }
 
@@ -523,6 +546,22 @@ fn daily_schedule_arguments_are_closed_and_mutually_exclusive() {
         ("message", CborValue::Text("invalid".to_owned())),
     ]);
     assert!(parse_action(&relative_utc, "call-relative").is_err());
+}
+
+/// An interval-only schedule has no defined first firing, so it must retain the
+/// explicit initial-delay rejection rather than silently acquiring a default.
+#[test]
+fn interval_schedule_requires_an_initial_delay() {
+    let interval_only = cbor_map(vec![
+        ("action", CborValue::Text("schedule".to_owned())),
+        ("interval_seconds", CborValue::Integer(60.into())),
+        ("message", CborValue::Text("wake".to_owned())),
+    ]);
+
+    assert_eq!(
+        parse_action(&interval_only, "call-interval"),
+        Err("delay_seconds is required with interval_seconds to set the initial delay".to_owned())
+    );
 }
 
 /// One cadence-bounded timezone snapshot preserves an already-due occurrence
