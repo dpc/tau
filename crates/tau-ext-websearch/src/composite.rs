@@ -209,14 +209,42 @@ impl AttemptOutcome {
 pub(super) struct AttemptRecord {
     /// Provider contacted for this attempt.
     pub(super) provider: WebAdapter,
+    /// Whether the request used the provider's public quota.
+    pub(super) public_quota: bool,
     /// Exact normalized attempt outcome.
     pub(super) outcome: AttemptOutcome,
+}
+
+/// Result and authentication mode captured from one provider request snapshot.
+pub(super) struct AttemptExecution {
+    /// Whether the request used the provider's public quota.
+    pub(super) public_quota: bool,
+    /// Provider response or sanitized failure.
+    pub(super) result: Result<String, String>,
+}
+
+impl AttemptExecution {
+    /// Wrap an attempt whose request used public quota.
+    pub(super) fn public(result: Result<String, String>) -> Self {
+        Self {
+            public_quota: true,
+            result,
+        }
+    }
+
+    /// Wrap an attempt with the exact request authentication mode.
+    pub(super) fn new(public_quota: bool, result: Result<String, String>) -> Self {
+        Self {
+            public_quota,
+            result,
+        }
+    }
 }
 
 /// Provider-integration seam consumed by the provider-neutral scheduler.
 pub(super) trait ProviderDispatcher {
     /// Issue one operation-specific provider attempt within the supplied slice.
-    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String>;
+    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> AttemptExecution;
 }
 
 /// Production adapter registry for the currently integrated hosted providers.
@@ -230,7 +258,7 @@ pub(super) struct HostedProviderDispatcher<'a> {
 }
 
 impl ProviderDispatcher for HostedProviderDispatcher<'_> {
-    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String> {
+    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> AttemptExecution {
         match (provider, &attempt.request) {
             (
                 WebAdapter::Exa,
@@ -241,9 +269,9 @@ impl ProviderDispatcher for HostedProviderDispatcher<'_> {
                 },
             ) => self
                 .searcher
-                .search_with_timeout(query, *count, attempt.timeout),
+                .search_composite_attempt(query, *count, attempt.timeout),
             (WebAdapter::Exa, HostedRequest::Fetch { url }) => {
-                self.searcher.fetch_with_timeout(url, attempt.timeout)
+                self.searcher.fetch_composite_attempt(url, attempt.timeout)
             }
             (
                 WebAdapter::Parallel,
@@ -252,7 +280,7 @@ impl ProviderDispatcher for HostedProviderDispatcher<'_> {
                     count: _,
                     allowed_domains: _,
                 },
-            ) => self.parallel_client.call_attempt(
+            ) => self.parallel_client.call_composite_attempt(
                 PARALLEL_REMOTE_SEARCH_TOOL,
                 serde_json::json!({
                     "objective": query,
@@ -262,7 +290,7 @@ impl ProviderDispatcher for HostedProviderDispatcher<'_> {
                 attempt.cancelled,
             ),
             (WebAdapter::Parallel, HostedRequest::Fetch { url }) => {
-                self.parallel_client.call_attempt(
+                self.parallel_client.call_composite_attempt(
                     PARALLEL_REMOTE_FETCH_TOOL,
                     serde_json::json!({"urls": [url]}),
                     attempt.timeout,
@@ -275,11 +303,11 @@ impl ProviderDispatcher for HostedProviderDispatcher<'_> {
                 | WebAdapter::Tavily
                 | WebAdapter::Firecrawl),
                 _,
-            ) => self.hosted_client.call(provider, attempt),
+            ) => self.hosted_client.call_composite(provider, attempt),
             #[cfg(test)]
-            (WebAdapter::Third | WebAdapter::Fourth, _) => {
-                Err("test provider requires an injected dispatcher".to_owned())
-            }
+            (WebAdapter::Third | WebAdapter::Fourth, _) => AttemptExecution::public(Err(
+                "test provider requires an injected dispatcher".to_owned(),
+            )),
         }
     }
 }
@@ -369,7 +397,7 @@ impl CompositeCall<'_> {
                     url: parsed_url.as_deref().expect("validated fetch URL"),
                 },
             };
-            let result = self.dispatcher.call(
+            let execution = self.dispatcher.call(
                 provider,
                 HostedAttempt {
                     request,
@@ -380,6 +408,7 @@ impl CompositeCall<'_> {
             if self.cancelled.load(Ordering::Acquire) {
                 attempts.push(AttemptRecord {
                     provider,
+                    public_quota: execution.public_quota,
                     outcome: AttemptOutcome::Cancelled,
                 });
                 return cancelled_event(self.invoke, self.display_args, attempts);
@@ -387,18 +416,21 @@ impl CompositeCall<'_> {
             if attempt_timeout <= before.elapsed() {
                 attempts.push(AttemptRecord {
                     provider,
+                    public_quota: execution.public_quota,
                     outcome: AttemptOutcome::Deadline,
                 });
                 continue;
             }
-            match result {
+            match execution.result {
                 Ok(text) if text.trim().is_empty() => attempts.push(AttemptRecord {
                     provider,
+                    public_quota: execution.public_quota,
                     outcome: AttemptOutcome::Empty,
                 }),
                 Ok(text) => {
                     attempts.push(AttemptRecord {
                         provider,
+                        public_quota: execution.public_quota,
                         outcome: AttemptOutcome::Success,
                     });
                     let projected = match project_web_content(provider, self.operation, &text) {
@@ -438,6 +470,7 @@ impl CompositeCall<'_> {
                 }
                 Err(message) => attempts.push(AttemptRecord {
                     provider,
+                    public_quota: execution.public_quota,
                     outcome: classify_provider_error(&message),
                 }),
             }
@@ -479,10 +512,12 @@ pub(super) fn attempt_chip(attempts: &[AttemptRecord], current: Option<WebAdapte
     let mut entries = attempts
         .iter()
         .map(|attempt| {
+            let public_quota_marker = if attempt.public_quota { "*" } else { "" };
             format!(
-                "{} {}",
+                "{} {}{}",
                 attempt.outcome.marker(),
-                attempt.provider.display_name()
+                attempt.provider.display_name(),
+                public_quota_marker,
             )
         })
         .collect::<Vec<_>>();

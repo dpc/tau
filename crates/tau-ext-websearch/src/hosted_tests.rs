@@ -189,21 +189,18 @@ fn you_free_mcp_fixture_is_exact() {
         you_endpoint: format!("{}mcp?profile=free", server.origin),
         ..config()
     });
-    assert_eq!(
-        client
-            .call(
-                WebAdapter::You,
-                request(
-                    WebOperation::Search,
-                    "rust agents",
-                    7,
-                    "",
-                    &AtomicBool::new(false),
-                ),
-            )
-            .expect("You.com fixture"),
-        "you result"
+    let execution = client.call_composite(
+        WebAdapter::You,
+        request(
+            WebOperation::Search,
+            "rust agents",
+            7,
+            "",
+            &AtomicBool::new(false),
+        ),
     );
+    assert!(execution.public_quota);
+    assert_eq!(execution.result.expect("You.com fixture"), "you result");
     let requests = server.finish_all();
     assert_eq!(requests.len(), 3);
     for request in &requests {
@@ -285,19 +282,19 @@ fn you_authenticated_mcp_fixture_sends_bearer_token() {
         },
         ..config()
     });
+    let execution = client.call_composite(
+        WebAdapter::You,
+        request(
+            WebOperation::Search,
+            "rust agents",
+            7,
+            "",
+            &AtomicBool::new(false),
+        ),
+    );
+    assert!(!execution.public_quota);
     assert_eq!(
-        client
-            .call(
-                WebAdapter::You,
-                request(
-                    WebOperation::Search,
-                    "rust agents",
-                    7,
-                    "",
-                    &AtomicBool::new(false),
-                ),
-            )
-            .expect("authenticated You.com fixture"),
+        execution.result.expect("authenticated You.com fixture"),
         "you result"
     );
     let requests = server.finish_all();

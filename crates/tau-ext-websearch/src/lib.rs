@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use composite::{
-    CompositeCall, HostedProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal,
+    AttemptExecution, CompositeCall, HostedProviderDispatcher, ProviderPool,
+    arbitrate_cancelled_terminal,
 };
 #[cfg(test)]
 use hosted::HostedAttempt;
@@ -239,6 +240,21 @@ trait Searcher: Send + Sync + 'static {
         self.fetch(url)
     }
 
+    /// Search for a composite call and return the request's quota mode.
+    fn search_composite_attempt(
+        &self,
+        query: &str,
+        num_results: u32,
+        timeout: Duration,
+    ) -> AttemptExecution {
+        AttemptExecution::public(self.search_with_timeout(query, num_results, timeout))
+    }
+
+    /// Fetch for a composite call and return the request's quota mode.
+    fn fetch_composite_attempt(&self, url: &str, timeout: Duration) -> AttemptExecution {
+        AttemptExecution::public(self.fetch_with_timeout(url, timeout))
+    }
+
     /// Apply a runtime endpoint update from a harness `Configure`.
     fn set_endpoint(&self, _endpoint: String) {}
 
@@ -287,6 +303,17 @@ trait ParallelClient: Send + Sync + 'static {
         _cancelled: &AtomicBool,
     ) -> Result<String, String> {
         self.call_with_timeout(remote_tool, arguments, timeout)
+    }
+
+    /// Call a composite provider route and return the request's quota mode.
+    fn call_composite_attempt(
+        &self,
+        remote_tool: &str,
+        arguments: serde_json::Value,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> AttemptExecution {
+        AttemptExecution::public(self.call_attempt(remote_tool, arguments, timeout, cancelled))
     }
 
     /// Apply a runtime endpoint update from a harness `Configure`.
@@ -1795,6 +1822,16 @@ impl Searcher for HttpExaSearcher {
         num_results: u32,
         timeout: Duration,
     ) -> Result<String, String> {
+        self.search_composite_attempt(query, num_results, timeout)
+            .result
+    }
+
+    fn search_composite_attempt(
+        &self,
+        query: &str,
+        num_results: u32,
+        timeout: Duration,
+    ) -> AttemptExecution {
         let config = self
             .config
             .lock()
@@ -1802,6 +1839,7 @@ impl Searcher for HttpExaSearcher {
             .clone();
         let endpoint = exa_endpoint_with_options(&config.endpoint, &config.options);
         let api_key = config.api_key;
+        let public_quota = api_key.is_none();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1814,27 +1852,32 @@ impl Searcher for HttpExaSearcher {
                 },
             },
         });
-        let payload = post_mcp(
+        let result = post_mcp(
             &provider_http_agent(timeout),
             &endpoint,
             body,
             "exa",
             api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
-        )?;
-        let text = decode_mcp_text_result(&payload, "exa").map_err(|error| {
-            sanitize_mcp_diagnostic(
-                &error,
-                &endpoint,
-                api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
-            )
-        })?;
-        limit_tool_output(text, "exa").map_err(|error| {
-            sanitize_mcp_diagnostic(
-                &error,
-                &endpoint,
-                api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
-            )
+        )
+        .and_then(|payload| {
+            decode_mcp_text_result(&payload, "exa").map_err(|error| {
+                sanitize_mcp_diagnostic(
+                    &error,
+                    &endpoint,
+                    api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
+                )
+            })
         })
+        .and_then(|text| {
+            limit_tool_output(text, "exa").map_err(|error| {
+                sanitize_mcp_diagnostic(
+                    &error,
+                    &endpoint,
+                    api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
+                )
+            })
+        });
+        AttemptExecution::new(public_quota, result)
     }
 
     fn fetch(&self, url: &str) -> Result<String, String> {
@@ -1842,6 +1885,10 @@ impl Searcher for HttpExaSearcher {
     }
 
     fn fetch_with_timeout(&self, url: &str, timeout: Duration) -> Result<String, String> {
+        self.fetch_composite_attempt(url, timeout).result
+    }
+
+    fn fetch_composite_attempt(&self, url: &str, timeout: Duration) -> AttemptExecution {
         let config = self
             .config
             .lock()
@@ -1849,6 +1896,7 @@ impl Searcher for HttpExaSearcher {
             .clone();
         let endpoint = config.endpoint;
         let api_key = config.api_key;
+        let public_quota = api_key.is_none();
         let options = config.options;
         let mut arguments = serde_json::json!({"urls": [url]});
         if let Some(max_characters) = options.fetch_max_content_chars {
@@ -1866,27 +1914,32 @@ impl Searcher for HttpExaSearcher {
                 "arguments": arguments,
             },
         });
-        let payload = post_mcp(
+        let result = post_mcp(
             &provider_http_agent(timeout),
             &endpoint,
             body,
             "exa",
             api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
-        )?;
-        let text = decode_mcp_text_result(&payload, "exa").map_err(|error| {
-            sanitize_mcp_diagnostic(
-                &error,
-                &endpoint,
-                api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
-            )
-        })?;
-        limit_tool_output(text, "exa").map_err(|error| {
-            sanitize_mcp_diagnostic(
-                &error,
-                &endpoint,
-                api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
-            )
+        )
+        .and_then(|payload| {
+            decode_mcp_text_result(&payload, "exa").map_err(|error| {
+                sanitize_mcp_diagnostic(
+                    &error,
+                    &endpoint,
+                    api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
+                )
+            })
         })
+        .and_then(|text| {
+            limit_tool_output(text, "exa").map_err(|error| {
+                sanitize_mcp_diagnostic(
+                    &error,
+                    &endpoint,
+                    api_key.as_ref().map(|key| (key, McpAuth::ApiKey)),
+                )
+            })
+        });
+        AttemptExecution::new(public_quota, result)
     }
 
     fn set_endpoint(&self, endpoint: String) {
@@ -1965,7 +2018,17 @@ impl ParallelClient for HttpParallelClient {
         timeout: Duration,
         cancelled: &AtomicBool,
     ) -> Result<String, String> {
-        check_parallel_cancelled(cancelled)?;
+        self.call_composite_attempt(remote_tool, arguments, timeout, cancelled)
+            .result
+    }
+
+    fn call_composite_attempt(
+        &self,
+        remote_tool: &str,
+        arguments: serde_json::Value,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> AttemptExecution {
         let config = self
             .config
             .lock()
@@ -1973,105 +2036,110 @@ impl ParallelClient for HttpParallelClient {
             .clone();
         let endpoint = config.endpoint;
         let api_key = config.api_key;
-        let parallel_config =
-            parallel_search_config_header(remote_tool, &config.options, api_key.is_some())?;
-        let deadline = Instant::now() + timeout;
-        let initialize = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "tau-ext-websearch",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-            },
-        });
-        let (payload, session_id) = post_parallel_mcp(
-            &endpoint,
-            api_key.as_ref(),
-            initialize,
-            None,
-            false,
-            parallel_config.as_deref(),
-            remaining_parallel(deadline)?,
-        )?;
-        let initialized = parse_sse_or_json(&payload, "parallel").map_err(|error| {
-            sanitize_mcp_diagnostic(
-                &error,
-                &endpoint,
-                api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
-            )
-        })?;
-        let negotiated = initialized
-            .pointer("/result/protocolVersion")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                "parallel invalid response: initialize omitted protocol version".to_owned()
-            })?;
-        if negotiated != MCP_PROTOCOL_VERSION {
-            return Err(format!(
-                "parallel invalid response: unsupported negotiated MCP version `{negotiated}`"
-            ));
-        }
-        if initialized
-            .pointer("/result/capabilities/tools")
-            .and_then(serde_json::Value::as_object)
-            .is_none()
-        {
-            return Err(
-                "parallel invalid response: initialize did not negotiate tools capability"
-                    .to_owned(),
-            );
-        }
-        check_parallel_cancelled(cancelled)?;
-        post_parallel_mcp(
-            &endpoint,
-            api_key.as_ref(),
-            serde_json::json!({
+        let public_quota = api_key.is_none();
+        let result = (|| {
+            check_parallel_cancelled(cancelled)?;
+            let parallel_config =
+                parallel_search_config_header(remote_tool, &config.options, api_key.is_some())?;
+            let deadline = Instant::now() + timeout;
+            let initialize = serde_json::json!({
                 "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-            }),
-            session_id.as_deref(),
-            true,
-            parallel_config.as_deref(),
-            remaining_parallel(deadline)?,
-        )?;
-        check_parallel_cancelled(cancelled)?;
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": remote_tool,
-                "arguments": arguments,
-            },
-        });
-        let (payload, _) = post_parallel_mcp(
-            &endpoint,
-            api_key.as_ref(),
-            body,
-            session_id.as_deref(),
-            true,
-            parallel_config.as_deref(),
-            remaining_parallel(deadline)?,
-        )?;
-        let text = decode_mcp_text_result(&payload, "parallel").map_err(|error| {
-            sanitize_mcp_diagnostic(
-                &error,
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "tau-ext-websearch",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                },
+            });
+            let (payload, session_id) = post_parallel_mcp(
                 &endpoint,
-                api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
-            )
-        })?;
-        limit_tool_output(text, "parallel").map_err(|error| {
-            sanitize_mcp_diagnostic(
-                &error,
+                api_key.as_ref(),
+                initialize,
+                None,
+                false,
+                parallel_config.as_deref(),
+                remaining_parallel(deadline)?,
+            )?;
+            let initialized = parse_sse_or_json(&payload, "parallel").map_err(|error| {
+                sanitize_mcp_diagnostic(
+                    &error,
+                    &endpoint,
+                    api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
+                )
+            })?;
+            let negotiated = initialized
+                .pointer("/result/protocolVersion")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    "parallel invalid response: initialize omitted protocol version".to_owned()
+                })?;
+            if negotiated != MCP_PROTOCOL_VERSION {
+                return Err(format!(
+                    "parallel invalid response: unsupported negotiated MCP version `{negotiated}`"
+                ));
+            }
+            if initialized
+                .pointer("/result/capabilities/tools")
+                .and_then(serde_json::Value::as_object)
+                .is_none()
+            {
+                return Err(
+                    "parallel invalid response: initialize did not negotiate tools capability"
+                        .to_owned(),
+                );
+            }
+            check_parallel_cancelled(cancelled)?;
+            post_parallel_mcp(
                 &endpoint,
-                api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
-            )
-        })
+                api_key.as_ref(),
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                }),
+                session_id.as_deref(),
+                true,
+                parallel_config.as_deref(),
+                remaining_parallel(deadline)?,
+            )?;
+            check_parallel_cancelled(cancelled)?;
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": remote_tool,
+                    "arguments": arguments,
+                },
+            });
+            let (payload, _) = post_parallel_mcp(
+                &endpoint,
+                api_key.as_ref(),
+                body,
+                session_id.as_deref(),
+                true,
+                parallel_config.as_deref(),
+                remaining_parallel(deadline)?,
+            )?;
+            let text = decode_mcp_text_result(&payload, "parallel").map_err(|error| {
+                sanitize_mcp_diagnostic(
+                    &error,
+                    &endpoint,
+                    api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
+                )
+            })?;
+            limit_tool_output(text, "parallel").map_err(|error| {
+                sanitize_mcp_diagnostic(
+                    &error,
+                    &endpoint,
+                    api_key.as_ref().map(|key| (key, McpAuth::Bearer)),
+                )
+            })
+        })();
+        AttemptExecution::new(public_quota, result)
     }
 
     fn set_endpoint(&self, endpoint: String) {

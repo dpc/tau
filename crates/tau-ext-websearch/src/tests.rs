@@ -12,9 +12,9 @@ use tau_proto::{
 };
 
 use super::composite::{
-    AttemptOutcome, AttemptRecord, CompositeCall, FailureCategory, HostedProviderDispatcher,
-    ProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal, attempt_budget, attempt_chip,
-    classify_provider_error,
+    AttemptExecution, AttemptOutcome, AttemptRecord, CompositeCall, FailureCategory,
+    HostedProviderDispatcher, ProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal,
+    attempt_budget, attempt_chip, classify_provider_error,
 };
 use super::*;
 
@@ -720,14 +720,14 @@ fn hybrid_search_fails_over_with_ordered_attempt_display() {
             event => panic!("unexpected event: {event:?}"),
         }
     };
-    assert_eq!(progress_chips, ["… Exa", "✗ Exa → … Parallel"]);
+    assert_eq!(progress_chips, ["… Exa", "✗ Exa* → … Parallel"]);
     let CborValue::Text(text) = result.result else {
         panic!("expected text");
     };
     assert!(text.contains("adapter=\"parallel\" operation=\"search\""));
     assert_eq!(
         result.display.expect("display").info_chips,
-        vec!["✗ Exa → ✓ Parallel"]
+        vec!["✗ Exa* → ✓ Parallel*"]
     );
     assert_eq!(exa.calls.lock().expect("calls").len(), 1);
     assert_eq!(parallel.calls.lock().expect("calls").len(), 1);
@@ -752,9 +752,9 @@ fn hybrid_search_round_robin_advances_once_per_accepted_call() {
             panic!("expected result");
         };
         let expected = if query == "first" {
-            "✓ Exa"
+            "✓ Exa*"
         } else {
-            "✓ Parallel"
+            "✓ Parallel*"
         };
         assert_eq!(result.display.expect("display").info_chips, vec![expected]);
     }
@@ -800,7 +800,7 @@ fn invalid_and_replayed_hybrid_calls_do_not_advance_cursor() {
     let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader) else {
         panic!("expected live result");
     };
-    assert_eq!(result.display.expect("display").info_chips, ["✓ Exa"]);
+    assert_eq!(result.display.expect("display").info_chips, ["✓ Exa*"]);
     assert_eq!(exa.calls.lock().expect("calls").len(), 1);
     assert!(parallel.calls.lock().expect("calls").is_empty());
 }
@@ -900,8 +900,8 @@ fn concurrent_hybrid_admissions_reserve_in_protocol_order() {
             );
         }
     }
-    assert_eq!(chips["concurrent-first"], ["✓ Exa"]);
-    assert_eq!(chips["concurrent-second"], ["✓ Parallel"]);
+    assert_eq!(chips["concurrent-first"], ["✓ Exa*"]);
+    assert_eq!(chips["concurrent-second"], ["✓ Parallel*"]);
 }
 
 /// Ensures empty decoded text is a distinct failover outcome rather than a
@@ -922,7 +922,7 @@ fn hybrid_search_empty_result_fails_over() {
     };
     assert_eq!(
         result.display.expect("display").info_chips,
-        vec!["∅ Exa → ✓ Parallel"]
+        vec!["∅ Exa* → ✓ Parallel*"]
     );
 }
 
@@ -949,7 +949,7 @@ fn hybrid_search_all_provider_failure_is_normalized() {
     assert!(!error.message.contains("secret"));
     assert_eq!(
         error.display.expect("display").info_chips,
-        vec!["✗ Exa → ✗ Parallel → ✗ You.com"]
+        vec!["✗ Exa* → ✗ Parallel* → ✗ You.com*"]
     );
 }
 
@@ -1059,8 +1059,8 @@ fn interleaved_hybrid_search_and_fetch_use_independent_runtime_cursors() {
             panic!("expected result");
         };
         let expected = match result.call_id.as_str() {
-            "cursor-search-1" | "cursor-fetch-1" => "✓ Exa",
-            "cursor-search-2" | "cursor-fetch-2" => "✓ Parallel",
+            "cursor-search-1" | "cursor-fetch-1" => "✓ Exa*",
+            "cursor-search-2" | "cursor-fetch-2" => "✓ Parallel*",
             call_id => panic!("unexpected call: {call_id}"),
         };
         assert_eq!(result.display.expect("display").info_chips, [expected]);
@@ -1182,7 +1182,7 @@ fn busy_hybrid_runtime_rejection_preserves_next_primary() {
     };
     assert_eq!(
         result.display.expect("display").info_chips,
-        ["✗ You.com → ✓ Exa"]
+        ["✗ You.com* → ✓ Exa*"]
     );
 }
 
@@ -1198,13 +1198,9 @@ fn composite_scheduler_handles_third_provider_and_max_three() {
     }
 
     impl ProviderDispatcher for SyntheticDispatcher {
-        fn call(
-            &self,
-            provider: WebAdapter,
-            _attempt: HostedAttempt<'_>,
-        ) -> Result<String, String> {
+        fn call(&self, provider: WebAdapter, _attempt: HostedAttempt<'_>) -> AttemptExecution {
             self.calls.lock().expect("calls").push(provider);
-            Err("provider failed".to_owned())
+            AttemptExecution::public(Err("provider failed".to_owned()))
         }
     }
 
@@ -1236,11 +1232,44 @@ fn composite_scheduler_handles_third_provider_and_max_three() {
     );
     assert_eq!(
         error.display.expect("display").info_chips,
-        ["✗ Exa → ✗ Parallel → ✗ Third"]
+        ["✗ Exa* → ✗ Parallel* → ✗ Third*"]
     );
     assert_eq!(
         dispatcher.calls.lock().expect("calls").as_slice(),
         [WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::Third]
+    );
+}
+
+/// Ensures the default hosted-client seam never marks credential-required
+/// Brave, Tavily, or Firecrawl attempts as public quota.
+#[test]
+fn hosted_default_seam_keeps_keyed_only_attempt_labels_unmarked() {
+    let cancelled = AtomicBool::new(false);
+    let Event::ToolStarted(invoke) = hybrid_search_started("keyed-hosted", "query") else {
+        unreachable!();
+    };
+    let event = CompositeCall {
+        invoke,
+        operation: WebOperation::Search,
+        providers: vec![WebAdapter::Brave, WebAdapter::Tavily, WebAdapter::Firecrawl]
+            .into_boxed_slice(),
+        display_args: "query: query".to_owned(),
+        cancelled: &cancelled,
+        dispatcher: &HostedProviderDispatcher {
+            searcher: StubSearcher::ok("unused").as_ref(),
+            parallel_client: StubParallelClient::ok("unused").as_ref(),
+            hosted_client: &StubHostedClient,
+        },
+        handle: None,
+        deadline: Instant::now() + REQUEST_TIMEOUT,
+    }
+    .run();
+    let Event::ToolError(error) = event else {
+        panic!("expected all-provider failure");
+    };
+    assert_eq!(
+        error.display.expect("display").info_chips,
+        ["✗ Brave → ✗ Tavily → ✗ Firecrawl"]
     );
 }
 
@@ -1642,21 +1671,17 @@ fn composite_deadline_is_anchored_before_worker_entry() {
     assert_eq!(searcher.timeouts.lock().expect("timeouts").len(), 1);
 }
 
-/// Ensures an issued attempt that exhausts its slice renders the stable
-/// deadline marker in the terminal attempt history.
+/// Ensures an issued API-keyed attempt that exhausts its slice retains its
+/// authentication mode while rendering the stable deadline marker.
 #[test]
 fn composite_deadline_attempt_renders_deadline_chip() {
     /// Dispatcher that intentionally outlives its scheduler slice.
     struct SlowDispatcher;
 
     impl ProviderDispatcher for SlowDispatcher {
-        fn call(
-            &self,
-            _provider: WebAdapter,
-            _attempt: HostedAttempt<'_>,
-        ) -> Result<String, String> {
+        fn call(&self, _provider: WebAdapter, _attempt: HostedAttempt<'_>) -> AttemptExecution {
             thread::sleep(Duration::from_millis(3));
-            Err("late failure".to_owned())
+            AttemptExecution::new(false, Err("late failure".to_owned()))
         }
     }
 
@@ -1682,7 +1707,7 @@ fn composite_deadline_attempt_renders_deadline_chip() {
 }
 
 /// Ensures cancellation observed after an issued attempt suppresses failover,
-/// discards the response, and retains the current provider in terminal display.
+/// discards the response, and retains its API-keyed provider label.
 #[test]
 fn hybrid_cancellation_stops_after_current_attempt() {
     /// Search stub that deterministically requests cancellation before return.
@@ -1693,8 +1718,17 @@ fn hybrid_cancellation_stops_after_current_attempt() {
 
     impl Searcher for CancellingSearcher {
         fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+            unreachable!("scheduler uses the composite attempt entry point")
+        }
+
+        fn search_composite_attempt(
+            &self,
+            _query: &str,
+            _num_results: u32,
+            _timeout: Duration,
+        ) -> AttemptExecution {
             self.cancelled.store(true, Ordering::Release);
-            Ok("late success".to_owned())
+            AttemptExecution::new(false, Ok("late success".to_owned()))
         }
     }
 
@@ -1861,10 +1895,30 @@ fn attempt_chip_compacts_long_histories() {
             } else {
                 WebAdapter::Parallel
             },
+            public_quota: false,
             outcome: AttemptOutcome::Failure(FailureCategory::Provider),
         })
         .collect::<Vec<_>>();
     assert_eq!(attempt_chip(&attempts, None), "✗ Exa → … +18 → ✗ Parallel");
+}
+
+/// Ensures attempt labels distinguish public quota while leaving API-keyed
+/// provider names unchanged in the shared success and failure renderer.
+#[test]
+fn attempt_chip_marks_only_public_quota() {
+    let attempts = [
+        AttemptRecord {
+            provider: WebAdapter::Exa,
+            public_quota: true,
+            outcome: AttemptOutcome::Failure(FailureCategory::RateLimited),
+        },
+        AttemptRecord {
+            provider: WebAdapter::Parallel,
+            public_quota: false,
+            outcome: AttemptOutcome::Success,
+        },
+    ];
+    assert_eq!(attempt_chip(&attempts, None), "✗ Exa* → ✓ Parallel");
 }
 
 /// Ensures a cancellation processed after a success was queued but before the
@@ -1885,7 +1939,7 @@ fn cancellation_processed_before_publication_replaces_queued_success() {
         kind: tau_proto::ToolResultKind::Final,
         display: Some(ToolUseState {
             args: "query: race".to_owned(),
-            info_chips: vec!["✗ Exa → ✓ Parallel".to_owned()],
+            info_chips: vec!["✗ Exa* → ✓ Parallel*".to_owned()],
             status: ToolUseStatus::Success,
             status_text: "ok".to_owned(),
             ..Default::default()
@@ -1900,7 +1954,7 @@ fn cancellation_processed_before_publication_replaces_queued_success() {
     let display = cancelled.display.expect("display");
     assert_eq!(display.status, ToolUseStatus::Warning);
     assert_eq!(display.status_text, "cancelled");
-    assert_eq!(display.info_chips, vec!["✗ Exa → ⊘ Parallel"]);
+    assert_eq!(display.info_chips, vec!["✗ Exa* → ⊘ Parallel*"]);
 }
 
 /// Ensures web-tool display metadata escapes layout controls and truncates
@@ -3784,8 +3838,9 @@ fn exa_fetch_client_posts_urls_array() {
 
     let client = HttpExaSearcher::new(endpoint);
     client.set_api_key(Some(tau_proto::SecretValue::new("exa-fixture-secret")));
-    let result = client.fetch("https://example.com/article").expect("fetch");
-    assert_eq!(result, "page");
+    let execution = client.fetch_composite_attempt("https://example.com/article", REQUEST_TIMEOUT);
+    assert!(!execution.public_quota);
+    assert_eq!(execution.result.expect("fetch"), "page");
     let (headers, body) = server.join().expect("join");
     assert!(
         headers
@@ -3999,18 +4054,17 @@ fn parallel_client_sends_configured_bearer_token() {
         Some(tau_proto::SecretValue::new("parallel-fixture-secret")),
         ProviderOptions::default(),
     );
-    assert_eq!(
-        client
-            .call(
-                PARALLEL_REMOTE_SEARCH_TOOL,
-                adapt_parallel_search_arguments(serde_json::json!({
-                    "query": "rust",
-                }))
-                .expect("adapt search arguments"),
-            )
-            .expect("Parallel call"),
-        "ok"
+    let execution = client.call_composite_attempt(
+        PARALLEL_REMOTE_SEARCH_TOOL,
+        adapt_parallel_search_arguments(serde_json::json!({
+            "query": "rust",
+        }))
+        .expect("adapt search arguments"),
+        REQUEST_TIMEOUT,
+        &AtomicBool::new(false),
     );
+    assert!(!execution.public_quota);
+    assert_eq!(execution.result.expect("Parallel call"), "ok");
     let requests = server.join().expect("join");
     assert_eq!(requests.len(), 3);
     for request in &requests {

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tau_proto::SecretValue;
 
+use super::composite::AttemptExecution;
 use super::options::{ProviderOptions, SearchDepth};
 use super::{
     DEFAULT_BRAVE_ENDPOINT, DEFAULT_FIRECRAWL_ENDPOINT, DEFAULT_TAVILY_ENDPOINT,
@@ -42,6 +43,11 @@ pub(super) struct HostedConfig {
 pub(super) trait HostedClient: Send + Sync + 'static {
     /// Issue one normalized search or fetch request.
     fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String>;
+
+    /// Issue a composite request and return the request's quota mode.
+    fn call_composite(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> AttemptExecution {
+        AttemptExecution::new(provider == WebAdapter::You, self.call(provider, attempt))
+    }
 
     /// Apply a fully validated runtime configuration.
     fn configure(&self, _config: HostedConfig) {}
@@ -130,12 +136,17 @@ impl Default for HttpHostedClient {
 
 impl HostedClient for HttpHostedClient {
     fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String> {
+        self.call_composite(provider, attempt).result
+    }
+
+    fn call_composite(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> AttemptExecution {
         let config = self
             .config
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        match (provider, &attempt.request) {
+        let public_quota = provider == WebAdapter::You && config.you_api_key.is_none();
+        let result = (|| match (provider, &attempt.request) {
             (
                 WebAdapter::You,
                 HostedRequest::Search {
@@ -191,7 +202,8 @@ impl HostedClient for HttpHostedClient {
                     HostedRequest::Fetch { url: _ } => "fetch",
                 }
             )),
-        }
+        })();
+        AttemptExecution::new(public_quota, result)
     }
 
     fn configure(&self, config: HostedConfig) {
