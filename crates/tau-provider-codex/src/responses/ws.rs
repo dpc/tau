@@ -73,6 +73,8 @@ pub(crate) enum ResponseMode {
     Ordinary,
     /// Native standalone-compaction original-event validation.
     Compact,
+    /// Ordinary wire lowering with private local-summary output and no repair.
+    LocalSummary,
 }
 
 /// Beta-feature header value the OpenAI WebSocket endpoint expects.
@@ -1129,6 +1131,9 @@ impl WsConn {
                     if let Some(shape) = compact_shape.as_mut() {
                         shape.validate(decoded.value())?;
                     }
+                    if execution.response_mode == ResponseMode::LocalSummary {
+                        crate::local_compaction::validate_event(decoded.value())?;
+                    }
                     let mut observed_update = |state: &StreamState| {
                         if state.has_timed_semantic_output()
                             && let Some(trace) = private_trace.as_mut()
@@ -1491,6 +1496,9 @@ pub(super) fn run_replay(
             DecodedEvent::decode(&event.raw).map_err(|_| malformed_text_error(event.raw.len()))?;
         if let Some(shape) = compact_shape.as_mut() {
             shape.validate(decoded.value())?;
+        }
+        if response_mode == ResponseMode::LocalSummary {
+            crate::local_compaction::validate_event(decoded.value())?;
         }
         let terminal = apply_ws_replay_decoded_event(&mut state, &decoded, on_update)?;
         if terminal {

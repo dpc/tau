@@ -96,13 +96,13 @@ restart, and different namespaces may select different modes. The selected
 Codex surface is constrained by
 [GATE-tau-provider-codex-responses-surface-selection](../../tau-provider-codex/specs/GATE-tau-provider-codex-responses-surface-selection.md).
 
-For ChatGPT routes, model publication distinguishes a route that never supports
-standalone compaction from generation-scoped negative capability evidence.
-Automatic scheduling stops for either state. An explicit compaction remains
-admissible for the latter state so normal prompt-time credential resolution can
-compare the current identity; unchanged identity fails locally, while changed
-identity reaches the Codex runtime's single fresh generation probe. The
-extension performs no capability polling or model-refresh loop.
+All built-in ChatGPT models support standalone compaction. The Codex adapter
+privately selects native compaction where supported, otherwise local summary.
+Generation-scoped negative native evidence clears only the native
+provider-default threshold, not common standalone support. Definitive native
+absence before semantic output permits one local request in the same
+transaction; cancellation and post-content failures do not. The extension
+performs no capability polling or model-refresh loop.
 
 The main runtime loop owns ChatGPT quota profile epochs and reconciliation.
 Prompt workers only report normalized observations through the worker channel;

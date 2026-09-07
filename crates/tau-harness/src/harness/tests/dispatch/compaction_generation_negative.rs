@@ -31,11 +31,11 @@ fn manual_cross_compaction_admits_generation_negative_model() {
     assert!(!h.provider_runtime.model_info[&"echo/model".into()].supports_standalone_compaction);
 }
 
-/// Generation-negative capability suppresses automatic compaction even when
-/// threshold and observed usage would otherwise qualify it, while an explicit
-/// UI request remains admissible through that existing harness boundary.
+/// Without a numeric provider default, the default policy has no boundary.
+/// Explicit UI requests still reach an extension with generation-negative
+/// evidence; the harness does not fabricate an extension-specific lowerer.
 #[test]
-fn generation_negative_model_suppresses_automatic_compaction_but_admits_manual_ui() {
+fn missing_provider_default_keeps_automatic_compaction_boundaryless_but_admits_manual_ui() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
@@ -47,7 +47,7 @@ fn generation_negative_model_suppresses_automatic_compaction_but_admits_manual_u
     info.supports_compaction = false;
     info.supports_standalone_compaction = false;
     info.standalone_compaction_generation_negative = true;
-    info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1));
+    info.standalone_compaction_threshold = None;
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.publish_for_agent(
@@ -80,7 +80,7 @@ fn generation_negative_model_suppresses_automatic_compaction_but_admits_manual_u
     }
     assert!(
         !h.schedule_standalone_auto_compaction(&cid),
-        "generation-negative capability must be the only ineligible automatic condition"
+        "provider_default without a numeric default has no scheduling authority"
     );
     assert_eq!(
         event_log_events(&h)

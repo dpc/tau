@@ -1024,7 +1024,7 @@ pub(crate) fn run_compact_through_shared_pool_observed(
     clippy::too_many_arguments,
     reason = "transport lifecycle callbacks remain separate typed boundaries"
 )]
-fn run_response_through_shared_pool(
+pub(crate) fn run_response_through_shared_pool(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
     agent_prompt_id: &str,
@@ -1179,8 +1179,9 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                 Err(WsTurnError::Other(other))
             }
             Err(err)
-                if recovery_decision(&err, observation.semantic_progress)
-                    == RecoveryDecision::Repair =>
+                if self.response_mode != ResponseMode::LocalSummary
+                    && recovery_decision(&err, observation.semantic_progress)
+                        == RecoveryDecision::Repair =>
             {
                 let silent_reconnects = self.pool.bump_silent_reconnects()?;
                 tracing::info!(
@@ -1284,6 +1285,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             }
             Err(err)
                 if self.record_config.is_none()
+                    && self.response_mode != ResponseMode::LocalSummary
                     && repair_budget_available(emit_dispatched)
                     && recovery_decision(&err, observation.semantic_progress)
                         == RecoveryDecision::Repair =>

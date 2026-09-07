@@ -32,6 +32,10 @@ retention is not the new 30-minute TTL.
 The approved runtime-cache-contract change 590b extends the routing snapshot
 with the private ChatGPT/Codex model's conservative, content-free response-chain
 contract; generic profiles remain absent unless explicitly configured.
+The approved configured-compaction change 4hk9 publishes standalone support for
+every Codex model, with native capability selecting native versus local-summary
+lowering. The routing snapshot changes only those four formerly native-absent
+model capability bits; it does not invent provider-default thresholds.
 
 Each `*.events.cbor` file is a length-prefixed, pre-`recorded_at`,
 pre-`observation_id` `PersistedAgentEvent` journal. Its matching JSON file is the

@@ -114,6 +114,8 @@ use tau_proto::{
     ProviderStopReason, SecretValue, ServerOffsetMillis, UnixMillis,
 };
 use tau_provider::local_summary_compaction::ConfigError as SummaryCompactionConfigError;
+mod compact_route;
+use compact_route::{apply_compact_route_downgrades, compact_with_local_fallback};
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
     AttemptOutcome as CodexAttemptOutcome, ChatGptRetryIdentity, CodexError, CodexMode,
@@ -7228,7 +7230,8 @@ enum WorkerMessage {
     },
     /// Marker that one prompt worker finished and freed a concurrency slot.
     PromptDone,
-    /// A canonical v2 unsupported code removed compaction for this generation.
+    /// A canonical unsupported code disabled native compaction for this
+    /// generation.
     CompactRouteUnavailable {
         /// Exact resolved profile generation that observed the rejection.
         identity: InferenceProfileIdentity,
@@ -9091,14 +9094,23 @@ fn handle_compact_prompt<R, S: ProviderReportSink>(
 where
     R: TurnAbort,
 {
-    // Standalone compaction deliberately has no inline fallback.
-    match execution.runtime.compact_numbered(
+    let outcome = execution.runtime.compact_numbered(
         agent_prompt_id,
         execution.logical_attempt,
         config,
         request,
         retry_ctx,
-    ) {
+    );
+    let outcome = compact_with_local_fallback(outcome, execution.compact_route_unavailable, || {
+        execution.runtime.local_compact_numbered(
+            agent_prompt_id,
+            execution.logical_attempt,
+            config,
+            request,
+            retry_ctx,
+        )
+    });
+    match outcome {
         CompactOutcome::Finished {
             output_items,
             usage,
@@ -9953,24 +9965,6 @@ fn replace_provider_models(
     models.extend(models_for_profiles(selected_profiles));
     models.sort_by(|left, right| left.id.provider.cmp(&right.id.provider));
     models
-}
-
-fn apply_compact_route_downgrades(
-    models: &mut [ProviderModelInfo],
-    identities: &HashMap<ProviderName, InferenceProfileIdentity>,
-    unavailable: &HashSet<InferenceProfileIdentity>,
-) {
-    for model in models {
-        if identities
-            .get(&model.id.provider)
-            .is_some_and(|identity| unavailable.contains(identity))
-            && model.supports_standalone_compaction
-        {
-            model.supports_standalone_compaction = false;
-            model.standalone_compaction_generation_negative = true;
-            model.standalone_compaction_threshold = None;
-        }
-    }
 }
 
 #[cfg(test)]

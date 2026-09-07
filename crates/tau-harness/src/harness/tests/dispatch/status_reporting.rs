@@ -1110,7 +1110,9 @@ fn self_info_uses_prompt_authority_and_current_runtime_status() {
         post_response.threshold,
         Some(tau_proto::TokenCount::new(750))
     );
-    assert_eq!(post_response.state, "unsupported");
+    // A configured numeric policy remains enabled independently of native
+    // capability; the provider owns its standalone implementation.
+    assert_eq!(post_response.state, "enabled");
     assert_eq!(info.provider_quota, None);
     assert_eq!(
         info.session_dir,

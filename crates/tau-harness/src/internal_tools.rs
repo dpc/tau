@@ -372,8 +372,6 @@ impl Harness {
                 };
                 let state = if !policy.enable {
                     "disabled"
-                } else if !standalone {
-                    "unsupported"
                 } else if threshold.is_some() {
                     "enabled"
                 } else {

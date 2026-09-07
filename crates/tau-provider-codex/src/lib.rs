@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 mod decoded_event;
+mod local_compaction;
 use attempt_context::{AttemptOperation, ProviderAttemptContext, RetryFailureInput};
 use responses::pool as path_responses_pool;
 use responses::ws::ResponseMode;
@@ -916,6 +917,17 @@ impl CodexRuntime {
                 on_update,
                 private_trace,
             ),
+            ResponseMode::LocalSummary => responses::pool::run_response_through_shared_pool(
+                &self.ws_pool,
+                config,
+                agent_prompt_id,
+                request,
+                Some(correlation),
+                response_mode,
+                abort,
+                on_update,
+                private_trace,
+            ),
         };
         let state = match dispatch {
             Ok(state) => state,
@@ -1188,7 +1200,8 @@ impl CodexRuntime {
         )
     }
 
-    /// Run one numbered native standalone-compaction attempt.
+    /// Run one numbered standalone-compaction attempt, preferring native
+    /// compaction only for models with that wire contract.
     pub fn compact_numbered(
         &self,
         agent_prompt_id: &str,
@@ -1197,6 +1210,15 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
+        if !supports_native_standalone_compaction(&config.wire().model_id) {
+            return self.local_compact_numbered(
+                agent_prompt_id,
+                logical_attempt,
+                config,
+                request,
+                abort,
+            );
+        }
         let metadata_enabled = self
             .cache_diagnostics
             .get_or_init(BTreeMap::new)
@@ -1323,7 +1345,9 @@ impl CodexRuntime {
                 return CompactOutcome::Canceled { backend_reached };
             }
             Err(error) => {
-                if error.is_compaction_route_unavailable() {
+                if error.is_compaction_route_unavailable()
+                    && attempt.progress() == SemanticProgress::None
+                {
                     let newly_downgraded = if let Some(probe) = probe {
                         probe.complete(CompactRouteState::Unavailable)
                     } else {
@@ -1677,7 +1701,7 @@ fn model_info(
             ThinkingSummary::Detailed,
         ],
         supports_compaction: !supports_native_standalone_compaction(model),
-        supports_standalone_compaction: supports_native_standalone_compaction(model),
+        supports_standalone_compaction: true,
         standalone_compaction_generation_negative: false,
         standalone_compaction_threshold: supports_native_standalone_compaction(model).then(|| {
             tau_proto::TokenCount::new(

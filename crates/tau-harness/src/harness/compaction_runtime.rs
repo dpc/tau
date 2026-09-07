@@ -1834,9 +1834,6 @@ impl Harness {
         let Some(info) = self.provider_runtime.model_info.get(&model) else {
             return false;
         };
-        if !info.supports_standalone_compaction {
-            return false;
-        }
         let prefix_budget = info.standalone_compaction_prefix_budget;
         let role_name = self.role_name_for_agent_id(cid);
         let role = self.config.available_roles.get(&role_name);

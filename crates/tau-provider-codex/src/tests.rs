@@ -516,9 +516,14 @@ fn chatgpt_models_publish_conservative_runtime_cache_contract() {
 }
 
 #[derive(Default)]
+/// Counts transport attempts and retains synthetic loopback request envelopes.
 struct TransportCounts {
+    /// Number of attempted WebSocket upgrades.
     ws_upgrade_requests: path_std_sync::atomic::AtomicUsize,
+    /// Number of unexpected HTTP inference requests.
     http_post_requests: path_std_sync::atomic::AtomicUsize,
+    /// Exact request envelopes sent to this synthetic peer.
+    requests: path_std_sync::Mutex<Vec<serde_json::Value>>,
 }
 
 /// Bounded loopback peer used to prove WebSocket routing never falls back.
@@ -576,6 +581,10 @@ enum LoopbackResponseMode {
     CompactExactSuccess,
     CompactRepairThenSuccess,
     CompactItemThenCloseThenSuccess,
+    LocalSummarySuccess,
+    CompactUnavailable,
+    CompactItemThenUnavailable,
+    CompactUnavailableWithEmbeddedItem,
 }
 
 fn spawn_ws_426_server() -> WsLoopbackServer {
@@ -635,6 +644,10 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     | LoopbackResponseMode::CompactExactSuccess
                     | LoopbackResponseMode::CompactRepairThenSuccess
                     | LoopbackResponseMode::CompactItemThenCloseThenSuccess
+                    | LoopbackResponseMode::LocalSummarySuccess
+                    | LoopbackResponseMode::CompactUnavailable
+                    | LoopbackResponseMode::CompactItemThenUnavailable
+                    | LoopbackResponseMode::CompactUnavailableWithEmbeddedItem
             ) {
                 let Ok(mut socket) = tungstenite::accept(stream) else {
                     continue;
@@ -642,7 +655,65 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 thread_counts
                     .ws_upgrade_requests
                     .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
-                let _ = socket.read();
+                if let Ok(tungstenite::Message::Text(request)) = socket.read() {
+                    thread_counts
+                        .requests
+                        .lock()
+                        .expect("requests")
+                        .push(serde_json::from_str(&request).expect("synthetic request JSON"));
+                }
+                if matches!(
+                    mode,
+                    LoopbackResponseMode::CompactUnavailable
+                        | LoopbackResponseMode::CompactItemThenUnavailable
+                        | LoopbackResponseMode::CompactUnavailableWithEmbeddedItem
+                ) {
+                    let item = serde_json::json!({
+                        "type": "compaction", "id": "cmp_uncommitted",
+                        "encrypted_content": "discard-me"
+                    });
+                    if matches!(mode, LoopbackResponseMode::CompactItemThenUnavailable) {
+                        let _ = socket.send(tungstenite::Message::Text(
+                            serde_json::json!({
+                                "type": "response.output_item.done", "output_index": 0,
+                                "item": item
+                            })
+                            .to_string()
+                            .into(),
+                        ));
+                    }
+                    let mut event = serde_json::json!({
+                        "type": "error", "code": "compaction_not_supported",
+                        "message": "unavailable"
+                    });
+                    if matches!(
+                        mode,
+                        LoopbackResponseMode::CompactUnavailableWithEmbeddedItem
+                    ) {
+                        event["item"] = item;
+                        event["output_index"] = 0.into();
+                    }
+                    let _ = socket.send(tungstenite::Message::Text(event.to_string().into()));
+                    continue;
+                }
+                if matches!(mode, LoopbackResponseMode::LocalSummarySuccess) {
+                    for event in [
+                        serde_json::json!({
+                            "type": "response.output_item.done", "output_index": 0,
+                            "item": {"type": "message", "role": "assistant",
+                                "content": [{"type": "output_text", "text": "Keep the invariant."}]}
+                        }),
+                        serde_json::json!({
+                            "type": "response.completed", "response": {
+                                "usage": {"input_tokens": 100, "output_tokens": 4,
+                                    "input_tokens_details": {"cached_tokens": 60}}
+                            }
+                        }),
+                    ] {
+                        let _ = socket.send(tungstenite::Message::Text(event.to_string().into()));
+                    }
+                    continue;
+                }
                 if matches!(mode, LoopbackResponseMode::CompactRepairThenSuccess)
                     && request_index == 0
                 {
@@ -851,7 +922,11 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 | LoopbackResponseMode::CompactItemThenClose
                 | LoopbackResponseMode::CompactExactSuccess
                 | LoopbackResponseMode::CompactRepairThenSuccess
-                | LoopbackResponseMode::CompactItemThenCloseThenSuccess => {
+                | LoopbackResponseMode::CompactItemThenCloseThenSuccess
+                | LoopbackResponseMode::LocalSummarySuccess
+                | LoopbackResponseMode::CompactUnavailable
+                | LoopbackResponseMode::CompactItemThenUnavailable
+                | LoopbackResponseMode::CompactUnavailableWithEmbeddedItem => {
                     unreachable!("handled above")
                 }
             }
@@ -1067,7 +1142,7 @@ fn compact_mixed_prefix_context() -> tau_proto::PromptContext {
 fn compact_pre_progress_failure_remains_retryable() {
     let server = spawn_ws_disconnect_server();
     let config = ResolvedConfig {
-        inner: test_config(server.base_url()),
+        inner: native_compact_test_config(server.base_url()),
     };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::parse("session-compact-pre-progress").expect("session");
@@ -1103,7 +1178,7 @@ fn compact_pre_progress_failure_remains_retryable() {
 fn compact_same_event_error_first_remains_retryable() {
     let server = spawn_loopback_server(LoopbackResponseMode::CompactErrorWithEmbeddedItem);
     let config = ResolvedConfig {
-        inner: test_config(server.base_url()),
+        inner: native_compact_test_config(server.base_url()),
     };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::parse("session-compact-error-first").expect("session");
@@ -1133,7 +1208,7 @@ fn compact_same_event_error_first_remains_retryable() {
 fn compact_post_progress_failure_is_terminal() {
     let server = spawn_loopback_server(LoopbackResponseMode::CompactItemThenClose);
     let config = ResolvedConfig {
-        inner: test_config(server.base_url()),
+        inner: native_compact_test_config(server.base_url()),
     };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::parse("session-compact-post-progress").expect("session");
@@ -1170,13 +1245,134 @@ fn compact_post_progress_failure_is_terminal() {
     );
 }
 
+/// Definitive absence authorizes fallback only before accepted native content.
+/// Error fields win over an embedded item in the same event; a previously
+/// accepted item instead terminalizes without downgrade or another dispatch.
+#[test]
+fn native_unavailable_respects_semantic_progress_and_event_ordering() {
+    for (mode, eligible) in [
+        (LoopbackResponseMode::CompactUnavailable, true),
+        (
+            LoopbackResponseMode::CompactUnavailableWithEmbeddedItem,
+            true,
+        ),
+        (LoopbackResponseMode::CompactItemThenUnavailable, false),
+    ] {
+        let server = spawn_loopback_server(mode);
+        let config = ResolvedConfig {
+            inner: native_compact_test_config(server.base_url()),
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("native-unavailable-session").expect("session");
+        let agent = tau_proto::AgentId::parse("native-unavailable-agent").expect("agent");
+        let context = compact_trigger_context();
+        let request = test_prompt_payload(&session, &agent, &context);
+        let outcome = runtime.compact("native-unavailable", &config, &request, &mut NeverAbort);
+        assert_eq!(
+            matches!(outcome, CompactOutcome::RouteUnavailable { .. }),
+            eligible
+        );
+        assert_eq!(
+            matches!(outcome, CompactOutcome::Terminal { .. }),
+            !eligible
+        );
+        assert_eq!(server.counts.requests.lock().expect("requests").len(), 1);
+        let admission = runtime.acquire_compact_probe(config.inference_identity(), &mut NeverAbort);
+        assert_eq!(
+            matches!(admission, CompactAdmissionResult::Unavailable),
+            eligible
+        );
+    }
+}
+
+/// Models without native capability lower the same immutable prefix through
+/// ordinary WS, retaining tools/cache identity while replacing only the trigger
+/// and disabling tool choice. The validated narrative and real usage return
+/// once.
+#[test]
+fn codex_local_summary_preserves_ordinary_prefix_and_usage() {
+    for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+        let server = spawn_loopback_server(LoopbackResponseMode::LocalSummarySuccess);
+        let mut config = resolved_config_for_model(
+            &ModelName::new("gpt-5.3-codex"),
+            ResolvedCredentials::new("token".to_owned(), None),
+            mode,
+        );
+        config.inner.base_url = server.base_url();
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("local-summary-session").expect("session");
+        let agent = tau_proto::AgentId::parse("local-summary-agent").expect("agent");
+        let context = compact_mixed_prefix_context();
+        let request = test_prompt_payload(&session, &agent, &context);
+        let mut expected_context = context.clone();
+        tau_provider::local_summary_compaction::replace_trailing_trigger(&mut expected_context)
+            .expect("trailing trigger");
+        let mut expected_request = test_prompt_payload(&session, &agent, &expected_context);
+        expected_request.tool_choice = tau_proto::ToolChoice::None;
+        let expected = serde_json::to_value(responses::build_ws_envelope(
+            config.wire(),
+            &expected_request,
+            None,
+            None,
+        ))
+        .expect("ordinary envelope");
+        let CompactOutcome::Finished {
+            output_items,
+            usage,
+        } = runtime.compact("local-summary", &config, &request, &mut NeverAbort)
+        else {
+            panic!("local summary must finish");
+        };
+        assert!(matches!(output_items.as_slice(),
+            [tau_proto::ContextItem::LocalCompactionNarrative(item)]
+                if item.narrative == "Keep the invariant."));
+        let usage = usage.expect("real usage");
+        assert_eq!(usage.prompt_sent_tokens, 100);
+        assert_eq!(usage.prompt_cached_tokens, 60);
+        assert_eq!(usage.response_received_tokens, 4);
+        let requests = server.counts.requests.lock().expect("requests");
+        assert_eq!(requests.as_slice(), &[expected]);
+        assert_eq!(requests[0]["tool_choice"], "none");
+        assert!(
+            requests[0].get("max_output_tokens").is_none(),
+            "Codex has no supported remote generation-cap field"
+        );
+    }
+}
+
+/// A local summary failure is one finite attempt, not another repair/retry
+/// chain. Tentative semantic output and pre-progress failures both remain
+/// private.
+#[test]
+fn codex_local_summary_failure_never_repairs() {
+    for mode in [
+        LoopbackResponseMode::RepairThenSuccess,
+        LoopbackResponseMode::SemanticThenClose,
+    ] {
+        let server = spawn_loopback_server(mode);
+        let config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("local-failure-session").expect("session");
+        let agent = tau_proto::AgentId::parse("local-failure-agent").expect("agent");
+        let context = compact_trigger_context();
+        let request = test_prompt_payload(&session, &agent, &context);
+        assert!(matches!(
+            runtime.compact("local-failure", &config, &request, &mut NeverAbort),
+            CompactOutcome::Terminal { .. }
+        ));
+        assert_eq!(server.counts.requests.lock().expect("requests").len(), 1);
+    }
+}
+
 /// Native compact success remains exactly one canonical compaction item
 /// followed by `response.completed`.
 #[test]
 fn compact_exact_success_returns_one_item() {
     let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
     let config = ResolvedConfig {
-        inner: test_config(server.base_url()),
+        inner: native_compact_test_config(server.base_url()),
     };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::parse("session-compact-exact-success").expect("session");
@@ -1268,7 +1464,7 @@ fn astra_native_compaction_returns_one_opaque_item() {
 fn compact_explicit_new_request_dispatches_after_post_progress_failure() {
     let server = spawn_loopback_server(LoopbackResponseMode::CompactItemThenCloseThenSuccess);
     let config = ResolvedConfig {
-        inner: test_config(server.base_url()),
+        inner: native_compact_test_config(server.base_url()),
     };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id =
@@ -1310,7 +1506,7 @@ fn compact_explicit_new_request_dispatches_after_post_progress_failure() {
 #[test]
 fn compact_large_fixed_material_reaches_canonical_context_rejection_once() {
     let server = spawn_direct_ws_context_error_server();
-    let mut config = test_config(server.base_url());
+    let mut config = native_compact_test_config(server.base_url());
     config.raw_context_window = tau_proto::TokenCount::new(1_000);
     let session_id =
         tau_proto::SessionId::parse("session-compact-provider-limit").expect("session id");
@@ -1358,6 +1554,13 @@ fn compact_large_fixed_material_reaches_canonical_context_rejection_once() {
             .load(std::sync::atomic::Ordering::SeqCst),
         0
     );
+}
+
+/// Select a model with the native standalone wire contract for native oracles.
+fn native_compact_test_config(base_url: String) -> responses::ResponsesConfig {
+    let mut config = test_config(base_url);
+    config.model_id = "gpt-5.6-sol".to_owned();
+    config
 }
 
 pub(crate) fn test_config(base_url: String) -> responses::ResponsesConfig {
@@ -1791,7 +1994,7 @@ fn cache_diagnostics_compact_outcomes_preserve_dispatch_and_progress() {
     ] {
         let server = spawn_loopback_server(mode);
         let mut config = ResolvedConfig {
-            inner: test_config(server.base_url()),
+            inner: native_compact_test_config(server.base_url()),
         };
         config.inner.api_key = "PRIVATE_COMPACT_ACCESS_TOKEN".to_owned();
         let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
@@ -1919,7 +2122,7 @@ fn cache_diagnostics_compact_policy_and_local_exits() {
     ] {
         let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
         let config = ResolvedConfig {
-            inner: test_config(server.base_url()),
+            inner: native_compact_test_config(server.base_url()),
         };
         let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
         runtime.initialize_cache_diagnostics(BTreeMap::from([(

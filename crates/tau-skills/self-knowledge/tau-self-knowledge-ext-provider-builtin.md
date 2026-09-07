@@ -441,8 +441,14 @@ named after-done policies can run earlier. Astra remains on standard Responses
 even when its profile requests Lite compatibility. Manual and automatic native
 compaction send the full closed window plus `compaction_trigger` over the
 ordinary Responses WebSocket route and install exactly one validated opaque
-compaction item. The harness preserves the exact post-cut suffix. There is no
-generic local-summary or surface-switch fallback for ChatGPT.
+compaction item. The harness preserves the exact post-cut suffix. All Codex
+models support standalone compaction: native where available, otherwise local
+summary through the same ordinary Responses mode. A definitive native rejection
+before semantic output permits one local request in the same transaction;
+known native absence goes directly local. Local attempts never repair or retry,
+and cancellation or post-content native failure never falls back. Native absence
+clears only the native default threshold, not configured numeric/reserve
+policies. There is no surface-switch fallback.
 The startup mode also separates prompt
 cache/thread/socket identity, causing one cold transition after upgrade, while
 quota and retry identity remain account/provider based.
@@ -523,6 +529,16 @@ stable anti-herd jitter. Errors, cancellation, stale successes, and best-effort
 quota display updates do not clear inference cooldowns.
 
 ## Tau-owned summary compaction fallback
+
+Configured named thresholds decide when to compact, independently of capability
+metadata. Existing usage, lifecycle/status, closed-cut, and prefix-budget safety
+checks still apply. `provider_default` without a numeric default has no boundary.
+External extensions must own their standalone lowering; Tau cannot fabricate
+wire support for one that rejects the common operation.
+Codex local summary uses the shared final-trigger instruction, disables tool
+choice, and validates one private 256 KiB-bounded narrative while discarding
+reasoning and rejecting tools. Its private wire has no supported output-token
+cap or override object; acceptance bounds do not limit remote generation.
 
 Chat Completions, OpenRouter, and public Responses models advertise standalone
 summary compaction by default when their configured context window is nonzero.

@@ -23,8 +23,8 @@ fn oauth_test_credential_reference() -> ProviderCredentialReference {
     .expect("valid OAuth credential reference")
 }
 
-/// A route downgrade must stop automatic compaction while preserving explicit
-/// identity-refresh admission only for the affected provider generation.
+/// Native absence clears only that generation's provider-default boundary:
+/// every Codex model still supports the common operation through local summary.
 #[test]
 fn compact_route_downgrade_republishes_honest_capability() {
     let unavailable = ProviderName::new("chatgpt");
@@ -47,8 +47,8 @@ fn compact_route_downgrade_republishes_honest_capability() {
                     && (model.id.model.as_str().starts_with("gpt-5.6-")
                         || model.id.model.as_str() == "gpt-6-astra")
             })
-            .all(|model| !model.supports_standalone_compaction
-                && model.standalone_compaction_generation_negative
+            .all(|model| model.supports_standalone_compaction
+                && !model.standalone_compaction_generation_negative
                 && model.supports_explicit_standalone_compaction()
                 && model.standalone_compaction_threshold.is_none())
     );
@@ -60,9 +60,9 @@ fn compact_route_downgrade_republishes_honest_capability() {
                     && !model.id.model.as_str().starts_with("gpt-5.6-")
                     && model.id.model.as_str() != "gpt-6-astra"
             })
-            .all(|model| !model.supports_standalone_compaction
+            .all(|model| model.supports_standalone_compaction
                 && !model.standalone_compaction_generation_negative
-                && !model.supports_explicit_standalone_compaction())
+                && model.supports_explicit_standalone_compaction())
     );
     assert!(
         models
@@ -74,6 +74,102 @@ fn compact_route_downgrade_republishes_honest_capability() {
     );
 }
 
+/// Only the typed pre-content native-absence outcome permits a local attempt.
+/// The switch reports new negative evidence once and never recursively retries
+/// a local failure; native success, retry, cancellation, and terminal failure
+/// retain their existing ownership.
+#[test]
+fn compact_fallback_is_one_attempt_only_for_definitive_native_absence() {
+    let error = || {
+        tau_provider_codex::CodexError::from_repetition(tau_provider::StreamRepetition {
+            key: tau_provider::StreamRepetitionKey::AssistantText { output_index: 0 },
+            mode: tau_provider::RepetitionMode::Fragment,
+            snippet: ".".to_owned(),
+        })
+    };
+    for newly_downgraded in [false, true] {
+        let mut downgrades = 0;
+        let mut calls = 0;
+        let identity = InferenceProfileIdentity::from_test_value(42);
+        let outcome = compact_with_local_fallback(
+            CompactOutcome::RouteUnavailable {
+                error: error(),
+                newly_downgraded,
+                profile_identity: identity,
+                backend_reached: newly_downgraded,
+            },
+            |observed| {
+                assert!(observed == identity);
+                downgrades += 1;
+            },
+            || {
+                calls += 1;
+                CompactOutcome::Terminal {
+                    error: error(),
+                    backend_reached: true,
+                }
+            },
+        );
+        assert!(matches!(outcome, CompactOutcome::Terminal { .. }));
+        assert_eq!(calls, 1);
+        assert_eq!(downgrades, usize::from(newly_downgraded));
+    }
+    for outcome in [
+        CompactOutcome::Finished {
+            output_items: Vec::new(),
+            usage: None,
+        },
+        CompactOutcome::Canceled {
+            backend_reached: true,
+        },
+        CompactOutcome::Terminal {
+            error: error(),
+            backend_reached: true,
+        },
+        CompactOutcome::Retry {
+            decision: RetryDecision::new(RetryClass::Transport),
+            backend_reached: true,
+        },
+    ] {
+        compact_with_local_fallback(
+            outcome,
+            |_| panic!("no native downgrade"),
+            || panic!("no local attempt"),
+        );
+    }
+    for local_canceled in [false, true] {
+        let outcome = compact_with_local_fallback(
+            CompactOutcome::RouteUnavailable {
+                error: error(),
+                newly_downgraded: true,
+                profile_identity: InferenceProfileIdentity::from_test_value(42),
+                backend_reached: true,
+            },
+            |_| {},
+            || {
+                if local_canceled {
+                    CompactOutcome::Canceled {
+                        backend_reached: false,
+                    }
+                } else {
+                    CompactOutcome::Terminal {
+                        error: error(),
+                        backend_reached: false,
+                    }
+                }
+            },
+        );
+        assert!(matches!(
+            outcome,
+            CompactOutcome::Canceled {
+                backend_reached: true
+            } | CompactOutcome::Terminal {
+                backend_reached: true,
+                ..
+            }
+        ));
+    }
+}
 /// Pins the production prompt-worker default so ordinary provider instances
 /// admit eight prompt jobs without an environment override.
 #[test]

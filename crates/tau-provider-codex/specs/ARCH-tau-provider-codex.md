@@ -41,12 +41,25 @@ Ordinary ChatGPT/Codex Responses inference always uses the pooled WebSocket
 transport. There is no surface or transport selector and no HTTP/SSE inference
 fallback. Capability, connection-limit, and retryable WebSocket failures surface
 to the outer logical-prompt scheduler rather than replaying the prompt over HTTP.
-HTTPS remains supported for OAuth and quota acquisition. Standalone ChatGPT
-compaction uses the ordinary pooled Responses WebSocket route, starts a fresh
-chain, and sends the complete provider-visible window followed by one
+HTTPS remains supported for OAuth and quota acquisition. Native standalone
+ChatGPT compaction uses the ordinary pooled Responses WebSocket route, starts a
+fresh chain, and sends the complete provider-visible window followed by one
 `compaction_trigger`. Per-request metadata identifies Tau truthfully and carries
 the model/service-tier routing hint; Tau does not claim a Codex installation or
 attestation identity.
+
+Every published Codex model supports the common standalone operation. Native
+capability selects implementation, not configured policy eligibility. Known
+native absence selects Tau's local-summary lowerer; definitive native absence
+before semantic output permits one local request in the same transaction.
+Local summary replaces the exact trailing trigger with the shared summary
+instruction and uses ordinary fresh-chain lowering with tool choice disabled.
+It keeps semantic output private, rejects tool/unknown output, discards
+reasoning, and accepts one bounded narrative. The private Codex wire has no
+supported output-token cap; acceptance byte bounds do not cap remote generation.
+Existing WebSocket receive/retained-state bounds and cancellation still apply.
+Local summary never repairs or retries. Native transient retry remains unchanged;
+cancellation and post-content native failures never fall back.
 
 The model publishes no inferred historical-prefix byte budget. Tau initially
 sends the exact normalized provider-closed target with the same mode, system

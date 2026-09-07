@@ -46,8 +46,10 @@ published model `max_output_tokens` then narrows the resolved summary request.
 Removed duplicate-context and serialization-selector fields are
 configuration errors with migration diagnostics. Override validation occurs
 before any model publication or Ready signal. These bounds publish no proactive
-threshold. Provider-native ChatGPT/Codex compaction remains preferred and
-unchanged.
+threshold. Provider-native ChatGPT/Codex compaction remains preferred where
+available. Other Codex models use the same ordinary-prefix summary contract,
+with bounded narrative/reasoning acceptance and existing transport resource
+bounds, but no invented remote output-token cap on the private Codex wire.
 
 The compaction request lowers the selected immutable cut exactly as ordinary
 inference does: the same system prompt, tool definitions, ordered typed history,
@@ -223,21 +225,20 @@ discards the uncommitted output and terminalizes without automatic retry;
 recovery requires a distinct explicit request. Deterministic failures,
 including context-window exhaustion, are terminal immediately. Ordinary
 inference deliberately retains its unbounded transient-retry policy.
-The Codex adapter serializes the first v2 compaction probe for a route/account
-generation. A compaction-specific request rejection removes standalone
-capability for that generation; explicit tools and automatic recovery share the
-downgrade. The provider publishes that generation-negative state separately
-from routes that never support standalone compaction. Automatic compaction
-treats it as unavailable, while an explicit `:compact`, `compact`, or authorized
-`agent_compact` request may ask the provider to refresh the credential/account
-identity. An unchanged identity retains the negative observation without a
-network probe. A changed identity invalidates only the stale observation and
-admits one serialized fresh probe for the new generation; concurrent explicit
-requests coalesce behind its capability result, then each successful waiter may
-compact its own context. A compaction-specific rejection marks the new
-generation negative and fails every waiter without redundant probes. Identity
-refresh is request-driven: no proactive polling, unrelated inference, or model
-republication is required. Negative capability evidence is not persisted.
+The Codex adapter selects native compaction privately when the model supports
+its wire contract, otherwise local summary. It serializes the first native probe
+for a route/account generation. A definitive compaction-specific rejection
+before accepted semantic output marks only the native route unavailable and
+immediately permits one local-summary request in the same transaction. This
+exact extra-attempt behavior was explicitly approved by the user. The local
+attempt has no transparent repair or logical retry. Cancellation and failure
+after accepted semantic output never select another implementation.
+An unchanged negative identity goes directly local without another native
+network probe. A changed identity permits one fresh serialized native probe;
+concurrent waiters retain their own transactions and select local if that probe
+proves native absence. Negative evidence remains process-local. The common
+standalone capability remains available, while a native provider-default
+threshold is cleared. No proactive capability polling is required.
 An explicit `:compact` or authorized `agent_compact` request may recover a
 terminally failed standalone transaction. Its successor may preserve the
 failed cut or retreat it along the same ancestor path to obtain a closed
@@ -502,6 +503,14 @@ Larger reserves fail explicitly instead of saturating, and unavailable model
 metadata cannot be replaced with a provider default or guessed window.
 
 Named automatic-compaction policies are harness-scheduled standalone policies.
+Explicit resolved boundaries do not depend on native or standalone capability
+metadata: configuration decides when, and the adapter chooses how. All existing
+usage, model, lifecycle/status, closed-cut, transaction, and prefix-budget gates
+still apply. A `provider_default` policy without a numeric provider default
+remains boundary-less. Built-in providers own native or local lowering; an
+external extension must implement the common standalone operation itself.
+The harness does not manufacture provider wire requests for an extension that
+rejects that operation.
 The built-in named `default` policy runs at `before_inference` at the
 adapter-published context-limit-safe threshold. Other named policies augment it;
 only disabling `default` or legacy replace-all disabling removes that safety

@@ -3,7 +3,7 @@
 use super::*;
 
 /// A reserve boundary resolves against the selected model's separate legal
-/// input limit and preserves threshold equality for proactive compaction.
+/// input limit and preserves threshold equality even without native capability.
 #[test]
 fn reserve_policy_schedules_at_selected_model_boundary() {
     let td = TempDir::new().expect("tempdir");
@@ -18,7 +18,9 @@ fn reserve_policy_schedules_at_selected_model_boundary() {
         .expect("test model");
     info.context_window = tau_proto::TokenCount::new(120);
     info.max_input_tokens = Some(tau_proto::TokenCount::new(100));
-    info.supports_standalone_compaction = true;
+    info.supports_standalone_compaction = false;
+    info.standalone_compaction_generation_negative = true;
+    info.standalone_compaction_threshold = None;
     let role = h
         .config
         .available_roles
@@ -477,7 +479,8 @@ fn zero_named_policy_does_not_suppress_positive_outer_turn_sibling() {
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
-    info.supports_standalone_compaction = true;
+    info.supports_standalone_compaction = false;
+    info.standalone_compaction_threshold = None;
     let cid = ensure_test_user_agent(&mut h);
     let role = h
         .config

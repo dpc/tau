@@ -1011,7 +1011,12 @@ same system prompt, tools, ordered history, images, raw tool-call arguments,
 route/model fields, and cache controls. It appends one harness-authored
 `<tau_internal>` user message last. This preserves eligibility for provider
 prefix-cache reuse; actual cache hits remain provider-controlled. ChatGPT/Codex
-models continue to prefer their unchanged provider-native compaction.
+models prefer provider-native compaction where available and otherwise use
+ordinary-prefix local summary. All built-in Codex models support standalone
+compaction. Their private wire has no supported remote output-token cap or
+`local_summary_compaction` override object; the 256 KiB narrative/reasoning
+acceptance bounds and existing WebSocket resource limits are not a remote
+generation cap.
 
 Any returned tool call rejects compaction and executes nothing. Tau accepts
 exactly one nonempty bounded assistant final text, discards separately bounded
@@ -1299,8 +1304,15 @@ Responses WebSocket request with the full window and a final
 opaque provider compaction item; Tau does not copy items from the compacted
 prefix back into the replacement. The harness preserves the exact ordered
 post-cut suffix, including facts accepted while compaction runs. A
-route/account rejection removes capability for that credential generation;
-rotation permits one fresh serialized probe.
+definitive native-route rejection before semantic output selects one local
+summary attempt in the same transaction and clears only that generation's
+native default threshold. Configured numeric thresholds and reserves still
+trigger; no numeric provider default means no default boundary. Known native
+absence goes directly local, and identity rotation permits one fresh serialized
+native probe. Local attempts do not repair or retry, and neither cancellation
+nor failure after native content permits fallback. Arbitrary external provider
+extensions still own their standalone lowering: the harness cannot synthesize
+an implementation for an extension that rejects the operation.
 After setup, ChatGPT/Codex inference uses WebSocket exclusively with a separate
 five-minute idle watchdog. The watchdog resets on each provider frame and is not
 an absolute turn-duration cap. If upstream goes quiet, Tau

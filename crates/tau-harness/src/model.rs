@@ -554,9 +554,6 @@ pub(crate) fn resolve_compaction_policies_for_prompt(
         }
         return Ok(BTreeMap::new());
     };
-    if !info.supports_standalone_compaction {
-        return Ok(BTreeMap::new());
-    }
     let mut resolved_policies = BTreeMap::new();
     for (name, policy) in policies {
         if !policy.enable {
