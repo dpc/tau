@@ -694,6 +694,63 @@ fn places_state_before_history_and_live_after_boundary() {
     assert!(matches!(ready.as_slice(), [value] if value.event.as_ref() == &live));
 }
 
+/// Tool-bearing replay may end transcript reordering early, but it must not
+/// make later attach snapshots look like live initialization.
+#[test]
+fn tool_history_keeps_later_attach_snapshots_silent_until_boundary() {
+    let mut stager = ColdAttachStager::staging();
+    let tool = historical_tool_error();
+    let tool_ready = stager.admit(replay(tool.clone(), 1, 1));
+    assert!(matches!(tool_ready.as_slice(), [value] if value.event.as_ref() == &tool));
+
+    let snapshots = [
+        Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
+            session_id: "session-1".parse().expect("valid session id"),
+            path: "/tmp/session-1".into(),
+            status: tau_proto::SessionDirStatus::Resumed,
+        }),
+        Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
+            tau_proto::notice_kind::HARNESS_NOTICE,
+            "provider profile disabled",
+            tau_proto::NoticeLevel::Warning,
+        )),
+        Event::ExtensionReady(tau_proto::ExtensionReady {
+            extension_name: "test-extension".parse().expect("valid extension name"),
+            instance_id: 1.into(),
+            pid: Some(123),
+        }),
+        Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            session_id: "session-1".parse().expect("valid session id"),
+            agent_id: "agent-1".parse().expect("valid agent id"),
+            agent_initialization_id: "init-1".parse().expect("valid initialization id"),
+            listed_skills: Vec::new(),
+            agents_files: Vec::new(),
+        }),
+    ];
+    for (index, snapshot) in snapshots.into_iter().enumerate() {
+        let ready = stager.admit(replay(snapshot, 1, index as u64 + 2));
+        assert!(matches!(
+            ready.as_slice(),
+            [delivery]
+                if matches!(
+                    delivery.presentation,
+                    RendererPresentation::ColdAttachReplay
+                )
+        ));
+    }
+
+    let boundary = stager.admit(live(replay_complete(), 6));
+    assert!(matches!(
+        boundary.last().map(|delivery| &delivery.presentation),
+        Some(RendererPresentation::FinishAttach { .. })
+    ));
+    let live = stager.admit(live(Event::TermBell(tau_proto::TermBell {}), 7));
+    assert!(matches!(
+        live.as_slice(),
+        [delivery] if matches!(delivery.presentation, RendererPresentation::Ordinary)
+    ));
+}
+
 /// Remote termination must release staged rows before disconnect admission.
 #[test]
 fn drains_history_before_disconnect() {
@@ -735,6 +792,37 @@ fn pass_through_preserves_protocol_order() {
     assert!(
         matches!(second_ready.as_slice(), [value] if value.event.as_ref() == &second && value.delivery_id == RendererDeliveryId::new(2))
     );
+    assert!(matches!(
+        first_ready[0].presentation,
+        RendererPresentation::Ordinary
+    ));
+    assert!(matches!(
+        second_ready[0].presentation,
+        RendererPresentation::Ordinary
+    ));
+}
+
+/// Owning and resumed UIs must keep genuine startup lifecycle presentation
+/// rather than inheriting the attach-only silent snapshot policy.
+#[test]
+fn pass_through_keeps_real_initialization_presentation() {
+    let mut stager = ColdAttachStager::pass_through();
+    let delivery = tau_proto::EventDelivery::replay(
+        UnixMicros::new(1),
+        Event::ExtensionReady(tau_proto::ExtensionReady {
+            extension_name: "test-extension".parse().expect("valid extension name"),
+            instance_id: 1.into(),
+            pid: Some(123),
+        }),
+    );
+    let delivery = renderer_event_from_delivery(delivery, 1, RendererDeliveryId::new(1))
+        .expect("startup lifecycle delivery");
+    let ready = stager.admit(delivery);
+
+    assert!(matches!(
+        ready.as_slice(),
+        [delivery] if matches!(delivery.presentation, RendererPresentation::Replay)
+    ));
 }
 
 /// Item overflow must flush retained history in relative order and stop

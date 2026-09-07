@@ -195,6 +195,9 @@ enum AttachSelection {
 pub(super) struct ColdAttachStager {
     /// Current presentation behavior.
     phase: StagingPhase,
+    /// Whether routine current-state catch-up still needs attach-only silent
+    /// presentation, independently from transcript reordering.
+    cold_attach_presentation: bool,
     /// Historical transcript deliveries withheld until current-state catch-up
     /// ends.
     transcript: Vec<RendererDelivery>,
@@ -254,6 +257,7 @@ impl ColdAttachStager {
     pub(super) fn staging() -> Self {
         Self {
             phase: StagingPhase::Staging,
+            cold_attach_presentation: true,
             transcript: Vec::new(),
             transcript_bytes: 0,
             shell_reconciliation: ShellReconciliation::Collecting {
@@ -274,6 +278,7 @@ impl ColdAttachStager {
     pub(super) fn pass_through() -> Self {
         Self {
             phase: StagingPhase::PassThrough,
+            cold_attach_presentation: false,
             transcript: Vec::new(),
             transcript_bytes: 0,
             shell_reconciliation: ShellReconciliation::Collecting {
@@ -291,8 +296,7 @@ impl ColdAttachStager {
     /// Admits one decoded delivery and returns deliveries ready for rendering.
     pub(super) fn admit(&mut self, mut delivery: RendererDelivery) -> Vec<RendererDelivery> {
         self.observe_attach_agent_candidate(delivery.event.as_ref(), delivery.queue_bytes);
-        if matches!(self.phase, StagingPhase::Staging)
-            && !matches!(self.attach_selection, AttachSelection::Disabled)
+        if self.cold_attach_presentation
             && matches!(
                 delivery.presentation,
                 RendererPresentation::Ordinary | RendererPresentation::Replay
@@ -330,6 +334,7 @@ impl ColdAttachStager {
             delivery.presentation = RendererPresentation::FinishAttach {
                 target: self.take_initial_attach_target(),
             };
+            self.cold_attach_presentation = false;
             delivery.abandoned_shell_starts = self.finish_shell_reconciliation();
         }
         match (&mut self.shell_reconciliation, delivery.event.as_ref()) {
@@ -970,6 +975,7 @@ impl ColdAttachStager {
 
     /// Drains retained history before a remote termination is enqueued.
     pub(super) fn finish_before_disconnect(&mut self) -> Vec<RendererDelivery> {
+        self.cold_attach_presentation = false;
         self.attach_selection = AttachSelection::Disabled;
         self.finish_tool_reconstruction(None, false)
     }
