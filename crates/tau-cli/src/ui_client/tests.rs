@@ -98,7 +98,17 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
     assert!(!subscription.historical_selectors.contains(&prompt_rejected));
     assert!(subscription.live_selectors.contains(&prompt_rejected));
 
-    for event in [EventName::TERM_OSC1337_SET_USER_VAR, EventName::TERM_BELL] {
+    for event in [
+        EventName::AGENT_PROMPT_STARTED,
+        EventName::AGENT_PROMPT_TERMINATED,
+        EventName::AGENT_PROMPT_RECALLED,
+        EventName::PROVIDER_PROMPT_SUBMITTED,
+        EventName::PROVIDER_RESPONSE_UPDATED,
+        EventName::TOOL_PROGRESS,
+        EventName::SHELL_COMMAND_PROGRESS,
+        EventName::TERM_OSC1337_SET_USER_VAR,
+        EventName::TERM_BELL,
+    ] {
         let selector = EventSelector::Exact(event);
         assert!(!subscription.historical_selectors.contains(&selector));
         assert!(subscription.live_selectors.contains(&selector));
@@ -109,6 +119,10 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
         EventName::TOOL_RESULT_DISPLAY,
         EventName::TOOL_BACKGROUND_RESULT_DISPLAY,
         EventName::TOOL_ERROR,
+        // These transient event names also identify current-state snapshots.
+        EventName::AGENT_PROMPT_QUEUED,
+        EventName::AGENT_STATS_UPDATED,
+        EventName::AGENT_WATCHES_UPDATED,
     ] {
         let selector = EventSelector::Exact(event);
         assert!(subscription.historical_selectors.contains(&selector));

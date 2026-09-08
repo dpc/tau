@@ -60,7 +60,10 @@ Requests default to `persist=false` and never enter semantic agent, session, or 
 journals for either caller-supplied `persist` value. They are operational
 observations and never rerun after restart. Canonical facts remain durable,
 extension-visible state; replay synthesizes the latest folded values before
-`session.agent_loaded` and removes live mutation ids.
+`session.agent_loaded` without mutation ids. Historical selection also delivers
+recorded metadata mutations, including their recorded correlation ids, after
+the snapshot. Consumers distinguish history from live commit echoes using the
+delivery's replay marker, not the presence of a mutation id.
 
 `tau-ext-shell` sends explicit transient set requests and completes setters
 only after receiving the correlated canonical commit. Its subscriptions,

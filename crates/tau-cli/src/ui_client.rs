@@ -450,18 +450,29 @@ pub(crate) fn subscribe_message(selectors: Vec<EventSelector>) -> HarnessInputMe
     })
 }
 
-/// Builds the production chat subscription with terminal side effects
-/// restricted to live delivery.
+/// Builds the production chat subscription. Historical selection belongs to the
+/// UI: replay final transcript facts and current snapshots, not old progress or
+/// prompt-owner transitions that would resurrect activity.
 pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
     let live_selectors = chat_subscription_selectors();
+    let live_only = [
+        EventName::AGENT_PROMPT_STARTED,
+        EventName::AGENT_PROMPT_TERMINATED,
+        EventName::AGENT_PROMPT_FAILED,
+        EventName::AGENT_PROMPT_REJECTED,
+        EventName::AGENT_PROMPT_RECALLED,
+        EventName::PROVIDER_PROMPT_SUBMITTED,
+        EventName::PROVIDER_RESPONSE_UPDATED,
+        EventName::TOOL_PROGRESS,
+        EventName::SHELL_COMMAND_PROGRESS,
+        EventName::TERM_OSC1337_SET_USER_VAR,
+        EventName::TERM_BELL,
+    ];
     let historical_selectors = live_selectors
         .iter()
-        .filter(|selector| {
-            **selector != EventSelector::Exact(EventName::AGENT_PROMPT_FAILED)
-                && **selector != EventSelector::Exact(EventName::AGENT_PROMPT_REJECTED)
-                && **selector != EventSelector::Exact(EventName::TERM_OSC1337_SET_USER_VAR)
-                && **selector != EventSelector::Exact(EventName::TERM_BELL)
-        })
+        .filter(
+            |selector| !matches!(selector, EventSelector::Exact(name) if live_only.contains(name)),
+        )
         .cloned()
         // Historical provider errors normalize into logical tool errors during
         // cold attach. Live provider errors are deliberately ignored in favor

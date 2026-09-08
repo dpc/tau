@@ -8,21 +8,22 @@
 //! session history to every peer that subscribed *before* init — on resume,
 //! that history predates the process and is never published live, so without
 //! this pass a startup extension would know less than one that joined a
-//! second later. Catch-up is semantic state reconstruction, not a readback of
-//! a retained event log:
+//! second later. Catch-up combines subscriber-selected durable history with
+//! reconstructed current state:
 //!
 //! - [`Harness::replay_session_events`] announces the current loaded-agent
-//!   snapshot, then replays each loaded agent's durable transcript facts from
-//!   the global agent store.
+//!   snapshot, then replays each loaded agent's selected durable facts from the
+//!   global agent store. Subscribers own event selection; the harness does not
+//!   restrict agent history to events useful to the transcript UI.
 //! - [`Harness::replay_harness_notice`] reconstructs current harness status
 //!   from live state snapshots, so a subscriber that just joined sees the same
 //!   indicators as one that was here from the start without retaining old
 //!   runtime events.
 //!
-//! Historical transcript facts are delivered as replay-marked frames
-//! ([`tau_proto::EventDelivery::is_replay`]); side-effecting consumers (sound
-//! notifications, tool execution) must skip those frames and react only to
-//! live deliveries.
+//! Selected historical facts and current snapshots are delivered as
+//! replay-marked frames ([`tau_proto::EventDelivery::is_replay`]);
+//! side-effecting consumers (sound notifications, tool execution) must skip
+//! those frames and react only to live deliveries.
 
 use std::{cmp as path_std_cmp, collections as path_std_collections};
 
@@ -134,7 +135,7 @@ impl Harness {
     }
 
     /// Catches one subscriber up on the bound session's content: the
-    /// loaded-agent roster, each agent's durable transcript facts, the bounded
+    /// loaded-agent roster, each agent's selected durable facts, the bounded
     /// UI-only running-shell current state, and currently queued prompts.
     ///
     /// Called from two places: subscribe-time catch-up (after the
@@ -308,18 +309,16 @@ impl Harness {
                 continue;
             };
             for entry in events {
-                if should_replay_agent_event_to_late_subscriber(&entry.event) {
-                    let event = project_agent_replay_event(entry.event, is_ui);
-                    if !selector_matches_event(selectors, &event) {
-                        continue;
-                    }
-                    let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
-                    let source = entry
-                        .source
-                        .as_ref()
-                        .and_then(tau_core::PersistedEventSource::connection_id);
-                    let _ = self.runtime_io.bus.send_to(client_id, source, frame);
+                let event = project_agent_replay_event(entry.event, is_ui);
+                if !selector_matches_event(selectors, &event) {
+                    continue;
                 }
+                let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
+                let source = entry
+                    .source
+                    .as_ref()
+                    .and_then(tau_core::PersistedEventSource::connection_id);
+                let _ = self.runtime_io.bus.send_to(client_id, source, frame);
             }
         }
         let stats_events = loaded_agents
@@ -539,22 +538,19 @@ impl Harness {
                         }
                     }
                     for entry in events {
-                        if should_replay_agent_event_to_late_subscriber(&entry.event) {
-                            let event = project_agent_replay_event(
-                                entry.event.clone(),
-                                kind == tau_proto::ClientKind::Ui,
-                            );
-                            if !selector_matches_event(&selectors, &event) {
-                                continue;
-                            }
-                            let frame =
-                                HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
-                            let source = entry
-                                .source
-                                .as_ref()
-                                .and_then(tau_core::PersistedEventSource::connection_id);
-                            let _ = self.runtime_io.bus.send_to(&client_id, source, frame);
+                        let event = project_agent_replay_event(
+                            entry.event.clone(),
+                            kind == tau_proto::ClientKind::Ui,
+                        );
+                        if !selector_matches_event(&selectors, &event) {
+                            continue;
                         }
+                        let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
+                        let source = entry
+                            .source
+                            .as_ref()
+                            .and_then(tau_core::PersistedEventSource::connection_id);
+                        let _ = self.runtime_io.bus.send_to(&client_id, source, frame);
                     }
                 }
                 Err(message) => {
@@ -1004,45 +1000,6 @@ fn bounded_running_shell_snapshot<'a>(
         .collect::<Vec<_>>();
     let omitted = total.saturating_sub(commands.len());
     (commands, omitted)
-}
-
-fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
-    // Replay final, durable transcript facts, not progress. In particular, skip
-    // provider streaming chunks and prompt-created pending markers, but keep
-    // the agent-owned user/assistant/tool facts needed to reconstruct
-    // transcript UI.
-    matches!(
-        event,
-        Event::AgentStarted(_)
-            | Event::AgentDisplayNameSet(_)
-            | Event::AgentPromptSubmitted(_)
-            | Event::AgentPromptSteered(_)
-            | Event::AgentUserMessageInjected(_)
-            | Event::AgentCompactionTriggered(_)
-            | Event::AgentManualCompactionRequested(_)
-            | Event::AgentCompacted(_)
-            | Event::AgentStandaloneCompactionStarted(_)
-            | Event::AgentStandaloneCompactionFailed(_)
-            | Event::AgentInferenceDispatchStarted(_)
-            | Event::AgentMessageSent(_)
-            | Event::AgentMessageReceived(_)
-            | Event::MessageDelivered(_)
-            | Event::MessageEdited(_)
-            | Event::MessageDeleted(_)
-            | Event::MessageReactionAdded(_)
-            | Event::MessageReactionRemoved(_)
-            | Event::MessageSent(_)
-            | Event::ProviderToolResult(_)
-            | Event::ProviderToolError(_)
-            | Event::ToolError(_)
-            | Event::ToolBackgroundResult(_)
-            | Event::ToolBackgroundError(_)
-            | Event::ToolCancelled(_)
-            | Event::ShellCommandFinished(_)
-            | Event::ProviderResponseFinished(_)
-            | Event::ProviderStandaloneExecutionAccounted(_)
-            | Event::ProviderStandaloneExecutionAccountingCorrected(_)
-    )
 }
 
 /// Converts one durable event into its replay-visible projection.

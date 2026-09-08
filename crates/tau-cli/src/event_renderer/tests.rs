@@ -119,6 +119,69 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
     )
 }
 
+/// Unhandled durable observations and metadata mutations must remain harmless
+/// even if delivered during cold attach or later-agent replay. The UI does not
+/// need a harness-side event filter to protect its current pending state.
+#[test]
+fn irrelevant_replay_facts_preserve_current_ui_state() {
+    for cold_attach in [false, true] {
+        let mut renderer = renderer_for_agent_id_tests();
+        let agent = agent_id("main");
+        renderer.selection.current_agent_id = Some(agent.clone());
+        renderer.selection.displayed_agent_id = Some(agent.clone());
+        renderer.handle_agent_prompt_queued(&tau_proto::AgentPromptQueued {
+            agent_id: agent.clone(),
+            text: "still pending".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+        });
+        renderer
+            .resources
+            .handle
+            .force_selected_delivery_tracking_for_test();
+        let events = [
+            tau_proto::Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: agent.clone(),
+                key: tau_proto::AgentMetadataKey::new("ext_test_old"),
+                value: tau_proto::CborValue::Text("obsolete metadata".to_owned()),
+                mutation_id: None,
+                inheritable: false,
+            }),
+            tau_proto::Event::AgentToolDispatchObserved(tau_proto::AgentToolDispatchObserved {
+                call: tau_proto::ToolCallRef {
+                    declaration: tau_proto::ObservationId::from_bytes([1; 16]),
+                    item_index: 0,
+                },
+            }),
+        ];
+        for (index, event) in events.iter().enumerate() {
+            let delivery_id = RendererDeliveryId::new(index as u64 + 1);
+            if cold_attach {
+                renderer.handle_cold_attach_replay_socket_delivery(
+                    event,
+                    tau_proto::UnixMicros::new(1),
+                    delivery_id,
+                );
+            } else {
+                renderer.handle_replay_socket_delivery(
+                    event,
+                    tau_proto::UnixMicros::new(1),
+                    delivery_id,
+                );
+            }
+            assert!(!renderer.resources.handle.selected_delivery_mutated());
+        }
+        assert_eq!(renderer.selection.current_agent_id, Some(agent.clone()));
+        assert_eq!(renderer.selection.displayed_agent_id, Some(agent));
+        assert_eq!(renderer.transcript.runtime.queued_user_blocks.len(), 1);
+        assert_eq!(
+            renderer.transcript.runtime.queued_user_blocks[0].text,
+            "still pending"
+        );
+        assert!(renderer.event_owners.prompt_agents.is_empty());
+        assert!(renderer.event_owners.tool_agents.is_empty());
+    }
+}
+
 /// The borrowed final-text projector must match the removed eager-`String`
 /// semantics for empty, single, multipart, mixed-role, and Unicode inputs while
 /// reporting allocations at the exact concatenation site.

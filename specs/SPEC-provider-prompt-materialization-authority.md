@@ -59,8 +59,9 @@ owner. Once the owner exists, the ordinary conservative boundary applies:
 missing prompt-start or missing provider terminal is dispatch-uncertain and Tau
 never reconstructs or resends the request.
 
-Historical subscriber catch-up excludes prompt-start facts. Best-effort debug
-output contains only a bounded content-free summary. Optional exact request
+Historical subscriber catch-up delivers prompt-start facts when selected, without
+recreating their provider-delivery continuation. Best-effort debug output
+contains only a bounded content-free summary. Optional exact request
 capture is diagnostic output with explicit bounded retention and is never
 semantic authority, replay input, or recovery state.
 

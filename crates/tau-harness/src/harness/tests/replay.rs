@@ -2569,9 +2569,10 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     h.handle_extension_message(
         &crate::test_connection_id("late-extension"),
         TestMessage::Subscribe(Subscribe {
-            historical_selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
-            )],
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_STARTED),
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
+            ],
             live_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
             )],
@@ -2581,6 +2582,23 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
 
     {
         let events = extension_events.lock().expect("sink");
+        let started_index = events
+            .iter()
+            .position(|routed| {
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    delivery.is_replay() && matches!(delivery.event(), Event::AgentPromptStarted(_))
+                })
+            })
+            .expect("requested durable prompt materialization must not be withheld");
+        assert!(
+            events.iter().all(|routed| {
+                !matches!(
+                    peel_inner_event(&routed.frame),
+                    Some(Event::AgentPromptSubmitted(_))
+                )
+            }),
+            "unselected durable facts must remain unselected"
+        );
         let replay_index = events
             .iter()
             .position(|routed| {
@@ -2613,7 +2631,9 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
             })
             .expect("session replay boundary");
         assert!(
-            replay_index < agent_boundary_index && agent_boundary_index < session_boundary_index,
+            started_index < replay_index
+                && replay_index < agent_boundary_index
+                && agent_boundary_index < session_boundary_index,
             "historical replay must precede non-replay replay-complete boundaries"
         );
         assert!(
@@ -2763,7 +2783,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             agent_id.as_str(),
             None,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-                agent_prompt_id: prompt_id,
+                agent_prompt_id: prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 session_id: "s1".parse().expect("session id"),
                 model: "echo/model".into(),
@@ -2775,6 +2795,19 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             }),
         )
         .expect("seed ordinary materialization");
+    agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+                agent_id: agent_id.clone(),
+                agent_prompt_id: prompt_id,
+                automatic_compaction_decision: None,
+                reason: tau_proto::AgentPromptTerminationReason::Stale,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("seed durable owner closure");
     drop(agent_store);
 
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -2790,6 +2823,8 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
                 EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
                 EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
                 EventSelector::Exact(tau_proto::EventName::AGENT_STATS_UPDATED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_STARTED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_TERMINATED),
             ],
             live_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::SESSION_AGENT_LOADED,
@@ -2904,6 +2939,37 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             })
         })
         .expect("loaded-agent stats snapshot");
+    let lifecycle = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, routed)| {
+            let delivery = peel_delivery(&routed.frame)?;
+            matches!(
+                delivery.event(),
+                Event::AgentPromptStarted(_) | Event::AgentPromptTerminated(_)
+            )
+            .then(|| {
+                assert!(delivery.is_replay());
+                assert!(replay_index < index && index < stats_index);
+                delivery.event().name()
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle,
+        [
+            tau_proto::EventName::AGENT_PROMPT_STARTED,
+            tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+        ],
+        "later-agent replay must deliver requested materialization and closure exactly once"
+    );
+    assert!(
+        events.iter().all(|routed| !matches!(
+            peel_inner_event(&routed.frame),
+            Some(Event::AgentInferenceDispatchStarted(_))
+        )),
+        "unselected durable dispatch must not be delivered"
+    );
     let Event::AgentStatsUpdated(stats) = peel_delivery(&events[stats_index].frame)
         .expect("stats delivery")
         .event()
@@ -3108,11 +3174,15 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
     h.shutdown().expect("shutdown");
 }
 
+/// An intentionally broad UI observer gets durable materialization facts too;
+/// transient queue and stream events still have no journal history to replay.
 #[test]
-fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
+fn ui_observer_replays_requested_durable_facts_but_not_transient_progress() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.send_user_message("s1", "completed before attach", None)
+        .expect("seed durable prompt materialization");
 
     let spid: AgentPromptId = "sp-replay"
         .parse::<tau_proto::AgentPromptId>()
@@ -3225,11 +3295,11 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            historical_selectors: Vec::new(),
-            live_selectors: vec![
+            historical_selectors: vec![
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
             ],
+            live_selectors: Vec::new(),
         })),
     )
     .expect("subscribe");
@@ -3247,7 +3317,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     assert!(replayed.contains(&tau_proto::EventName::AGENT_COMPACTION_TRIGGERED));
     assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_QUEUED));
     assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_CREATED));
-    assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_STARTED));
+    assert!(replayed.contains(&tau_proto::EventName::AGENT_PROMPT_STARTED));
     assert!(!replayed.contains(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED));
 
     h.shutdown().expect("shutdown");
@@ -3904,8 +3974,10 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     h.shutdown().expect("shutdown");
 }
 
+/// Metadata selection returns both the folded snapshot and durable mutations;
+/// consumers must not mistake the initial snapshot for history filtering.
 #[test]
-fn replay_emits_latest_agent_metadata_without_stale_values() {
+fn replay_emits_current_metadata_snapshot_and_selected_mutation_history() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     {
@@ -3966,10 +4038,10 @@ fn replay_emits_latest_agent_metadata_without_stale_values() {
     h.handle_client_event(
         "metadata-ui",
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            historical_selectors: Vec::new(),
-            live_selectors: vec![EventSelector::Exact(
+            historical_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_METADATA_SET,
             )],
+            live_selectors: Vec::new(),
         })),
     )
     .expect("subscribe");
@@ -3980,24 +4052,34 @@ fn replay_emits_latest_agent_metadata_without_stale_values() {
         .iter()
         .filter_map(|routed| peel_inner_event(&routed.frame).cloned())
         .collect();
-    let metadata_index = replayed
+    let metadata = replayed
         .iter()
-        .position(|event| {
-            matches!(
-                event,
-                Event::AgentMetadataSet(set)
-                    if set.agent_id.as_str() == "agent-replay-meta"
-                        && set.key.as_str() == "ext_core-shell_cwd"
-                        && set.value == CborValue::Text("/latest".to_owned())
-                        && set.mutation_id.is_none()
-            )
+        .filter_map(|event| match event {
+            Event::AgentMetadataSet(set)
+                if set.agent_id.as_str() == "agent-replay-meta"
+                    && set.key.as_str() == "ext_core-shell_cwd" =>
+            {
+                Some(set)
+            }
+            _ => None,
         })
-        .expect("latest metadata replayed");
-    let _ = metadata_index;
-    assert!(replayed.iter().all(|event| !matches!(
-        event,
-        Event::AgentMetadataSet(set) if set.value == CborValue::Text("/first".to_owned())
-    )));
+        .collect::<Vec<_>>();
+    assert_eq!(
+        metadata.iter().map(|set| &set.value).collect::<Vec<_>>(),
+        ["/latest", "/first", "/latest"]
+            .map(|value| CborValue::Text(value.to_owned()))
+            .iter()
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        metadata[0].mutation_id.is_none(),
+        "snapshot has no mutation identity"
+    );
+    assert_eq!(
+        metadata[2].mutation_id.as_ref().map(|id| id.as_str()),
+        Some("durable-live-token"),
+        "journal mutation identity is preserved"
+    );
 
     h.shutdown().expect("shutdown");
 }

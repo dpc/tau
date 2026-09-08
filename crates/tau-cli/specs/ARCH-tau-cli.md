@@ -121,7 +121,8 @@ It selects only an exact current/viewed `ModelId` binding, preserves provider
 timestamps during catch-up, keeps per-cycle hysteresis locally, and renders the
 accessible compact `Q-`, `Q=`, `Q+`, `Q!`, or `Q?` status chip.
 The durable, content-free `agent.prompt_started` fact supplies the selected
-agent's model for live lifecycle tracking; historical catch-up excludes it.
+agent's model for live lifecycle tracking; the chat UI excludes it from its
+historical selectors.
 Provider quota current-state is capability evidence for neutral `Q?`;
 only a fresh exact binding and trustworthy weekly timing permit colored pacing.
 Capability lasts for the running harness: a replayed empty snapshot after
@@ -133,6 +134,12 @@ Terminal bells and OSC user-variable writes are live-only side effects. The CLI
 requests their event names only in its live selector set and independently drops
 replay-marked terminal-output deliveries before rendering. See
 [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
+
+The chat UI owns its historical event selection: prompt-owner activity
+transitions and streaming progress are live-only, while final transcript facts,
+tool restore starts, and current queue/watch/stats snapshots reconstruct attach
+state. The harness does not filter other subscribers' durable agent history to
+match chat's needs.
 
 The one-shot `--prompt-stdin` sink chooses presentation policy independently
 for inherited stdout and stderr. When stdout is a terminal, it applies the

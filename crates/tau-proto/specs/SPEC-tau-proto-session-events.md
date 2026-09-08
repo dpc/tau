@@ -135,14 +135,19 @@ snapshots selected by `historical_selectors`; both are delivered with
 `agent.replay_complete`/`session.replay_complete` boundary events before live
 delivery is released.
 
+Subscribers own historical event selection. The harness does not impose a
+transcript-oriented event allowlist on durable agent history. Current snapshots
+can precede older journal mutations of the same event name; consumers requesting
+both must reconstruct their state accordingly.
+
 ## Prompt lifecycle versus provider prompt payloads
 
 `agent.prompt_started` is the durable harness-authored materialization fact. It
 carries prompt, agent, session, model, captured model parameters, owning outer
 turn, originator, correlation, and operation metadata without provider content.
-Agent-journal replay folds it for uniqueness
-and inference-generation authority, but subscriber historical catch-up excludes
-it.
+Agent-journal replay folds it for uniqueness and inference-generation authority.
+Historical subscribers receive it when selected; the chat UI requests this
+activity transition only live.
 
 `agent.outer_turn_started` and `agent.outer_turn_finished` are durable,
 harness-authored activation boundaries. Their stable ids, session attribution,

@@ -296,8 +296,9 @@ crash can leave a delivered request without that fact in the recovered prefix.
 Providers consume `agent.prompt_created`; UIs and side-effect observers should
 subscribe to `agent.prompt_started` so materialized prompt context and tool
 schemas are not sent over UI/control channels unnecessarily. Cold replay folds
-prompt-start facts for audit and generation state but never recreates full work
-or includes prompt starts in subscriber catch-up.
+prompt-start facts for audit and generation state but never recreates full work.
+Subscriber catch-up delivers durable prompt starts when selected; the chat UI
+requests these activity transitions only live.
 
 Immediately before selected-provider delivery, the harness requires the same
 session generation and loaded runtime

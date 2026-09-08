@@ -100,11 +100,11 @@ fn running_shell_snapshot_enforces_exact_cbor_byte_boundary() {
     assert_eq!(omitted, 1);
 }
 
-/// Accepted manual-compaction work is a durable user-visible lifecycle
-/// fact, so late subscribers must receive it before a matching
-/// transaction start.
+/// Manual-compaction acceptance carries the request and source identity needed
+/// to correlate a later transaction start, so UI payload projection must not
+/// redact it like provider-only content.
 #[test]
-fn late_subscriber_replays_manual_compaction_acceptance() {
+fn replay_projection_preserves_manual_compaction_acceptance() {
     let event = Event::AgentManualCompactionRequested(tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-1-0").expect("request id"),
         target_agent_id: crate::parse_agent_id("worker"),
@@ -123,41 +123,32 @@ fn late_subscriber_replays_manual_compaction_acceptance() {
         model: "test/model".parse().expect("model id"),
     });
 
-    assert!(should_replay_agent_event_to_late_subscriber(&event));
+    assert_eq!(project_agent_replay_event(event.clone(), true), event);
 }
 
-/// A completed context shell command is a self-contained final transcript fact,
-/// while its running observations remain outside late-subscriber replay.
+/// A completed context shell command is a self-contained transcript fact:
+/// command, output, and exit status must survive UI payload projection even
+/// though its transient running observations have no durable history.
 #[test]
-fn late_subscriber_replays_only_completed_context_shell_fact() {
-    let target = crate::parse_agent_id("worker");
+fn replay_projection_preserves_completed_context_shell_fact() {
     let finished = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
         command_id: tau_proto::ShellCommandId::parse("shell-replay").expect("command id"),
         session_id: tau_proto::SessionId::parse("session-replay").expect("session id"),
         command: "sh -c 'printf output; exit 7'".to_owned(),
         include_in_context: true,
-        target_agent_id: Some(target.clone()),
+        target_agent_id: Some(crate::parse_agent_id("worker")),
         output: "output".to_owned(),
         exit_code: Some(7),
         cancelled: false,
     });
 
-    assert!(should_replay_agent_event_to_late_subscriber(&finished));
     assert_eq!(project_agent_replay_event(finished.clone(), true), finished);
-    assert!(!should_replay_agent_event_to_late_subscriber(
-        &Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-            command_id: tau_proto::ShellCommandId::parse("shell-replay").expect("command id"),
-            stream: tau_proto::ShellStream::Stdout,
-            chunk: "output".to_owned(),
-            target_agent_id: Some(target),
-        })
-    ));
 }
 
-/// Durable exact-owner termination folds during restore but remains private
-/// from historical subscriber catch-up.
+/// Payload projection does not redact exact-owner termination for either peer
+/// kind; historical selection is the subscriber's responsibility.
 #[test]
-fn late_subscriber_excludes_durable_prompt_termination() {
+fn replay_projection_preserves_durable_prompt_termination() {
     let event = Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
         automatic_compaction_decision: None,
         agent_id: crate::parse_agent_id("worker"),
@@ -165,5 +156,7 @@ fn late_subscriber_excludes_durable_prompt_termination() {
         reason: tau_proto::AgentPromptTerminationReason::Stale,
         originator: tau_proto::PromptOriginator::User,
     });
-    assert!(!should_replay_agent_event_to_late_subscriber(&event));
+    for is_ui in [false, true] {
+        assert_eq!(project_agent_replay_event(event.clone(), is_ui), event);
+    }
 }

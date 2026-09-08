@@ -67,8 +67,8 @@ existing ownership and kind/state validation:
    variants.
 9. `AgentPromptTerminated(Canceled | Stale)` closes a marked owner without an
    assistant block and materializes pending inputs from their accepted branch
-   positions. This private durable closure folds during agent cold replay but is
-   excluded from historical subscriber catch-up.
+    positions. This durable closure folds during agent cold replay and is
+    available to historical subscribers that select it.
 
 The same rules cover errors, cancellation, and background-result closure. A
 tool-calling assistant and its complete result aggregate are indivisible.

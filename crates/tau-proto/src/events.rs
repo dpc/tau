@@ -5663,8 +5663,9 @@ pub struct AgentToolTerminalClassified {
 ///
 /// The harness commits this fact after the durable dispatch owner and before
 /// the matching transient [`AgentPromptCreated`] provider work request.
-/// Historical subscriber catch-up excludes it even though agent-journal replay
-/// folds it.
+/// Historical subscriber catch-up delivers it when selected, without recreating
+/// provider work. Consumers tracking only current activity should select it
+/// live.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptStarted {
     /// Prompt that was materialized; this does not assert provider receipt.

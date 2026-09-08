@@ -158,6 +158,11 @@ membership journal, not a transcript.
 Historical load/unload facts are not transcript history. On reconnect/resume the
 harness announces the current loaded-agent snapshot, then replays each loaded
 agent log once.
+Historical selectors choose durable agent facts without a harness-owned
+transcript allowlist. The chat UI requests activity transitions and streaming
+progress only live, not historically; other subscribers can request durable
+lifecycle or observation facts. Current snapshots may precede older journal
+mutations of the same name.
 
 When an existing stored agent is loaded into an already-live session,
 subscribers may see the live `session.agent_loaded` membership fact before the
@@ -252,9 +257,9 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   UI correlation id. It commits after the durable dispatch owner and
   before the matching transient `agent.prompt_created`. Agent-journal replay
   folds it for exact-one materialization and ordinary-inference generation
-  authority, but subscriber catch-up excludes it and replay never recreates
-  provider work. UIs and observers should use this when they only need to track
-  in-flight prompt state.
+  authority. Historical subscribers receive it when selected, but replay never
+  recreates provider work. The chat UI selects it only live to track in-flight
+  prompt state.
 - **`agent.outer_turn_started` / `agent.outer_turn_finished`** — Durable
   harness-authored boundaries for one non-overlapping accepted activation. They
   carry the stable turn id and session attribution; the start also identifies the
@@ -288,8 +293,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). For a V1-marked ordinary
   inference owner this is a required exact-prompt agent-journal fact: core folds
-  it to release deferred placement without adding provider output. It remains
-  excluded from historical subscriber catch-up. Legacy prompt termination stays
+  it to release deferred placement without adding provider output. Historical
+  subscribers receive durable closures when selected. Legacy prompt termination stays
   transient. Canceling exact ordinary checkpointed inference also releases its
   runtime dispatch ownership so a later prompt on the same agent can proceed;
   standalone-compaction ownership remains governed by its durable recovery
@@ -333,8 +338,10 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   extension-visible state such as `ext_core-shell_cwd`. A set carrying a
   mutation id is a live commit acknowledgement: interception may rewrite its
   value, but cannot drop it or change its agent, key, correlation id, or
-  inheritance flag. Durable state and replay omit the transient mutation id, so
-  replay can reconstruct current metadata without impersonating a live commit.
+  inheritance flag. Folded metadata snapshots omit the mutation id; selected
+  journal mutations retain their recorded payloads. Consumers must use the
+  replay marker rather than a mutation id to distinguish historical delivery
+  from live commit acknowledgements.
   See
   [`SPEC-agent-metadata-requests-and-canonical-facts`](../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 - **`agent.started`** — Creation fact for an agent. Durable agents write it to

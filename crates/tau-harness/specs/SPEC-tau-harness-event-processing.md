@@ -200,6 +200,16 @@ true`. Only `agent.replay_complete` and `session.replay_complete` boundaries
 remain non-replay during catch-up; live delivery is buffered until the session
 boundary has been sent.
 
+Agent-journal catch-up delivers subscriber-selected durable events without a
+shared transcript eligibility allowlist, on both initial subscription and later
+agent load. Configured extensions may select lifecycle and runtime-observation
+facts as well as transcript content. These replay-marked deliveries do not
+execute the original reactions. Existing payload projections still apply.
+Folded metadata snapshots precede selected journal mutations, including old
+values and unsets; a snapshot is not a promise that subsequent history contains
+only current values. UI consumers own their historical versus live selection
+and reconstruction rather than relying on the harness to hide irrelevant facts.
+
 ## Client event boundary
 
 UI clients are local UI/control peers, not providers. Client `emit` intake must
