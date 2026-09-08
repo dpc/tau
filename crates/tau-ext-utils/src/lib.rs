@@ -76,8 +76,42 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let mut runtime = TauExtensionRunner::new(UtilsExtension)
-        .start_manual_loop_deferred_startup_with_state(reader, writer, TimerRuntime::new)?;
+    let hello = tau_proto::Hello {
+        declaration_inspection: false,
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: EXTENSION_NAME.parse()?,
+        client_kind: tau_proto::ClientKind::Tool,
+        expected_session_id: None,
+        capabilities: Vec::new(),
+    };
+    let Some(connection) = tau_client::prepare_inspection(reader, writer, hello, |configure| {
+        let config = configure
+            .config
+            .deserialized::<UtilsConfig>()
+            .map_err(|_| tau_client::ClientError::handler("invalid utility configuration"))?;
+        Ok(tau_proto::InspectionComplete {
+            tools: tool_registrations(config.papercut.enable),
+            ..Default::default()
+        })
+    })?
+    else {
+        return Ok(());
+    };
+    connection.run(UtilsExtension, run_configured)?
+}
+
+/// Enter operational startup only after the bootstrap selected runtime purpose.
+fn run_configured<R, W>(
+    runner: TauExtensionRunner<UtilsExtension>,
+    reader: R,
+    writer: W,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let mut runtime =
+        runner.start_manual_loop_deferred_startup_with_state(reader, writer, TimerRuntime::new)?;
     let Some(configure) = read_initial_config(&mut runtime)? else {
         let _state = runtime.finish_detached();
         return Ok(());

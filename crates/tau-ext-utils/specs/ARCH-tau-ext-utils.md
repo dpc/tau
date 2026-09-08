@@ -6,6 +6,12 @@ The reporter is declared only when its configured instance enables
 `papercut.enable`; ordinary global and role tool policy still controls its
 effective visibility.
 
+The dedicated inspection bootstrap runs before timer state, timezone discovery
+or extension-data clients exist. It shares the ordinary configured tool
+registration constructor, including groups, prompt fragments and
+`papercut.enable`; no timer or papercut operation runs. See
+[SPEC-extension-declaration-inspection](../../../specs/SPEC-extension-declaration-inspection.md).
+
 `papercut` accepts only a bounded report string and uses the existing
 per-instance `ExtensionDataScope::User` `AppendFile` RPC to append one
 newline-terminated v1 JSONL record to its owned `papercuts.jsonl` relative

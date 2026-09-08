@@ -289,12 +289,102 @@ pub fn resolve_extensions_with_cli_overrides_and_diagnostics(
     resolve_extensions_with_environment_and_cli_overrides(settings, builtins, &[], cli_overrides)
 }
 
-fn resolve_extensions_with_environment_and_cli_overrides(
+/// Resolve launch declarations without creating a harness, state or processes.
+pub fn resolve_extensions_with_environment_and_cli_overrides(
     settings: &HarnessSettings,
     builtins: Vec<BuiltinExtension>,
     environment_names: &[String],
     cli_overrides: &[ExtensionCliOverride],
 ) -> Result<ResolvedExtensions, ResolveExtensionsError> {
+    let (order, entries) =
+        prepare_extension_entries(settings, builtins, environment_names, cli_overrides)?;
+    resolved_extension_entries(order, entries)
+}
+
+/// One discoverable origin whose declaration launch could not be resolved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnavailableInspectionExtension {
+    /// Configured or explicitly requested instance, never a diagnostic payload.
+    pub name: String,
+    /// Config-owned classification, when the origin exists in configuration.
+    pub role: Option<String>,
+}
+
+/// Pure inspection resolution preserves failures without changing startup's
+/// fail-fast policy.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InspectionExtensions {
+    /// Enabled origins with valid launch configuration.
+    pub extensions: Vec<ExtensionConfig>,
+    /// Discoverable origins that must receive a closed unavailable outcome.
+    pub unavailable: Vec<UnavailableInspectionExtension>,
+}
+
+/// Resolve the normal launch settings, but retain every failed inspection
+/// origin. Unknown overrides prevent all launches; their reports also retain
+/// configured origins because the intended enabled selection could not be
+/// established.
+pub fn resolve_inspection_extensions(
+    settings: &HarnessSettings,
+    builtins: Vec<BuiltinExtension>,
+    environment_names: &[String],
+    cli_overrides: &[ExtensionCliOverride],
+) -> InspectionExtensions {
+    let mut origins: BTreeMap<String, Option<String>> = builtins
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.role.clone()))
+        .collect();
+    for (name, entry) in &settings.extensions {
+        let role = origins.entry(name.clone()).or_default();
+        if entry.role.is_some() {
+            role.clone_from(&entry.role);
+        }
+    }
+    for name in environment_names
+        .iter()
+        .chain(cli_overrides.iter().filter_map(|entry| match entry {
+            ExtensionCliOverride::Enable(name) | ExtensionCliOverride::Disable(name) => Some(name),
+            ExtensionCliOverride::EnableAll | ExtensionCliOverride::DisableAll => None,
+        }))
+    {
+        origins.entry(name.clone()).or_default();
+    }
+    let Ok((order, mut entries)) =
+        prepare_extension_entries(settings, builtins, environment_names, cli_overrides)
+    else {
+        return InspectionExtensions {
+            extensions: Vec::new(),
+            unavailable: origins
+                .into_iter()
+                .map(|(name, role)| UnavailableInspectionExtension { name, role })
+                .collect(),
+        };
+    };
+    let mut result = InspectionExtensions::default();
+    for name in order {
+        let entry = entries.remove(&name).expect("seeded above");
+        if !entry.enable {
+            continue;
+        }
+        let role = entry.role.clone();
+        match entry.into_enabled_extension_config(name.clone()) {
+            Ok(Some(extension)) => result.extensions.push(extension),
+            Ok(None) | Err(_) => result
+                .unavailable
+                .push(UnavailableInspectionExtension { name, role }),
+        }
+    }
+    result
+}
+
+/// Share all launch precedence rules between runtime and declaration
+/// collection.
+fn prepare_extension_entries(
+    settings: &HarnessSettings,
+    builtins: Vec<BuiltinExtension>,
+    environment_names: &[String],
+    cli_overrides: &[ExtensionCliOverride],
+) -> Result<(Vec<String>, HashMap<String, ResolvedExtension>), ResolveExtensionsError> {
     // Keep the config → environment → CLI ordering aligned with
     // `SPEC-tau-harness-extension-lifecycle`.
     let (order, entries) = seed_builtin_extension_entries(builtins, settings.tau_state_access);
@@ -313,7 +403,7 @@ fn resolve_extensions_with_environment_and_cli_overrides(
         entry.enable = true;
     }
     let entries = apply_extension_cli_overrides(entries, cli_overrides)?;
-    resolved_extension_entries(order, entries)
+    Ok((order, entries))
 }
 
 fn seed_builtin_extension_entries(

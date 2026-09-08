@@ -1,5 +1,39 @@
 # ARCH-tau-cli: tau-cli architecture
 
+## Declaration collector
+
+The collector's public JSON schema and exit contract are documented in
+[Declaration inspection](../../../docs/declaration-inspection.md).
+`preview_declarations` loads config with no state directory and bypasses ordinary
+state-aware validators. Its pure launch resolver shares normal precedence rules
+but retains failed origins instead of applying runtime fail-fast/optional-skip
+policy. Unknown override selection prevents all launches while retaining every
+discoverable configured/requested origin; config-load failure reports that no
+origins could be discovered. Configured provider role owns profile-input permission
+and omission reporting, with contradictory peer kinds rejected before Configure.
+
+Collection permits at most 128 child launches and charges at most 32 MiB of actual
+protocol input across children, including malformed and buffered bytes. Protocol
+frame limits also apply, and encoded Configure is checked before transmission.
+Each exchange uses the lesser of its configured startup timeout and ten seconds.
+Nonblocking pipes wait with OS readiness polling against that absolute deadline
+for both input and backpressured output; no reader thread can prevent return.
+Cleanup closes pipes, kills an unfinished child and checks reaping for at most one
+second, using short sleeps between `try_wait` calls; failure is explicit. Child
+stderr is discarded. These are cooperative configured-process bounds, not
+adversarial descendant isolation or guarantees about uninterruptible kernel work.
+
+## Architecture overview
+
+`tau dev preview-declarations` uses a separate bounded config-only collector,
+not the daemon-backed effective preview flow. It starts only the protocol
+bootstrap of selected executables, admits explicit inspection support before
+Configure, and reports unsupported/partial results without falling back to
+ordinary startup. It never constructs a harness or accesses extension state and
+credentials. See
+[SPEC-extension-declaration-inspection](../../../specs/SPEC-extension-declaration-inspection.md)
+for output scope, finite collection/cleanup bounds and the cooperative boundary.
+
 `tau dev papercut clear` validates the normal `std-utils` instance's active
 papercut JSONL file under the shared User-scope append lock, then atomically
 renames it to a non-overwriting numbered archive. The command prints the archive

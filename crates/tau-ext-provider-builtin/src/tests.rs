@@ -982,13 +982,24 @@ fn run_provider_configure(
     Result<(), Box<dyn Error>>,
     Vec<tau_proto::HarnessInputMessage>,
 ) {
+    run_provider_purpose(settings_files, tau_proto::ConfigurePurpose::Runtime)
+}
+
+/// Drive production bootstrap without supplying any Secret RPC responses.
+fn run_provider_purpose(
+    settings_files: BTreeMap<String, Vec<u8>>,
+    purpose: tau_proto::ConfigurePurpose,
+) -> (
+    Result<(), Box<dyn Error>>,
+    Vec<tau_proto::HarnessInputMessage>,
+) {
     let mut input = Vec::new();
     {
         let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
         writer
             .write_message(&tau_proto::HarnessOutputMessage::Configure(
                 tau_proto::Configure {
-                    purpose: tau_proto::ConfigurePurpose::Runtime,
+                    purpose,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
                     instance_name: tau_proto::ExtensionName::parse("provider-builtin")
@@ -1004,6 +1015,55 @@ fn run_provider_configure(
     let output = SharedTraceWriter::default();
     let result = run(Cursor::new(input), output.clone());
     (result, decode_frames(&output.bytes()))
+}
+
+/// Credential-backed candidates can be inspected without credential requests,
+/// Ready, runtime publication, or a provider invocation.
+#[test]
+fn inspection_provider_metadata_requires_no_credentials() {
+    let settings = BTreeMap::from([(
+        "deepseek.json".to_owned(),
+        configured_chat_completions_settings("deepseek", serde_json::json!({})),
+    )]);
+    let expected =
+        models_for_profiles(&validate_configure_settings(&settings).expect("valid profile"));
+    let (result, frames) =
+        run_provider_purpose(settings, tau_proto::ConfigurePurpose::DeclarationInspection);
+    result.expect("inspection succeeds");
+    let [
+        HarnessInputMessage::Hello(hello),
+        HarnessInputMessage::InspectionComplete(inventory),
+    ] = frames.as_slice()
+    else {
+        panic!("inspection must emit only Hello and completion");
+    };
+    assert!(hello.declaration_inspection);
+    assert_eq!(inventory.providers.len(), 1);
+    assert_eq!(inventory.providers[0].models, expected);
+    assert!(!expected.is_empty());
+    assert!(inventory.gaps.is_empty());
+}
+
+/// Invalid inspection profiles expose only a closed gap, never raw settings.
+#[test]
+fn inspection_provider_invalid_settings_are_sanitized() {
+    let (result, frames) = run_provider_purpose(
+        BTreeMap::from([("secret-name.json".to_owned(), b"secret-value".to_vec())]),
+        tau_proto::ConfigurePurpose::DeclarationInspection,
+    );
+    result.expect("closed inspection completion");
+    let [
+        HarnessInputMessage::Hello(_),
+        HarnessInputMessage::InspectionComplete(inventory),
+    ] = frames.as_slice()
+    else {
+        panic!("no runtime or diagnostic frames");
+    };
+    assert_eq!(
+        inventory.gaps,
+        [tau_proto::InspectionGap::InvalidConfiguration]
+    );
+    assert!(inventory.providers.is_empty());
 }
 
 /// Drives the production Configure and Secret-RPC transport, returning every

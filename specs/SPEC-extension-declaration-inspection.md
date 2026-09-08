@@ -2,9 +2,10 @@
 
 ## Status
 
-The protocol and SDK bootstrap are available. Built-in opt-ins and the separate
-CLI collector are not yet connected; ordinary extension entrypoints continue to
-advertise no inspection support.
+The protocol, SDK bootstrap and `tau dev preview-declarations` collector are
+available. `std-utils` and `provider-builtin` opt in; other ordinary extension
+entrypoints remain unsupported until they explicitly adopt pure declaration
+construction.
 
 ## Record justification
 
@@ -55,3 +56,27 @@ or a promise that no extension code executes. It preserves
 [GATE-configured-extension-trust-boundary](GATE-configured-extension-trust-boundary.md)
 and is subject to
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
+
+## Caller and provider boundaries
+
+Collection preserves configured attribution and exposes incomplete origins rather
+than silently dropping them. The caller owns input permission: a child-selected
+Hello kind cannot grant access to provider settings or erase provider omissions.
+
+Provider inspection reads only config-owned, credential-free profile files using
+the same bounded profile reader as normal startup. It does not enumerate state
+profiles, acquire provider locks, resolve named key sources or read Secret records.
+Provider inventories are therefore partial even when no config profile exists. Candidate metadata
+does not claim credentials work or services are available.
+
+The CLI's report schema, resolver accounting, resource limits, pipe waiting and
+cleanup mechanics belong to
+[ARCH-tau-cli](../crates/tau-cli/specs/ARCH-tau-cli.md) and its
+[public command documentation](../docs/declaration-inspection.md), not this
+distributed protocol contract.
+
+`std-utils` shares its pure configured registration constructor with normal
+startup, including `papercut.enable`, groups and prompt fragments. Its timer state
+and extension-data client exist only on the ordinary branch. The provider shares
+profile validation and model metadata constructors without initializing runtime
+network policy, workers, credential RPC or quota work.

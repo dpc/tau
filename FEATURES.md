@@ -6,6 +6,14 @@ capabilities, not a complete command or configuration reference. Start with the
 [README](README.md) for installation and project philosophy; follow the links
 below for details.
 
+For config-only extension inventories, `tau dev preview-declarations` uses an
+explicitly opted-in declaration branch rather than ordinary harness startup.
+`std-utils` and `provider-builtin` support it; unsupported extensions and omitted
+runtime-dependent information remain explicit. The command reads no extension
+state or credentials and does not claim effective prompt/tool or service
+availability parity. See the
+[inspection contract](specs/SPEC-extension-declaration-inspection.md).
+
 ## A durable terminal coding workflow
 
 Tau's terminal UI keeps the conversation, tools, and project context together

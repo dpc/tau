@@ -672,6 +672,13 @@ pub enum DevCommand {
     /// `--role` uses the configured startup role.
     PrintTools,
 
+    /// Preview config-derived declarations from explicitly opted-in extensions.
+    ///
+    /// Does not start a harness, read extension state or credentials, or
+    /// discover agent context. Unsupported or incomplete inventories exit
+    /// unsuccessfully.
+    PreviewDeclarations,
+
     /// Inspect or clear reports recorded by the standard papercut reporter.
     Papercut {
         /// Papercut operation to run.

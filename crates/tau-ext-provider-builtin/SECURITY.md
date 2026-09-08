@@ -1,5 +1,16 @@
 # tau-ext-provider-builtin security boundaries
 
+## Declaration inspection
+
+The opt-in inspection branch parses only supplied credential-free profiles and
+returns unverified candidate model metadata before network/runtime construction.
+It does not acquire an extension-data client, read credentials, resolve named key
+sources, initialize quota or invoke providers. Invalid profiles produce a closed
+gap without raw profile diagnostics. The CLI supplies only config-owned profiles
+and explicitly reports state-owned profiles omitted. Ordinary model publication
+still requires the existing runtime credential acceptance; inspection is not
+publication or availability evidence.
+
 ## Private receipt diagnostics
 
 The dedicated disabled-by-default `provider-builtin.receipt` TRACE target measures provider input receipt through

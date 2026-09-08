@@ -152,6 +152,13 @@ fn load_extension_settings_files_at(
     Ok(files)
 }
 
+/// Config-only declaration input; deliberately bypasses operational snapshots.
+pub(super) fn inspection_settings_files(
+    config_root: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    load_extension_settings_files_at(config_root, ProfileSource::Config)
+}
+
 fn merged_settings_files(
     config_root: Option<PathBuf>,
     state_root: Option<&Path>,

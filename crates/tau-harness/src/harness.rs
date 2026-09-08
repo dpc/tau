@@ -1598,6 +1598,13 @@ mod preview_requests;
 mod provider_runtime;
 mod provider_runtime_state;
 mod provider_startup;
+/// Read only explicitly selected config-owned provider settings for inspection.
+///
+/// Unlike ordinary provider startup this does not inspect state profiles, take
+/// instance locks, materialize credentials or create directories.
+pub fn inspection_settings_files(config_root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    provider_startup::inspection_settings_files(config_root)
+}
 mod replay;
 mod semantic_event_router;
 mod subagents_tool;

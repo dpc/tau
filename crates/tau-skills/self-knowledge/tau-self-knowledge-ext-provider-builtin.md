@@ -8,6 +8,13 @@ advertise: false
 
 `provider-builtin` is Tau's built-in provider extension. It runs `tau-ext-provider-builtin`, is enabled by default, publishes available models from configured providers, and executes agent turns for built-in provider backends.
 
+`tau dev preview-declarations` can inspect config-owned provider/model metadata
+without reading credentials or starting provider runtime work. It reports
+state-owned profiles omitted and runtime availability unverified, so provider
+results are partial and the command exits nonzero. This is a cooperative
+declaration preview, not the effective `print-tools`/`print-prompt` path or proof
+that a model can be invoked.
+
 ChatGPT/Codex Standard Responses routes advertise provider-hosted web search.
 The harness selects it through each role's `agents.web_tools` policy and uses
 cached search by default. Lite never advertises hosted search. Hosted calls stay

@@ -1,5 +1,17 @@
 # Testing tau-cli
 
+Declaration preview tests in `preview_declarations/tests.rs` own admission before
+Configure, configured-role input authority, exact permitted Configure fields,
+Ready rejection, cumulative malformed-input accounting, typed collision ordering,
+origin attribution and complete/incomplete decisions. Real pipe fixtures cover
+stalled reads, backpressured Configure writes and bounded reaping without reader
+threads. `crates/tau/tests/declaration_inspection.rs` owns real CLI JSON/exit
+behavior, per-origin and global resolver failure reports, configured utils output,
+provider state/credential omission and no runtime/context/state startup. Utils
+tests own full configured runtime/inspection declaration parity; provider tests
+own pure model metadata and sanitized invalid configuration. Run these focused
+owners together rather than substituting a runtime effective-preview test.
+
 `dev_tmux` provider-access tests stay focused on config parsing, exact allowlist
 copying, stale scratch reconciliation, warnings, and refusal of symlink,
 non-regular, path-traversal, or unsafe entries.

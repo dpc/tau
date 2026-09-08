@@ -75,6 +75,19 @@ fn run_frames(
     papercut_enabled: bool,
     deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
 ) -> Vec<HarnessInputMessage> {
+    configured_frames(
+        papercut_enabled,
+        tau_proto::ConfigurePurpose::Runtime,
+        deliveries,
+    )
+}
+
+/// Exercise the same production bootstrap for ordinary and inspection purposes.
+fn configured_frames(
+    papercut_enabled: bool,
+    purpose: tau_proto::ConfigurePurpose,
+    deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
+) -> Vec<HarnessInputMessage> {
     let config = papercut_enabled.then(|| {
         CborValue::Map(vec![(
             CborValue::Text("papercut".to_owned()),
@@ -85,7 +98,7 @@ fn run_frames(
         )])
     });
     let configure = HarnessOutputMessage::Configure(Configure {
-        purpose: tau_proto::ConfigurePurpose::Runtime,
+        purpose,
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         instance_name: tau_proto::ExtensionName::parse("std-utils").expect("extension name"),
         config: config.unwrap_or_else(|| CborValue::Map(Vec::new())),
@@ -113,6 +126,42 @@ fn run_frames(
         frames.push(frame);
     }
     frames
+}
+
+/// Inspection shares complete configured registrations, including prefix, group
+/// and prompt metadata, but emits no ordinary startup or storage messages.
+#[test]
+fn inspection_matches_configured_utility_declarations() {
+    for enabled in [false, true] {
+        let ordinary = startup_frames(enabled);
+        let expected: Vec<_> = ordinary
+            .into_iter()
+            .filter_map(|frame| match frame {
+                HarnessInputMessage::Emit(emit) => match *emit.event {
+                    Event::ToolRegistrationDeclared(tool) => Some(tool),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let inspected = configured_frames(
+            enabled,
+            tau_proto::ConfigurePurpose::DeclarationInspection,
+            [],
+        );
+        let [
+            HarnessInputMessage::Hello(hello),
+            HarnessInputMessage::InspectionComplete(result),
+        ] = inspected.as_slice()
+        else {
+            panic!("inspection must emit only Hello and completion");
+        };
+        assert!(hello.declaration_inspection);
+        assert_eq!(result.tools, expected);
+        assert!(result.gaps.is_empty());
+        assert!(result.providers.is_empty());
+        assert!(result.prompt_fragments.is_empty());
+    }
 }
 
 fn startup_frames(papercut_enabled: bool) -> Vec<HarnessInputMessage> {

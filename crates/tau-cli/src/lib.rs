@@ -24,6 +24,7 @@ mod markdown_render;
 mod message_fact_render;
 mod papercut;
 mod peer_exit;
+mod preview_declarations;
 mod print_prompt;
 mod print_tools;
 mod prompt_history;
@@ -708,7 +709,8 @@ fn consumes_harness_settings(command: &DispatchCommand) -> bool {
                 cli::DevCommand::DumpInitialPrompt { .. }
                 | cli::DevCommand::PrintPrompt { .. }
                 | cli::DevCommand::PrintSystemPrompt
-                | cli::DevCommand::PrintTools,
+                | cli::DevCommand::PrintTools
+                | cli::DevCommand::PreviewDeclarations,
         }) => true,
         DispatchCommand::Other(cli::Command::Component { name, .. }) => name == "harness",
         DispatchCommand::Other(cli::Command::Serve { .. }) => true,
@@ -888,6 +890,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
                     | cli::DevCommand::PrintTools
+                    | cli::DevCommand::PreviewDeclarations
                     | cli::DevCommand::Tmux { .. },
             }) => true,
             DispatchCommand::Other(cli::Command::Component { name, .. }) => name == "harness",
@@ -914,7 +917,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 command:
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
-                    | cli::DevCommand::PrintTools,
+                    | cli::DevCommand::PrintTools
+                    | cli::DevCommand::PreviewDeclarations,
             }) => {}
             DispatchCommand::Other(cli::Command::Session { command }) => {
                 let command_name = match command {
@@ -989,6 +993,22 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             return dev_tmux::run(command);
         }
 
+        // Declaration inspection owns a config-only loader. Do not route it
+        // through ordinary validators that also consult state-owned settings.
+        if matches!(
+            &command,
+            DispatchCommand::Other(cli::Command::Dev {
+                command: cli::DevCommand::PreviewDeclarations,
+            })
+        ) {
+            return preview_declarations::run(
+                harness.profile.as_deref(),
+                &role_cli_overrides,
+                &extension_cli_overrides,
+                &environment_extension_names,
+                &harness_config_overrides,
+            );
+        }
         let consumes_harness_settings = consumes_harness_settings(&command);
         let selected_profile = if consumes_harness_settings {
             tau_config::settings::selected_profile(harness.profile.as_deref())
@@ -1262,6 +1282,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     &harness_config_overrides,
                 ),
                 cli::DevCommand::Papercut { command } => papercut::run(command),
+                cli::DevCommand::PreviewDeclarations => {
+                    unreachable!("declaration inspection returns before runtime validation")
+                }
                 cli::DevCommand::Tmux { command } => {
                     let _ = command;
                     unreachable!("dev tmux dispatch returns before harness config validation")

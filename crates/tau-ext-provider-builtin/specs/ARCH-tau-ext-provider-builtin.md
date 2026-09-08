@@ -5,6 +5,13 @@ immutable credential-free settings snapshot and runtime Secret RPC credentials, 
 model-visible prompt and tool context from the harness, invokes external model
 services, and reports provider execution through Tau protocol events.
 
+The dedicated inspection branch validates supplied credential-free profile files
+and constructs candidate model metadata before operational runtime construction.
+It neither hydrates credentials nor initializes network policy, workers, quota
+or model publication. Ordinary startup continues to require its existing
+credential acceptance before publishing usable models. See
+[SPEC-extension-declaration-inspection](../../../specs/SPEC-extension-declaration-inspection.md).
+
 ## Ownership boundaries
 
 Tau loads credential-free profiles as a disjoint union from XDG config and state

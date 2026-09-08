@@ -117,13 +117,17 @@ pub use crate::daemon::{
 pub use crate::error::{ExtensionSpawnError, HarnessError};
 pub use crate::extension::{harness_log_path, session_logs_dir};
 pub use crate::format::{format_extension_event, format_tool_progress};
-pub use crate::harness::{AgentToolCall, Harness, normalized_wait_timeout_minutes};
+pub use crate::harness::{
+    AgentToolCall, Harness, inspection_settings_files, normalized_wait_timeout_minutes,
+};
 pub use crate::internal_tools::{
     AgentOwnedInternalToolCall, InternalToolHandler, InternalToolHandlers, InternalToolHost,
 };
 pub use crate::settings::{
-    EXTENSION_CLI_OVERRIDES_ENV, HARNESS_CONFIG_CLI_OVERRIDES_ENV, ROLE_CLI_OVERRIDES_ENV,
-    STARTUP_ROLE_ENV, builtin_extensions, validate_cli_overrides,
-    validate_cli_overrides_with_profile, validate_extension_environment_and_cli_overrides,
+    EXTENSION_CLI_OVERRIDES_ENV, ExtensionConfig, HARNESS_CONFIG_CLI_OVERRIDES_ENV,
+    ROLE_CLI_OVERRIDES_ENV, STARTUP_ROLE_ENV, builtin_extensions,
+    resolve_extensions_with_environment_and_cli_overrides, resolve_inspection_extensions,
+    validate_cli_overrides, validate_cli_overrides_with_profile,
+    validate_extension_environment_and_cli_overrides,
     validate_extension_environment_and_cli_overrides_with_profile,
 };
