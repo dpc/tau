@@ -549,6 +549,7 @@ fn configure_supervised_extension(
     h.handle_extension_event(
         connection_id,
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-test-extension"),
             client_kind: kind,

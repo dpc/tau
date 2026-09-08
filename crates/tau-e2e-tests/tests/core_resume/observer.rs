@@ -114,6 +114,7 @@ impl SideObserver {
             }
         };
         peer.send(&HarnessInputMessage::Hello(Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: tau_proto::ExtensionName::parse("tau-e2e-side-observer")
                 .expect("test extension name must satisfy the identifier grammar"),

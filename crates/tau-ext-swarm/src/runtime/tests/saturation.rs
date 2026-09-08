@@ -196,6 +196,7 @@ async fn detached_prompt_saturation_caches_indeterminate_and_cleans_up() {
     let mut input_writer = HarnessOutputWriter::new(&mut input);
     input_writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             config: tau_proto::CborValue::Null,
             instance_name: tau_proto::ExtensionName::parse("swarm-saturation-test").expect("name"),
             tool_prefix: None,

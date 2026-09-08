@@ -340,6 +340,7 @@ pub(crate) fn hello_message(
     expected_session_id: Option<&tau_proto::SessionId>,
 ) -> HarnessInputMessage {
     HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
         protocol_version: PROTOCOL_VERSION,
         client_name,
         client_kind: ClientKind::Ui,

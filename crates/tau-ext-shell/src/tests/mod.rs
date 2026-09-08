@@ -385,6 +385,7 @@ fn spawn_extension_with_exit_and_prefix(
     let mut writer = EventWriter::new(BufWriter::new(harness_stream));
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -491,6 +492,7 @@ fn read_range(start_line: i64, end_line: i64) -> CborValue {
 fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable: bool) {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -527,6 +529,7 @@ fn send_shell_regex_allowlist_config(
         .collect();
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name"),
@@ -688,6 +691,7 @@ fn run_after_production_fifo_saturation(
     let mut input = EventWriter::new(harness_stream);
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: test_extension_name("test-extension"),
             config: CborValue::Map(Vec::new()),
@@ -807,6 +811,7 @@ fn assert_mandatory_frame_failure_exits(event: Event, needle: &'static [u8], lab
     let mut input = EventWriter::new(harness_stream);
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: test_extension_name("test-extension"),
             config: CborValue::Map(Vec::new()),

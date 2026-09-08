@@ -24,6 +24,12 @@ path-based shutdown races.
 
 ## Extension boundary
 
+Declaration inspection is a separate collector/SDK branch, not a normal
+harness instance or an intermediate readiness phase. An ordinary extension
+sending inspection completion fails its runtime protocol connection rather
+than activating declarations or satisfying Ready. See
+[SPEC-extension-declaration-inspection](../../../specs/SPEC-extension-declaration-inspection.md).
+
 Memory-only harnesses preserve the same Hello, Configure, declaration, Ready,
 collision, and required/optional failure lifecycle. Configure carries
 `state_dir = None`, and the harness delegates no Session, User, or Cache

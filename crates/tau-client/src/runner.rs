@@ -6,9 +6,13 @@ use crate::writer_thread::{run_writer, writer_channel};
 use crate::{ClientError, ClientHandle, ClientResult, TauExtension, builder as path_crate_builder};
 
 /// Runtime that performs the Tau protocol lifecycle for one extension.
-pub struct TauExtensionRunner<Extension> {
+pub struct TauExtensionRunner<Extension: TauExtension> {
     /// Extension declaration consumed when the runner starts.
-    pub(crate) extension: Extension,
+    pub(crate) extension: Option<Extension>,
+    /// Runtime declarations already validated against an admitted Hello.
+    pub(crate) prepared_builder: Option<ExtensionBuilder<Extension::State>>,
+    /// Ordinary Configure already consumed by opt-in inspection bootstrap.
+    pub(crate) initial_configure: Option<tau_proto::Configure>,
 }
 
 impl<Extension> TauExtensionRunner<Extension>
@@ -18,7 +22,27 @@ where
     /// Creates a runner for one extension declaration.
     #[must_use]
     pub fn new(extension: Extension) -> Self {
-        Self { extension }
+        Self {
+            extension: Some(extension),
+            prepared_builder: None,
+            initial_configure: None,
+        }
+    }
+
+    /// Register the ordinary runtime only after purpose selection, if supplied.
+    pub(crate) fn into_builder(self) -> ClientResult<ExtensionBuilder<Extension::State>> {
+        if let Some(builder) = self.prepared_builder {
+            return Ok(builder);
+        }
+        let extension = self
+            .extension
+            .expect("unprepared runner owns its extension");
+        let mut builder = ExtensionBuilder::new(extension.name(), extension.kind())?;
+        extension.register(&mut builder);
+        builder.initial_configure = self.initial_configure;
+        builder.hello_sent = builder.initial_configure.is_some();
+        builder.validate()?;
+        Ok(builder)
     }
 
     /// Runs the extension over the supplied protocol streams and returns final
@@ -43,9 +67,7 @@ where
         R: Read,
         W: Write + Send,
     {
-        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind())?;
-        self.extension.register(&mut builder);
-        builder.validate()?;
+        let builder = self.into_builder()?;
 
         let (sender, receiver) = writer_channel();
         let handle = ClientHandle::new(sender);
@@ -122,9 +144,7 @@ where
         W: Write + Send + 'static,
         MakeState: FnOnce(ClientHandle) -> Extension::State,
     {
-        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind())?;
-        self.extension.register(&mut builder);
-        builder.validate()?;
+        let builder = self.into_builder()?;
 
         let (sender, receiver) = writer_channel();
         let handle = ClientHandle::new(sender);
@@ -173,7 +193,7 @@ where
 {
     write_hello(&builder, &handle)?;
     let mut reader = tau_proto::PeerInputReader::new(reader);
-    let Some(configure) = read_initial_configure(&mut reader)? else {
+    let Some(configure) = take_initial_configure(&mut reader, &mut builder)? else {
         return Ok((state, LoopExit::Disconnect));
     };
     install_scope(&mut builder, &handle, &configure)?;
@@ -199,7 +219,7 @@ where
 {
     write_hello(&builder, &handle)?;
     let mut reader = tau_proto::PeerInputReader::new(reader);
-    let Some(configure) = read_initial_configure(&mut reader)? else {
+    let Some(configure) = take_initial_configure(&mut reader, &mut builder)? else {
         return Err(ClientError::handler(
             "harness disconnected before detached state initialization",
         ));
@@ -235,11 +255,22 @@ where
 }
 
 /// Require the first harness response after `Hello` to be `Configure`.
-fn read_initial_configure<R: Read>(
+pub(crate) fn take_initial_configure<R: Read, State>(
     reader: &mut tau_proto::PeerInputReader<R>,
+    builder: &mut ExtensionBuilder<State>,
 ) -> ClientResult<Option<tau_proto::Configure>> {
+    if let Some(configure) = builder.initial_configure.take() {
+        return Ok(Some(configure));
+    }
     match reader.read_message()? {
-        Some(tau_proto::HarnessOutputMessage::Configure(configure)) => Ok(Some(configure)),
+        Some(tau_proto::HarnessOutputMessage::Configure(configure))
+            if configure.purpose.is_runtime() =>
+        {
+            Ok(Some(configure))
+        }
+        Some(tau_proto::HarnessOutputMessage::Configure(_)) => {
+            Err(ClientError::handler("inspection requires opt-in bootstrap"))
+        }
         Some(tau_proto::HarnessOutputMessage::Disconnect(_)) | None => Ok(None),
         Some(message) => Err(ClientError::handler(format!(
             "expected initial Configure after Hello, received {message:?}"
@@ -318,7 +349,11 @@ pub(crate) fn write_hello<State>(
     builder: &ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
+    if builder.hello_sent {
+        return Ok(());
+    }
     handle.send_startup(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: builder.name.clone(),
         client_kind: builder.kind.clone(),
@@ -340,6 +375,13 @@ pub(crate) fn dispatch_message<State>(
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<DispatchOutcome> {
+    if let tau_proto::HarnessOutputMessage::Configure(configure) = &message
+        && !configure.purpose.is_runtime()
+    {
+        return Err(ClientError::handler(
+            "inspection is only valid at opt-in bootstrap",
+        ));
+    }
     if let tau_proto::HarnessOutputMessage::Configure(configure) = &message
         && let Err(error) =
             handle.install_tool_name_scope(crate::ToolNameScope::from_configure(configure))

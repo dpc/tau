@@ -29,6 +29,7 @@ mod events;
 mod interception;
 mod local_summary_continuation;
 pub use local_summary_continuation::*;
+mod inspection;
 mod message_extension_data;
 mod message_fact;
 mod messages;
@@ -66,6 +67,7 @@ pub use duration_format::format_approximate_duration_secs;
 pub use estimated_cost::*;
 pub use event_name::*;
 pub use events::*;
+pub use inspection::*;
 pub use interception::*;
 pub use message_extension_data::*;
 pub use message_fact::*;
@@ -99,7 +101,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(4, 1);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(4, 2);
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.
@@ -1648,6 +1650,13 @@ where
     #[must_use]
     pub fn into_inner(self) -> R {
         self.inner.into_inner()
+    }
+
+    /// Preserve unread buffered bytes when handing a startup stream to a
+    /// runtime.
+    #[must_use]
+    pub fn into_buffered_inner(self) -> BufReader<R> {
+        self.inner
     }
 
     /// Reads one protocol message from the stream.

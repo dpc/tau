@@ -1608,6 +1608,12 @@ impl Harness {
             HarnessInputMessage::ExtensionDataRequest(_) => !startup_extension_data_request,
             _ => true,
         };
+        if matches!(&message, HarnessInputMessage::InspectionComplete(_)) {
+            return self.handle_extension_protocol_failure(
+                source_id,
+                "declaration inspection completion is not runtime readiness".to_owned(),
+            );
+        }
         let retained_message = activation_pending
             && !matches!(
                 &message,
@@ -1780,6 +1786,7 @@ impl Harness {
             // Messages sent by clients only — extensions shouldn't round-trip
             // these. Ignore silently.
             HarnessInputMessage::Disconnect(_)
+            | HarnessInputMessage::InspectionComplete(_)
             | HarnessInputMessage::GetRenderedSystemPrompt(_)
             | HarnessInputMessage::GetRenderedPrompt(_)
             | HarnessInputMessage::GetRenderedToolDefinitions(_)

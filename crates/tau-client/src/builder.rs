@@ -16,6 +16,10 @@ use crate::{ClientError, ClientResult, ExtensionPlugin, InterceptDecision};
 /// Builder used by a [`crate::TauExtension`] to declare startup frames and
 /// handlers.
 pub struct ExtensionBuilder<State> {
+    /// Configure consumed by a preceding declaration-aware bootstrap.
+    pub(crate) initial_configure: Option<tau_proto::Configure>,
+    /// Whether that bootstrap already emitted the connection's Hello.
+    pub(crate) hello_sent: bool,
     /// Extension name used in the startup `Hello` frame.
     pub(crate) name: tau_proto::ExtensionName,
     /// Peer kind used in the startup `Hello` frame.
@@ -78,6 +82,8 @@ impl<State> ExtensionBuilder<State> {
         let name = tau_proto::ExtensionName::parse(name.as_ref().to_owned())
             .map_err(|error| ClientError::builder(error.to_string()))?;
         Ok(Self {
+            initial_configure: None,
+            hello_sent: false,
             name,
             kind,
             peer_capabilities: Vec::new(),

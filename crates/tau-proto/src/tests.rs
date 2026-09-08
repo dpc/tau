@@ -2424,6 +2424,7 @@ fn sample_session_started() -> Event {
 fn representative_input_messages() -> Vec<HarnessInputMessage> {
     vec![
         HarnessInputMessage::Hello(Hello {
+            declaration_inspection: false,
             protocol_version: PROTOCOL_VERSION,
             client_name: test_extension_name("provider"),
             client_kind: ClientKind::Provider,
@@ -2549,6 +2550,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
 fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     vec![
         HarnessOutputMessage::Configure(Configure {
+            purpose: crate::ConfigurePurpose::Runtime,
             instance_name: crate::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             tool_prefix: None,
@@ -4248,6 +4250,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     assert!(parsed.secrets.is_empty());
 
     let with_state = Configure {
+        purpose: crate::ConfigurePurpose::Runtime,
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
@@ -4265,6 +4268,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     assert_eq!(decoded, with_state);
 
     let without_state = serde_json::to_value(Configure {
+        purpose: crate::ConfigurePurpose::Runtime,
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
@@ -4286,6 +4290,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
     let mut secrets = path_std_collections::BTreeMap::new();
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
+        purpose: crate::ConfigurePurpose::Runtime,
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
@@ -4316,6 +4321,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
 #[test]
 fn directional_message_wire_form_uses_flat_message_tag() {
     let input = HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
         protocol_version: PROTOCOL_VERSION,
         client_name: test_extension_name("provider"),
         client_kind: ClientKind::Provider,
@@ -4327,7 +4333,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 4, "minor": 1})
+        serde_json::json!({"major": 4, "minor": 2})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4375,6 +4381,7 @@ fn hello_protocol_version_wire_shape_fails_closed() {
 fn ui_session_admission_wire_round_trip() {
     let expected = SessionId::parse("session-1").expect("valid session id");
     let hello = HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
         protocol_version: PROTOCOL_VERSION,
         client_name: test_extension_name("ui"),
         client_kind: ClientKind::Ui,
@@ -4418,7 +4425,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 4, "minor": 1})
+        serde_json::json!({"major": 4, "minor": 2})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

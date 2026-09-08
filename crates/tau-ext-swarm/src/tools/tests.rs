@@ -88,6 +88,7 @@ fn extension_registers_no_legacy_tool_aliases() {
     let mut input = Vec::new();
     HarnessOutputWriter::new(&mut input)
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             config: tau_proto::CborValue::Null,
             instance_name: tau_proto::ExtensionName::parse("swarm-tool-test")
                 .expect("instance name"),
@@ -127,6 +128,7 @@ fn extension_registers_no_legacy_tool_aliases() {
 #[test]
 fn swarm_tool_declarations_apply_instance_prefixes() {
     let configure = tau_proto::Configure {
+        purpose: tau_proto::ConfigurePurpose::Runtime,
         config: tau_proto::CborValue::Null,
         instance_name: tau_proto::ExtensionName::parse("std-swarm").expect("instance name"),
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
@@ -586,6 +588,7 @@ fn terminal_worker_cannot_report_successful_tool_results() {
         let mut input_writer = HarnessOutputWriter::new(&mut input);
         input_writer
             .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+                purpose: tau_proto::ConfigurePurpose::Runtime,
                 config: tau_proto::CborValue::Null,
                 instance_name: tau_proto::ExtensionName::parse("swarm-tool-test")
                     .expect("instance name"),

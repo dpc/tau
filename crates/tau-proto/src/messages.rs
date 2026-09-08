@@ -17,9 +17,9 @@ use std::{fmt, time as path_std_time};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, Event, EventSelector,
-    ExtensionName, HostedToolDefinition, InterceptionPriority, NoticeLevel, ProtocolVersion,
-    SessionId, ToolDefinition, ToolNamePrefix,
+    AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, ConfigurePurpose, Event,
+    EventSelector, ExtensionName, HostedToolDefinition, InspectionComplete, InterceptionPriority,
+    NoticeLevel, ProtocolVersion, SessionId, ToolDefinition, ToolNamePrefix,
 };
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,10 @@ pub enum PeerCapability {
 /// Announcement sent by a participant after connecting.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
+    /// Opt-in support for declaration-only Configure, before runtime
+    /// initialization. Older harnesses ignore this additive field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declaration_inspection: bool,
     /// Protocol version understood by the connecting peer.
     pub protocol_version: ProtocolVersion,
     /// Stable name used to identify the connecting peer.
@@ -128,6 +132,10 @@ pub struct Disconnect {
 /// contain floats; `PartialEq` is enough for tests.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Configure {
+    /// Select declaration inspection instead of ordinary operational startup.
+    /// Collectors must first check Hello's explicit inspection support.
+    #[serde(default, skip_serializing_if = "ConfigurePurpose::is_runtime")]
+    pub purpose: ConfigurePurpose,
     /// Free-form extension configuration from harness settings.
     pub config: CborValue,
     /// Stable configured extension instance name.
@@ -1526,6 +1534,9 @@ impl fmt::Debug for ProviderDebugCapture {
 #[serde(tag = "message", content = "payload", rename_all = "snake_case")]
 pub enum HarnessInputMessage {
     Hello(Hello),
+    /// Terminal declaration inventory; never implies ordinary runtime
+    /// readiness.
+    InspectionComplete(InspectionComplete),
     Subscribe(Subscribe),
     Intercept(Intercept),
     Ready(Ready),

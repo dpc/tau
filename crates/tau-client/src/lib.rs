@@ -28,6 +28,7 @@ mod detached_output;
 mod event_payload;
 mod extension_trait;
 mod handler;
+mod inspection;
 mod intercept_decision;
 mod logging;
 mod manual_runtime;
@@ -49,6 +50,7 @@ pub use contexts::{
 pub use detached_output::{MAX_OUTBOUND_FRAME_BYTES, encoded_outbound_frame_bytes};
 pub use event_payload::EventPayload;
 pub use extension_trait::{ExtensionPlugin, TauExtension};
+pub use inspection::{ConfiguredConnection, prepare_inspection};
 pub use intercept_decision::InterceptDecision;
 pub use logging::{DEFAULT_FILTER, ENV_VAR, init_logging, init_logging_for};
 pub use manual_runtime::{

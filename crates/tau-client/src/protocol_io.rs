@@ -555,6 +555,7 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
 pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str {
     match message {
         HarnessInputMessage::Hello(_) => "hello",
+        HarnessInputMessage::InspectionComplete(_) => "inspection_complete",
         HarnessInputMessage::Subscribe(_) => "subscribe",
         HarnessInputMessage::Intercept(_) => "intercept",
         HarnessInputMessage::Ready(_) => "ready",

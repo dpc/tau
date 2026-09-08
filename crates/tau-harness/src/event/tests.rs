@@ -227,6 +227,7 @@ fn extension_reader_waits_for_initialized_ack() {
     let mut writer = tau_proto::HarnessInputWriter::new(BufWriter::new(writer_stream));
     writer
         .write_message(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("test-extension"),
             client_kind: tau_proto::ClientKind::Tool,

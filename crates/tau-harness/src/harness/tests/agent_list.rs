@@ -258,6 +258,7 @@ fn current_session_result_is_authoritative_ui_only_and_directed() {
         .handle_client_message(
             &crate::test_connection_id("requester"),
             HarnessInputMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("claim-external"),
                 client_kind: tau_proto::ClientKind::External,

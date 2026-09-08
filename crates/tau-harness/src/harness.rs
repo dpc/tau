@@ -1913,6 +1913,7 @@ where
     let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     writer.write_message(&HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
         protocol_version: PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse("tau-echo-provider")
             .expect("built-in echo provider name must satisfy the extension identifier grammar"),
@@ -3233,6 +3234,7 @@ impl Harness {
             }
             // Other input messages from clients are ignored.
             HarnessInputMessage::ConfigError(_)
+            | HarnessInputMessage::InspectionComplete(_)
             | HarnessInputMessage::ExtensionNoticeRequest(_)
             | HarnessInputMessage::Intercept(_)
             | HarnessInputMessage::InterceptReply(_)

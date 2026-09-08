@@ -988,6 +988,7 @@ fn run_provider_configure(
         writer
             .write_message(&tau_proto::HarnessOutputMessage::Configure(
                 tau_proto::Configure {
+                    purpose: tau_proto::ConfigurePurpose::Runtime,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
                     instance_name: tau_proto::ExtensionName::parse("provider-builtin")
@@ -1053,6 +1054,7 @@ fn run_production_credential_scenario_with(
     writer
         .write_message(&tau_proto::HarnessOutputMessage::Configure(
             tau_proto::Configure {
+                purpose: tau_proto::ConfigurePurpose::Runtime,
                 tool_prefix: None,
                 config: tau_proto::CborValue::Map(Vec::new()),
                 instance_name: tau_proto::ExtensionName::parse("provider-builtin")
@@ -1253,6 +1255,7 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
     writer
         .write_message(&tau_proto::HarnessOutputMessage::Configure(
             tau_proto::Configure {
+                purpose: tau_proto::ConfigurePurpose::Runtime,
                 tool_prefix: None,
                 config: tau_proto::CborValue::Map(Vec::new()),
                 instance_name: tau_proto::ExtensionName::parse("provider-builtin")
@@ -4770,6 +4773,7 @@ fn provider_prompt_trace_omits_model_visible_content() {
         writer
             .write_message(&tau_proto::HarnessOutputMessage::Configure(
                 tau_proto::Configure {
+                    purpose: tau_proto::ConfigurePurpose::Runtime,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
                     instance_name: tau_proto::ExtensionName::parse("provider-builtin")
@@ -4928,6 +4932,7 @@ fn receipt_trace_observes_real_worker_slot_queue() {
         writer
             .write_message(&tau_proto::HarnessOutputMessage::Configure(
                 tau_proto::Configure {
+                    purpose: tau_proto::ConfigurePurpose::Runtime,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
                     instance_name: tau_proto::ExtensionName::parse("provider-builtin")

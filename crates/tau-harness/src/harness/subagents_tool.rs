@@ -3677,6 +3677,7 @@ fn authenticate_external_agent_message_sender(
     peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|err| format!("failed to set external auth deadline: {err}"))?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(
             crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
@@ -3768,6 +3769,7 @@ fn send_external_agent_message_request(
             ExternalMessageDeliveryError::Local(format!("failed to set peer send deadline: {err}"))
         })?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(
             crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,

@@ -149,6 +149,7 @@ fn write_startup(
 ) -> Result<(), Box<dyn std::error::Error>> {
     writer.write_frame(&TestProtocolItem::Message(TestMessage::Hello(
         tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-strict-compaction-provider"),
             client_kind: tau_proto::ClientKind::Provider,

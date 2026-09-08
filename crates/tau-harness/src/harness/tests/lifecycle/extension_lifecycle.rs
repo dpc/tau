@@ -48,6 +48,7 @@ fn client_hello_rejects_expected_session_mismatch() {
         .handle_client_event(
             "attach-ui",
             TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("attach-ui"),
                 client_kind: tau_proto::ClientKind::Ui,
@@ -509,6 +510,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         writer
             .write_frame(&TestProtocolItem::Message(TestMessage::Hello(
                 tau_proto::Hello {
+                    declaration_inspection: false,
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: crate::test_extension_name("late-tool"),
                     client_kind: tau_proto::ClientKind::Tool,
@@ -1687,6 +1689,7 @@ fn extension_hello_installs_declared_peer_capabilities() {
     h.handle_extension_message(
         &crate::test_connection_id("bridge"),
         TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("bridge"),
             client_kind: tau_proto::ClientKind::Tool,
@@ -1766,6 +1769,7 @@ fn rejected_startup_handshake_flushes_disconnect_before_teardown() {
         .handle_startup_from_connection(
             &client_id,
             HarnessInputMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("attach-ui"),
                 client_kind: tau_proto::ClientKind::Ui,
@@ -1825,6 +1829,7 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
         .expect("accept runtime client");
     let requested = tau_proto::SessionId::parse("different-session").expect("valid session id");
     let message = HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::test_extension_name("attach-ui"),
         client_kind: tau_proto::ClientKind::Ui,
@@ -2005,6 +2010,7 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
         .handle_client_event(
             "stale-ui",
             TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::ProtocolVersion::new(
                     tau_proto::PROTOCOL_VERSION.major + 1,
                     0,
@@ -2063,6 +2069,7 @@ fn client_minor_protocol_skew_warning_is_once_per_connection() {
     let connection_id = crate::test_connection_id("skew-ui");
     let skewed_hello = || {
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::ProtocolVersion::new(
                 tau_proto::PROTOCOL_VERSION.major,
                 tau_proto::PROTOCOL_VERSION.minor + 1,
@@ -3354,6 +3361,7 @@ fn configure_includes_extension_state_dir_and_creates_it() {
     h.handle_extension_event(
         "std-email",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
@@ -3415,6 +3423,7 @@ fn memory_only_configure_omits_extension_state_dir() {
     h.handle_extension_event(
         "std-email",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
@@ -3462,6 +3471,7 @@ fn configure_includes_only_resolved_extension_secrets() {
     h.handle_extension_event(
         "std-email",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
@@ -3507,6 +3517,7 @@ fn oversized_complete_configure_disconnects_before_publication() {
     h.handle_extension_event(
         "oversized-configure",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("oversized-configure"),
             client_kind: tau_proto::ClientKind::Tool,
@@ -4329,6 +4340,7 @@ fn ready_blocked_behind_hello_retains_decode_deadline_authority() {
         .send_for_test(HarnessEvent::from_connection_observed_at_for_test(
             connection_id.clone(),
             HarnessInputMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("queued-hello-ready"),
                 client_kind: tau_proto::ClientKind::Tool,
@@ -4496,6 +4508,7 @@ fn initial_ui_subscribe_decode_observation_owns_startup_deadline_boundary() {
             .send(HarnessEvent::from_connection_observed_at_for_test(
                 connection_id.clone(),
                 HarnessInputMessage::Hello(tau_proto::Hello {
+                    declaration_inspection: false,
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: crate::test_extension_name("deadline-ui"),
                     client_kind: tau_proto::ClientKind::Ui,
@@ -4544,6 +4557,7 @@ fn initial_subscribe_admitted_before_delayed_wake_retains_decode_authority() {
         !h.handle_startup_from_connection(
             &connection_id,
             HarnessInputMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("subscribe-before-wake"),
                 client_kind: tau_proto::ClientKind::Ui,
@@ -5158,6 +5172,7 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
         h.handle_extension_message(
             &crate::test_connection_id(connection_id),
             TestMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name(connection_id),
                 client_kind: tau_proto::ClientKind::Tool,
@@ -5649,6 +5664,58 @@ fn runtime_duplicate_ready_disconnects_only_the_extension() {
         ExtensionState::Disconnected
     );
     h.shutdown().expect("shutdown");
+}
+
+/// A declaration-inspection terminal must never count as normal Ready or
+/// activate tool declarations, either during startup or on a live connection.
+#[test]
+fn inspection_completion_cannot_activate_ordinary_extension() {
+    for already_ready in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        connect_handshaking_tool(&mut h, "inspection-on-runtime");
+        if already_ready {
+            h.extensions
+                .entries
+                .get_mut("inspection-on-runtime")
+                .expect("extension")
+                .state = ExtensionState::Ready;
+        }
+        h.extensions.initial_tool_preflight_complete = true;
+        h.handle_extension_message(
+            &crate::test_connection_id("inspection-on-runtime"),
+            tau_proto::HarnessInputMessage::InspectionComplete(tau_proto::InspectionComplete {
+                tools: vec![tau_proto::ToolRegistrationDeclared {
+                    tool: staged_tool_spec("inspection_only"),
+                    tool_group: None,
+                    prompt_fragment: None,
+                }],
+                ..Default::default()
+            }),
+        )
+        .expect("protocol failure remains extension-local");
+        assert_eq!(
+            h.extensions.entries["inspection-on-runtime"].state,
+            ExtensionState::Disconnected
+        );
+        assert!(
+            !h.extensions
+                .ready_received
+                .contains("inspection-on-runtime")
+        );
+        assert!(
+            !h.extensions
+                .activation_staging
+                .contains_key("inspection-on-runtime")
+        );
+        assert!(
+            h.tool_routing
+                .registry
+                .providers_for("inspection_only")
+                .is_empty()
+        );
+        h.shutdown().expect("shutdown");
+    }
 }
 
 /// Config rejection after the initial barrier isolates the live connection
@@ -7516,6 +7583,7 @@ fn unavailable_tool_is_reported_without_crashing() {
 #[test]
 fn hello_protocol_version_admission_matrix_is_explicit() {
     let hello = |protocol_version| tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version,
         client_name: crate::test_extension_name("future-client"),
         client_kind: tau_proto::ClientKind::Tool,
@@ -7560,14 +7628,11 @@ fn hello_protocol_version_admission_matrix_is_explicit() {
     }
 }
 
-/// Local-summary continuation requires every peer to understand protocol major
-/// 4.
+/// Local-summary continuation requires protocol major 4 independently of later
+/// additive minor revisions such as declaration inspection.
 #[test]
 fn local_summary_continuation_rejects_protocol_three_peers() {
-    assert_eq!(
-        tau_proto::PROTOCOL_VERSION,
-        tau_proto::ProtocolVersion::new(4, 1)
-    );
+    assert_eq!(tau_proto::PROTOCOL_VERSION.major, 4);
     for client_kind in [
         tau_proto::ClientKind::Provider,
         tau_proto::ClientKind::Tool,
@@ -7575,6 +7640,7 @@ fn local_summary_continuation_rejects_protocol_three_peers() {
         tau_proto::ClientKind::Ui,
     ] {
         let hello = tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::ProtocolVersion::new(3, 1),
             client_name: crate::test_extension_name("old-peer"),
             client_kind,
@@ -7585,8 +7651,9 @@ fn local_summary_continuation_rejects_protocol_three_peers() {
     }
 }
 
-/// A protocol 4.0 configured extension remains admitted by the 4.1 harness,
-/// receives Configure first, and produces only the ordinary minor-skew warning.
+/// A protocol 4.0 configured extension remains admitted by a newer minor
+/// harness, receives Configure first, and produces only the ordinary minor-skew
+/// warning.
 #[test]
 fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
     let td = TempDir::new().expect("tempdir");
@@ -7601,6 +7668,7 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
     h.handle_extension_message(
         &crate::test_connection_id("configured-minor-skew"),
         TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::ProtocolVersion::new(4, 0),
             client_name: crate::test_extension_name("hello-minor-skew-peer"),
             client_kind: tau_proto::ClientKind::Tool,
@@ -7714,6 +7782,7 @@ fn optional_mismatched_protocol_is_disabled_but_required_mismatch_is_fatal() {
     }
     let mismatched_hello = |name: &str| {
         TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::ProtocolVersion::new(
                 tau_proto::PROTOCOL_VERSION.major + 1,
                 0,

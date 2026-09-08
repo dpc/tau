@@ -85,6 +85,7 @@ fn run_frames(
         )])
     });
     let configure = HarnessOutputMessage::Configure(Configure {
+        purpose: tau_proto::ConfigurePurpose::Runtime,
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         instance_name: tau_proto::ExtensionName::parse("std-utils").expect("extension name"),
         config: config.unwrap_or_else(|| CborValue::Map(Vec::new())),

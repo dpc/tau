@@ -463,6 +463,7 @@ fn external_message_peer_cannot_reach_ui_or_action_handlers() {
     h.handle_client_message(
         &external_id,
         tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name(
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,

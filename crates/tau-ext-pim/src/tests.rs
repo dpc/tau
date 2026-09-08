@@ -178,6 +178,7 @@ fn rejected_legacy_fallback_reconfigure_clears_calendar_state() {
 
 fn configure(config: CborValue, state_root: &std::path::Path) -> tau_proto::Configure {
     tau_proto::Configure {
+        purpose: tau_proto::ConfigurePurpose::Runtime,
         tool_prefix: None,
         config,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -431,6 +432,7 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
     runtime
         .configure(
             tau_proto::Configure {
+                purpose: tau_proto::ConfigurePurpose::Runtime,
                 tool_prefix: Some(
                     tau_proto::ToolNamePrefix::parse("work").expect("valid tool prefix"),
                 ),
@@ -473,6 +475,7 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
     runtime
         .configure(
             tau_proto::Configure {
+                purpose: tau_proto::ConfigurePurpose::Runtime,
                 tool_prefix: Some(
                     tau_proto::ToolNamePrefix::parse("work").expect("valid tool prefix"),
                 ),

@@ -16,6 +16,7 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
 
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -1070,6 +1071,7 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
 
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: Some(prefix),
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -1371,6 +1373,7 @@ fn initial_dir_lock_override_is_final_before_ready() {
     let mut input_writer = tau_proto::HarnessOutputWriter::new(&mut input);
     input_writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),

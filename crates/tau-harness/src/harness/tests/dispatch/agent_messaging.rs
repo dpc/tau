@@ -263,6 +263,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
     h.handle_client_message(
         &crate::test_connection_id("ui"),
         tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("ordinary-ui"),
             client_kind: tau_proto::ClientKind::Ui,
@@ -281,6 +282,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
     h.handle_client_message(
         &crate::test_connection_id("external"),
         tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name(
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
@@ -332,6 +334,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     target.accept_client(stream).expect("accept client");
 
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::test_extension_name(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME),
         client_kind: tau_proto::ClientKind::External,
@@ -488,6 +491,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         .accept_client(stream)
         .expect("register target client");
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::test_extension_name(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME),
         client_kind: tau_proto::ClientKind::External,
@@ -615,6 +619,7 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
     h.handle_client_message(
         &crate::test_connection_id("external"),
         tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name(
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,

@@ -565,6 +565,7 @@ fn runtime_config_retains_redacted_password_until_client_adapter() {
 
 fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
     tau_proto::Configure {
+        purpose: tau_proto::ConfigurePurpose::Runtime,
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
         instance_name: extension_name(),

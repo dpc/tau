@@ -77,6 +77,7 @@ fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn
         tau_proto::PROTOCOL_VERSION
     );
     peer.send(&HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
         protocol_version: peer_version,
         client_name: "tau-e2e-minor-skew".parse()?,
         client_kind: ClientKind::Ui,

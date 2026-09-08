@@ -338,6 +338,7 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
         if !matches!(frames.first(), Some(HarnessOutputMessage::Configure(_))) {
             writer
                 .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+                    purpose: tau_proto::ConfigurePurpose::Runtime,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
                     instance_name: tau_proto::ExtensionName::parse("test-extension")

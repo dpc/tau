@@ -655,6 +655,7 @@ fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error::Error>> {
     wait_for_socket(socket)?;
     let mut peer = SocketPeer::connect(socket)?;
     peer.send(&HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse("provider-builtin-retry-e2e")?,
         client_kind: ClientKind::Ui,

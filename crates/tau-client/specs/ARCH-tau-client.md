@@ -9,6 +9,15 @@ above `tau-proto`, which owns the wire messages. First-party extensions now use
 `tau-client` directly; the former compatibility startup helper crate was removed
 after the migration completed without a protocol break.
 
+Opted-in executables can place `prepare_inspection` before runtime registration
+and state construction. It advertises declaration inspection, consumes purpose
+selection, and either emits a bounded typed terminal inventory or returns an
+ordinary configured connection. The latter resumes any runner family with the
+same Configure and unread buffered input, without another Hello. Existing runner
+APIs alone do not advertise support, and cannot undo preconstructed-state effects.
+This branch never creates operational client handles or calls normal handlers;
+see [SPEC-extension-declaration-inspection](../../../specs/SPEC-extension-declaration-inspection.md).
+
 Configure supplies the stable extension instance name used by instance-scoped
 state such as per-agent workdir metadata. The client runtime exposes committed
 metadata events and context publication to the extension; it does not choose a

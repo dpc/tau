@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 4.2 adds opt-in declaration inspection without changing ordinary
+startup. Hello's additive support field gates an explicit Configure purpose;
+runtime remains the omitted default. The terminal `inspection_complete` message
+contains typed declarations and completeness codes, never runtime Ready.
+See [SPEC-extension-declaration-inspection](../../../specs/SPEC-extension-declaration-inspection.md).
+
 UI lifetime controls are directed messages, not events: `ui_quit_request` carries
 ordinary quit versus explicit daemon-lifetime detach intent, and
 `ui_quit_result` reports the harness's committed disposition. The directed

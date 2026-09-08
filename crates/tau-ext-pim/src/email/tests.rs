@@ -473,6 +473,7 @@ fn spawn_extension_with_config(
     ));
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: tool_prefix
                 .map(|prefix| tau_proto::ToolNamePrefix::parse(prefix).expect("tool prefix")),
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -897,6 +898,7 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
 
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -1031,6 +1033,7 @@ fn email_run_malformed_config_emits_config_error_and_continues() {
 
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -1237,6 +1240,7 @@ fn email_runner_republishes_effective_google_auth_accounts() {
     let state_dir = tempfile::TempDir::new().expect("state dir");
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: Some(
                 tau_proto::ToolNamePrefix::parse("work").expect("unchanged tool prefix"),
             ),
@@ -5598,6 +5602,7 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
     let _tool = drain_startup(&mut pair.reader);
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),

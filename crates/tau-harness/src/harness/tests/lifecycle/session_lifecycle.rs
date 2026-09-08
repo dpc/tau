@@ -133,6 +133,7 @@ fn client_hello_acknowledges_matching_expected_session() {
         .handle_client_event(
             "attach-ui",
             TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("attach-ui"),
                 client_kind: tau_proto::ClientKind::Ui,

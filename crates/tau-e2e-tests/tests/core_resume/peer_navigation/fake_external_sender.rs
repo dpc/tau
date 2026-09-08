@@ -275,6 +275,7 @@ fn assert_callback_auth(
 
 fn callback_hello(session_id: &SessionId) -> tau_proto::Hello {
     tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
             .expect("callback client name must satisfy the identifier grammar"),

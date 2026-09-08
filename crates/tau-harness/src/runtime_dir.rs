@@ -640,6 +640,7 @@ fn probe_exact_session(
     peer.set_write_timeout(probe_remaining(deadline, cancelled)?)
         .ok()?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse("tau-runtime-probe").ok()?,
         client_kind: tau_proto::ClientKind::Ui,
@@ -1027,6 +1028,7 @@ fn probe_peer_entrypoint(
     }
     if peer
         .send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name,
             client_kind: tau_proto::ClientKind::External,

@@ -89,6 +89,7 @@ fn initial_ui_stdio_command(
 fn write_initial_ui_handshake(writer: &mut PeerOutputWriter<BufWriter<std::process::ChildStdin>>) {
     writer
         .write_message(&HarnessInputMessage::Hello(Hello {
+            declaration_inspection: false,
             protocol_version: PROTOCOL_VERSION,
             client_name: "tau-chat".parse().expect("valid chat client name"),
             client_kind: ClientKind::Ui,
@@ -467,6 +468,7 @@ fn harness_process_rejects_attach_session_mismatch() {
     let mut writer = PeerOutputWriter::new(BufWriter::new(child.stdin.take().expect("stdin")));
     writer
         .write_message(&HarnessInputMessage::Hello(Hello {
+            declaration_inspection: false,
             protocol_version: PROTOCOL_VERSION,
             client_name: "attach-test".parse().expect("valid client name"),
             client_kind: ClientKind::Ui,
@@ -552,6 +554,7 @@ fn late_startup_failure_does_not_emit_introduction_notice() {
 
     let mut writer = PeerOutputWriter::new(BufWriter::new(child.stdin.take().expect("stdin")));
     let _ = writer.write_message(&HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-chat".parse().expect("valid chat client name"),
         client_kind: ClientKind::Ui,

@@ -888,6 +888,9 @@ impl<State> ManualExtensionRuntime<State> {
     /// Establish the first scope or emit ConfigError and consume an immutable
     /// identity change.
     fn accept_configure(&mut self, configure: &tau_proto::Configure) -> ClientResult<bool> {
+        if !configure.purpose.is_runtime() {
+            return Err(ClientError::handler("inspection requires opt-in bootstrap"));
+        }
         match self
             .handle
             .install_tool_name_scope(crate::ToolNameScope::from_configure(configure))
@@ -1183,9 +1186,7 @@ where
         W: Write + Send + 'static,
         MakeState: FnOnce(ClientHandle, ExtensionDataClient) -> Extension::State,
     {
-        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind())?;
-        self.extension.register(&mut builder);
-        builder.validate()?;
+        let mut builder = self.into_builder()?;
 
         let (sender, receiver) = crate::writer_thread::writer_channel();
         let handle = ClientHandle::new(sender);
@@ -1198,19 +1199,15 @@ where
         }
         let mut input_reader = tau_proto::PeerInputReader::new(reader);
         let startup_result = (|| {
-            let configure = match input_reader.read_message()? {
-                Some(tau_proto::HarnessOutputMessage::Configure(configure)) => configure,
-                Some(message) => {
-                    return Err(ClientError::handler(format!(
-                        "expected initial Configure after Hello, received {message:?}"
-                    )));
-                }
-                None => {
-                    return Err(ClientError::handler(
-                        "harness input closed before initial Configure",
-                    ));
-                }
-            };
+            let configure =
+                match crate::runner::take_initial_configure(&mut input_reader, &mut builder)? {
+                    Some(configure) => configure,
+                    None => {
+                        return Err(ClientError::handler(
+                            "harness input closed before initial Configure",
+                        ));
+                    }
+                };
             let scope = crate::ToolNameScope::from_configure(&configure);
             handle.install_tool_name_scope(scope.clone())?;
             if let Err(error) = builder.apply_tool_name_scope(&scope) {
@@ -1341,9 +1338,7 @@ where
         W: Write + Send + 'static,
         MakeState: FnOnce(ClientHandle) -> Extension::State,
     {
-        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind())?;
-        self.extension.register(&mut builder);
-        builder.validate()?;
+        let mut builder = self.into_builder()?;
         builder.validate_deferred_startup()?;
 
         let (sender, receiver) = crate::writer_thread::writer_channel();
@@ -1356,6 +1351,7 @@ where
             return Err(error);
         }
 
+        let initial_configure = builder.initial_configure.take();
         let state = make_state(handle.clone());
         let (wake_sender, wake_receiver) = tau_blocking_notify_channel::channel();
         let (input, reader_thread, local_input_observations_enabled) =
@@ -1366,7 +1362,14 @@ where
             handle,
             input: Rc::new(RefCell::new(ManualInput {
                 receiver: input,
-                pending: VecDeque::new(),
+                pending: initial_configure
+                    .into_iter()
+                    .map(|configure| {
+                        ReaderMessage::Message(tau_proto::HarnessOutputMessage::Configure(
+                            configure,
+                        ))
+                    })
+                    .collect(),
                 input_closed: false,
                 last_observation: None,
             })),

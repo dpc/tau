@@ -15,6 +15,12 @@ Implementation-only changes do not bump it. Boundary changes bump the minor
 revision only when best-effort continuation is deliberate; when in doubt, they
 bump the major revision and reset the minor revision to zero.
 
+Protocol 4.2 deliberately permits ordinary minor-skew continuation: declaration
+inspection support is an additive Hello field and runtime-default Configure
+purpose is omitted. Only a collector that first verifies explicit support sends
+the new inspection purpose and expects its distinct completion message.
+See [SPEC-extension-declaration-inspection](SPEC-extension-declaration-inspection.md).
+
 The initial revision is `1.0`. Its object-shaped wire value deliberately breaks
 the former scalar-zero Hello field. Missing, malformed, and legacy scalar values
 fail decoding; Tau provides no bootstrap legacy decoder or default.

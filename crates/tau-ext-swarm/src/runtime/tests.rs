@@ -593,6 +593,7 @@ fn runner_subscribes_projection_for_restore_and_live_delivery() {
     let mut input_writer = HarnessOutputWriter::new(&mut input);
     input_writer
         .write_message(&HarnessOutputMessage::Configure(Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "endpoint": {"peer_id": peer_id},
@@ -700,6 +701,7 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
     let mut writer = HarnessOutputWriter::new(&mut harness_input);
     writer
         .write_message(&HarnessOutputMessage::Configure(Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
             tool_prefix: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "endpoint": {

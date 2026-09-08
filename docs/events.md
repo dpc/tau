@@ -1145,3 +1145,10 @@ recipients and other start paths retain their existing navigation behavior.
   generation.
 
 Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.
+
+## Declaration inspection is not an event
+
+The opt-in `inspection_complete` peer message terminates declaration-only
+bootstrap. Its typed declarations are not published events and do not imply
+runtime `Ready`; see
+[SPEC-extension-declaration-inspection](../specs/SPEC-extension-declaration-inspection.md).
