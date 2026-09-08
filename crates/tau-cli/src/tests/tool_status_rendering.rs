@@ -4705,6 +4705,12 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
             unreachable!("tool_started helper returns a tool start");
         };
         started_event.agent_id = agent_id("main");
+        if tool_name == "wait" {
+            started_event.arguments = CborValue::Map(vec![(
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(60.into()),
+            )]);
+        }
         renderer.handle(&started);
         renderer.handle(&initial_tool_progress(
             call_id,
@@ -4734,17 +4740,22 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
 
     let verbose = vt.screen_text(120).join("\n");
     assert!(verbose.contains("PRIVATE_LIVE_PAYLOAD"), "{verbose}");
-    let verbose_headers =
-        ["READ_ARGUMENT", "SEARCH_ARGUMENT", "WRITE_ARGUMENT", "60m"].map(|argument| {
-            verbose
-                .lines()
-                .find(|line| line.contains(argument))
-                .unwrap_or_else(|| panic!("missing verbose header for {argument}: {verbose}"))
-                .trim()
-                .to_owned()
-        });
+    let verbose_headers = [
+        "READ_ARGUMENT",
+        "SEARCH_ARGUMENT",
+        "WRITE_ARGUMENT",
+        "wait input",
+    ]
+    .map(|argument| {
+        verbose
+            .lines()
+            .find(|line| line.contains(argument))
+            .unwrap_or_else(|| panic!("missing verbose header for {argument}: {verbose}"))
+            .trim()
+            .to_owned()
+    });
     assert!(
-        verbose_headers[3].contains("wait 60m"),
+        verbose_headers[3].contains("/3600s"),
         "{}",
         verbose_headers[3]
     );

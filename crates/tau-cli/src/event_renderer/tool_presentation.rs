@@ -105,6 +105,34 @@ pub(super) fn effective_shell_timeout(started: &tau_proto::ToolStarted) -> Optio
     Some(Duration::from_secs(timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)))
 }
 
+/// Normalizes the harness-owned activating-input wait label and returns its
+/// effective timeout for the generic elapsed/limit duration chip.
+///
+/// Exact and background waits carry tool-name labels instead and therefore
+/// have no known deadline.
+pub(super) fn is_activating_input_wait(started: &tau_proto::ToolStarted) -> bool {
+    started.tool_name.as_str() == "wait"
+        && tau_harness::normalized_wait_timeout_minutes(&started.arguments)
+            .ok()
+            .flatten()
+            .is_some()
+}
+
+/// Normalizes the activating-input wait label and returns its
+/// harness-normalized timeout for the generic elapsed/limit duration chip.
+pub(super) fn normalize_wait_display_timeout(
+    is_activating_input_wait: bool,
+    display: &mut ToolCallDisplay,
+) -> Option<Duration> {
+    if !is_activating_input_wait {
+        return None;
+    }
+    let minutes = display.args.strip_suffix('m')?.parse::<u64>().ok()?;
+    let seconds = minutes.checked_mul(60)?;
+    display.args = "input".to_owned();
+    Some(Duration::from_secs(seconds))
+}
+
 /// Projects a blocker display through the action-only presentation boundary.
 pub(super) fn sanitize_blocker_display(
     display: &mut ToolCallDisplay,

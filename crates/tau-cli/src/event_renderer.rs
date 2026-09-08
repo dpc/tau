@@ -40,8 +40,8 @@ use self::prompt_projection::{
 };
 use self::terminal_tool_calls::TerminalToolCalls;
 use self::tool_presentation::{
-    BlockerAction, blocker_action_descriptor, effective_shell_timeout, is_blocker_tool_name,
-    sanitize_blocker_display,
+    BlockerAction, blocker_action_descriptor, effective_shell_timeout, is_activating_input_wait,
+    is_blocker_tool_name, normalize_wait_display_timeout, sanitize_blocker_display,
 };
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
@@ -954,9 +954,11 @@ struct ToolCallState {
     started_at: Option<Instant>,
     /// Harness log timestamp for final duration chips.
     recorded_started_at: Option<UnixMicros>,
-    /// Effective shell timeout retained from the tool start for duration
-    /// presentation. `None` leaves non-shell tool duration chips unchanged.
-    effective_shell_timeout: Option<Duration>,
+    /// Effective tool timeout retained for elapsed/limit duration presentation.
+    /// Currently populated for shell calls and activating-input waits.
+    effective_tool_timeout: Option<Duration>,
+    /// Whether the start arguments select the activating-input wait mode.
+    is_activating_input_wait: bool,
     /// Summary block for the assistant tool batch this call belongs
     /// to. `None` for stray events without a preceding tool-call
     /// announcement.
@@ -3569,7 +3571,7 @@ impl EventRenderer {
                         freeze_multiline_payloads,
                         &mut display,
                         duration,
-                        state.effective_shell_timeout,
+                        state.effective_tool_timeout,
                     );
                     state.live_display = Some(display.clone());
                     Some(display)
@@ -7263,11 +7265,7 @@ impl EventRenderer {
             &Self::self_compaction_tool_use_state(status, status_text),
         );
         if let Some(duration) = Self::live_tool_duration(state) {
-            Self::upsert_tool_duration_suffix(
-                &mut display,
-                duration,
-                state.effective_shell_timeout,
-            );
+            Self::upsert_tool_duration_suffix(&mut display, duration, state.effective_tool_timeout);
         }
         let block = self.render_live_tool_block(&display);
         self.resources.handle.set_block(block_id, block);
@@ -8191,6 +8189,7 @@ impl EventRenderer {
         let is_blocker = is_blocker_tool_name(started.tool_name.as_str());
         let blocker_action = blocker_action_descriptor(started);
         let effective_shell_timeout = effective_shell_timeout(started);
+        let is_activating_input_wait = is_activating_input_wait(started);
         let mut display = pending_tool_call_display(started.tool_name.as_str());
         sanitize_blocker_display(&mut display, is_blocker, blocker_action);
         Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO, effective_shell_timeout);
@@ -8226,7 +8225,8 @@ impl EventRenderer {
             });
         state.blocker_action = blocker_action;
         state.is_blocker = is_blocker;
-        state.effective_shell_timeout = effective_shell_timeout;
+        state.effective_tool_timeout = effective_shell_timeout;
+        state.is_activating_input_wait = is_activating_input_wait;
         state.block_id = Some(live_id);
         state.live_display = Some(display);
         state.started_at = Some(Instant::now());
@@ -8349,17 +8349,22 @@ impl EventRenderer {
                 } else {
                     render_tool_use_state(&progress.tool_name, progress_display)
                 };
+                let wait_timeout =
+                    normalize_wait_display_timeout(state.is_activating_input_wait, &mut display);
+                if wait_timeout.is_some() {
+                    state.effective_tool_timeout = wait_timeout;
+                }
                 sanitize_blocker_display(&mut display, state.is_blocker, state.blocker_action);
                 if Self::use_static_live_duration(freeze_multiline_payloads, &display) {
                     Self::upsert_static_tool_duration_suffix(
                         &mut display,
-                        state.effective_shell_timeout,
+                        state.effective_tool_timeout,
                     );
                 } else if let Some(duration) = Self::live_tool_duration(state) {
                     Self::upsert_tool_duration_suffix(
                         &mut display,
                         duration,
-                        state.effective_shell_timeout,
+                        state.effective_tool_timeout,
                     );
                 }
                 if state.live_display.as_ref() == Some(&display) {
@@ -8408,11 +8413,7 @@ impl EventRenderer {
                 continue;
             };
             let mut display = display.clone();
-            Self::upsert_tool_duration_suffix(
-                &mut display,
-                duration,
-                state.effective_shell_timeout,
-            );
+            Self::upsert_tool_duration_suffix(&mut display, duration, state.effective_tool_timeout);
             if state
                 .live_display
                 .as_ref()
@@ -8670,12 +8671,14 @@ impl EventRenderer {
         } else {
             Self::tool_result_display(tool_name, descriptor, diff.as_ref())
         };
+        let wait_timeout =
+            normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(
                 &mut display,
                 duration,
-                prior.effective_shell_timeout,
+                wait_timeout.or(prior.effective_tool_timeout),
             );
         }
         self.record_tool_summary_result(
@@ -8837,12 +8840,14 @@ impl EventRenderer {
                 error.descriptor,
             )
         };
+        let wait_timeout =
+            normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(
                 &mut display,
                 duration,
-                prior.effective_shell_timeout,
+                wait_timeout.or(prior.effective_tool_timeout),
             );
         }
         self.record_tool_summary_result(
@@ -8919,12 +8924,14 @@ impl EventRenderer {
             normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::Cancelled);
         let mut display = render_tool_use_state(&cancelled.tool_name, &descriptor);
         let is_blocker = prior.is_blocker || is_blocker_tool_name(cancelled.tool_name.as_str());
+        let wait_timeout =
+            normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(
                 &mut display,
                 duration,
-                prior.effective_shell_timeout,
+                wait_timeout.or(prior.effective_tool_timeout),
             );
         }
         self.record_tool_summary_result(prior.summary_block_id, None, None, true);

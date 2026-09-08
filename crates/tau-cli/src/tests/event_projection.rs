@@ -1471,8 +1471,8 @@ fn standalone_compaction_replay_retires_private_progress() {
     assert!(!vt.screen_contains(100, "◆"));
 }
 
-/// The normalized wait bound must be visible both while the call is live and
-/// after its generic result replaces the pending block.
+/// Activating-input waits identify their target and show the normalized wait
+/// bound alongside their own elapsed time both live and after completion.
 #[test]
 fn wait_timeout_label_survives_live_to_retained_transition() {
     let (_term, handle, vt) = setup(80, 24);
@@ -1495,7 +1495,8 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
         tau_proto::UnixMicros::new(1_100_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "wait 60m"));
+    assert!(vt.screen_contains(80, "wait input"));
+    assert!(vt.screen_contains(80, "/3600s"));
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
@@ -1517,7 +1518,7 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
         tau_proto::UnixMicros::new(2_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "wait 60m 1s timeout"));
+    assert!(vt.screen_contains(80, "wait input 1/3600s timeout"));
 
     // Durable replay does not include transient progress, so the terminal
     // descriptor must remain self-contained.
@@ -1561,7 +1562,109 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
         tau_proto::UnixMicros::new(2_000_000),
     );
     sync(&replay_handle);
-    assert!(replay_vt.screen_contains(80, "wait 60m 1s timeout"));
+    assert!(replay_vt.screen_contains(80, "wait input 1/3600s timeout"));
+}
+
+/// The CLI must use the harness wait parser rather than a stricter structural
+/// approximation, so accepted ignored fields do not hide the effective limit.
+#[test]
+fn input_wait_with_ignored_extra_field_keeps_timeout_limit() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle_recorded_at(
+        &tool_started(
+            "input-wait-extra",
+            "wait",
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("timeout_minutes".to_owned()),
+                    CborValue::Integer(5.into()),
+                ),
+                (CborValue::Text("ignored".to_owned()), CborValue::Bool(true)),
+            ]),
+        ),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &initial_tool_progress("input-wait-extra", "wait", "5m", ""),
+        tau_proto::UnixMicros::new(1_100_000),
+    );
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "wait input"));
+    assert!(vt.screen_contains(80, "/300s"));
+}
+
+/// Exact waits must not infer activating-input mode from a target tool name
+/// that happens to look like the normalized `Nm` input-timeout label.
+#[test]
+fn exact_wait_for_minute_shaped_tool_name_has_no_timeout_limit() {
+    let exact_arguments = || {
+        CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text("target-call".to_owned()),
+        )])
+    };
+    let terminal = || {
+        Event::ToolResult(ToolResult {
+            presentation: Default::default(),
+            call_id: "exact-wait".into(),
+            tool_name: tau_proto::ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "60m".to_owned(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "ok".to_owned(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle_recorded_at(
+        &tool_started("exact-wait", "wait", exact_arguments()),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &initial_tool_progress("exact-wait", "wait", "60m", ""),
+        tau_proto::UnixMicros::new(1_100_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(80, "wait 60m"));
+    assert!(!vt.screen_contains(80, "/3600s"));
+
+    renderer.handle_recorded_at(&terminal(), tau_proto::UnixMicros::new(2_000_000));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "wait 60m 1s ok"));
+    assert!(!vt.screen_contains(80, "wait input"));
+
+    let (_replay_term, replay_handle, replay_vt) = setup(80, 24);
+    let mut replay = EventRenderer::new(
+        replay_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    replay.handle_recorded_at(
+        &tool_started("exact-wait", "wait", exact_arguments()),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    replay.handle_recorded_at(&terminal(), tau_proto::UnixMicros::new(2_000_000));
+    sync(&replay_handle);
+    assert!(replay_vt.screen_contains(80, "wait 60m 1s ok"));
+    assert!(!replay_vt.screen_contains(80, "wait input"));
 }
 
 /// Every structured progress counter keeps counter priority, including custom

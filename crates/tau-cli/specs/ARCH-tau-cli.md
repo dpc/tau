@@ -189,6 +189,12 @@ the CLI reads their start arguments solely to retain the configured `timeout`
 (or the shell provider's 300-second default) and renders their duration chip as
 `elapsed/timeout`s. It does not interpret any other shell argument or alter
 generic tool-header behavior.
+The built-in `wait` tool is another narrow presentation exception. The CLI uses
+its start arguments only to distinguish activating-input mode, then interprets
+the harness-normalized `Nm` display label as that wait's effective timeout. It
+renders the target as `input` and the duration as `elapsed/timeout`s. Exact,
+plural, and bare background waits retain their tool-owned target labels and show
+elapsed time without a fabricated limit.
 The standard Swarm `task_blocker` tool, including a structurally prefixed name
 such as `work_task_blocker`, is the narrow exception to otherwise generic
 tool-header projection: its structured start argument contributes only the

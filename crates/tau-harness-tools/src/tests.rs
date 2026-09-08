@@ -992,8 +992,8 @@ fn wait_initial_display_uses_tracked_target_tool_name() {
     assert_eq!(display.status, ToolUseStatus::InProgress);
 }
 
-/// Plural wait display keeps request order, resolves tracked tool names, and
-/// leaves unknown-but-valid call IDs visible.
+/// Plural wait display keeps request order and resolves tracked tool names
+/// without exposing opaque call IDs for unknown targets.
 #[test]
 fn wait_initial_display_shows_plural_targets_in_request_order() {
     let mut state = BuiltinState::default();
@@ -1015,11 +1015,11 @@ fn wait_initial_display_shows_plural_targets_in_request_order() {
             )]),
         })
         .expect("plural wait display");
-    assert_eq!(display.args, "workdir, call-unknown, shell");
+    assert_eq!(display.args, "workdir, tool, shell");
 }
 
-/// Activating-input waits expose their effective bounded timeout through the
-/// provider-owned generic display while argument-free waits stay unchanged.
+/// Wait modes always expose a concise target label, while activating-input
+/// waits retain their normalized timeout for renderer-side duration projection.
 #[test]
 fn wait_initial_display_shows_normalized_input_timeout() {
     let state = BuiltinState::default();
@@ -1066,7 +1066,7 @@ fn wait_initial_display_shows_normalized_input_timeout() {
             })
             .expect("argument-free wait display")
             .args,
-        ""
+        "background"
     );
     let invalid = CborValue::Map(vec![
         (
@@ -1079,6 +1079,32 @@ fn wait_initial_display_shows_normalized_input_timeout() {
         ),
     ]);
     assert_eq!(state.wait_initial_display_args(&invalid, None), "");
+}
+
+/// Large plural waits keep a bounded target preview and report the omitted
+/// count so one tool row cannot be dominated by target labels.
+#[test]
+fn wait_initial_display_bounds_plural_target_names() {
+    let mut state = BuiltinState::default();
+    for index in 0..6 {
+        state.record_tool_started(
+            format!("call-{index}").into(),
+            ToolName::new(format!("tool_{index}")),
+        );
+    }
+    let arguments = CborValue::Map(vec![(
+        CborValue::Text("tool_call_ids".to_owned()),
+        CborValue::Array(
+            (0..6)
+                .map(|index| CborValue::Text(format!("call-{index}")))
+                .collect(),
+        ),
+    )]);
+
+    assert_eq!(
+        state.wait_initial_display_args(&arguments, None),
+        "tool_0, tool_1, tool_2, tool_3, +2"
+    );
 }
 
 /// The message tool progress display must keep an agent recipient inline and

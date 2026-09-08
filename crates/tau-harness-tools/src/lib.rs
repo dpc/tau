@@ -40,6 +40,7 @@ const SESSION_LIST_TOOL_NAME: &str = "session_list";
 const AGENT_LIST_TOOL_NAME: &str = "agent_list";
 const STATUS_TOOL_NAME: &str = "status";
 const DISCOVERY_MAX_RESULTS: usize = 50;
+const WAIT_DISPLAY_TARGET_LIMIT: usize = 4;
 
 /// Return handlers for Tau's built-in harness-process tools.
 pub fn builtin_handlers() -> Vec<Arc<dyn InternalToolHandler>> {
@@ -212,23 +213,38 @@ impl BuiltinState {
         if let Some(minutes) = input_wait_timeout_minutes {
             return format!("{minutes}m");
         }
-        wait_target_call_id(arguments)
-            .and_then(|call_id| self.in_progress_tool_names.get(call_id))
-            .map(ToString::to_string)
-            .or_else(|| {
-                wait_target_call_ids(arguments).map(|call_ids| {
-                    call_ids
-                        .into_iter()
-                        .map(|call_id| {
-                            self.in_progress_tool_names
-                                .get(call_id)
-                                .map_or_else(|| call_id.to_owned(), ToString::to_string)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
+        if cbor_map_field(arguments, "timeout_minutes").is_some()
+            && (wait_target_call_id(arguments).is_some()
+                || wait_target_call_ids(arguments).is_some())
+        {
+            return String::new();
+        }
+        if let Some(call_id) = wait_target_call_id(arguments) {
+            return self
+                .in_progress_tool_names
+                .get(call_id)
+                .map_or_else(|| "tool".to_owned(), ToString::to_string);
+        }
+        if let Some(call_ids) = wait_target_call_ids(arguments) {
+            let remaining = call_ids.len().saturating_sub(WAIT_DISPLAY_TARGET_LIMIT);
+            let mut targets = call_ids
+                .into_iter()
+                .take(WAIT_DISPLAY_TARGET_LIMIT)
+                .map(|call_id| {
+                    self.in_progress_tool_names
+                        .get(call_id)
+                        .map_or_else(|| "tool".to_owned(), ToString::to_string)
                 })
-            })
-            .unwrap_or_default()
+                .collect::<Vec<_>>();
+            if remaining != 0 {
+                targets.push(format!("+{remaining}"));
+            }
+            return targets.join(", ");
+        }
+        if matches!(arguments, CborValue::Map(entries) if entries.is_empty()) {
+            return "background".to_owned();
+        }
+        String::new()
     }
 }
 
