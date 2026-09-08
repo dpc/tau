@@ -1470,6 +1470,181 @@ fn crashing_supervised_tool_uses_fake_clock_and_stops_after_three_restarts() {
     h.shutdown().expect("shutdown");
 }
 
+/// Named recovery must reset only the selected exhausted budget and leave
+/// healthy, already-retrying, and configuration-disabled peers untouched.
+#[test]
+fn named_exhausted_extension_retry_is_selective() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let exhausted = install_exhausted_test_extension(&mut h, "failed-a");
+    let other_exhausted = install_exhausted_test_extension(&mut h, "failed-b");
+    let _healthy = connect_handshaking_tool(&mut h, "healthy");
+    let retrying = crate::test_connection_id("retrying");
+    let _retrying_sink = connect_handshaking_tool(&mut h, retrying.as_str());
+    h.extensions
+        .entries
+        .get_mut(&retrying)
+        .expect("retrying")
+        .state = ExtensionState::Disconnected;
+    h.extensions
+        .entries
+        .get_mut(&retrying)
+        .expect("retrying")
+        .supervised_config = Some(supervised_test_config("retrying", "exit 1"));
+    h.schedule_extension_restart_at(&retrying, Instant::now());
+    let disabled = crate::test_connection_id("config-disabled");
+    let _disabled_sink = connect_handshaking_tool(&mut h, disabled.as_str());
+    h.extensions
+        .entries
+        .get_mut(&disabled)
+        .expect("disabled")
+        .state = ExtensionState::Disconnected;
+    h.extensions
+        .entries
+        .get_mut(&disabled)
+        .expect("disabled")
+        .respawn_allowed = false;
+
+    let now = Instant::now();
+    let retried = h.retry_exhausted_extensions(Some(&crate::test_extension_name("failed-a")), now);
+
+    assert_eq!(retried, [crate::test_extension_name("failed-a")]);
+    assert_eq!(h.extensions.entries[&exhausted].restart_attempt, 0);
+    assert!(h.extensions.entries[&exhausted].respawn_allowed);
+    assert_eq!(
+        h.extensions.restart_deadlines[&exhausted],
+        now + EXTENSION_RESTART_DELAY
+    );
+    assert!(
+        h.extensions
+            .restart_budget_disabled
+            .contains(&other_exhausted)
+    );
+    assert!(h.extensions.restart_deadlines.contains_key(&retrying));
+    assert!(!h.extensions.entries[&disabled].respawn_allowed);
+    h.shutdown().expect("shutdown");
+}
+
+/// Bare recovery must select every currently exhausted extension exactly once;
+/// a duplicate request must not reset an active fresh cycle.
+#[test]
+fn all_exhausted_extension_retry_is_idempotent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let failed_b = install_exhausted_test_extension(&mut h, "failed-b");
+    let failed_a = install_exhausted_test_extension(&mut h, "failed-a");
+    let now = Instant::now();
+
+    assert_eq!(
+        h.retry_exhausted_extensions(None, now),
+        [
+            crate::test_extension_name("failed-a"),
+            crate::test_extension_name("failed-b")
+        ]
+    );
+    let first_a = h.extensions.restart_deadlines[&failed_a];
+    let first_b = h.extensions.restart_deadlines[&failed_b];
+    assert!(
+        h.retry_exhausted_extensions(None, now + Duration::from_secs(30))
+            .is_empty()
+    );
+    assert_eq!(h.extensions.restart_deadlines[&failed_a], first_a);
+    assert_eq!(h.extensions.restart_deadlines[&failed_b], first_b);
+    h.shutdown().expect("shutdown");
+}
+
+/// Only an attached socket UI may consume the exhausted marker, and its
+/// successful request receives one transient requester-directed response.
+#[test]
+fn retry_extension_request_requires_attached_ui_and_returns_feedback() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let failed = install_exhausted_test_extension(&mut h, "failed");
+    let denied = crate::test_connection_id("denied-ui");
+    connect_test_client(&mut h, denied.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_ui_retry_extension_request(
+        &denied,
+        tau_proto::UiRetryExtensionRequest {
+            extension_name: None,
+        },
+    );
+    assert!(h.extensions.restart_budget_disabled.contains(&failed));
+
+    let allowed = crate::test_connection_id("allowed-ui");
+    let output = connect_test_client_with_origin(
+        &mut h,
+        allowed.as_str(),
+        tau_proto::ClientKind::Ui,
+        ConnectionOrigin::Socket,
+    );
+    h.handle_ui_retry_extension_request(
+        &allowed,
+        tau_proto::UiRetryExtensionRequest {
+            extension_name: Some(crate::test_extension_name("failed")),
+        },
+    );
+
+    assert!(!h.extensions.restart_budget_disabled.contains(&failed));
+    let output = output.lock().expect("UI output");
+    assert!(output.iter().any(|frame| matches!(
+        &frame.frame,
+        HarnessOutputMessage::Deliver(delivery)
+            if matches!(
+                delivery.event(),
+                Event::HarnessNotice(notice)
+                    if notice.purpose == tau_proto::NoticePurpose::Response
+                        && notice.message == "Retrying failed."
+            )
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Recovery must consume the exhausted connection generation before spawning
+/// its replacement so stale declarations cannot regain ownership.
+#[test]
+fn exhausted_extension_retry_replaces_stale_generation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let stale = install_exhausted_test_extension(&mut h, "stale-generation");
+    let now = Instant::now();
+    assert_eq!(
+        h.retry_exhausted_extensions(Some(&crate::test_extension_name("stale-generation")), now,),
+        [crate::test_extension_name("stale-generation")]
+    );
+
+    h.process_runtime_deadlines_at(now + EXTENSION_RESTART_DELAY);
+
+    let current = h
+        .extension_connection_id("stale-generation")
+        .expect("replacement generation")
+        .to_owned();
+    assert_ne!(current, stale);
+    assert!(!h.extensions.entries.contains_key(&stale));
+    assert!(!h.extensions.restart_budget_disabled.contains(&stale));
+    assert_eq!(h.extensions.entries[&current].restart_attempt, 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Installs one disconnected supervised tool in the exact automatic-budget
+/// exhausted state accepted by the operator retry control.
+fn install_exhausted_test_extension(h: &mut Harness, name: &str) -> tau_proto::ConnectionId {
+    let connection_id = crate::test_connection_id(name);
+    let _sink = connect_handshaking_tool(h, connection_id.as_str());
+    let entry = h
+        .extensions
+        .entries
+        .get_mut(&connection_id)
+        .expect("test extension");
+    entry.state = ExtensionState::Disconnected;
+    entry.supervised_config = Some(supervised_test_config(name, "exit 1"));
+    entry.restart_attempt = MAX_EXTENSION_RESTART_ATTEMPTS;
+    entry.respawn_allowed = false;
+    h.extensions
+        .restart_budget_disabled
+        .insert(connection_id.clone());
+    connection_id
+}
+
 #[test]
 fn duplicate_tool_result_is_discarded() {
     let td = TempDir::new().expect("tempdir");
@@ -7385,12 +7560,13 @@ fn hello_protocol_version_admission_matrix_is_explicit() {
     }
 }
 
-/// Local-summary continuation requires every peer to understand protocol 4.
+/// Local-summary continuation requires every peer to understand protocol major
+/// 4.
 #[test]
 fn local_summary_continuation_rejects_protocol_three_peers() {
     assert_eq!(
         tau_proto::PROTOCOL_VERSION,
-        tau_proto::ProtocolVersion::new(4, 0)
+        tau_proto::ProtocolVersion::new(4, 1)
     );
     for client_kind in [
         tau_proto::ClientKind::Provider,
@@ -7409,9 +7585,8 @@ fn local_summary_continuation_rejects_protocol_three_peers() {
     }
 }
 
-/// An admitted configured extension with minor skew names that configured
-/// instance, rather than its Hello peer, in one replayable live warning while
-/// receiving Configure first and keeping journal history clean.
+/// A protocol 4.0 configured extension remains admitted by the 4.1 harness,
+/// receives Configure first, and produces only the ordinary minor-skew warning.
 #[test]
 fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
     let td = TempDir::new().expect("tempdir");
@@ -7426,10 +7601,7 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
     h.handle_extension_message(
         &crate::test_connection_id("configured-minor-skew"),
         TestMessage::Hello(tau_proto::Hello {
-            protocol_version: tau_proto::ProtocolVersion::new(
-                tau_proto::PROTOCOL_VERSION.major,
-                tau_proto::PROTOCOL_VERSION.minor + 1,
-            ),
+            protocol_version: tau_proto::ProtocolVersion::new(4, 0),
             client_name: crate::test_extension_name("hello-minor-skew-peer"),
             client_kind: tau_proto::ClientKind::Tool,
             expected_session_id: None,
@@ -7459,10 +7631,7 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
         notice.message,
         format!(
             "`configured-minor-skew`, minor protocol mismatch {} vs harness {}",
-            tau_proto::ProtocolVersion::new(
-                tau_proto::PROTOCOL_VERSION.major,
-                tau_proto::PROTOCOL_VERSION.minor + 1,
-            ),
+            tau_proto::ProtocolVersion::new(4, 0),
             tau_proto::PROTOCOL_VERSION,
         )
     );

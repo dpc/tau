@@ -132,6 +132,7 @@ fn ui_session_admission_preserves_coalesced_followup() {
         .write_message(&HarnessOutputMessage::SessionAccepted(
             tau_proto::SessionAccepted {
                 session_id: expected.clone(),
+                harness_protocol_version: None,
             },
         ))
         .expect("write admission");
@@ -142,10 +143,11 @@ fn ui_session_admission_preserves_coalesced_followup() {
         .expect("write disconnect");
     writer.flush().expect("flush coalesced messages");
 
-    let mut reader =
+    let mut admission =
         await_ui_session_admission(Box::new(client), expected, None, Duration::from_secs(1))
             .expect("admission succeeds");
-    let followup = reader
+    let followup = admission
+        .reader
         .read_message()
         .expect("read followup")
         .expect("followup exists");

@@ -688,6 +688,35 @@ fn parse_agent_picker_command(
     })
 }
 
+pub(crate) const RETRY_EXTENSION_USAGE: &str = "usage: :retry-extension [extension-name]";
+
+pub(crate) fn supports_retry_extension(
+    harness_protocol_version: Option<tau_proto::ProtocolVersion>,
+) -> bool {
+    harness_protocol_version >= Some(tau_proto::ProtocolVersion::new(4, 1))
+}
+
+pub(crate) fn parse_retry_extension_command(
+    text: &str,
+) -> Option<Result<Option<tau_proto::ExtensionName>, &'static str>> {
+    let mut parts = text.split_whitespace();
+    if parts.next()? != ":retry-extension" {
+        return None;
+    }
+    let extension_name = match parts.next() {
+        Some(name) => match tau_proto::ExtensionName::parse(name.to_owned()) {
+            Ok(name) => Some(name),
+            Err(_) => return Some(Err(RETRY_EXTENSION_USAGE)),
+        },
+        None => None,
+    };
+    Some(if parts.next().is_none() {
+        Ok(extension_name)
+    } else {
+        Err(RETRY_EXTENSION_USAGE)
+    })
+}
+
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     (":quit", "Quit this UI using the current session policy"),
     (":q", "Alias for :quit"),
@@ -696,6 +725,10 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     (
         ":retry",
         "Run the selected agent's delayed provider retry now",
+    ),
+    (
+        ":retry-extension",
+        "Retry failed extensions, optionally selecting one configured name",
     ),
     (":detach", "Disconnect this UI and keep the session running"),
     (
@@ -1267,12 +1300,13 @@ pub(crate) fn run_chat(
             Some(session_id),
         ),
     )?;
-    let socket_reader_input = await_ui_session_admission(
+    let admission = await_ui_session_admission(
         read_stream,
         session_id.clone(),
         Some(shutdown.stream()),
         UI_SESSION_ADMISSION_TIMEOUT,
     )?;
+    let socket_reader_input = admission.reader;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "verified UI session admission");
     send_frame(&writer, &crate::ui_client::chat_subscribe_message())?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
@@ -1288,6 +1322,7 @@ pub(crate) fn run_chat(
         writer,
         shutdown,
         socket_reader_input,
+        admission.harness_protocol_version,
     )
 }
 
@@ -1304,6 +1339,7 @@ fn run_chat_session(
     writer: WriterHandle,
     shutdown: UiTransportShutdown,
     socket_reader_input: crate::ui_client::UiInputReader,
+    harness_protocol_version: Option<tau_proto::ProtocolVersion>,
 ) -> Result<(), CliError> {
     use tau_cli_term::{CommandCompletion, HighTerm};
 
@@ -1605,6 +1641,7 @@ fn run_chat_session(
                 ui_io_meter: ui_io_meter.clone(),
                 harness_socket_path,
                 agent_estimated_api_costs,
+                harness_protocol_version,
             },
         )
     });
@@ -2219,9 +2256,9 @@ fn await_ui_session_admission(
     expected_session_id: tau_proto::SessionId,
     shutdown_stream: Option<&UnixStream>,
     timeout: Duration,
-) -> Result<crate::ui_client::UiInputReader, CliError> {
+) -> Result<crate::ui_client::UiSessionAdmission, CliError> {
     let reader = PeerInputReader::new(read_stream);
-    crate::ui_client::await_ui_session_admission(
+    crate::ui_client::await_ui_session_admission_with_version(
         reader,
         expected_session_id,
         shutdown_stream.and_then(|stream| stream.try_clone().ok()),
@@ -2525,6 +2562,8 @@ struct TerminalInputLoopCtx {
     harness_socket_path: std::path::PathBuf,
     /// Canonical cumulative costs projected by the event renderer.
     agent_estimated_api_costs: crate::estimated_cost::AgentCostProjection,
+    /// Admitted harness revision used to avoid sending unsupported controls.
+    harness_protocol_version: Option<tau_proto::ProtocolVersion>,
 }
 
 #[derive(Clone)]
@@ -3443,6 +3482,25 @@ impl<'a> TerminalInputSession<'a> {
                 self.writer,
                 &crate::ui_events::retry_prompt(self.session_id, self.selected_side_agent_id()),
             );
+            return Ok(CommandOutcome::Continue);
+        }
+        if let Some(extension_name) = parse_retry_extension_command(text) {
+            match extension_name {
+                Ok(extension_name)
+                    if supports_retry_extension(self.ctx.harness_protocol_version) =>
+                {
+                    let _ = send_frame(
+                        self.writer,
+                        &HarnessInputMessage::UiRetryExtensionRequest(
+                            tau_proto::UiRetryExtensionRequest { extension_name },
+                        ),
+                    );
+                }
+                Ok(_) => self.output.command_feedback(
+                    ":retry-extension requires a harness with protocol 4.1 or newer",
+                ),
+                Err(message) => self.output.command_feedback(message),
+            }
             return Ok(CommandOutcome::Continue);
         }
         if text
@@ -5188,6 +5246,7 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
             | ":quit-session"
             | ":cancel"
             | ":retry"
+            | ":retry-extension"
             | ":detach"
             | ":pick-agent"
             | ":pick-agent-all"

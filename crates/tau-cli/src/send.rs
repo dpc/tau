@@ -12,7 +12,7 @@ use crate::ui_prompt::{
     create_user_agent_prompt,
 };
 
-const TREE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum SendLineDisposition {
     Message(Box<HarnessInputMessage>),
@@ -55,6 +55,17 @@ fn classify_send_line(
             crate::ui_events::tree_request_message(session_id, None),
         )));
     }
+    if let Some(extension_name) = crate::chat::parse_retry_extension_command(text) {
+        return extension_name
+            .map(|extension_name| {
+                SendLineDisposition::Message(Box::new(
+                    HarnessInputMessage::UiRetryExtensionRequest(
+                        tau_proto::UiRetryExtensionRequest { extension_name },
+                    ),
+                ))
+            })
+            .map_err(|message| CliError::Participant(message.to_owned()));
+    }
     if let Some(event) = event_for_line(session_id, text) {
         return Ok(SendLineDisposition::Message(Box::new(
             HarnessInputMessage::emit(event),
@@ -77,16 +88,30 @@ fn send_message(
         CliError::Participant(format!("no running daemon for session `{session_id}`"))
     })?;
     let socket_path = tau_harness::runtime_dir::socket_path(&harness_path);
-    if matches!(message, HarnessInputMessage::UiTreeRequest(_)) {
-        let deadline = Instant::now() + TREE_REQUEST_TIMEOUT;
-        let (mut reader, mut writer) = crate::ui_client::connect_ui_client_until(
-            &socket_path,
-            "tau-dev-send",
-            session_id,
-            deadline,
-        )?;
+    if matches!(
+        message,
+        HarnessInputMessage::UiTreeRequest(_) | HarnessInputMessage::UiRetryExtensionRequest(_)
+    ) {
+        let deadline = Instant::now() + COMMAND_RESPONSE_TIMEOUT;
+        let (mut reader, mut writer, harness_protocol_version) =
+            crate::ui_client::connect_ui_client_until_with_version(
+                &socket_path,
+                "tau-dev-send",
+                session_id,
+                deadline,
+            )?;
+        if matches!(message, HarnessInputMessage::UiRetryExtensionRequest(_))
+            && !crate::chat::supports_retry_extension(harness_protocol_version)
+        {
+            return Err(CliError::Participant(
+                ":retry-extension requires a harness with protocol 4.1 or newer".to_owned(),
+            ));
+        }
         crate::ui_client::send_message(&mut writer, &message)?;
-        print!("{}", tree_stdout_text(&read_tree_result(&mut reader)?));
+        print!(
+            "{}",
+            command_response_stdout_text(&read_command_response(&mut reader)?)
+        );
     } else {
         let (_reader, mut writer) =
             crate::ui_client::connect_ui_client(&socket_path, "tau-dev-send", Some(session_id))?;
@@ -95,9 +120,9 @@ fn send_message(
     Ok(())
 }
 
-/// Formats one requester-directed tree result for unconditional headless
+/// Formats one requester-directed command result for unconditional headless
 /// output.
-fn tree_stdout_text(result: &str) -> String {
+fn command_response_stdout_text(result: &str) -> String {
     format!("{result}\n")
 }
 
@@ -223,11 +248,11 @@ fn valid_headless_noop(text: &str) -> bool {
     )
 }
 
-fn read_tree_result(reader: &mut crate::ui_client::UiInputReader) -> Result<String, CliError> {
+fn read_command_response(reader: &mut crate::ui_client::UiInputReader) -> Result<String, CliError> {
     loop {
         let Some(message) = reader.read_message().map_err(path_std_io::Error::other)? else {
             return Err(CliError::Participant(
-                "daemon disconnected before returning the tree".to_owned(),
+                "daemon disconnected before returning the command response".to_owned(),
             ));
         };
         match message {
@@ -241,7 +266,7 @@ fn read_tree_result(reader: &mut crate::ui_client::UiInputReader) -> Result<Stri
             }
             HarnessOutputMessage::Disconnect(disconnect) => {
                 return Err(CliError::Participant(disconnect.reason.unwrap_or_else(
-                    || "daemon disconnected before returning the tree".to_owned(),
+                    || "daemon disconnected before returning the command response".to_owned(),
                 )));
             }
             _ => {}

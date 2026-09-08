@@ -1668,6 +1668,7 @@ fn daemon_disconnect_reason_is_reported() {
             .send(&HarnessOutputMessage::SessionAccepted(
                 tau_proto::SessionAccepted {
                     session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+                    harness_protocol_version: None,
                 },
             ))
             .expect("write acceptance");

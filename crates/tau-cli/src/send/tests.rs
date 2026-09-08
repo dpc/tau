@@ -7,8 +7,8 @@ use tau_proto::{
 };
 
 use super::{
-    event_for_test_line, message_for_line, read_tree_result, run_send as run_send_typed,
-    tree_stdout_text,
+    command_response_stdout_text, event_for_test_line, message_for_line, read_command_response,
+    run_send as run_send_typed,
 };
 use crate::test_support::TREE_PREVIEW_PARITY_NOTICE;
 use crate::ui_prompt::DEFAULT_AGENT_ROLE;
@@ -118,6 +118,31 @@ fn retry_requests_exact_delayed_prompt_release() {
     }
 }
 
+/// Headless send shares the approved named/default-all exhausted-extension
+/// command grammar instead of converting it into prompt text.
+#[test]
+fn retry_extension_builds_dedicated_requests() {
+    for (line, expected) in [
+        (":retry-extension", None),
+        (
+            ":retry-extension tool-a",
+            Some(tau_proto::ExtensionName::parse("tool-a").expect("valid extension name")),
+        ),
+    ] {
+        let HarnessInputMessage::UiRetryExtensionRequest(request) =
+            message(line).expect("retry extension message")
+        else {
+            panic!("expected dedicated retry extension request");
+        };
+        assert_eq!(request.extension_name, expected);
+    }
+    for malformed in [":retry-extension bad/name", ":retry-extension tool-a extra"] {
+        let error = run_send("definitely-not-running", malformed)
+            .expect_err("malformed request must fail before daemon lookup");
+        assert!(error.to_string().contains("usage: :retry-extension"));
+    }
+}
+
 /// Tree commands are daemon-side operations, while malformed navigation
 /// stays a prompt.
 #[test]
@@ -192,9 +217,9 @@ fn headless_tree_result_reads_one_multiline_notice() {
         .expect("write tree result");
     harness_writer.flush().expect("flush tree result");
 
-    let result = read_tree_result(&mut reader).expect("read tree result");
+    let result = read_command_response(&mut reader).expect("read tree result");
     assert_eq!(result, TREE_PREVIEW_PARITY_NOTICE);
-    let stdout = tree_stdout_text(&result);
+    let stdout = command_response_stdout_text(&result);
     assert_eq!(
         stdout.as_bytes(),
         format!("{TREE_PREVIEW_PARITY_NOTICE}\n").as_bytes()

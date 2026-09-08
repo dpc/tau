@@ -58,6 +58,14 @@ provider owner, then directs the correlated typed result only to the invoking UI
 Provider-side transfer behavior is specified by
 [SPEC-tau-ext-provider-builtin-retry-scheduler](../../tau-ext-provider-builtin/specs/SPEC-tau-ext-provider-builtin-retry-scheduler.md).
 
+`:retry-extension [extension-name]` is a static CLI-owned operator command whose
+work is harness-routed through a dedicated directed control. A configured name
+selects one exhausted extension; omission requests all exhausted extensions.
+The CLI sends the request only when UI admission advertises protocol 4.1 or
+newer; a protocol 4.0 acknowledgement omits that support signal and produces a
+local upgrade diagnostic. Interactive and headless send clients use the same
+grammar and render the harness's transient requester-directed result.
+
 The CLI has one narrow action-specific redaction exception: after submission,
 `:email auth google finish ...` is represented as exactly `:email auth google
 finish <redacted>` in command echo, in-process navigation and search history,

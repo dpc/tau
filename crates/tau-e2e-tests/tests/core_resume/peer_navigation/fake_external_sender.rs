@@ -93,6 +93,7 @@ impl FakeExternalSender {
                     writer.write_message(&HarnessOutputMessage::SessionAccepted(
                         tau_proto::SessionAccepted {
                             session_id: self.expected.sender_session_id.clone(),
+                            harness_protocol_version: None,
                         },
                     ))?;
                     writer.flush()?;
@@ -141,6 +142,7 @@ fn serve_runtime_probe(
     writer.write_message(&HarnessOutputMessage::SessionAccepted(
         tau_proto::SessionAccepted {
             session_id: session_id.clone(),
+            harness_protocol_version: None,
         },
     ))?;
     writer.flush()?;

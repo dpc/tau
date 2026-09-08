@@ -529,6 +529,33 @@ impl Harness {
         );
     }
 
+    /// Applies an attached UI's exhausted-extension recovery request and sends
+    /// only requester-directed transient feedback.
+    pub(super) fn handle_ui_retry_extension_request(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        request: tau_proto::UiRetryExtensionRequest,
+    ) {
+        if !self.is_attached_socket_ui(client_id) {
+            return;
+        }
+        let retried =
+            self.retry_exhausted_extensions(request.extension_name.as_ref(), Instant::now());
+        let message = match retried.as_slice() {
+            [] => "No failed extensions to retry.".to_owned(),
+            [name] => format!("Retrying {name}."),
+            names => format!(
+                "Retrying {}.",
+                names
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        self.send_ui_response(client_id, message);
+    }
+
     pub(super) fn handle_recall_queued_prompt(&mut self, req: &tau_proto::UiRecallQueuedPrompt) {
         if req.session_id != self.session_runtime.current_session_id {
             return;

@@ -64,6 +64,12 @@ pub struct Hello {
 pub struct SessionAccepted {
     /// Session identity verified during socket connection admission.
     pub session_id: SessionId,
+    /// Harness protocol revision for UI feature gating.
+    ///
+    /// Protocol 4.0 harnesses omit this field. Newer UIs must treat absence as
+    /// lacking post-4.0 UI control support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_protocol_version: Option<ProtocolVersion>,
 }
 
 /// Subscription request describing which events a participant wants.
@@ -1447,6 +1453,19 @@ pub struct UiTreeRequest {
     pub target_agent_id: Option<AgentId>,
 }
 
+/// Dedicated UI input requesting a fresh bounded restart cycle for extensions
+/// disabled only after exhausting their automatic restart budget.
+///
+/// The harness consumes this request directly and replies only to the
+/// requesting UI with a transient notice.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiRetryExtensionRequest {
+    /// Configured extension name to retry, or every restart-budget-disabled
+    /// extension when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_name: Option<ExtensionName>,
+}
+
 /// Valid request/response and transport combination for one provider debug
 /// capture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1526,6 +1545,7 @@ pub enum HarnessInputMessage {
     UiShutdownRequest(UiShutdownRequest),
     UiQuitRequest(UiQuitRequest),
     UiTreeRequest(UiTreeRequest),
+    UiRetryExtensionRequest(UiRetryExtensionRequest),
     ProviderDebugCapture(ProviderDebugCapture),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),

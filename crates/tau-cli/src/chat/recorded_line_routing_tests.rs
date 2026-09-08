@@ -359,6 +359,51 @@ fn retry_is_static_exact_and_never_falls_through_to_prompt_submission() {
     );
 }
 
+/// Exhausted-extension recovery must accept the approved optional configured
+/// name, reject extra or malformed arguments, and remain statically
+/// discoverable.
+#[test]
+fn retry_extension_command_parses_approved_forms() {
+    assert_eq!(
+        parse_retry_extension_command(":retry-extension"),
+        Some(Ok(None))
+    );
+    assert_eq!(
+        parse_retry_extension_command(":retry-extension tool-a"),
+        Some(Ok(Some(
+            tau_proto::ExtensionName::parse("tool-a").expect("valid extension name")
+        )))
+    );
+    assert_eq!(
+        parse_retry_extension_command(":retry-extension tool-a extra"),
+        Some(Err(RETRY_EXTENSION_USAGE))
+    );
+    assert_eq!(
+        parse_retry_extension_command(":retry-extension bad/name"),
+        Some(Err(RETRY_EXTENSION_USAGE))
+    );
+    assert!(is_known_static_command(":retry-extension"));
+    assert!(BUILTIN_COMMANDS.iter().any(|(name, description)| {
+        *name == ":retry-extension" && description.contains("configured name")
+    }));
+}
+
+/// A new UI must serialize the additive control only after a 4.1-or-newer
+/// harness acknowledgement; absent 4.0 disclosure remains unsupported.
+#[test]
+fn retry_extension_support_requires_advertised_protocol_4_1() {
+    assert!(!supports_retry_extension(None));
+    assert!(!supports_retry_extension(Some(
+        tau_proto::ProtocolVersion::new(4, 0)
+    )));
+    assert!(supports_retry_extension(Some(
+        tau_proto::ProtocolVersion::new(4, 1)
+    )));
+    assert!(supports_retry_extension(Some(
+        tau_proto::ProtocolVersion::new(4, 2)
+    )));
+}
+
 /// Both history-aware editor commands must remain discoverable and keep
 /// malformed argument variants inside local command handling.
 #[test]

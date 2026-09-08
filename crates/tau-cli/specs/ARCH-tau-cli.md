@@ -273,6 +273,9 @@ input for harness resolution. Cross-boundary commands such as `:retry` and `:tre
 parse in the CLI but address exact harness-owned prompt work or provenance rather
 than reconstructing it locally. Their behavior is specified by
 [SPEC-tau-cli-command-mode](SPEC-tau-cli-command-mode.md).
+The `:retry-extension` control follows the same CLI-parse and harness-execute
+split, but gates serialization on the harness revision returned during session
+admission so a 4.1-only request never reaches a 4.0 decoder.
 
 The CLI also owns presentation-only recursive watch activity. Its current
 implementation folds the harness-owned live watch DAG and uses the complete

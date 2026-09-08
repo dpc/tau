@@ -142,7 +142,11 @@ payload-free `ui_shutdown_request` with the same attached-socket-UI authority;
 it enters the same canonical lifecycle as signal or policy shutdown and does
 not itself become an event. UI tree inspection uses `ui_tree_request` and
 returns one requester-directed, non-published multiline notice. The
-dedicated attached-UI request row is complete.
+directed `ui_retry_extension_request` similarly selects only tool/core
+extensions disabled by exhausted automatic-restart budgets, resets a fresh
+bounded cycle through the ordinary supervisor and Ready path, and returns
+requester-directed feedback. It does not restart healthy, already-retrying, or
+configuration-disabled peers, and never restores stale declarations.
 Agent creation accepts `ui.create_agent` only from attached socket UIs and
 returns its terminal admission result directly to the initiating connection
 without publication. Admission ends when durable creation plus initial-prompt

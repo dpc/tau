@@ -3050,6 +3050,7 @@ impl Harness {
                         None,
                         HarnessOutputMessage::SessionAccepted(tau_proto::SessionAccepted {
                             session_id: self.session_runtime.current_session_id.clone(),
+                            harness_protocol_version: Some(PROTOCOL_VERSION),
                         }),
                     )?;
                 }
@@ -3158,6 +3159,10 @@ impl Harness {
             HarnessInputMessage::UiQuitRequest(_) => Ok(ClientMessageDisposition::Continue),
             HarnessInputMessage::UiTreeRequest(request) => {
                 self.handle_ui_tree_request(client_id, request);
+                Ok(ClientMessageDisposition::Continue)
+            }
+            HarnessInputMessage::UiRetryExtensionRequest(request) => {
+                self.handle_ui_retry_extension_request(client_id, request);
                 Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::ExternalAgentMessage(request) => {

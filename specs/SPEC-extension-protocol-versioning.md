@@ -41,3 +41,11 @@ the first harness response to an admitted configured extension.
 This policy changes neither session-target validation nor capability, cleanup,
 security, and connection-ownership semantics. It makes no compatibility
 guarantee after a minor-skew admission and does not version or migrate journals.
+
+Socket UI admission additionally returns the harness revision in the existing
+`SessionAccepted` acknowledgement. Protocol 4.0 acknowledgements omit the
+optional field; newer UIs treat absence as lacking later UI controls. This
+allows a newer UI to withhold an additive request from an older harness while
+older UIs and extensions continue best-effort against the newer harness without
+another negotiation round trip. Configured extensions still receive Configure
+as their first harness response.

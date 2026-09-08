@@ -16,6 +16,13 @@ extensions and UI clients: silently ignoring the request field would redraft
 instead of continuing, and older event consumers cannot decode the new trigger.
 The harness and all peers require compatible rebuilds or updates.
 
+Protocol revision `4.1` adds the directed `ui_retry_extension_request` control
+and an optional harness revision in the existing UI-only `SessionAccepted`
+acknowledgement. A 4.1 UI sends the new control only after a harness advertises
+4.1 or newer; absence identifies a 4.0 harness and produces a local upgrade
+diagnostic instead of an undecodable request. Older UIs ignore the additive
+acknowledgement field, while extension traffic remains unchanged.
+
 `SessionId` and `AgentPromptId` are controlled wire and journal identifiers.
 Both accept 1 through 128 bytes containing only ASCII letters, digits, `_`, and
 `-`. Construction and deserialization validate that grammar; invalid protocol

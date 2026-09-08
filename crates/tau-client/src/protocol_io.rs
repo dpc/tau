@@ -574,6 +574,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::UiShutdownRequest(_) => "ui_shutdown_request",
         HarnessInputMessage::UiQuitRequest(_) => "ui_quit_request",
         HarnessInputMessage::UiTreeRequest(_) => "ui_tree_request",
+        HarnessInputMessage::UiRetryExtensionRequest(_) => "ui_retry_extension_request",
         HarnessInputMessage::ProviderDebugCapture(_) => "provider_debug_capture",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",

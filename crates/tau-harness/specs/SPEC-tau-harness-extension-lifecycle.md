@@ -220,6 +220,18 @@ disables an optional claimant. After the startup barrier, respawns and runtime
 registrations are newcomers and cannot evict an incumbent. Changing an assigned
 prefix requires restarting that extension instance.
 
+An attached socket UI may request operator recovery with
+`ui_retry_extension_request`. A configured name selects only that enabled
+non-provider extension when it is disconnected and disabled specifically
+because the session automatic-restart budget was exhausted; an omitted name
+selects every extension in that exact state. Each selected extension clears the
+exhaustion marker, resets its attempt counter, and enters the ordinary delayed
+supervisor path for a fresh bounded cycle. Healthy, already-retrying,
+configuration-disabled, unsupervised, and provider extensions remain untouched.
+The normal replacement handshake owns all declaration registration, so recovery
+never revives declarations from the disconnected process generation. Feedback
+is a transient requester-directed UI response.
+
 One narrow bootstrap exception exists: an `ExtensionDataRequest` received before
 that peer's `Ready` is handled immediately because an initial Configure handler
 may need extension-owned storage before it can accept configuration. After that

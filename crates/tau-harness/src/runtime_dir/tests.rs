@@ -59,6 +59,7 @@ fn spawn_peer_daemon(
             .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
                 tau_proto::SessionAccepted {
                     session_id: id.clone(),
+                    harness_protocol_version: None,
                 },
             ))
             .expect("write peer acceptance");
@@ -120,6 +121,7 @@ fn spawn_exact_probe_daemon(
             .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
                 tau_proto::SessionAccepted {
                     session_id: id.clone(),
+                    harness_protocol_version: None,
                 },
             ))
             .expect("write exact acceptance");

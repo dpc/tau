@@ -37,6 +37,7 @@ fn delayed_session_replay_keeps_one_accepted_observer_connection() {
             .write_message(&HarnessOutputMessage::SessionAccepted(
                 tau_proto::SessionAccepted {
                     session_id: server_expected.clone(),
+                    harness_protocol_version: None,
                 },
             ))
             .expect("write acceptance");
@@ -154,6 +155,7 @@ fn expired_session_replay_deadline_does_not_reconnect() {
             .write_message(&HarnessOutputMessage::SessionAccepted(
                 tau_proto::SessionAccepted {
                     session_id: server_expected,
+                    harness_protocol_version: None,
                 },
             ))
             .expect("write acceptance");

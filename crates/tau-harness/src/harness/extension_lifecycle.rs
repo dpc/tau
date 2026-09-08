@@ -487,6 +487,48 @@ impl Harness {
             .or_insert(now + EXTENSION_RESTART_DELAY);
     }
 
+    /// Starts a fresh bounded restart cycle for the requested exhausted
+    /// extension set and returns the configured names that became eligible.
+    pub(super) fn retry_exhausted_extensions(
+        &mut self,
+        requested_name: Option<&tau_proto::ExtensionName>,
+        now: Instant,
+    ) -> Vec<tau_proto::ExtensionName> {
+        let mut candidates = self
+            .extensions
+            .restart_budget_disabled
+            .iter()
+            .filter_map(|connection_id| {
+                let entry = self.extensions.entries.get(connection_id)?;
+                requested_name
+                    .is_none_or(|requested| requested == &entry.name)
+                    .then(|| (entry.name.clone(), connection_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut retried = Vec::with_capacity(candidates.len());
+        for (name, connection_id) in candidates {
+            let Some(entry) = self.extensions.entries.get_mut(&connection_id) else {
+                continue;
+            };
+            if entry.kind == ClientKind::Provider
+                || entry.supervised_config.is_none()
+                || entry.state != ExtensionState::Disconnected
+            {
+                continue;
+            }
+            entry.restart_attempt = 0;
+            entry.respawn_allowed = true;
+            self.extensions
+                .restart_budget_disabled
+                .remove(&connection_id);
+            self.schedule_extension_restart_at(&connection_id, now);
+            retried.push(name);
+        }
+        retried
+    }
+
     /// Reset only session-scoped restart budget during final shutdown.
     ///
     /// Permanently disabled optional/configuration peers remain disabled. A

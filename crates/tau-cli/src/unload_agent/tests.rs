@@ -73,6 +73,7 @@ fn exact_incident_command_succeeds_over_socket() {
             .write_message(&HarnessOutputMessage::SessionAccepted(
                 tau_proto::SessionAccepted {
                     session_id: "tau-zulip-bot".parse().expect("session"),
+                    harness_protocol_version: None,
                 },
             ))
             .expect("admit");
@@ -125,6 +126,7 @@ fn post_send_eof_is_indeterminate() {
             .write_message(&HarnessOutputMessage::SessionAccepted(
                 tau_proto::SessionAccepted {
                     session_id: "tau-zulip-bot".parse().expect("session"),
+                    harness_protocol_version: None,
                 },
             ))
             .expect("admit");

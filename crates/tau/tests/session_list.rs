@@ -86,6 +86,7 @@ fn serve_current_session(
         .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
             tau_proto::SessionAccepted {
                 session_id: session_id.clone(),
+                harness_protocol_version: None,
             },
         ))
         .map_err(|error| error.to_string())?;

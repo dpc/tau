@@ -1510,6 +1510,7 @@ impl Harness {
                         | HarnessInputMessage::UiShutdownRequest(_)
                         | HarnessInputMessage::UiQuitRequest(_)
                         | HarnessInputMessage::UiTreeRequest(_)
+                        | HarnessInputMessage::UiRetryExtensionRequest(_)
                 )
             } else {
                 matches!(
@@ -1530,7 +1531,8 @@ impl Harness {
                                 | HarnessInputMessage::UiDebugEventStatsRequest(_)
                                 | HarnessInputMessage::UiShutdownRequest(_)
                                 | HarnessInputMessage::UiQuitRequest(_)
-                                | HarnessInputMessage::UiTreeRequest(_),
+                                | HarnessInputMessage::UiTreeRequest(_)
+                                | HarnessInputMessage::UiRetryExtensionRequest(_),
                             ExtensionState::Handshaking | ExtensionState::Ready,
                         )
                 )
@@ -1551,6 +1553,7 @@ impl Harness {
                 | HarnessInputMessage::UiShutdownRequest(_)
                 | HarnessInputMessage::UiQuitRequest(_)
                 | HarnessInputMessage::UiTreeRequest(_)
+                | HarnessInputMessage::UiRetryExtensionRequest(_)
         ) && self.extensions.entries.contains_key(source_id)
         {
             // These requests belong exclusively to attached socket UIs.
@@ -1787,6 +1790,7 @@ impl Harness {
             | HarnessInputMessage::UiShutdownRequest(_)
             | HarnessInputMessage::UiQuitRequest(_)
             | HarnessInputMessage::UiTreeRequest(_)
+            | HarnessInputMessage::UiRetryExtensionRequest(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
             | HarnessInputMessage::ExternalAgentMessageAuth(_)
             | HarnessInputMessage::PeerSessionProbe(_) => {}

@@ -2508,6 +2508,9 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
         }),
+        HarnessInputMessage::UiRetryExtensionRequest(UiRetryExtensionRequest {
+            extension_name: Some(ExtensionName::parse("tool-a").expect("valid extension name")),
+        }),
         HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
             request_id: "ext-data-1".to_owned(),
             scope: ExtensionDataScope::Session,
@@ -4324,7 +4327,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 4, "minor": 0})
+        serde_json::json!({"major": 4, "minor": 1})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4405,6 +4408,7 @@ fn ui_session_admission_wire_round_trip() {
 
     let accepted = HarnessOutputMessage::SessionAccepted(SessionAccepted {
         session_id: expected,
+        harness_protocol_version: Some(PROTOCOL_VERSION),
     });
     let accepted_json = serde_json::to_value(&accepted).expect("serialize acknowledgement");
     assert_eq!(accepted_json["message"], "session_accepted");
@@ -4413,10 +4417,80 @@ fn ui_session_admission_wire_round_trip() {
         serde_json::json!("session-1")
     );
     assert_eq!(
+        accepted_json["payload"]["harness_protocol_version"],
+        serde_json::json!({"major": 4, "minor": 1})
+    );
+    assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
             .expect("decode acknowledgement"),
         accepted
     );
+}
+
+/// Protocol 4.1 UIs must decode the protocol 4.0 acknowledgement shape as an
+/// unsupported optional feature rather than failing admission.
+#[test]
+fn session_accepted_defaults_absent_harness_protocol_version() {
+    let old = serde_json::json!({
+        "message": "session_accepted",
+        "payload": {"session_id": "session-1"}
+    });
+    let HarnessOutputMessage::SessionAccepted(accepted) =
+        serde_json::from_value(old).expect("decode 4.0 acknowledgement")
+    else {
+        panic!("expected session acknowledgement");
+    };
+    assert_eq!(accepted.session_id, test_session_id("session-1"));
+    assert_eq!(accepted.harness_protocol_version, None);
+}
+
+/// A protocol 4.0-style UI decoder that knows only `session_id` must ignore
+/// the additive 4.1 acknowledgement field and continue admission.
+#[test]
+fn old_ui_shape_ignores_session_accepted_harness_protocol_version() {
+    #[derive(serde::Deserialize)]
+    struct OldSessionAccepted {
+        session_id: SessionId,
+    }
+
+    let payload = serde_json::json!({
+        "session_id": "session-1",
+        "harness_protocol_version": {"major": 4, "minor": 1}
+    });
+    let accepted: OldSessionAccepted =
+        serde_json::from_value(payload).expect("old UI shape ignores additive field");
+    assert_eq!(accepted.session_id, test_session_id("session-1"));
+}
+
+/// Exhausted-extension recovery remains a flat directed input with an optional
+/// configured name and cannot be confused with a generic event.
+#[test]
+fn ui_retry_extension_request_uses_dedicated_input_message() {
+    for (extension_name, expected_payload) in [
+        (
+            Some(ExtensionName::parse("tool-a").expect("valid extension name")),
+            serde_json::json!({"extension_name": "tool-a"}),
+        ),
+        (None, serde_json::json!({})),
+    ] {
+        let input = HarnessInputMessage::UiRetryExtensionRequest(UiRetryExtensionRequest {
+            extension_name,
+        });
+        assert_eq!(
+            serde_json::to_value(&input).expect("serialize request"),
+            serde_json::json!({
+                "message": "ui_retry_extension_request",
+                "payload": expected_payload,
+            })
+        );
+        let bytes = encode_harness_input_to_vec(&input).expect("encode request");
+        assert_eq!(
+            decode_harness_input_from_slice(&bytes).expect("decode request"),
+            input
+        );
+        assert!(decode_harness_output_from_slice(&bytes).is_err());
+        assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+    }
 }
 
 /// Ensures events serialize with dotted event names as the wire tag.

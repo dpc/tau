@@ -22,15 +22,39 @@ pub(crate) type UiInputReader = PeerInputReader<Box<dyn Read + Send>>;
 pub(crate) type UiOutputWriter = PeerOutputWriter<BufWriter<Box<dyn Write + Send>>>;
 pub(crate) const UI_SESSION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Exact session admission plus the harness revision advertised by supporting
+/// daemons.
+pub(crate) struct UiSessionAdmission {
+    /// Buffered protocol reader retained after consuming the acknowledgement.
+    pub(crate) reader: UiInputReader,
+    /// Harness protocol revision, absent for protocol 4.0 daemons.
+    pub(crate) harness_protocol_version: Option<tau_proto::ProtocolVersion>,
+}
+
 pub(crate) fn connect_ui_client(
     socket_path: &Path,
     client_name: impl AsRef<str>,
     expected_session_id: Option<&tau_proto::SessionId>,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
+    connect_ui_client_with_version(socket_path, client_name, expected_session_id)
+        .map(|(reader, writer, _)| (reader, writer))
+}
+
+/// Connects a UI and returns the admitted harness revision when the daemon
+/// supports protocol-gated controls.
+pub(crate) fn connect_ui_client_with_version(
+    socket_path: &Path,
+    client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
+) -> io::Result<(
+    UiInputReader,
+    UiOutputWriter,
+    Option<tau_proto::ProtocolVersion>,
+)> {
     let stream = UnixStream::connect(socket_path)?;
     let read_stream = stream.try_clone()?;
     let shutdown_stream = stream.try_clone()?;
-    connect_ui_streams_with_shutdown(
+    connect_ui_streams_with_shutdown_and_version(
         read_stream,
         stream,
         client_name,
@@ -51,7 +75,7 @@ pub(crate) fn connect_ui_client_with_peer_exit(
     let peer_exit = PeerExit::from_socket(&stream).ok();
     let read_stream = stream.try_clone()?;
     let shutdown_stream = stream.try_clone()?;
-    let (reader, writer) = connect_ui_streams_with_shutdown(
+    let (reader, writer, _) = connect_ui_streams_with_shutdown_and_version(
         read_stream,
         stream,
         client_name,
@@ -68,6 +92,22 @@ pub(crate) fn connect_ui_client_until(
     expected_session_id: &tau_proto::SessionId,
     deadline: std::time::Instant,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
+    connect_ui_client_until_with_version(socket_path, client_name, expected_session_id, deadline)
+        .map(|(reader, writer, _)| (reader, writer))
+}
+
+/// Connects an exact-session UI before one deadline and returns the admitted
+/// harness revision for feature gating.
+pub(crate) fn connect_ui_client_until_with_version(
+    socket_path: &Path,
+    client_name: impl AsRef<str>,
+    expected_session_id: &tau_proto::SessionId,
+    deadline: std::time::Instant,
+) -> io::Result<(
+    UiInputReader,
+    UiOutputWriter,
+    Option<tau_proto::ProtocolVersion>,
+)> {
     let timeout = deadline.saturating_duration_since(path_std_time::Instant::now());
     if timeout.is_zero() {
         return Err(io::Error::new(
@@ -81,7 +121,7 @@ pub(crate) fn connect_ui_client_until(
     let stream: UnixStream = fd.into();
     stream.set_write_timeout(Some(timeout))?;
     let read_stream = stream.try_clone()?;
-    connect_ui_streams(
+    connect_ui_streams_with_version(
         DeadlineUnixReader {
             stream: read_stream,
             deadline,
@@ -152,6 +192,7 @@ impl Write for DeadlineUnixWriter {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn connect_ui_streams<R, W>(
     reader: R,
     writer: W,
@@ -162,7 +203,25 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    connect_ui_streams_with_shutdown(
+    connect_ui_streams_with_version(reader, writer, client_name, expected_session_id)
+        .map(|(reader, writer, _)| (reader, writer))
+}
+
+fn connect_ui_streams_with_version<R, W>(
+    reader: R,
+    writer: W,
+    client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
+) -> io::Result<(
+    UiInputReader,
+    UiOutputWriter,
+    Option<tau_proto::ProtocolVersion>,
+)>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    connect_ui_streams_with_shutdown_and_version(
         reader,
         writer,
         client_name,
@@ -172,14 +231,18 @@ where
     )
 }
 
-fn connect_ui_streams_with_shutdown<R, W>(
+fn connect_ui_streams_with_shutdown_and_version<R, W>(
     reader: R,
     writer: W,
     client_name: impl AsRef<str>,
     expected_session_id: Option<&tau_proto::SessionId>,
     shutdown_stream: Option<UnixStream>,
     admission_timeout: Duration,
-) -> io::Result<(UiInputReader, UiOutputWriter)>
+) -> io::Result<(
+    UiInputReader,
+    UiOutputWriter,
+    Option<tau_proto::ProtocolVersion>,
+)>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -188,33 +251,39 @@ where
         PeerOutputWriter::new(BufWriter::new(Box::new(writer) as Box<dyn Write + Send>));
     send_hello(&mut writer, client_name, expected_session_id)?;
     let reader = PeerInputReader::new(Box::new(reader) as Box<dyn Read + Send>);
-    let reader = match expected_session_id {
-        Some(expected_session_id) => await_ui_session_admission(
-            reader,
-            expected_session_id.clone(),
-            shutdown_stream,
-            admission_timeout,
-        )?,
-        None => reader,
+    let (reader, harness_protocol_version) = match expected_session_id {
+        Some(expected_session_id) => {
+            let admission = await_ui_session_admission_with_version(
+                reader,
+                expected_session_id.clone(),
+                shutdown_stream,
+                admission_timeout,
+            )?;
+            (admission.reader, admission.harness_protocol_version)
+        }
+        None => (reader, None),
     };
-    Ok((reader, writer))
+    Ok((reader, writer, harness_protocol_version))
 }
 
-/// Performs admission on an owned thread so every UI client has a bounded
-/// handshake while retaining any bytes already buffered after the ACK.
-pub(crate) fn await_ui_session_admission(
+/// Performs bounded exact-session admission and retains the harness revision
+/// while retaining buffered bytes after the acknowledgement.
+pub(crate) fn await_ui_session_admission_with_version(
     mut reader: UiInputReader,
     expected_session_id: tau_proto::SessionId,
     shutdown_stream: Option<UnixStream>,
     timeout: Duration,
-) -> io::Result<UiInputReader> {
+) -> io::Result<UiSessionAdmission> {
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let result = verify_ui_session_admission(&mut reader, &expected_session_id);
         let _ = sender.send((reader, result));
     });
     match receiver.recv_timeout(timeout) {
-        Ok((reader, Ok(()))) => Ok(reader),
+        Ok((reader, Ok(harness_protocol_version))) => Ok(UiSessionAdmission {
+            reader,
+            harness_protocol_version,
+        }),
         Ok((_reader, Err(error))) => Err(error),
         Err(mpsc::RecvTimeoutError::Timeout) => {
             if let Some(stream) = shutdown_stream {
@@ -252,7 +321,7 @@ pub(crate) fn connect_daemon_ui_client_with_timeout(
     admission_timeout: Duration,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     if let Some(initial_ui) = daemon.take_initial_ui_stdio() {
-        connect_ui_streams_with_shutdown(
+        connect_ui_streams_with_shutdown_and_version(
             initial_ui.stdout,
             initial_ui.stdin,
             client_name,
@@ -260,6 +329,7 @@ pub(crate) fn connect_daemon_ui_client_with_timeout(
             initial_ui.shutdown_stream,
             admission_timeout,
         )
+        .map(|(reader, writer, _)| (reader, writer))
     } else {
         connect_ui_client(&daemon.socket_path(), client_name, expected_session_id)
     }
@@ -419,12 +489,12 @@ pub(crate) fn send_hello(
 pub(crate) fn verify_ui_session_admission<R: Read>(
     reader: &mut PeerInputReader<R>,
     expected_session_id: &tau_proto::SessionId,
-) -> io::Result<()> {
+) -> io::Result<Option<tau_proto::ProtocolVersion>> {
     match reader.read_message().map_err(io::Error::other)? {
         Some(tau_proto::HarnessOutputMessage::SessionAccepted(accepted))
             if accepted.session_id == *expected_session_id =>
         {
-            Ok(())
+            Ok(accepted.harness_protocol_version)
         }
         Some(tau_proto::HarnessOutputMessage::SessionAccepted(accepted)) => {
             Err(io::Error::other(format!(
