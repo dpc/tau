@@ -177,8 +177,10 @@ those boundaries.
 ## XMPP
 
 The separately maintained `std-xmpp` instance is disabled by default. Tau does
-not bundle its source or executable. Install `tau-ext-xmpp`, ensure it is
-available through `PATH`, and then enable the instance. The standalone project
+not bundle its source or executable. Install the Tau flake's `tau-ext-xmpp`
+package, ensure the executable is available through `PATH`, and then enable the
+instance. The
+[`tau-ext-xmpp` project](https://radicle.network/nodes/radicle.dpc.pw/rad%3AzpN6uwkd6ok9qRAX5yZaF7w8xzDd)
 owns the authoritative XMPP configuration, security, lifecycle, and testing
 documentation.
 

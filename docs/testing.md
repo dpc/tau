@@ -60,7 +60,9 @@ selects the external `tau-ext-swarm` command with no Tau component suffix.
 
 ## XMPP extension
 
-The separately maintained `tau-ext-xmpp` project owns its configuration,
+The separately maintained
+[`tau-ext-xmpp` project](https://radicle.network/nodes/radicle.dpc.pw/rad%3AzpN6uwkd6ok9qRAX5yZaF7w8xzDd)
+owns its configuration,
 allowlist, routing, MUC lifecycle, readiness, delivery, protocol, and
 standalone-process tests. Tau retains a focused settings oracle proving that
 disabled `std-xmpp` selects the external `tau-ext-xmpp` command with no Tau

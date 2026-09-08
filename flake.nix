@@ -19,6 +19,7 @@
     tau-ext-zulip.url = "git+https://radicle.dpc.pw/z2LFTBWK7VpAwC3Bpxohkh91aqXd.git?ref=main";
     tau-ext-pim.url = "git+https://radicle.dpc.pw/z4FCuiVzFns5iTquhsYCntZyVWCqi.git?ref=main";
     tau-ext-swarm.url = "git+https://radicle.dpc.pw/z38my9x3Rmn6VYtDMiLKgjK3tRv8o.git?ref=master";
+    tau-ext-xmpp.url = "git+https://radicle.dpc.pw/zpN6uwkd6ok9qRAX5yZaF7w8xzDd.git?ref=master";
     selfci = {
       url = "git+https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -40,6 +41,7 @@
       tau-ext-slack,
       tau-ext-swarm,
       tau-ext-telegram,
+      tau-ext-xmpp,
       tau-ext-zulip,
       selfci,
       ...
@@ -553,6 +555,7 @@
             tau-ext-telegram
             tau-telegram-gateway
             ;
+          inherit (tau-ext-xmpp.packages.${system}) tau-ext-xmpp;
           inherit (tau-ext-zulip.packages.${system}) tau-ext-zulip;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

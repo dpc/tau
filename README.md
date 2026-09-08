@@ -94,8 +94,7 @@ These extensions ship in the Tau workspace:
 ### External Tau projects
 
 Tau maintains these extensions in separate repositories. Published projects are
-pinned and re-exported by the Tau flake; XMPP forwarding awaits publication of
-its standalone repository.
+pinned and re-exported by the Tau flake.
 
 | Integration | What it provides | Flake package | Source |
 |---|---|---|---|
@@ -105,7 +104,7 @@ its standalone repository.
 | Rostra | Relay-only social client with local state, signed writes, and opt-in notifications | `tau-ext-rostra` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o) |
 | Slack | Socket Mode text bridge with scoped send/reaction tools and multiple-instance prefixes | `tau-ext-slack` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg) |
 | Telegram | Bot API text bridge, plus an optional separately supervised gateway | `tau-ext-telegram`, `tau-telegram-gateway` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r) |
-| XMPP | Disabled-by-default XMPP messaging integration | `tau-ext-xmpp` | Repository publication pending |
+| XMPP | Disabled-by-default XMPP messaging integration | `tau-ext-xmpp` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3AzpN6uwkd6ok9qRAX5yZaF7w8xzDd) |
 
 For example:
 
