@@ -381,6 +381,7 @@
                 pkgs.cargo-llvm-cov
                 pkgs.cargo-nextest
                 pkgs.ripgrep
+                pkgs.util-linux
               ];
               doCheck = false;
             };
