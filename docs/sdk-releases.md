@@ -13,19 +13,21 @@ extensions:
 These four SDK packages retain Rust 1.91 support even though the complete Tau
 workspace requires stable Rust 1.97 or newer.
 
-Publish `dpc-tau-actions` and `dpc-tau-blocking-notify-channel` first, followed
-by `dpc-tau-proto`, then `dpc-tau-client`. Rust source continues to import
-these packages as `tau_actions`, `tau_blocking_notify_channel`, `tau_proto`,
-and `tau_client`.
+When a release changes the complete closure, publish `dpc-tau-actions` and
+`dpc-tau-blocking-notify-channel` first, followed by `dpc-tau-proto`, then
+`dpc-tau-client`. Rust source continues to import these packages as
+`tau_actions`, `tau_blocking_notify_channel`, `tau_proto`, and `tau_client`.
 
 ## Package and protocol versions
 
-The initial SDK package set is `0.1.0` and currently advertises extension
-protocol revision `4.0`. This major revision adds typed local-summary continuation
-requests and their durable successor trigger. Older providers could silently
-ignore the continuation request and redraft instead; older UI clients cannot
-decode the trigger. All `3.x` extensions and UI clients are therefore rejected
-before configuration and must be rebuilt or updated together with the harness.
+The protocol `4.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
+`0.1.1`, with their unchanged leaf dependencies remaining at
+`dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. This major
+revision adds typed local-summary continuation requests and their durable
+successor trigger. Older providers could silently ignore the continuation
+request and redraft instead; older UI clients cannot decode the trigger. All
+`3.x` extensions and UI clients are therefore rejected before configuration
+and must be rebuilt or updated together with the harness.
 
 Cargo package versions describe Rust source API compatibility. During the
 pre-1.0 series, compatible releases remain within `0.1.x`; a source-incompatible
@@ -55,10 +57,11 @@ manifests, and builds a small consumer outside the workspace against the exact
 archives. Before the first registry release, the consumer uses temporary Cargo
 patches to stand in for the unpublished packages.
 
-After publication is authorized, dry-run and upload in dependency order:
-`cargo publish --dry-run` immediately precedes publishing each leaf package,
-then `dpc-tau-proto`, then `dpc-tau-client`. Do not upload a package whose
-current dry-run fails.
+For the protocol `4.0` release, the leaf versions are already published.
+Dry-run and upload `dpc-tau-proto` `0.1.1`, verify that registry release, then
+dry-run and upload `dpc-tau-client` `0.1.1`. Each `cargo publish --dry-run`
+must immediately precede its upload; do not upload a package whose current
+dry-run fails.
 
 After the complete set is available, run
 `./.config/selfci/check-sdk-packages.sh --registry` to repeat the exact-version

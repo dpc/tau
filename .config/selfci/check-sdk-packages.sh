@@ -68,6 +68,18 @@ import tomllib
 package = sys.argv[1]
 manifest = tomllib.loads(pathlib.Path(sys.argv[2]).read_text())
 
+expected_internal_dependencies = {
+    "dpc-tau-actions": {},
+    "dpc-tau-blocking-notify-channel": {},
+    "dpc-tau-proto": {
+        "tau-actions": "=0.1.0",
+    },
+    "dpc-tau-client": {
+        "tau-blocking-notify-channel": "=0.1.0",
+        "tau-proto": "=0.1.1",
+    },
+}
+
 def check_dependencies(table):
     for dependency, value in table.items():
         if isinstance(value, dict) and "path" in value:
@@ -83,6 +95,15 @@ for key in ("dependencies", "dev-dependencies", "build-dependencies"):
 for target in manifest.get("target", {}).values():
     for key in ("dependencies", "dev-dependencies", "build-dependencies"):
         check_dependencies(target.get(key, {}))
+
+dependencies = manifest.get("dependencies", {})
+for dependency, expected_version in expected_internal_dependencies[package].items():
+    actual_version = dependencies.get(dependency, {}).get("version")
+    if actual_version != expected_version:
+        raise SystemExit(
+            f"{package} dependency {dependency} is {actual_version!r}, "
+            f"expected exact {expected_version!r}"
+        )
 PY
   test -f "$tmp/packages/${package}-${version}/README.md"
 done
@@ -123,7 +144,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(3, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(4, 0));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 EOF

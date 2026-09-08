@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ciborium",
  "dpc-tau-blocking-notify-channel",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ciborium",
  "dpc-tau-actions",
