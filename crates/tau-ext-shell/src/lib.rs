@@ -917,8 +917,9 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              are inferred read-write only while the agent holds a matching `dir_lock`; otherwise \
              they are read-only. When directory locking is disabled, shell commands run read-write. \
              Non-zero exits and timeouts are returned as structured command results with output details. \
-             Model-visible output is capped at 2000 lines / \
-             15 KiB; truncated output keeps the first 1000 and last 1000 lines \
+             The native `output` body is capped at 2000 lines / 15 KiB; small result \
+             metadata is deliberately outside that budget, which does not cap fully \
+             rendered provider text. Truncated output keeps the first 1000 and last 1000 lines \
              separated by a literal `...` line. Output lines are prefixed with `out ` \
              for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
              `out(no_nl)`; CRLF and CR line endings are marked as `out(crlf)` \
@@ -974,7 +975,9 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
         description: Some(
-            "Run a shell command. Model-visible output is capped at 2000 lines / 15 KiB; \
+            "Run a shell command. The native `output` body is capped at 2000 lines / 15 KiB; \
+             small result metadata is deliberately outside that budget, which does not cap fully \
+             rendered provider text. \
              truncated results normally provide an exact temporary path to up to 16 MiB of rendered output and mark an incomplete saved artifact honestly; private-storage failures instead report `saved_output_unavailable: true`. \
              Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
              trailing newlines are marked with `(no_nl)`. Byte totals and artifacts count the complete rendered UTF-8 records, including stream prefixes, flags, and separators, rather than raw process bytes. Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors. For file changes, prefer apply_patch."

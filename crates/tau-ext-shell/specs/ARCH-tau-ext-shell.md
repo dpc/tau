@@ -106,7 +106,9 @@ See
 
 The `read`, `grep`, `find`, `ls`, edit-recovery, and user `!` / `!!` surfaces
 use a 10 KiB visible bound. Model `shell` / `shell_command` uses a 15 KiB
-visible bound. Each preserves its native rendering and metadata. When a cap
+native `output` body bound. Small result metadata is deliberately outside that
+budget, which does not cap fully rendered provider text. Each preserves its
+native rendering and metadata. When a cap
 truncates output, ext-shell
 saves at most 16 MiB of the same ordered native rendering in a private
 temporary artifact. Complete saved artifacts use `full_output_path`; artifacts

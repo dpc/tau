@@ -43,8 +43,9 @@ keeps draining child output for process liveness and final truncation metadata b
 forwarding arbitrary output volume into the event stream.
 
 Model shell capture retains complete byte and line totals while bounding memory.
-Its provider-visible rendering is capped separately from the larger ephemeral
-saved rendering, and hitting the saved-rendering cap must be reported as an
+Its native `output` body is capped separately from the larger ephemeral saved
+rendering. Small result metadata and fully rendered provider text are outside
+that body budget, and hitting the saved-rendering cap must be reported as an
 incomplete artifact rather than as full output.
 
 Shell lifecycle waits should use event/readiness channels or platform wait

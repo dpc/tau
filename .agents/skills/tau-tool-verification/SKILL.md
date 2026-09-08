@@ -139,12 +139,13 @@ counts.
 
 When output is truncated due to line number limit, first and last 1000 lines
 should be shown with `...` line separating them, instead of usual line prefix.
-If a single line would exceed the visible byte budget for ext-shell `read`,
+If a single line would exceed the native byte budget for ext-shell `read`,
 search/list/edit recovery, or user shell output (10 KiB), or model `shell` /
-`shell_command` output (15 KiB), show only the native prefix plus `(truncated)` rather than
-partial content.
+`shell_command` native `output` body (15 KiB), show only the native prefix plus
+`(truncated)` rather than partial content. Small model-shell result metadata and
+provider rendering are outside the 15 KiB body budget.
 
-Visible-cap-truncated ext-shell output, including `read`, `grep`, `find`, `ls`, edit
+Native-budget-truncated ext-shell output, including `read`, `grep`, `find`, `ls`, edit
 recovery, model shell, and user shell surfaces, must preserve native rendering
 and include complete
 `total_lines` and `total_bytes`, a compact warning to prefer narrower commands

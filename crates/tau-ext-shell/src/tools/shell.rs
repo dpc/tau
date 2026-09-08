@@ -30,6 +30,10 @@ pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 const VCR_REPLAY_SPEEDUP: u64 = 100;
 const MAX_CAPTURED_LINE_BYTES: usize = MAX_SAVED_OUTPUT_BYTES - 128;
 const MAX_USER_STDERR_CHUNKS: usize = 4096;
+/// Native `output` body budget for model-shell results.
+///
+/// Small result metadata is deliberately outside this budget; this budget does
+/// not cap fully rendered provider text.
 pub(crate) const MAX_MODEL_SHELL_OUTPUT_BYTES: usize = 15 * 1024;
 const USER_OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 /// Filesystem access mode ext-shell infers for a shell command.
