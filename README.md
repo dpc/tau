@@ -72,13 +72,35 @@ cargo install --git https://github.com/dpc/tau --package dpc-tau
 Official packaging will come later — request a format or upvote existing requests on [GitHub Discussions](https://github.com/dpc/tau/discussions) to help prioritize.
 
 
-## Optional extensions
+## Extensions
 
-Tau keeps service integrations in separately maintained process extensions.
-The Tau flake pins and re-exports their Nix packages under one umbrella:
+Tau runs most capabilities as process extensions. Some standard extensions ship
+in this repository; other Tau projects are maintained separately. “External”
+below means a separate Tau project, not a third-party project.
+
+### Standard extensions
+
+These extensions ship in the Tau workspace:
+
+| Extension | What it provides |
+|---|---|
+| [Provider backends](crates/tau-ext-provider-builtin/) | Built-in model providers and provider profile management |
+| [Shell and filesystem](crates/tau-ext-shell/) | Shell commands, file operations, locking, and image inspection |
+| [Utilities](crates/tau-ext-utils/) | Timers, reminders, and opt-in papercut reporting |
+| [Web search](crates/tau-ext-websearch/) | Generic web search and URL fetching |
+| [Notifications](crates/tau-ext-std-notifications/) | Terminal-facing activity notifications and detached notification commands |
+| [Rhai](crates/tau-ext-rhai/) | Opt-in trusted local scripting |
+| [XMPP](crates/tau-ext-xmpp/) | Disabled-by-default XMPP messaging integration |
+
+### External Tau projects
+
+Tau maintains these extensions in separate repositories. The Tau flake pins and
+re-exports their Nix packages under one umbrella:
 
 | Integration | What it provides | Flake package | Source |
 |---|---|---|---|
+| PIM | Email and calendar tools with approval-gated writes | `tau-ext-pim` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4FCuiVzFns5iTquhsYCntZyVWCqi) |
+| Swarm | Live session projection and task coordination with a Tau Swarm peer | `tau-ext-swarm` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az38my9x3Rmn6VYtDMiLKgjK3tRv8o) |
 | Zulip | Bot message bridge with long polling and scoped send/reaction tools | `tau-ext-zulip` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd) |
 | Rostra | Relay-only social client with local state, signed writes, and opt-in notifications | `tau-ext-rostra` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o) |
 | Slack | Socket Mode text bridge with scoped send/reaction tools and multiple-instance prefixes | `tau-ext-slack` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg) |
@@ -97,6 +119,18 @@ the allowed senders, routes, and role tool policy. Installation does not create
 an account, add credentials, enable an extension, or authorize any route or
 tool. See [Configuring extensions](docs/extensions.md) and each standalone
 project's README for the full setup.
+
+### Third-party extensions
+
+- [tau-ext-searxng-search](https://github.com/akohlsmith/tau-searxng-search),
+  maintained by akohlsmith, provides a standalone `searxng_search` tool that queries
+  a configured SearXNG instance over HTTP, with configurable engines and
+  categories plus optional local-category prioritization. See the project's
+  documentation for installation and configuration.
+
+Third-party extensions are independently maintained. Listing one here is not a
+compatibility, security, or maintenance endorsement; review its source and
+documentation before granting it access to Tau.
 
 
 ## Configuration

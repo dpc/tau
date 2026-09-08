@@ -628,6 +628,31 @@
       line-height: 1.6;
     }
 
+    .extension-list {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      margin: 1rem 0 2rem;
+    }
+
+    .extension-entry {
+      padding: 0.9rem 1rem;
+      background: rgb(255 255 255 / 0.035);
+      border: 1px solid rgb(255 255 255 / 0.1);
+      border-left: 3px solid var(--cyan);
+      border-radius: 4px;
+    }
+
+    .extension-entry strong {
+      color: var(--base2);
+    }
+
+    .extension-entry p {
+      margin: 0.25rem 0 0;
+      color: var(--base1);
+      line-height: 1.5;
+    }
+
     /* Architecture diagram */
     .arch-narrow {
       display: none;
@@ -1322,6 +1347,10 @@
         flex-direction: column;
         align-items: center;
       }
+
+      .extension-list {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -1616,50 +1645,90 @@
   <hr class="divider">
 
   <section id="extensions">
-    <h2>Optional integrations</h2>
-    <h3>Install only what you need</h3>
-    <p>Tau's service integrations are separately maintained process extensions.
-      The Tau flake pins and re-exports their packages under one umbrella, but
-      installing one does not enable it, create an account, add credentials, or
-      authorize routes and tools.</p>
-    <div class="features">
-      <div class="feature">
-        <div class="feature-title"><span class="icon">@</span>
-          <a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd">Zulip</a>
-        </div>
-        <p>Bot message bridge with long polling and scoped send/reaction tools.
-          Install <code style="color:#00ffff">tau-ext-zulip</code>, then enable
-          <code style="color:#00ffff">std-zulip</code>.</p>
+    <h2>Extensions</h2>
+    <h3>Built in, maintained separately, or supplied by the community</h3>
+    <p>Tau runs most capabilities as process extensions. Standard extensions
+      ship in the Tau repository. External Tau projects are maintained in
+      separate repositories but remain part of the Tau project.</p>
+
+    <h3>Standard extensions</h3>
+    <div class="extension-list">
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-provider-builtin">Provider backends</a></strong>
+        <p>Built-in model providers and provider profile management.</p>
       </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">~</span>
-          <a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o">Rostra</a>
-        </div>
-        <p>Relay-only social client with local state, signed writes, and opt-in
-          notifications. Install <code style="color:#00ffff">tau-ext-rostra</code>,
-          then enable <code style="color:#00ffff">std-rostra</code>.</p>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-shell">Shell and filesystem</a></strong>
+        <p>Shell commands, file operations, locking, and image inspection.</p>
       </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">#</span>
-          <a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg">Slack</a>
-        </div>
-        <p>Socket Mode text bridge with scoped send/reaction tools and
-          multiple-instance prefixes. Install
-          <code style="color:#00ffff">tau-ext-slack</code>, then enable
-          <code style="color:#00ffff">std-slack</code>.</p>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-utils">Utilities</a></strong>
+        <p>Timers, reminders, and opt-in papercut reporting.</p>
       </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">&gt;</span>
-          <a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r">Telegram</a>
-        </div>
-        <p>Bot API text bridge with an optional separately supervised gateway.
-          Install <code style="color:#00ffff">tau-ext-telegram</code>, then
-          enable <code style="color:#00ffff">std-telegram</code>. Gateway mode
-          also uses <code style="color:#00ffff">tau-telegram-gateway</code>.</p>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-websearch">Web search</a></strong>
+        <p>Generic web search and URL fetching.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-std-notifications">Notifications</a></strong>
+        <p>Terminal-facing activity notifications and detached notification commands.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-rhai">Rhai</a></strong>
+        <p>Opt-in trusted local scripting.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-xmpp">XMPP</a></strong>
+        <p>Disabled-by-default XMPP messaging integration.</p>
       </div>
     </div>
-    <p style="margin-top:1.5rem">For example:
+
+    <h3>External Tau projects</h3>
+    <p>These separately maintained Tau projects are pinned and re-exported by
+      the Tau flake.</p>
+    <div class="extension-list">
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4FCuiVzFns5iTquhsYCntZyVWCqi">PIM</a></strong>
+        <p>Email and calendar tools with approval-gated writes.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az38my9x3Rmn6VYtDMiLKgjK3tRv8o">Swarm</a></strong>
+        <p>Live session projection and task coordination with a Tau Swarm peer.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd">Zulip</a></strong>
+        <p>Bot message bridge with long polling and scoped send/reaction tools.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o">Rostra</a></strong>
+        <p>Relay-only social client with signed writes and opt-in notifications.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg">Slack</a></strong>
+        <p>Socket Mode text bridge with scoped send/reaction tools.</p>
+      </div>
+      <div class="extension-entry">
+        <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r">Telegram</a></strong>
+        <p>Bot API text bridge with an optional separately supervised gateway.</p>
+      </div>
+    </div>
+
+    <h3>Third-party extensions</h3>
+    <div class="extension-list">
+      <div class="extension-entry">
+        <strong><a href="https://github.com/akohlsmith/tau-searxng-search">tau-ext-searxng-search</a></strong>
+        <p>Maintained by akohlsmith, this standalone SearXNG search tool supports
+          configurable engines and categories, with optional local-category
+          prioritization. See the project for installation and configuration.</p>
+      </div>
+    </div>
+    <p>Third-party extensions are independently maintained. A listing is not a
+      compatibility, security, or maintenance endorsement; review the project
+      before granting it access to Tau.</p>
+    <p>For external Tau projects, for example:
       <code style="color:#00ffff">nix profile install github:dpc/tau#tau-ext-slack</code>.
+      Installing a package does not enable it, create an account, add credentials,
+      or authorize routes and tools.
       Then configure the service identity, Tau-managed secrets, allowed senders,
       routes, and role tool policy. See the
       <a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/docs/extensions.md">extension guide</a>.</p>
