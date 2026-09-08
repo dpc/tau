@@ -158,14 +158,32 @@ Running a separate executable does not widen its ingress, reply, reaction,
 proactive-send, or catch-up authority.
 
 
+## PIM
+
+The separately maintained `std-pim` instance and legacy `std-email` alias are
+disabled by default. Tau does not bundle their source or executable. Install
+`tau-ext-pim`, ensure it is available through `PATH`, and enable only one
+instance name. Both names launch the same executable through Tau's normal
+supervised stdio extension route.
+
+The standalone `tau-ext-pim` project owns its source plus the authoritative
+email/calendar configuration, OAuth, storage, approval, security, and testing
+documentation. Tau retains the standard instance names, managed-secret
+delivery, per-instance state paths, tool prefixing, role policy, action routing,
+and terminal redaction behavior. Running a separate executable does not change
+those boundaries.
+
+
 ## Tau Swarm
 
-The bundled `std-swarm` instance is disabled by default and optional
-(`require: false`). See the [authoritative configuration, bounds, retry, and
-process-memory semantics](../crates/tau-ext-swarm/README.md). The extension
-registers the agent-scoped `task_info`, `task_blocker`, and `task_update` tools, but none
-is model-visible by default even after the extension starts. Opt in deliberately
-for selected roles:
+The separately maintained `std-swarm` instance is disabled by default and
+optional (`require: false`). Tau does not bundle its source or executable.
+Install `tau-ext-swarm`, ensure it is available through `PATH`, and then enable
+the instance. Its standalone project owns the authoritative configuration,
+bounds, retry, process-memory semantics, and implementation tests. The
+extension registers the agent-scoped `task_info`, `task_blocker`, and
+`task_update` tools, but none is model-visible by default even after the
+extension starts. Opt in deliberately for selected roles:
 
 ```yaml
 agents:

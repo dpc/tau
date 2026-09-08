@@ -83,11 +83,13 @@ Security-relevant boundaries:
 
 - Communication is limited to the trusted local Tau extension stdio protocol
   and the fixture-private Unix release socket described above.
-- Apart from creating and removing that socket, the crate does not read or
-  write files, persist state, access secrets, open network connections, or spawn
-  subprocesses. `exit_once_then_success` is the narrow exception: it atomically
-  creates or checks one caller-owned fixture-private marker leaf and never
-  creates or removes its parent root.
+- Apart from its closed fixture modes, the crate does not read or write files,
+  persist state, access secrets, open network connections, or spawn
+  subprocesses. `hold_until_success_release` creates and removes one configured
+  socket. `exit_once_then_success` atomically creates or checks one configured
+  caller-owned marker leaf. The disabled `configure_user_data_probe` uses the
+  harness ExtensionData API during Configure to replace exactly the User-scope
+  `configure-probe` leaf with the fixed bytes `configured`.
 - Config parsing rejects unknown fields and invalid `restart_mode` values.
 - `typed_image_test_dummy` is foreground-only and accepts no arguments or
   runtime control; it appears only when `typed_image: true`.

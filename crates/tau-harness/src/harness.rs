@@ -272,7 +272,7 @@ const SELF_KNOWLEDGE_HARNESS_CONFIG: &str =
     include_str!("../../tau-config/config/built-in.harness.yaml");
 const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/built-in.cli.yaml");
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
-    include_str!("../../tau-ext-pim/config/self-knowledge.harness.yaml");
+    include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-ext-pim.harness.yaml");
 
 /// Build the model-visible provenance notice from the shared outer-family
 /// registry so its family list cannot drift from projection recognition.

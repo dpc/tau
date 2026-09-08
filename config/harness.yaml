@@ -135,6 +135,7 @@
 #       # Opt in to the legacy `[agent-id] ` prefix on agent-authored posts.
 #       prefix_agent_id: false
 #
+#   # Install tau-ext-swarm separately and make it available through PATH.
 #   # Publish this Tau session to one identity-pinned Tau Swarm server.
 #   # Starting the extension does not expose its tools. Opt selected roles into
 #   # `enable_tool_groups: [swarm]` under `agents.role_groups` separately. With
@@ -203,6 +204,7 @@
 #         invite_default_recipient: true
 #       # Default: 16384 bytes. Valid range: 1..=131072 (128 KiB).
 #       max_message_bytes: 16384
+#   # Install tau-ext-pim separately and make it available through PATH.
 #   std-pim:
 #     enable: true
 #     # Secret names may contain ASCII letters, digits, '.', '_' and '-'.

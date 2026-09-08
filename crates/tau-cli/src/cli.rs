@@ -258,8 +258,8 @@ pub enum Command {
     /// extension; for example, the harness is a component.
     Component {
         /// Component name (harness or a bundled extension such as ext-shell,
-        /// ext-provider-builtin, ext-websearch, ext-pim, ext-rhai,
-        /// ext-xmpp, ext-std-notifications, or ext-test-dummy)
+        /// ext-provider-builtin, ext-websearch, ext-rhai, ext-xmpp,
+        /// ext-std-notifications, or ext-test-dummy)
         name: String,
 
         /// Use stdin/stdout as the initial UI connection before starting

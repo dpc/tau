@@ -50,6 +50,16 @@ The optional `std-swarm` configured extension is a trusted same-user local
 executable. Its remote Iroh peer is cooperative but authenticated and
 identity-pinned before the worker credential is sent; externally supplied
 prompts, answers, identifiers, and collections remain size-validated inputs.
+The separately maintained `tau-ext-swarm` project owns its detailed
+architecture and security documentation.
+
+The optional `std-pim` and legacy `std-email` configured instances are trusted
+same-user local executables supplied by the separately maintained
+`tau-ext-pim` project. That project owns their detailed provider, credential,
+storage, approval, and network security boundaries. Until the standalone
+project has a public repository and reporting route, report suspected PIM
+extension vulnerabilities through Tau's private reporting route below and
+identify `tau-ext-pim` in the report.
 
 
 Tau is early-stage software, but security issues are important. Please report suspected vulnerabilities through GitHub private vulnerability reporting for `dpc/tau` (<https://github.com/dpc/tau/security/advisories/new>) when available. If that path is unavailable, contact the maintainer privately first and avoid filing a public issue with exploit details.
@@ -306,7 +316,7 @@ an accepted internal-prompt request produces one canonical prompt fact with the
 authenticated configured extension name, never a request-supplied name. CLI
 attribution escapes that bounded name as visible metadata and does not create a
 second transport message or model activation.
-The built-in Swarm `task_blocker` tool has a narrower presentation boundary: the
+The standard Swarm `task_blocker` tool has a narrower presentation boundary: the
 CLI permits only its finite `add`, `cancel`, or `list` action discriminant from
 the start arguments, and strips all other start, progress, and terminal display
 fields in compact and full modes. Missing, malformed, or unknown actions fail
@@ -1456,7 +1466,8 @@ or any broader replay capability.
 
 ## Tau Swarm extension
 
-`std-swarm` is a configured local extension that connects to one
+The separately installed `tau-ext-swarm` executable provides `std-swarm` as a
+configured local extension that connects to one
 cryptographically pinned Iroh endpoint. The configured credential is sensitive;
 Tau supplies it only through the declared Configure secret and the extension
 must not log it. Relay and direct addresses are reachability hints and do not
@@ -1494,8 +1505,9 @@ notice; panic-abort builds terminate the extension process instead.
 sections against retirement; after retirement they fail before changing
 process-memory state or reporting success. Revisit this synchronization when
 changing worker lifecycle, mutating tool paths, health ownership, or terminal
-notice ordering. Deterministic worker-return, panic, mutation-ordering,
-tool-authority, saturation, and cleanup regressions protect this boundary.
+notice ordering. The separately maintained `tau-ext-swarm` project's
+deterministic worker-return, panic, mutation-ordering, tool-authority,
+saturation, and cleanup regressions protect this boundary.
 
 ### Compact semantic trace disclosure
 

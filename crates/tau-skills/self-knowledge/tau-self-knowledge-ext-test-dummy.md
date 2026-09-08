@@ -15,6 +15,10 @@ advertise: false
 - Can be configured with deterministic `restart_mode` for tests: `random`,
   `success`, `error`, `exit`, `hold_no_side_effect`, or
   `hold_until_success_release`, or `exit_once_then_success`.
+- `configure_user_data_probe: true` performs one synchronous Configure-time
+  ExtensionData write to the fixed User-scope `configure-probe` leaf with fixed
+  `configured` bytes. It exists only to test ephemeral harness startup and
+  accepts no configurable path or content.
 - `typed_image: true` enables `typed_image_test_dummy`, which returns a fixed
   in-memory 1×1 PNG as typed provider content for
   the hermetic durable-replay test. It accepts no arguments and does not read or
@@ -58,6 +62,7 @@ extensions: {
   "test-dummy": {
     enable: true,
     config: {
+      configure_user_data_probe: false,
        restart_mode: "success", // also hold_no_side_effect | hold_until_success_release | exit_once_then_success
       typed_image: false, // enables typed_image_test_dummy
       // Release mode additionally requires:

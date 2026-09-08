@@ -21,23 +21,8 @@ fn main() -> std::process::ExitCode {
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
-            name: "ext-email",
-            runner: tau_ext_pim::run_stdio,
-            logging: tau_cli::ComponentLogging::RunnerManaged,
-        },
-        tau_cli::Component {
-            name: "ext-pim",
-            runner: tau_ext_pim::run_stdio,
-            logging: tau_cli::ComponentLogging::RunnerManaged,
-        },
-        tau_cli::Component {
             name: "ext-std-notifications",
             runner: tau_ext_std_notifications::run_stdio,
-            logging: tau_cli::ComponentLogging::RunnerManaged,
-        },
-        tau_cli::Component {
-            name: "ext-swarm",
-            runner: tau_ext_swarm::run_stdio,
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {

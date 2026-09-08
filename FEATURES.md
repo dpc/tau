@@ -215,10 +215,9 @@ See [Providers](docs/providers.md), [Agent roles](docs/agent-roles.md), and the
 Tau extensions connect to services while keeping routing and authorization
 explicit:
 
-- **Email and calendars:** `std-pim` offers gated email reading and sending,
-  calendar search and free/busy queries, approved calendar mutations, OAuth
-  flows, and audit logs. See the
-  [PIM README](crates/tau-ext-pim/README.md).
+- **Email and calendars:** the separately maintained `tau-ext-pim` executable
+  provides `std-pim` with gated email reading and sending, calendar search and
+  free/busy queries, approved calendar mutations, OAuth flows, and audit logs.
 - **Slack:** the separately maintained, disabled-by-default `tau-ext-slack`
   Socket Mode bridge accepts allowlisted senders and configured conversations,
   preserves typed message provenance, and limits replies, proactive sends, and
@@ -257,9 +256,9 @@ explicit:
 
 These integrations are ordinary extension processes and can be disabled,
 replaced, or configured independently. Tool-producing integrations can use
-per-instance tool prefixes and role-level tool policy. Their component READMEs
-are the user-facing configuration guides; the adjacent Linked Specs record
-architectural boundaries and durable design choices.
+per-instance tool prefixes and role-level tool policy. Bundled components keep
+their README and Linked Specs beside their source; separately maintained
+extensions own those guides and records in their standalone projects.
 
 ## Where to explore next
 
@@ -312,12 +311,13 @@ Compact trace formats provide a semantic assistant/tool/message timeline in JSON
 
 ## Tau Swarm
 
-The optional `std-swarm` extension publishes a replay-coherent live session
-overview to an identity-pinned Tau Swarm peer. It accepts correlated prompts
-and blocker answers and provides agent-scoped `task_info`, `task_update`, and
+The separately maintained, optional `tau-ext-swarm` executable provides the
+`std-swarm` extension. It publishes a replay-coherent live session overview to
+an identity-pinned Tau Swarm peer, accepts correlated prompts and blocker
+answers, and provides agent-scoped `task_info`, `task_update`, and
 `task_blocker` tools. Command deduplication, replaceable task metadata, blocker
-history, updates, and acknowledgements are
-process-memory-only and reset on extension restart.
+history, updates, and acknowledgements are process-memory-only and reset on
+extension restart.
 See [Configuring extensions: Tau Swarm](docs/extensions.md#tau-swarm).
 
 Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.

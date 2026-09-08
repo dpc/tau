@@ -56,7 +56,7 @@
     },
     {
         name: "std-swarm",
-        suffix: ["component", "ext-swarm"],
+        command: ["tau-ext-swarm"],
         role: "tool",
         enable: false,
         require: false,
@@ -99,14 +99,14 @@
     },
     {
         name: "std-pim",
-        suffix: ["component", "ext-pim"],
+        command: ["tau-ext-pim"],
         role: "tool",
         enable: false,
         config: {},
     },
     {
         name: "std-email",
-        suffix: ["component", "ext-pim"],
+        command: ["tau-ext-pim"],
         role: "tool",
         enable: false,
         config: {},

@@ -62,7 +62,7 @@ pub(super) fn blocker_action_descriptor(started: &tau_proto::ToolStarted) -> Opt
     action
 }
 
-/// Recognizes the bundled Swarm blocker name with an optional structural
+/// Recognizes the standard Swarm blocker name with an optional structural
 /// extension-instance prefix, but never its removed legacy alias.
 pub(super) fn is_blocker_tool_name(name: &str) -> bool {
     name == BLOCKER_TOOL_NAME

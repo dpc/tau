@@ -11,6 +11,9 @@ Regression coverage should include:
 
 - random restart outcomes: tool error and extension exit without reply;
 - deterministic `restart_mode` outcomes: `success`, `error`, and `exit`;
+- `configure_user_data_probe: true` synchronously replacing the fixed
+  User-scope `configure-probe` leaf during Configure, while an ephemeral
+  `tau dev print-tools` run creates no resumable session or runtime pair;
 - `exit_once_then_success` rejecting missing, relative, and unrelated marker
   configuration; first live marker claim exiting after correlated progress;
   second regular-marker use returning exactly one success; and replayed starts

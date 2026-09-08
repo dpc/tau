@@ -6,7 +6,11 @@ advertise: false
 
 # Tau std-pim email configuration
 
-Tau's preferred built-in PIM extension is named `std-pim`. It runs `tau component ext-pim`, registers split model-visible email tools such as `email_list_folders`, `email_read`, and `email_send`, and publishes `:email` approval/denial actions. The legacy `std-email` built-in alias remains for old email-only configs; do not enable both names together.
+Tau's preferred standard PIM extension is named `std-pim`. It runs the separately
+installed `tau-ext-pim` executable, registers split model-visible email tools such
+as `email_list_folders`, `email_read`, and `email_send`, and publishes `:email`
+approval/denial actions. The legacy `std-email` alias remains for old email-only
+configs; do not enable both names together.
 
 Use this skill when helping a user configure email. Do not include personal addresses, server names, passwords, authserv-ids, or message contents unless the user explicitly provided them for that answer.
 
@@ -96,7 +100,7 @@ extensions:
 
 Important fields:
 
-- Preferred built-in extension name: `std-pim`; legacy alias: `std-email`.
+- Preferred standard extension name: `std-pim`; legacy alias: `std-email`.
 - Model-visible email tools are split by command, for example `email_list_folders`, `email_list_recent`, `email_read`, `email_request_access`, and `email_send`.
 - IMAP default: port 993 with `tls: required`.
 - SMTP default: port 587 with `tls: start_tls`.

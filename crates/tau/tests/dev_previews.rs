@@ -432,25 +432,34 @@ fn previews_omit_durable_session_artifacts_across_success_failure_and_concurrenc
     assert_no_durable_preview_artifacts(home.path());
 }
 
-/// Required std-pim must complete ordinary Configure storage writes during an
-/// ephemeral diagnostic without creating a resumable session directory.
+/// A required fixture extension may synchronously write User-scope data during
+/// Configure without making an ephemeral tool preview resumable.
 #[test]
-fn print_tools_allows_std_pim_extension_data_without_durable_session() {
+fn print_tools_allows_configure_time_user_data_without_durable_session() {
     let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
     std::fs::create_dir_all(home.path().join("work")).expect("work directory");
+    std::fs::create_dir_all(&config_dir).expect("config directory");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        "extensions:\n  test-dummy:\n    config:\n      configure_user_data_probe: true\n",
+    )
+    .expect("write fixture extension configuration");
 
     let output = preview(
         &home,
-        Some("std-pim"),
+        Some("test-dummy"),
         &["--role", "engineer", "dev", "print-tools"],
     );
 
     assert!(output.status.success(), "{:?}", output.stderr);
-    assert!(
-        home.path()
-            .join(".state/tau/ext/std-pim/state-v0.json")
-            .is_file(),
-        "std-pim Configure must receive ordinary writable User storage"
+    assert_eq!(
+        std::fs::read(
+            home.path()
+                .join(".state/tau/ext/test-dummy/configure-probe")
+        )
+        .expect("read Configure-time probe"),
+        b"configured"
     );
     let sessions = home.path().join(".state/tau/sessions");
     assert!(

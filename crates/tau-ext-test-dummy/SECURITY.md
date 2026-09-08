@@ -5,11 +5,14 @@ It is trusted same-UID local fixture code, not a sandbox and not user-facing
 functionality. It communicates through Tau's stdio extension protocol and, in
 release mode only, one caller-provisioned fixture-private Unix socket. The
 supervisor may provide ordinary inherited process state, but this crate does not
-inspect environment variables or secrets, use its configured state directory,
-open network connections, or spawn child processes. The narrow filesystem
-exceptions are the configured fixture-private Unix socket used by
-`hold_until_success_release` and the one caller-owned fixture-private marker
-leaf used by `exit_once_then_success`.
+inspect environment variables or secrets, open network connections, or spawn
+child processes. The narrow filesystem exceptions are the configured
+fixture-private Unix socket used by `hold_until_success_release`, the one
+caller-owned fixture-private marker leaf used by `exit_once_then_success`, and
+the disabled `configure_user_data_probe`. That probe uses authenticated
+ExtensionData during Configure to replace exactly the extension's User-scope
+`configure-probe` leaf with fixed `configured` bytes; it accepts no path or
+content from configuration.
 
 The harness supplies typed configuration, prompt events, tool starts,
 cancellation, and disconnect. Configuration rejects unknown fields and invalid

@@ -87,6 +87,8 @@ enum RestartMode {
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ExtConfig {
+    /// Writes one fixed User-scope file synchronously during Configure.
+    configure_user_data_probe: bool,
     /// Test-only deterministic behavior for `restart_test_dummy`.
     restart_mode: Option<RestartMode>,
     /// Enables the separate fixed typed-image fixture tool.
@@ -103,6 +105,8 @@ struct ExtConfig {
 
 /// Runtime state for the dummy extension.
 struct DummyState<T> {
+    /// Client used by the Configure-time User-scope persistence probe.
+    extension_data: tau_client::ExtensionDataClient,
     /// Random source used by the historical restart fixture mode.
     rng: T,
     /// Active deterministic restart behavior selected by config.
@@ -288,6 +292,22 @@ where
         builder
             .message_bridge()
             .configure::<ExtConfig>(|cx| {
+                if cx.config().configure_user_data_probe {
+                    cx.state
+                        .extension_data
+                        .request(
+                            tau_proto::ExtensionDataScope::User,
+                            tau_proto::ExtensionDataRequestOp::WriteFile {
+                                path: tau_proto::ExtensionDataPath::new("configure-probe"),
+                                contents: b"configured".to_vec(),
+                            },
+                        )
+                        .map_err(|error| {
+                            tau_client::ClientError::handler(format!(
+                                "Configure-time extension-data probe failed: {error}"
+                            ))
+                        })?;
+                }
                 cx.state.restart_mode = cx.config().restart_mode.unwrap_or_default();
                 let typed_image = cx.config().typed_image;
                 if typed_image && !cx.state.typed_image {
@@ -513,23 +533,24 @@ where
     T: Rng,
 {
     let (terminal_tx, terminal_rx) = mpsc::channel();
-    let state = DummyState {
-        rng,
-        restart_mode: RestartMode::Random,
-        typed_image: false,
-        provider_context_raw_message: false,
-        pending_hold: None,
-        hold_timeout,
-        release_config: None,
-        exit_once_marker_path: None,
-        terminals: AsyncTerminals {
-            sender: None,
-            receiver: terminal_rx,
-        },
-    };
     let mut runtime = match TauExtensionRunner::new(DummyExtension::<&mut T>::default())
-        .start_manual_loop(reader, writer, state)
-    {
+        .start_manual_loop_with_extension_data_state(reader, writer, |_, extension_data| {
+            DummyState {
+                extension_data,
+                rng,
+                restart_mode: RestartMode::Random,
+                typed_image: false,
+                provider_context_raw_message: false,
+                pending_hold: None,
+                hold_timeout,
+                release_config: None,
+                exit_once_marker_path: None,
+                terminals: AsyncTerminals {
+                    sender: None,
+                    receiver: terminal_rx,
+                },
+            }
+        }) {
         Ok(runtime) => runtime,
         Err(tau_client::ClientError::InitialConfigureRejected) => return Ok(()),
         Err(error) => return Err(Box::new(error)),

@@ -41,6 +41,22 @@ The standalone project provides and tests both `tau-ext-telegram` and
 `tau-telegram-gateway`; Tau's package and check exports do not build either
 binary.
 
+## PIM extension
+
+The separately maintained `tau-ext-pim` project owns its email, calendar,
+OAuth, storage, approval, provider, protocol, and standalone-process tests. Tau
+retains focused settings oracles proving that disabled `std-pim` and its legacy
+`std-email` alias both select the external `tau-ext-pim` command with no Tau
+component suffix, plus a generic test-fixture process oracle for Configure-time
+User-scope writes during ephemeral previews.
+
+## Tau Swarm extension
+
+The separately maintained `tau-ext-swarm` project owns its projection, worker,
+transport, task-tool, protocol, saturation, and standalone-process tests. Tau
+retains a focused settings oracle proving that disabled optional `std-swarm`
+selects the external `tau-ext-swarm` command with no Tau component suffix.
+
 
 ## Rendering themes
 
