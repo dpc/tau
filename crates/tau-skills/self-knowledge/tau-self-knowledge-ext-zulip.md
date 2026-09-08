@@ -34,18 +34,24 @@ For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all
 In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the group. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
 
 The extension emits generic message reports for creates, edits, deletes,
-reactions, and successful sends. `offline_message_catch_up` defaults to false,
-preserving live-only reconnect behavior. When enabled, it registers a fresh live
-queue, retrieves bounded created-message history after an identity-scoped
-durable checkpoint, merges/deduplicates the live overlap, and advances only
-after its canonical delivered fact returns on the post-persistence downpath.
-First use establishes the current baseline without replay. Offline edits,
-deletes, and reactions are not recovered; filter changes do not rescan before
-the checkpoint. Crash recovery is at-least-once and can duplicate messages.
-Runtime references and registrations still disappear on restart. The bridge is
-Markdown text-only and deliberately provides no file upload/download capability.
-Admitted Zulip Markdown remains exact through canonical facts, replay, and
-provider context, including a leading addressed bot mention.
+reactions, and successful sends. Edits, reactions, and deletes with a supplied
+actor require a top-level numeric allowlisted actor. Zulip's singular delete may
+omit its actor only when its top-level message ID, message type, and stream/topic
+fields match one exact current source owner; the checked report records no actor
+and successful publication revokes only that owner. Bulk, nested-ID,
+incomplete, contradictory, unknown-owner, and stale-authority deletes fail
+closed. `offline_message_catch_up` defaults to false, preserving live-only
+reconnect behavior. When enabled, it registers a fresh live queue, retrieves
+bounded created-message history after an identity-scoped durable checkpoint,
+merges/deduplicates the live overlap, and advances only after its canonical
+delivered fact returns on the post-persistence downpath. First use establishes
+the current baseline without replay. Offline edits, deletes, and reactions are
+not recovered; filter changes do not rescan before the checkpoint. Crash
+recovery is at-least-once and can duplicate messages. Runtime references and
+registrations still disappear on restart. The bridge is Markdown text-only and
+deliberately provides no file upload/download capability. Admitted Zulip
+Markdown remains exact through canonical facts, replay, and provider context,
+including a leading addressed bot mention.
 
 When Zulip rejects the initial or live-re-registration `users_me`,
 `get_stream_id`, `subscribe`, or `register` request, the diagnostic keeps its
