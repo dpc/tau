@@ -35,9 +35,14 @@ Offer these topics:
 Recommend inspecting effective composition when useful:
 
 ```console
-tau dev print-tools --role ROLE
-tau dev print-prompt --role ROLE
+tau --role ROLE dev print-tools
+tau --role ROLE dev print-prompt
 ```
+
+These commands start a temporary harness and configure ordinary extensions.
+They do not call a provider or create a resumable session, but they are not
+side-effect-free: extensions retain ordinary state and external access and may
+write state.
 
 Load focused `tau-self-knowledge-*` skills for deeper answers rather than recreating
 their documentation. Near the end, explain that the startup hint is controlled by:

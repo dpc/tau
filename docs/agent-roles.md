@@ -72,14 +72,15 @@ Apply these instructions outside the excluded project.
 
 `tau dev print-prompt` and `tau dev print-tools` use the role that normal startup
 would select when `--role` is omitted, including profile and configured-default
-resolution. Pass `--role NAME` to preview that explicit role instead.
-Both commands configure ordinary extensions, load one fresh ephemeral agent,
-wait boundedly for its per-agent context, and resolve one model/tool snapshot.
-They do not call a provider or create a resumable session. Extensions still use
-their ordinary User, Cache, Secret, direct-state, filesystem, and network
-semantics, so running either diagnostic can have the same extension side effects
-as ordinary startup. This is fresh-agent parity, not a view of a restored or
-currently running agent.
+resolution. Use `tau --role NAME dev print-prompt` or
+`tau --role NAME dev print-tools` to preview that explicit role instead.
+Both commands start a temporary harness, configure ordinary extensions, load one
+fresh ephemeral agent, wait boundedly for its per-agent context, and resolve one
+model/tool snapshot. They do not call a provider or create a resumable session,
+but they are not side-effect-free: extensions retain their ordinary User, Cache,
+Secret, direct-state, filesystem, network, and external-service semantics and
+may write state or produce other startup side effects. This is fresh-agent
+parity, not a view of a restored or currently running agent.
 
 `tau dev print-tools` applies the same logical-web selection as a live prompt.
 When the exact route selects provider-hosted search, the JSON entry uses
