@@ -143,5 +143,5 @@ impl Drop for WorkerTerminalGuard {
 }
 
 fn unavailable() -> String {
-    "Tau Swarm owner is unavailable until successful replay has a live publication worker".into()
+    "Tau Swarm mutation was rejected because the publication worker is not confirmed available; no change was applied".into()
 }

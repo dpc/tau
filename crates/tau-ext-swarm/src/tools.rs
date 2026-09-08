@@ -663,20 +663,29 @@ fn add_update(
 }
 
 fn require_valid_owner(state: &SwarmRuntime, owner: &str) -> Result<(), String> {
-    if state.projection_valid
-        && state.replay_complete
-        && state
-            .projection
-            .blocking_lock()
-            .contains_agent(&tau_swarm_api::AgentId::new(owner))
-    {
-        Ok(())
-    } else {
-        Err(
-            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
+    if !state.projection_valid {
+        return Err(
+            "Tau Swarm mutation was rejected because recovered Swarm state is invalid; no change was applied"
                 .into(),
-        )
+        );
     }
+    if !state.replay_complete {
+        return Err(
+            "Tau Swarm mutation was rejected because session replay is not complete; no change was applied"
+                .into(),
+        );
+    }
+    if !state
+        .projection
+        .blocking_lock()
+        .contains_agent(&tau_swarm_api::AgentId::new(owner))
+    {
+        return Err(
+            "Tau Swarm mutation was rejected because the requested owner is absent; no change was applied"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_text(name: &str, text: &str, max: usize) -> Result<(), String> {

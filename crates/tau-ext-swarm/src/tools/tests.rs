@@ -446,15 +446,15 @@ fn terminal_worker_rejects_mutations_without_changing_state() {
             None,
         ),
         Err(
-            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
-                .into()
+            "Tau Swarm mutation was rejected because the publication worker is not confirmed available; no change was applied"
+                .into(),
         )
     );
     assert_eq!(
         cancel_blocker(&mut state, "agent", blocker_id, None),
         Err(
-            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
-                .into()
+            "Tau Swarm mutation was rejected because the publication worker is not confirmed available; no change was applied"
+                .into(),
         )
     );
     assert_eq!(
@@ -468,8 +468,8 @@ fn terminal_worker_rejects_mutations_without_changing_state() {
             },
         ),
         Err(
-            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
-                .into()
+            "Tau Swarm mutation was rejected because the publication worker is not confirmed available; no change was applied"
+                .into(),
         )
     );
     assert_eq!(
@@ -483,13 +483,73 @@ fn terminal_worker_rejects_mutations_without_changing_state() {
             },
         ),
         Err(
-            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
-                .into()
+            "Tau Swarm mutation was rejected because the publication worker is not confirmed available; no change was applied"
+                .into(),
         )
     );
 
     assert_eq!(state.blocker_history.lock().expect("history").len(), 1);
     assert_eq!(state.projection.blocking_lock().snapshot(), before);
+}
+
+/// Distinct owner-readiness guards report only their first established cause
+/// and reject before changing the shared projection.
+#[test]
+fn owner_readiness_rejections_identify_the_first_known_guard() {
+    let cases = [
+        (
+            false,
+            false,
+            false,
+            "missing",
+            "Tau Swarm mutation was rejected because the publication worker is not confirmed available; no change was applied",
+        ),
+        (
+            true,
+            false,
+            false,
+            "missing",
+            "Tau Swarm mutation was rejected because recovered Swarm state is invalid; no change was applied",
+        ),
+        (
+            true,
+            true,
+            false,
+            "missing",
+            "Tau Swarm mutation was rejected because session replay is not complete; no change was applied",
+        ),
+        (
+            true,
+            true,
+            true,
+            "missing",
+            "Tau Swarm mutation was rejected because the requested owner is absent; no change was applied",
+        ),
+    ];
+
+    for (worker_available, projection_valid, replay_complete, owner, expected) in cases {
+        let mut state = configured_runtime();
+        if !worker_available {
+            state.worker_health = WorkerHealth::indeterminate();
+        }
+        state.projection_valid = projection_valid;
+        state.replay_complete = replay_complete;
+        let before = state.projection.blocking_lock().snapshot();
+
+        assert_eq!(
+            replace_task_info(
+                &mut state,
+                owner,
+                TaskInfoArgs {
+                    task_id: "task".into(),
+                    title: "Title".into(),
+                    description: None,
+                },
+            ),
+            Err(expected.into()),
+        );
+        assert_eq!(state.projection.blocking_lock().snapshot(), before);
+    }
 }
 
 /// A routed call received after worker death emits only an authoritative tool
