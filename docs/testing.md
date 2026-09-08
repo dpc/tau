@@ -58,6 +58,15 @@ retains a focused settings oracle proving that disabled optional `std-swarm`
 selects the external `tau-ext-swarm` command with no Tau component suffix.
 
 
+## XMPP extension
+
+The separately maintained `tau-ext-xmpp` project owns its configuration,
+allowlist, routing, MUC lifecycle, readiness, delivery, protocol, and
+standalone-process tests. Tau retains a focused settings oracle proving that
+disabled `std-xmpp` selects the external `tau-ext-xmpp` command with no Tau
+component suffix.
+
+
 ## Rendering themes
 
 Rendering and theme behavior tests should use artificial fixture themes with

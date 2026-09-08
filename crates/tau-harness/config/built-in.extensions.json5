@@ -78,7 +78,7 @@
     },
     {
         name: "std-xmpp",
-        suffix: ["component", "ext-xmpp"],
+        command: ["tau-ext-xmpp"],
         role: "tool",
         enable: false,
         config: {},

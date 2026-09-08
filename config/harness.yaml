@@ -180,6 +180,7 @@
 #       direct_messages: { receive: all_messages }
 #       conversations:
 #         - { name: Operations, topic: deploy, receive: mentions_only, proactive_send: true }
+#   # Install tau-ext-xmpp separately and make it available through PATH.
 #   std-xmpp:
 #     enable: true
 #     secrets:

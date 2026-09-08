@@ -26,11 +26,6 @@ fn main() -> std::process::ExitCode {
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
-            name: "ext-xmpp",
-            runner: tau_ext_xmpp::run_stdio,
-            logging: tau_cli::ComponentLogging::RunnerManaged,
-        },
-        tau_cli::Component {
             name: "ext-utils",
             runner: tau_ext_utils::run_stdio,
             logging: tau_cli::ComponentLogging::RunnerManaged,

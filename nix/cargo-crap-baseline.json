@@ -462,15 +462,6 @@
       "crate": "tau-provider-codex"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::register_agent",
-      "line": 1471,
-      "cyclomatic": 14.0,
-      "coverage": 26.785714285714285,
-      "crap": 90.92075892857146,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
       "function": "TerminalInputSession::handle_binding_action",
       "line": 2202,
@@ -541,15 +532,6 @@
       "coverage": null,
       "crap": 90.0,
       "crate": "tau-ext-websearch"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::wait_for_muc_self_presence",
-      "line": 1892,
-      "cyclomatic": 9.0,
-      "coverage": 0.0,
-      "crap": 90.0,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -685,15 +667,6 @@
       "coverage": 0.0,
       "crap": 72.0,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_command",
-      "line": 1407,
-      "cyclomatic": 8.0,
-      "coverage": 0.0,
-      "crap": 72.0,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
@@ -973,24 +946,6 @@
       "coverage": 0.0,
       "crap": 56.0,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::send_post_register_notice",
-      "line": 1539,
-      "cyclomatic": 7.0,
-      "coverage": 0.0,
-      "crap": 56.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::ensure_online_with_timeout",
-      "line": 1650,
-      "cyclomatic": 7.0,
-      "coverage": 0.0,
-      "crap": 56.0,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
@@ -1405,15 +1360,6 @@
       "coverage": null,
       "crap": 42.0,
       "crate": "tau-ext-websearch"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "xmpp_worker",
-      "line": 1238,
-      "cyclomatic": 6.0,
-      "coverage": 0.0,
-      "crap": 42.0,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -1945,24 +1891,6 @@
       "coverage": null,
       "crap": 30.0,
       "crate": "tau-ext-test-dummy"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::send_message",
-      "line": 1845,
-      "cyclomatic": 5.0,
-      "coverage": 0.0,
-      "crap": 30.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "submit_instant_room_config",
-      "line": 2368,
-      "cyclomatic": 5.0,
-      "coverage": 0.0,
-      "crap": 30.0,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
@@ -3198,78 +3126,6 @@
       "crate": "tau-ext-test-dummy"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "LiveXmppBridge::register_agent",
-      "line": 1124,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "LiveXmppBridge::wait_until_ready",
-      "line": 1156,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "LiveXmppBridge::send_message",
-      "line": 1169,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::setup_joined_muc_room",
-      "line": 1866,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::rejoin_all",
-      "line": 1935,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "handle_live_event",
-      "line": 2650,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "shutdown_session",
-      "line": 2678,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "run_protocol_messages",
-      "line": 361,
-      "cyclomatic": 4.0,
-      "coverage": null,
-      "crap": 20.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "FakeState::emit_hold_until_cancel",
       "line": 1416,
@@ -3430,15 +3286,6 @@
       "coverage": 37.5,
       "crap": 18.962890625,
       "crate": "tau-provider-codex"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::handle_send",
-      "line": 898,
-      "cyclomatic": 17.0,
-      "coverage": 81.15942028985508,
-      "crap": 18.93277200929046,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-cli/src/render_request.rs",
@@ -3871,15 +3718,6 @@
       "coverage": 50.0,
       "crap": 16.0,
       "crate": "tau-proto"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_presence",
-      "line": 1980,
-      "cyclomatic": 6.0,
-      "coverage": 34.78260869565217,
-      "crap": 15.98602778006082,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
@@ -4942,15 +4780,6 @@
       "coverage": 59.09090909090909,
       "crap": 12.381667918858,
       "crate": "tau-vcr"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::handle_register",
-      "line": 826,
-      "cyclomatic": 12.0,
-      "coverage": 86.66666666666667,
-      "crap": 12.341333333333333,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
@@ -6375,123 +6204,6 @@
       "crate": "tau-ext-utils"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "LiveXmppBridge::ensure_started",
-      "line": 1096,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "LiveXmppBridge::unregister_agent",
-      "line": 1143,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "LiveXmppBridge::shutdown",
-      "line": 1183,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "xmpp_thread",
-      "line": 1223,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::finish_register_response",
-      "line": 1455,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::leave_all_with_timeout",
-      "line": 1712,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::leave_conversation",
-      "line": 1738,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::leave_conversation_until",
-      "line": 1747,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::notify_direct_reconnects",
-      "line": 1830,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Conversation::address",
-      "line": 2265,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::register_agent",
-      "line": 96,
-      "cyclomatic": 3.0,
-      "coverage": null,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::wait_until_ready",
-      "line": 121,
-      "cyclomatic": 3.0,
-      "coverage": null,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::send_message",
-      "line": 143,
-      "cyclomatic": 3.0,
-      "coverage": null,
-      "crap": 12.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/lib.rs",
       "function": "VcrFixture::write_work_file",
       "line": 139,
@@ -7075,15 +6787,6 @@
       "coverage": 81.08108108108108,
       "crap": 10.67715633822281,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_message",
-      "line": 2009,
-      "cyclomatic": 8.0,
-      "coverage": 65.38461538461539,
-      "crap": 10.654528903049613,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-core/src/session_store.rs",
@@ -8400,15 +8103,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "outbound_message_parts",
-      "line": 992,
-      "cyclomatic": 8.0,
-      "coverage": 75.67567567567568,
-      "crap": 8.921090557321381,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/version.rs",
       "function": "build_revision",
       "line": 61,
@@ -9471,15 +9165,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "ExtConfig::validate",
-      "line": 386,
-      "cyclomatic": 8.0,
-      "coverage": 100.0,
-      "crap": 8.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "WatchChainProgress::admit",
       "line": 162,
@@ -9604,15 +9289,6 @@
       "coverage": 76.19047619047619,
       "crap": 7.661375661375661,
       "crate": "tau-ext-websearch"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "handle_configure",
-      "line": 2577,
-      "cyclomatic": 7.0,
-      "coverage": 76.19047619047619,
-      "crap": 7.661375661375661,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -10128,15 +9804,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "handle_template_metadata",
-      "line": 2619,
-      "cyclomatic": 7.0,
-      "coverage": 92.3076923076923,
-      "crap": 7.022303140646336,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::take_finished_tool_call",
       "line": 6168,
@@ -10216,15 +9883,6 @@
       "coverage": 94.73684210526315,
       "crap": 7.007143898527482,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_groupchat",
-      "line": 2042,
-      "cyclomatic": 7.0,
-      "coverage": 94.73684210526315,
-      "crap": 7.007143898527482,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-term-screen/src/screen.rs",
@@ -11035,15 +10693,6 @@
       "coverage": 71.42857142857143,
       "crap": 6.839650145772595,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_rendered_room_localpart",
-      "line": 681,
-      "cyclomatic": 6.0,
-      "coverage": 71.42857142857143,
-      "crap": 6.839650145772595,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-provider/src/outbound_network.rs",
@@ -13989,114 +13638,6 @@
       "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::unregister_agent",
-      "line": 1694,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::leave_pending_muc_join",
-      "line": 1761,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::leave_muc_occupant",
-      "line": 1769,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::leave_muc_occupant_until",
-      "line": 1777,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::refresh_online_state",
-      "line": 1796,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_iq",
-      "line": 1970,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "join_room",
-      "line": 2326,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "leave_room",
-      "line": 2336,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "leave_room_until",
-      "line": 2343,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "send_stanza_with_timeout",
-      "line": 2413,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "send_stanza_until",
-      "line": 2421,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "unload_agent",
-      "line": 2668,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "WatchChainProgress::is_complete",
       "line": 200,
@@ -14653,15 +14194,6 @@
       "coverage": 81.81818181818183,
       "crap": 5.150262960180315,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Output::report_tool_terminal",
-      "line": 146,
-      "cyclomatic": 5.0,
-      "coverage": 82.35294117647058,
-      "crap": 5.137390596376959,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -15492,15 +15024,6 @@
       "crate": "tau-ext-provider-builtin"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "room_localpart_for_registration",
-      "line": 716,
-      "cyclomatic": 5.0,
-      "coverage": 97.2972972972973,
-      "crap": 5.000493554182378,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/daemon.rs",
       "function": "run_daemon_with_echo",
       "line": 758,
@@ -15517,15 +15040,6 @@
       "coverage": 97.5609756097561,
       "crap": 5.000362734144891,
       "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_room_template",
-      "line": 622,
-      "cyclomatic": 5.0,
-      "coverage": 97.95918367346938,
-      "crap": 5.000212496493808,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -16635,15 +16149,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "MucConfigRaw::validate",
-      "line": 425,
-      "cyclomatic": 5.0,
-      "coverage": 100.0,
-      "crap": 5.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "require_repaired_dummy_result",
       "line": 2083,
@@ -16858,24 +16363,6 @@
       "coverage": 66.66666666666666,
       "crap": 4.5925925925925934,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "cbor_bool_field",
-      "line": 2767,
-      "cyclomatic": 4.0,
-      "coverage": 66.66666666666666,
-      "crap": 4.5925925925925934,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "cbor_string_field",
-      "line": 2775,
-      "cyclomatic": 4.0,
-      "coverage": 66.66666666666666,
-      "crap": 4.5925925925925934,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-core/src/action_registry.rs",
@@ -17436,15 +16923,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_direct",
-      "line": 2090,
-      "cyclomatic": 4.0,
-      "coverage": 82.5,
-      "crap": 4.08575,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
       "function": "Harness::drain_pending_tool_invocations",
       "line": 23294,
@@ -17605,15 +17083,6 @@
       "coverage": 83.33333333333334,
       "crap": 4.0740740740740735,
       "crate": "tau-harness-tools"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_stanza",
-      "line": 1960,
-      "cyclomatic": 4.0,
-      "coverage": 83.33333333333334,
-      "crap": 4.0740740740740735,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -17877,15 +17346,6 @@
       "crate": "tau-ext-rhai"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "base32_token",
-      "line": 2882,
-      "cyclomatic": 4.0,
-      "coverage": 88.88888888888889,
-      "crap": 4.021947873799726,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
       "function": "next_role_in_groups",
       "line": 786,
@@ -17929,15 +17389,6 @@
       "coverage": 89.47368421052632,
       "crap": 4.018661612479954,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::ensure_muc_room_available",
-      "line": 1618,
-      "cyclomatic": 4.0,
-      "coverage": 89.47368421052632,
-      "crap": 4.018661612479954,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-cli/src/prompt_history.rs",
@@ -18388,15 +17839,6 @@
       "coverage": 94.44444444444444,
       "crap": 4.002743484224966,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::dispatch_scoped_tool",
-      "line": 800,
-      "cyclomatic": 4.0,
-      "coverage": 94.44444444444444,
-      "crap": 4.002743484224966,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness/interception.rs",
@@ -20370,42 +19812,6 @@
       "crate": "tau-ext-utils"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "RoutingConfig::validate",
-      "line": 414,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_account_jid",
-      "line": 444,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_default_recipient",
-      "line": 479,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "RandomAlphanumericHelper::call_inner",
-      "line": 579,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-supervisor/src/bin/tau-supervisor-test-child.rs",
       "function": "write_flood_messages",
       "line": 35,
@@ -21315,15 +20721,6 @@
       "crate": "tau-ext-std-notifications"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "AllowedJid::matches",
-      "line": 369,
-      "cyclomatic": 3.0,
-      "coverage": 80.0,
-      "crap": 3.072,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "FakeState::v2",
       "line": 1618,
@@ -21394,15 +20791,6 @@
       "coverage": 81.81818181818183,
       "crap": 3.0540946656649135,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "cbor_reject_unknown_fields",
-      "line": 2793,
-      "cyclomatic": 3.0,
-      "coverage": 81.81818181818183,
-      "crap": 3.0540946656649135,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -21664,15 +21052,6 @@
       "coverage": 85.71428571428571,
       "crap": 3.0262390670553936,
       "crate": "tau-harness-tools"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "AllowedJid::parse",
-      "line": 358,
-      "cyclomatic": 3.0,
-      "coverage": 85.71428571428571,
-      "crap": 3.0262390670553936,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/deterministic_fixture.rs",
@@ -21970,15 +21349,6 @@
       "coverage": 88.88888888888889,
       "crap": 3.0123456790123457,
       "crate": "tau-ext-std-notifications"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "bounded_xmpp_display_name",
-      "line": 2221,
-      "cyclomatic": 3.0,
-      "coverage": 88.88888888888889,
-      "crap": 3.0123456790123457,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-cli/src/chat.rs",
@@ -22294,15 +21664,6 @@
       "coverage": 91.66666666666666,
       "crap": 3.0052083333333335,
       "crate": "tau-ext-shell"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::update_direct_conversations",
-      "line": 1813,
-      "cyclomatic": 3.0,
-      "coverage": 91.66666666666666,
-      "crap": 3.0052083333333335,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -22699,15 +22060,6 @@
       "coverage": 96.42857142857143,
       "crap": 3.0004099854227406,
       "crate": "tau-ext-std-notifications"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "MucJoin::from_self_presence",
-      "line": 2285,
-      "cyclomatic": 3.0,
-      "coverage": 96.42857142857143,
-      "crap": 3.0004099854227406,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -26121,33 +25473,6 @@
       "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Output::send",
-      "line": 125,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "ShutdownSignal::wait",
-      "line": 205,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_max_message_bytes",
-      "line": 512,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "FakeConfig::validate",
       "line": 383,
@@ -26913,15 +26238,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::drop",
-      "line": 1038,
-      "cyclomatic": 2.0,
-      "coverage": 83.33333333333334,
-      "crap": 2.0185185185185186,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness/subagents_tool.rs",
       "function": "Harness::select_peer_entrypoint_recipient",
       "line": 1421,
@@ -27102,15 +26418,6 @@
       "crate": "tau-ext-utils"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "handle_session_started",
-      "line": 2611,
-      "cyclomatic": 2.0,
-      "coverage": 85.71428571428571,
-      "crap": 2.011661807580175,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
       "function": "push_action_token",
       "line": 1148,
@@ -27271,15 +26578,6 @@
       "coverage": 87.5,
       "crap": 2.0078125,
       "crate": "tau-harness-tools"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::apply_config",
-      "line": 775,
-      "cyclomatic": 2.0,
-      "coverage": 87.5,
-      "crap": 2.0078125,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -27775,15 +27073,6 @@
       "coverage": 94.11764705882352,
       "crap": 2.0008141664970487,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "run_with_bridge",
-      "line": 2471,
-      "cyclomatic": 2.0,
-      "coverage": 94.11764705882352,
-      "crap": 2.0008141664970487,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -44301,537 +43590,6 @@
       "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/main.rs",
-      "function": "main",
-      "line": 1,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "run_stdio",
-      "line": 86,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "run",
-      "line": 92,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "resolve_password",
-      "line": 455,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_allowed_jids",
-      "line": 469,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::clear_config_before_start",
-      "line": 791,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "LiveXmppBridge::command_sender",
-      "line": 1214,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "std_to_tokio",
-      "line": 1325,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::shutdown_requested",
-      "line": 1587,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::muc_room_for",
-      "line": 1605,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::ensure_online",
-      "line": 1643,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_online",
-      "line": 1790,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::inbound_message_id",
-      "line": 2176,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "leave_presence",
-      "line": 2355,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "send_presence",
-      "line": 2409,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "send_chat",
-      "line": 2433,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "send_groupchat",
-      "line": 2440,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "send_muc_invite",
-      "line": 2447,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "clean_token_or",
-      "line": 2841,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "short_random_hex",
-      "line": 2853,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "generated_resource",
-      "line": 2859,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "SharedWriter::bytes",
-      "line": 19,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "SharedWriter::write",
-      "line": 25,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "SharedWriter::flush",
-      "line": 30,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::new",
-      "line": 50,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::set_ready",
-      "line": 54,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::set_readiness_error",
-      "line": 59,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::set_send_error",
-      "line": 63,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::set_send_error_after",
-      "line": 67,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::wait_for_wait_calls",
-      "line": 71,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::ensure_started",
-      "line": 86,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::unregister_agent",
-      "line": 116,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "FakeBridge::shutdown",
-      "line": 154,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "agent_id",
-      "line": 160,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "assert_delivered_live_replay_parity",
-      "line": 166,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "assert_room_shape",
-      "line": 177,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "default_muc_room",
-      "line": 197,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "tool",
-      "line": 206,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "bool_args",
-      "line": 216,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "bool_args_with_extra",
-      "line": 223,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "message_args",
-      "line": 236,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "message_args_with_destination",
-      "line": 243,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "cfg",
-      "line": 256,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "secrets",
-      "line": 275,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "configure_from_json",
-      "line": 284,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "valid_config_message",
-      "line": 294,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "malformed_config_message",
-      "line": 305,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "session_started_message",
-      "line": 354,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "empty_password_secrets",
-      "line": 389,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "shutdown_signal",
-      "line": 398,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "extension",
-      "line": 402,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "reconstruct_multipart_payload",
-      "line": 1120,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "worker_with_muc_agent",
-      "line": 1261,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "muc_message",
-      "line": 1286,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "delayed_muc_message",
-      "line": 1294,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "worker_operations_are_cancelled_by_shutdown",
-      "line": 1844,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "shutdown_signal_wakes_waiters_without_polling",
-      "line": 1862,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "best_effort_helper_operations_are_cancelled_by_shutdown",
-      "line": 1881,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/tests.rs",
-      "function": "direct_registration_rejects_second_agent",
-      "line": 2242,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "run_stdio",
       "line": 38,
@@ -45453,15 +44211,6 @@
       "crate": "tau-harness-tools"
     },
     {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "cbor_field",
-      "line": 2783,
-      "cyclomatic": 1.0,
-      "coverage": 75.0,
-      "crap": 1.015625,
-      "crate": "tau-ext-xmpp"
-    },
-    {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider.rs",
       "function": "FakeProvider::register",
       "line": 317,
@@ -45604,15 +44353,6 @@
       "coverage": 80.0,
       "crap": 1.008,
       "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::is_own_muc_message",
-      "line": 2138,
-      "cyclomatic": 1.0,
-      "coverage": 80.0,
-      "crap": 1.008,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-harness/src/model.rs",
@@ -66646,411 +65386,6 @@
       "coverage": 100.0,
       "crap": 1.0,
       "crate": "tau-ext-websearch"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Output::from",
-      "line": 109,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Output::from",
-      "line": 115,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Output::report_tool_progress",
-      "line": 137,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Output::emit_message_report",
-      "line": 169,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "ShutdownSignal::new",
-      "line": 186,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "ShutdownSignal::is_requested",
-      "line": 194,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "ShutdownSignal::request",
-      "line": 199,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "RuntimeConfig::is_allowed",
-      "line": 379,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_muc_service",
-      "line": 497,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_resource_prefix",
-      "line": 525,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "validate_room_prefix",
-      "line": 534,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "room_template_engine",
-      "line": 614,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "render_room_template",
-      "line": 672,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::new",
-      "line": 766,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::config_is_locked",
-      "line": 784,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "Extension::dispatch_tool",
-      "line": 821,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "wait_for_shutdown",
-      "line": 1339,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "run_until_worker_shutdown",
-      "line": 1351,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::new",
-      "line": 1389,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::until_shutdown",
-      "line": 1592,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::handle_disconnected",
-      "line": 1688,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::remove_conversation",
-      "line": 1703,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::apply_online_state",
-      "line": 1806,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::muc_rooms_to_rejoin",
-      "line": 1949,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "WorkerState::route",
-      "line": 2151,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "generated_xmpp_send_message_id",
-      "line": 2202,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "xmpp_sender_ref",
-      "line": 2213,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "MucOccupant::new",
-      "line": 2258,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "muc_occupant_jid",
-      "line": 2360,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "muc_presence_from",
-      "line": 2364,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "instant_room_config_query",
-      "line": 2397,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "muc_invite_message",
-      "line": 2459,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "XmppExtension::name",
-      "line": 2496,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "XmppExtension::register",
-      "line": 2500,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "handle_tool_invocation",
-      "line": 2603,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "immutable_config_error",
-      "line": 2663,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "xmpp_tool_group",
-      "line": 2697,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "example_field",
-      "line": 2704,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "example_text",
-      "line": 2708,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "register_tool_spec",
-      "line": 2712,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "send_tool_spec",
-      "line": 2738,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "tool_result",
-      "line": 2808,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "tool_error",
-      "line": 2825,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "muc_room_disambiguator",
-      "line": 2874,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
-    },
-    {
-      "file": "/build/source/crates/tau-ext-xmpp/src/lib.rs",
-      "function": "has_delay_payload",
-      "line": 2903,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-ext-xmpp"
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/durable_snapshot.rs",

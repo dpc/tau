@@ -174,6 +174,21 @@ and terminal redaction behavior. Running a separate executable does not change
 those boundaries.
 
 
+## XMPP
+
+The separately maintained `std-xmpp` instance is disabled by default. Tau does
+not bundle its source or executable. Install `tau-ext-xmpp`, ensure it is
+available through `PATH`, and then enable the instance. The standalone project
+owns the authoritative XMPP configuration, security, lifecycle, and testing
+documentation.
+
+Tau retains the `std-xmpp` instance name, empty default configuration,
+managed-secret delivery, per-instance state paths, publisher identity, tool
+prefixing, and role policy. It launches the external executable through Tau's
+normal supervised stdio extension route. Running a separate executable does not
+change its allowlist, routing, registration, readiness, or delivery boundaries.
+
+
 ## Tau Swarm
 
 The separately maintained `std-swarm` instance is disabled by default and

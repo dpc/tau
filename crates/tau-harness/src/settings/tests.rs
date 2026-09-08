@@ -1080,9 +1080,9 @@ fn resolve_extensions_user_suffix_piggybacks_on_current_tau_executable() {
     let mut settings = HarnessSettings::built_in();
     let tool_prefix = tau_proto::ToolNamePrefix::parse("fedi").expect("tool prefix");
     settings.extensions.insert(
-        "fedi-xmpp".into(),
+        "project-shell".into(),
         ExtensionEntry {
-            suffix: Some(vec!["component".into(), "ext-xmpp".into()]),
+            suffix: Some(vec!["component".into(), "ext-shell".into()]),
             role: Some("tool".into()),
             tool_prefix: Some(Some(tool_prefix.clone())),
             ..Default::default()
@@ -1092,11 +1092,11 @@ fn resolve_extensions_user_suffix_piggybacks_on_current_tau_executable() {
     let resolved = resolve_extensions(&settings, builtins()).expect("resolve");
     let extension = resolved
         .iter()
-        .find(|extension| extension.name == "fedi-xmpp")
-        .expect("renamed XMPP extension");
+        .find(|extension| extension.name == "project-shell")
+        .expect("renamed shell extension");
 
     assert_eq!(extension.command, current_tau_executable());
-    assert_eq!(extension.args, ["component", "ext-xmpp"]);
+    assert_eq!(extension.args, ["component", "ext-shell"]);
     assert_eq!(extension.role.as_deref(), Some("tool"));
     assert_eq!(extension.tool_prefix.as_ref(), Some(&tool_prefix));
 }
@@ -1324,6 +1324,23 @@ fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
         assert!(extension.suffix.is_none());
         assert_eq!(extension.role.as_deref(), Some("tool"));
     }
+}
+
+/// Ensures the standard XMPP bridge launches its separately installed
+/// executable without retaining the removed Tau component suffix.
+#[test]
+fn built_in_extensions_json5_contains_disabled_external_std_xmpp() {
+    let extension = built_in_extension_defs()
+        .iter()
+        .find(|def| def.name == "std-xmpp")
+        .expect("std-xmpp built-in extension");
+    assert!(!extension.enable);
+    assert_eq!(
+        extension.command.as_deref(),
+        Some(["tau-ext-xmpp".to_owned()].as_slice())
+    );
+    assert!(extension.suffix.is_none());
+    assert_eq!(extension.role.as_deref(), Some("tool"));
 }
 
 #[test]

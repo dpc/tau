@@ -61,6 +61,14 @@ project has a public repository and reporting route, report suspected PIM
 extension vulnerabilities through Tau's private reporting route below and
 identify `tau-ext-pim` in the report.
 
+The optional `std-xmpp` configured instance is a trusted same-user local
+executable supplied by the separately maintained `tau-ext-xmpp` project. That
+project owns its detailed credential, allowlist, routing, connection, MUC, and
+message-delivery security boundaries. Until the standalone project has a public
+repository and reporting route, report suspected XMPP extension vulnerabilities
+through Tau's private reporting route below and identify `tau-ext-xmpp` in the
+report.
+
 
 Tau is early-stage software, but security issues are important. Please report suspected vulnerabilities through GitHub private vulnerability reporting for `dpc/tau` (<https://github.com/dpc/tau/security/advisories/new>) when available. If that path is unavailable, contact the maintainer privately first and avoid filing a public issue with exploit details.
 

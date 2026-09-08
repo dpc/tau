@@ -90,12 +90,12 @@ These extensions ship in the Tau workspace:
 | [Web search](crates/tau-ext-websearch/) | Generic web search and URL fetching |
 | [Notifications](crates/tau-ext-std-notifications/) | Terminal-facing activity notifications and detached notification commands |
 | [Rhai](crates/tau-ext-rhai/) | Opt-in trusted local scripting |
-| [XMPP](crates/tau-ext-xmpp/) | Disabled-by-default XMPP messaging integration |
 
 ### External Tau projects
 
-Tau maintains these extensions in separate repositories. The Tau flake pins and
-re-exports their Nix packages under one umbrella:
+Tau maintains these extensions in separate repositories. Published projects are
+pinned and re-exported by the Tau flake; XMPP forwarding awaits publication of
+its standalone repository.
 
 | Integration | What it provides | Flake package | Source |
 |---|---|---|---|
@@ -105,6 +105,7 @@ re-exports their Nix packages under one umbrella:
 | Rostra | Relay-only social client with local state, signed writes, and opt-in notifications | `tau-ext-rostra` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o) |
 | Slack | Socket Mode text bridge with scoped send/reaction tools and multiple-instance prefixes | `tau-ext-slack` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg) |
 | Telegram | Bot API text bridge, plus an optional separately supervised gateway | `tau-ext-telegram`, `tau-telegram-gateway` | [Radicle](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r) |
+| XMPP | Disabled-by-default XMPP messaging integration | `tau-ext-xmpp` | Repository publication pending |
 
 For example:
 

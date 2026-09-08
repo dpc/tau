@@ -236,9 +236,10 @@ explicit:
   send-only mode can expose one fixed proactive DM without registering any
   receive queue. Install the executable separately and make it available through
   `PATH` before enabling `std-zulip`.
-- **XMPP:** the disabled-by-default bridge supports fixed recipients or
-  per-agent MUC rooms with allowlisted senders and TLS transport. See the
-  [XMPP README](crates/tau-ext-xmpp/README.md).
+- **XMPP:** the separately maintained, disabled-by-default `tau-ext-xmpp`
+  bridge supports fixed recipients or per-agent MUC rooms with allowlisted
+  senders and TLS transport. Install the executable separately and make it
+  available through `PATH` before enabling `std-xmpp`.
 - **Web search:** capable ChatGPT/Codex Standard Responses routes use cached
   provider-hosted search by default. Other routes use the bundled extension,
   which rotates search through Exa, Parallel, and anonymous You.com, and fetch
