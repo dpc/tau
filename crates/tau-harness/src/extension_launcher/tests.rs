@@ -173,52 +173,6 @@ fn read_only_state_preserves_only_approved_writable_exceptions() {
     assert!(command.status().expect("spawn isolated child").success());
 }
 
-/// Proves legacy retains ambient state while still masking the mandatory secret
-/// root rather than weakening existing secret isolation.
-#[test]
-fn legacy_state_keeps_ambient_state_but_hides_secrets() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let state = temp.path().join("state");
-    let cwd = temp.path().join("work");
-    fs::create_dir_all(state.join("secrets")).expect("secrets");
-    fs::create_dir_all(&cwd).expect("cwd");
-    fs::write(state.join("visible"), "visible").expect("visible sentinel");
-    fs::write(state.join("secrets/value"), "secret").expect("secret sentinel");
-    let state = state.canonicalize().expect("canonical state");
-    let (outer, staging, runtime_mask) = mask_roots(&temp);
-    let runtime = runtime_socket_root(&temp);
-    fs::write(runtime.join("other-harness.sock"), "socket").expect("runtime sentinel");
-    let secret_target = state.join("secrets");
-    let mut command = Command::new("/bin/sh");
-    command.args([
-        "-c",
-        "test \"$(cat \"$1/visible\")\" = visible && test ! -e \"$1/secrets/value\" && test \"$(cat \"$2/other-harness.sock\")\" = socket",
-        "sh",
-        state.to_str().expect("state path"),
-        runtime.to_str().expect("runtime socket root"),
-    ]);
-    configure_command(
-        &mut command,
-        IsolationPlan {
-            isolation_root: outer.parent().expect("isolation root"),
-            state_root: Some(&state),
-            tau_state_access: TauStateAccess::Legacy,
-            outer_mask: &outer,
-            runtime_socket_mask: &runtime_mask,
-            staging_root: &staging,
-            secret_mask_target: Some(&secret_target),
-            own_state: None,
-            provider_settings: None,
-            test_nested_mount: None,
-            runtime_socket_root: &runtime,
-            tau_runtime_socket_access: TauRuntimeSocketAccess::Legacy,
-            cwd: &cwd,
-        },
-    )
-    .expect("configure isolation");
-    assert!(command.status().expect("spawn isolated child").success());
-}
-
 /// Proves an absent memory-only host state tree does not require a vacuous
 /// mount.
 #[test]

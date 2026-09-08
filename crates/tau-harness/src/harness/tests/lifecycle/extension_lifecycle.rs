@@ -4025,7 +4025,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
                 cwd: None,
                 config: serde_json::json!({"token": "config-secret"}),
                 secrets: BTreeMap::new(),
-                tau_state_access: TauStateAccess::Legacy,
+                tau_state_access: TauStateAccess::ReadOnly,
                 tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             },
         )]),
@@ -8337,37 +8337,6 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
 
     h.shutdown().expect("shutdown");
 }
-/// Ensures a recovery Tau-state policy publishes its dedicated replayable
-/// notice kind rather than sharing generic harness-internal warnings.
-#[test]
-fn state_access_startup_diagnostic_uses_dedicated_notice_kind() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-
-    h.emit_extension_startup_diagnostics(&[crate::settings::ExtensionStartupDiagnostic {
-        extension: "core-shell".to_owned(),
-        message: "extension `core-shell` uses Tau-state access `legacy` from global harness configuration"
-            .to_owned(),
-        kind: ExtensionStartupDiagnosticKind::StateAccess {
-            source: TauStateAccessSource::GlobalConfiguration,
-        },
-    }]);
-
-    assert!(event_log_contains_source_event(
-        &h,
-        HARNESS_CONNECTION_ID,
-        |event| matches!(
-            event,
-            Event::HarnessNotice(info)
-                if info.level == tau_proto::NoticeLevel::Warning
-                    && info.kind == tau_proto::notice_kind::EXTENSION_STATE_ACCESS
-                    && info.purpose == tau_proto::NoticePurpose::Alert
-                    && info.message.contains("core-shell")
-        )
-    ));
-}
-
 #[test]
 fn harness_failure_notice_is_mandatory_warning() {
     let td = TempDir::new().expect("tempdir");

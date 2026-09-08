@@ -517,7 +517,7 @@ fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
         cwd,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
-        tau_state_access: TauStateAccess::Legacy,
+        tau_state_access: TauStateAccess::ReadOnly,
         tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
     }
 }

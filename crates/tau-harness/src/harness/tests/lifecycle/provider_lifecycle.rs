@@ -276,7 +276,7 @@ fn raw_secret_source_error_prevents_provider_start() {
                     cwd: None,
                     config: serde_json::json!({}),
                     secrets: BTreeMap::new(),
-                    tau_state_access: TauStateAccess::Legacy,
+                    tau_state_access: TauStateAccess::ReadOnly,
                     tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
                 },
             )]),

@@ -30,9 +30,7 @@ use crate::harness::{
     tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
     unavailable_tool_error_message, validate_protocol_version_against,
 };
-use crate::settings::{
-    Config, ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource,
-};
+use crate::settings::{Config, ExtensionConfig, ExtensionStartupDiagnosticKind};
 
 static STUCK_PROVIDER_OBSERVED_TRANSPORT_CLOSE: AtomicBool = AtomicBool::new(false);
 static STUCK_PROVIDER_RELEASE: AtomicBool = AtomicBool::new(false);
@@ -143,7 +141,7 @@ fn supervised_test_config(name: &str, script: &str) -> ExtensionConfig {
         cwd: None,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
-        tau_state_access: TauStateAccess::Legacy,
+        tau_state_access: TauStateAccess::ReadOnly,
         tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
     }
 }
@@ -541,7 +539,7 @@ fn configure_supervised_extension(
         cwd: None,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
-        tau_state_access: TauStateAccess::Legacy,
+        tau_state_access: TauStateAccess::ReadOnly,
         tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
     });
     entry.state = ExtensionState::Spawning;
@@ -589,7 +587,7 @@ fn builtin_provider_startup_config(
                 secrets: source_declaration
                     .map(|declaration| BTreeMap::from([("provider_key".to_owned(), declaration)]))
                     .unwrap_or_default(),
-                tau_state_access: TauStateAccess::Legacy,
+                tau_state_access: TauStateAccess::ReadOnly,
                 tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             },
         )]),

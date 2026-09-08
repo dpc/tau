@@ -1,6 +1,6 @@
 # ARCH-tau-config: tau-config architecture
 
-`tau_state_access` selects `hidden`, `read_only`, or `legacy` for supervised
+`tau_state_access` selects `hidden` or `read_only` for supervised
 extensions, and an extension entry can override it with the same field. A
 selected profile can replace this global default before command-line layers.
 The shipped default is `read_only`;

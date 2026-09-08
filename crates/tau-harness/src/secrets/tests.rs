@@ -32,7 +32,7 @@ fn config_with_secret(optional: bool) -> Config {
                 cwd: None,
                 config: serde_json::json!({}),
                 secrets,
-                tau_state_access: TauStateAccess::Legacy,
+                tau_state_access: TauStateAccess::ReadOnly,
                 tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             },
         )]),

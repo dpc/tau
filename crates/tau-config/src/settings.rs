@@ -268,8 +268,6 @@ pub enum TauStateAccess {
     /// paths.
     #[default]
     ReadOnly,
-    /// Retain the historical ambient Tau-state view except for secrets.
-    Legacy,
 }
 
 /// Visibility of Tau harness runtime sockets in a supervised extension mount
@@ -289,7 +287,6 @@ impl std::fmt::Display for TauStateAccess {
         formatter.write_str(match self {
             Self::Hidden => "hidden",
             Self::ReadOnly => "read_only",
-            Self::Legacy => "legacy",
         })
     }
 }
@@ -318,15 +315,14 @@ pub fn parse_tau_state_access_env(
     };
     let value = value.into_string().map_err(|_| {
         TauStateAccessEnvError(format!(
-            "{TAU_EXTENSION_TAU_STATE_ACCESS_ENV} must be valid UTF-8 and exactly hidden, read_only, or legacy"
+            "{TAU_EXTENSION_TAU_STATE_ACCESS_ENV} must be valid UTF-8 and exactly hidden or read_only"
         ))
     })?;
     match value.as_str() {
         "hidden" => Ok(Some(TauStateAccess::Hidden)),
         "read_only" => Ok(Some(TauStateAccess::ReadOnly)),
-        "legacy" => Ok(Some(TauStateAccess::Legacy)),
         _ => Err(TauStateAccessEnvError(format!(
-            "{TAU_EXTENSION_TAU_STATE_ACCESS_ENV} must be exactly hidden, read_only, or legacy"
+            "{TAU_EXTENSION_TAU_STATE_ACCESS_ENV} must be exactly hidden or read_only"
         ))),
     }
 }

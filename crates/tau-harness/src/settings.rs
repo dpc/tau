@@ -27,7 +27,7 @@ pub struct Config {
     /// secrets.
     pub extensions: BTreeMap<String, ExtensionConfig>,
     /// Mandatory startup diagnostics for optional extensions skipped during
-    /// configuration or for every non-hidden Tau-state policy.
+    /// configuration.
     pub extension_startup_diagnostics: Vec<ExtensionStartupDiagnostic>,
     /// Complete accepted harness settings from which this launch configuration
     /// was resolved.
@@ -60,35 +60,6 @@ pub struct ExtensionStartupDiagnostic {
 pub enum ExtensionStartupDiagnosticKind {
     /// An optional extension could not start and was skipped.
     OptionalSkip,
-    /// The ambient `legacy` Tau-state recovery policy is active for an
-    /// extension.
-    StateAccess {
-        /// Configuration layer that selected the effective policy.
-        source: TauStateAccessSource,
-    },
-}
-
-/// Configuration layer that selected an extension's Tau-state policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TauStateAccessSource {
-    /// The global `tau_state_access` setting selected the policy.
-    GlobalConfiguration,
-    /// The extension's `tau_state_access` setting selected the policy.
-    InstanceConfiguration,
-    /// The emergency environment force selected the policy for every extension.
-    EnvironmentForce,
-}
-
-impl TauStateAccessSource {
-    /// Return the stable user-facing description of this configuration layer.
-    #[must_use]
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::GlobalConfiguration => "global harness configuration",
-            Self::InstanceConfiguration => "extension configuration",
-            Self::EnvironmentForce => "process-wide TAU_EXTENSION_TAU_STATE_ACCESS",
-        }
-    }
 }
 
 /// One configured extension process, after merging built-in defaults
@@ -1177,9 +1148,10 @@ fn resolve_config_in_with_extension_cli_overrides(
         std::env::var_os(tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV),
     )?;
     apply_tau_state_access_force(&mut resolved_extensions, tau_state_access_force);
-    let mut config = config_from_resolved_extensions(resolved_extensions, settings.clone());
-    append_tau_state_access_diagnostics(&mut config, &settings, tau_state_access_force);
-    Ok(config)
+    Ok(config_from_resolved_extensions(
+        resolved_extensions,
+        settings,
+    ))
 }
 
 /// Apply the emergency process-wide state-access override after configuration
@@ -1192,42 +1164,6 @@ fn apply_tau_state_access_force(
         for extension in &mut resolved_extensions.extensions {
             extension.tau_state_access = tau_state_access;
         }
-    }
-}
-
-/// Append mandatory diagnostics for each ambient Tau-state recovery policy.
-fn append_tau_state_access_diagnostics(
-    config: &mut Config,
-    settings: &HarnessSettings,
-    tau_state_access_force: Option<path_tau_config_settings::TauStateAccess>,
-) {
-    for extension in config.extensions.values().filter(|extension| {
-        extension.tau_state_access == path_tau_config_settings::TauStateAccess::Legacy
-    }) {
-        let source = match tau_state_access_force {
-            Some(_) => TauStateAccessSource::EnvironmentForce,
-            None if settings
-                .extensions
-                .get(&extension.name)
-                .and_then(|entry| entry.tau_state_access)
-                .is_some() =>
-            {
-                TauStateAccessSource::InstanceConfiguration
-            }
-            None => TauStateAccessSource::GlobalConfiguration,
-        };
-        config
-            .extension_startup_diagnostics
-            .push(ExtensionStartupDiagnostic {
-                extension: extension.name.clone(),
-                message: format!(
-                    "extension `{}` uses Tau-state access `{}` from {}",
-                    extension.name,
-                    extension.tau_state_access,
-                    source.description()
-                ),
-                kind: ExtensionStartupDiagnosticKind::StateAccess { source },
-            });
     }
 }
 

@@ -347,10 +347,10 @@ fn isolated_supervised_command(
             create_private_state_tree(state_dir, &PathBuf::from("ext").join(config.name.as_str()))?;
             Some(state_dir.canonicalize()?)
         };
-        if state_root.as_ref().is_some_and(|target| {
-            tau_state_access != TauStateAccess::Legacy && cwd.starts_with(target)
-                || cwd.starts_with(target.join("secrets"))
-        }) {
+        if state_root
+            .as_ref()
+            .is_some_and(|target| cwd.starts_with(target))
+        {
             return Err(HarnessError::Participant(format!(
                 "extension `{}` cwd must not be at or below masked Tau state",
                 config.name

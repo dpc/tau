@@ -487,8 +487,8 @@ fn provider_profile_roots_are_disjoint_and_instance_qualified() {
     );
 }
 
-/// Ensures the emergency state-access override accepts only its exact
-/// process-wide recovery tokens rather than silently weakening isolation.
+/// Ensures the emergency state-access override accepts only its two supported
+/// exact tokens and rejects the removed ambient-writable mode.
 #[test]
 fn tau_state_access_environment_is_exact_and_fail_closed() {
     assert_eq!(
@@ -499,12 +499,8 @@ fn tau_state_access_environment_is_exact_and_fail_closed() {
         parse_tau_state_access_env(Some("read_only".into())).expect("read-only"),
         Some(TauStateAccess::ReadOnly)
     );
-    assert_eq!(
-        parse_tau_state_access_env(Some("legacy".into())).expect("legacy"),
-        Some(TauStateAccess::Legacy)
-    );
     assert_eq!(parse_tau_state_access_env(None).expect("absent"), None);
-    for invalid in ["", "Hidden", "read-only", "legacy ", "all"] {
+    for invalid in ["", "Hidden", "read-only", "legacy", "legacy ", "all"] {
         assert!(
             parse_tau_state_access_env(Some(invalid.into())).is_err(),
             "{invalid:?} must fail closed"
@@ -770,7 +766,7 @@ fn selected_profiles_apply_all_layers_in_exact_order() {
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
-tau_state_access: legacy
+tau_state_access: read_only
 agents:
   effort: 0.25
   role_groups:
@@ -4590,7 +4586,7 @@ fn selected_profile_layers_tau_state_access_before_cli_overrides() {
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
-tau_state_access: legacy
+tau_state_access: hidden
 profiles:
   focused:
     tau_state_access: read_only
@@ -6474,6 +6470,58 @@ fn tau_state_access_omission_defaults_to_read_only_and_preserves_explicit_hidden
     assert_eq!(
         settings.extensions["hidden"].tau_state_access,
         Some(TauStateAccess::Hidden)
+    );
+}
+
+/// Ensures stale explicit `legacy` values fail at every Tau-state configuration
+/// layer instead of silently falling back to a supported policy.
+#[test]
+fn tau_state_access_rejects_removed_legacy_configuration() {
+    for yaml in [
+        "tau_state_access: legacy\n",
+        "extensions:\n  shell:\n    command: [demo]\n    tau_state_access: legacy\n",
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(td.path().join("harness.yaml"), yaml).expect("write stale configuration");
+        let error = load_harness_settings_in(&dirs_with_config(td.path()))
+            .expect_err("legacy configuration must be rejected");
+        assert!(
+            error.to_string().contains("legacy"),
+            "error should identify the rejected value: {error}"
+        );
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "profiles:\n  stale:\n    tau_state_access: legacy\n",
+    )
+    .expect("write stale profile");
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile_selection("stale")),
+        &[],
+        &[],
+    )
+    .expect_err("selected legacy profile must be rejected");
+    assert!(
+        error.to_string().contains("legacy"),
+        "profile error should identify the rejected value: {error}"
+    );
+
+    let cli_td = TempDir::new().expect("CLI tempdir");
+    let override_value = HarnessConfigCliOverride::from_str("tau_state_access=legacy")
+        .expect("generic override syntax");
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(cli_td.path()),
+        None,
+        &[],
+        &[override_value],
+    )
+    .expect_err("legacy command-line override must be rejected");
+    assert!(
+        error.to_string().contains("legacy"),
+        "override error should identify the rejected value: {error}"
     );
 }
 

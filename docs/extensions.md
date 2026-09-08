@@ -3,22 +3,19 @@
 ## Tau-state access
 
 Persistent supervised extensions receive the real Tau-state tree recursively
-read-only by default. Use `hidden` to hide unrelated state, or `legacy` to
-recover the historical ambient writable view:
+read-only by default. Use `hidden` to hide unrelated state:
 
 ```yaml
 extensions:
   narrow-integration:
     tau_state_access: hidden
-  legacy-integration:
-    tau_state_access: legacy
 ```
 
-`TAU_EXTENSION_TAU_STATE_ACCESS=hidden|read_only|legacy tau` overrides every
+`TAU_EXTENSION_TAU_STATE_ACCESS=hidden|read_only tau` overrides every
 supervised extension in one new persistent daemon. A memory-only harness still
 forces `hidden` afterward. The setting is intentionally rejected by `tau attach`
 and never reaches extension child environments. Secrets stay masked in every
-mode. Restricted modes restore only the extension's own durable state directory
+mode. Both modes restore only the extension's own durable state directory
 read-write. Providers additionally receive their selected credential-free
 settings read-only. Provider captures cross the
 extension protocol as bounded opaque zstd blobs; the harness alone derives and

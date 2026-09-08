@@ -1755,14 +1755,6 @@ impl Harness {
                 ExtensionStartupDiagnosticKind::OptionalSkip => {
                     self.emit_optional_extension_skipped(&diagnostic.message);
                 }
-                ExtensionStartupDiagnosticKind::StateAccess { .. } => {
-                    self.emit_notice(
-                        tau_proto::notice_kind::EXTENSION_STATE_ACCESS,
-                        tau_proto::NoticeLevel::Warning,
-                        tau_proto::NoticePurpose::Alert,
-                        &diagnostic.message,
-                    );
-                }
             }
         }
     }

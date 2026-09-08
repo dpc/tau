@@ -24,22 +24,19 @@ tau_state_access: read_only
 extensions:
   diagnostics:
     tau_state_access: hidden
-  legacy-integration:
-    tau_state_access: legacy
 ```
 
 `read_only` is the persistent-harness default and presents the real Tau state
 tree recursively read-only. `hidden` presents an empty read-only Tau state
-tree. `legacy` retains the historical ambient state view. Memory-only harnesses
-always force `hidden`, create no host state, and mask an existing state root if
-one exists. The emergency
-`TAU_EXTENSION_TAU_STATE_ACCESS=hidden|read_only|legacy` environment setting
+tree. Memory-only harnesses always force `hidden`, create no host state, and
+mask an existing state root if one exists. The emergency
+`TAU_EXTENSION_TAU_STATE_ACCESS=hidden|read_only` environment setting
 forces every supervised extension for one newly started persistent daemon. A
 memory-only harness still forces `hidden` afterward. `tau attach` rejects the
 setting and Tau removes it before child execution.
 
 A persistent harness restores the exact `<state>/ext/<instance>` directory
-read-write for that instance in restricted modes. This direct state directory
+read-write for that instance in both modes. This direct state directory
 is also the `Configure.state_dir` path where the harness can provide persistent
 state. Independently, extension-data RPC gives each instance its own writable
 Session, User, Cache, and Secret scopes:
@@ -67,7 +64,7 @@ configured `prefix ++ command ++ suffix` argv. It removes `TAU_SECRET_*` and
 `TAU_EXTENSION_TAU_STATE_ACCESS` from the child environment but otherwise does
 not present a sanitized environment.
 
-When a state root exists, Tau masks the entire Tau secret root in every policy.
+When a state root exists, Tau masks the entire Tau secret root in both modes.
 A persistent harness restores the per-instance direct-state bind after the
 restricted state view. A persistent Provider, and only a persistent Provider,
 additionally receives its selected

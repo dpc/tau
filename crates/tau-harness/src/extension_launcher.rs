@@ -251,7 +251,6 @@ fn install_tau_state_access(
             make_recursively_read_only(state_root)?;
             install_secret_mask(plan)
         }
-        TauStateAccess::Legacy => install_secret_mask(plan),
     }
 }
 
