@@ -36,11 +36,12 @@ const RESTORE_NOTICE: &str = concat!(
     "and recreate timers or other session-scoped setup if still needed."
 );
 
-/// A real daemon socket admits a deliberately newer minor peer, exposes exactly
-/// one replayable warning, and preserves ordinary operation and cleanup.
+/// A real daemon socket admits a deliberately newer minor peer without its
+/// protocol-skew scrollback warning, while preserving ordinary operation and
+/// cleanup.
 #[test]
-fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn std::error::Error>>
-{
+fn deterministic_minor_protocol_skew_continues_without_warning()
+-> Result<(), Box<dyn std::error::Error>> {
     const PROMPT: &str = "prove minor protocol skew continues";
     const RESPONSE: &str = "minor skew peer remained operational";
     let scenario = ScenarioV2::new(
@@ -54,7 +55,7 @@ fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn
         }],
     );
     let fixture = DeterministicFixture::new_v2(
-        "deterministic_minor_protocol_skew_warns_and_continues",
+        "deterministic_minor_protocol_skew_continues_without_warning",
         &scenario,
         FAKE_PROVIDER,
     )?;
@@ -72,7 +73,7 @@ fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn
         tau_proto::PROTOCOL_VERSION.major,
         tau_proto::PROTOCOL_VERSION.minor + 1,
     );
-    let expected_warning = format!(
+    let expected_skew_warning = format!(
         "`tau-e2e-minor-skew`, minor protocol mismatch {peer_version} vs harness {}",
         tau_proto::PROTOCOL_VERSION
     );
@@ -95,28 +96,18 @@ fn deterministic_minor_protocol_skew_warns_and_continues() -> Result<(), Box<dyn
         ],
     }))?;
 
-    let observed = loop {
-        let observed = recv_observed(&mut peer)?;
-        if matches!(
-            &observed.event,
-            Event::HarnessNotice(notice)
-                if notice.message == expected_warning
-        ) {
-            break observed;
-        }
-    };
-    let Event::HarnessNotice(notice) = &observed.event else {
-        unreachable!("loop exits only for a harness notice");
-    };
-    assert_eq!(notice.message, expected_warning);
-    assert!(
-        observed.replay,
-        "late subscription must replay the live alert"
-    );
     create_agent(&mut peer, "protocol-minor-skew", PROMPT)?;
     loop {
+        let event = recv_event(&mut peer)?;
+        assert!(
+            !matches!(
+                &event,
+                Event::HarnessNotice(notice) if notice.message == expected_skew_warning
+            ),
+            "generic peer protocol skew must not publish a harness notice: {event:?}"
+        );
         if matches!(
-            recv_event(&mut peer)?,
+            event,
             Event::ProviderResponseFinished(finished)
                 if finished.output_items.iter().any(|item| {
                     matches!(

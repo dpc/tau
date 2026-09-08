@@ -32,17 +32,19 @@ Every producer of the shared Hello message advertises the revision compiled into
 configuration:
 
 - equal revisions continue without a warning;
-- equal majors with different minors emit one concise visible warning for that
-  connection and continue best-effort in either direction;
+- equal majors with different minors continue best-effort in either direction.
+  A harness-launched configured extension emits one concise visible warning for
+  that connection; generic socket peers do not add a harness scrollback notice;
 - different majors reject the connection before configuration, declarations,
   subscriptions, or extension state initialization.
 
-The diagnostic concisely identifies the peer and both revisions. A major-skew
-diagnostic also says that the peer was rejected; minor-skew admission is implied
-by its warning severity. It is live-only, remains replayable to late UI
-subscribers for the current process, and does not enter a journal. Reconnection
-may warn again. Admission adds no negotiation round trip, and Configure remains
-the first harness response to an admitted configured extension.
+The configured-extension diagnostic concisely identifies the peer and both
+revisions. A major-skew diagnostic also says that the peer was rejected;
+minor-skew admission is implied by its warning severity. The configured-extension
+warning is live-only, remains replayable to late UI subscribers for the current
+process, and does not enter a journal. Extension reconnection may warn again.
+Admission adds no negotiation round trip, and Configure remains the first harness
+response to an admitted configured extension.
 
 This policy changes neither session-target validation nor capability, cleanup,
 security, and connection-ownership semantics. It makes no compatibility
@@ -53,5 +55,7 @@ Socket UI admission additionally returns the harness revision in the existing
 optional field; newer UIs treat absence as lacking later UI controls. This
 allows a newer UI to withhold an additive request from an older harness while
 older UIs and extensions continue best-effort against the newer harness without
-another negotiation round trip. Configured extensions still receive Configure
-as their first harness response.
+another negotiation round trip. Socket clients may use the acknowledgement for
+client-local compatibility UX, while the harness remains silent for their
+same-major minor skew. Configured extensions still receive Configure as their
+first harness response.

@@ -1716,8 +1716,8 @@ impl Harness {
         );
     }
 
-    /// Publishes one replayable but non-journaled alert for an admitted peer's
-    /// minor protocol-version skew.
+    /// Publishes one replayable but non-journaled alert for an admitted
+    /// supervised extension's minor protocol-version skew.
     pub(super) fn emit_protocol_version_skew(&mut self, message: &str) {
         let notice = tau_proto::HarnessNotice {
             kind: tau_proto::notice_kind::HARNESS_INTERNAL_WARNING.to_owned(),

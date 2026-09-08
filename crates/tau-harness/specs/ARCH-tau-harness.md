@@ -654,5 +654,7 @@ without resolving or materializing credentials.
 
 Shared Hello admission follows
 [SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md):
-major skew rejects before configuration, while minor skew emits one live
-replayable warning and continues without adding a negotiation round trip.
+major skew rejects before configuration, while same-major minor skew continues
+without a negotiation round trip. Generic socket peers add no harness notice;
+harness-launched configured extensions emit one live, process-replayable,
+non-journaled warning.

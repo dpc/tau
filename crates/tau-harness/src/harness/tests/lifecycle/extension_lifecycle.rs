@@ -2047,10 +2047,11 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
     );
 }
 
-/// Repeated skewed Hello messages on one generic client connection emit one
-/// warning, while disconnect cleanup lets a later connection reuse the id.
+/// Generic same-major minor-skew peers remain admitted without adding a
+/// scrollback warning, including after reconnecting with the same connection
+/// id.
 #[test]
-fn client_minor_protocol_skew_warning_is_once_per_connection() {
+fn client_minor_protocol_skew_continues_without_notice() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let dirs = tau_config::settings::TauDirs {
@@ -2091,7 +2092,7 @@ fn client_minor_protocol_skew_warning_is_once_per_connection() {
     }
     assert_eq!(
         h.runtime_io.replayable_harness_notices.len(),
-        notices_before + 1
+        notices_before
     );
 
     h.handle_disconnect(&connection_id);
@@ -2102,7 +2103,7 @@ fn client_minor_protocol_skew_warning_is_once_per_connection() {
     );
     assert_eq!(
         h.runtime_io.replayable_harness_notices.len(),
-        notices_before + 2
+        notices_before
     );
     h.shutdown().expect("shutdown");
 }

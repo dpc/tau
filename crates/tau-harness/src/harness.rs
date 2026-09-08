@@ -3004,19 +3004,16 @@ impl Harness {
         }
         match message {
             HarnessInputMessage::Hello(hello) => {
-                let protocol_version_warning = match validate_protocol_version(&hello) {
-                    Ok(warning) => warning,
-                    Err(error) => {
-                        let _ = self.runtime_io.bus.send_to(
-                            client_id,
-                            None,
-                            HarnessOutputMessage::Disconnect(Disconnect {
-                                reason: Some(error.to_string()),
-                            }),
-                        );
-                        return Ok(ClientMessageDisposition::CloseAfterReply);
-                    }
-                };
+                if let Err(error) = validate_protocol_version(&hello) {
+                    let _ = self.runtime_io.bus.send_to(
+                        client_id,
+                        None,
+                        HarnessOutputMessage::Disconnect(Disconnect {
+                            reason: Some(error.to_string()),
+                        }),
+                    );
+                    return Ok(ClientMessageDisposition::CloseAfterReply);
+                }
                 let socket_connection = self
                     .runtime_io
                     .bus
@@ -3075,20 +3072,6 @@ impl Harness {
                     self.ui_runtime
                         .runtime_probe_peers
                         .insert(client_id.clone());
-                }
-                if let Some(warning) = protocol_version_warning
-                    && self
-                        .runtime_io
-                        .protocol_version_skew_warned
-                        .insert(client_id.clone())
-                {
-                    tracing::warn!(
-                        peer = %hello.client_name,
-                        peer_protocol_version = %hello.protocol_version,
-                        harness_protocol_version = %PROTOCOL_VERSION,
-                        "admitting peer with protocol minor-version skew"
-                    );
-                    self.emit_protocol_version_skew(&warning);
                 }
                 Ok(ClientMessageDisposition::Continue)
             }

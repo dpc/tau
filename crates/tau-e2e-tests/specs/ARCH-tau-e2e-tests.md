@@ -54,8 +54,8 @@ and exact V1 global-FIFO or V2 lane-local consumption rather than giant prompt
 snapshots.
 
 A focused daemon-socket case deliberately advertises a newer protocol minor,
-then proves best-effort admission and one replayable warning through the
-production Hello and subscription path, then completes one ordinary
+then proves best-effort admission without its peer-skew harness notice through
+the production Hello and subscription path, then completes one ordinary
 deterministic text turn. It adds no protocol override to the compiled fake
 provider.
 
