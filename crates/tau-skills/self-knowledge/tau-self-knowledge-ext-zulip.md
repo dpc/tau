@@ -47,11 +47,37 @@ merges/deduplicates the live overlap, and advances only after its canonical
 delivered fact returns on the post-persistence downpath. First use establishes
 the current baseline without replay. Offline edits, deletes, and reactions are
 not recovered; filter changes do not rescan before the checkpoint. Crash
-recovery is at-least-once and can duplicate messages. Runtime references and
-registrations still disappear on restart. The bridge is Markdown text-only and
+recovery is at-least-once and can duplicate messages. Runtime references
+disappear on restart, and an unspecified installed `tau-ext-zulip` must be
+assumed not to restore a receive registration. The bridge is Markdown text-only and
 deliberately provides no file upload/download capability. Admitted Zulip
 Markdown remains exact through canonical facts, replay, and provider context,
 including a leading addressed bot mention.
+
+Receive-registration restoration is implemented only by reviewed standalone
+revision `ed760eee15994b7b0af83d355a882be8037eeb68`. That revision passed full
+CI but remains an unintegrated isolated sibling: it is not published, pinned,
+or activated here. Review and CI do not make an installed bot restore
+registrations. In that revision, a successfully completed ordinary-mode
+`zulip_register {"enabled":true}` records explicit receive resume-intent.
+After complete successful session and agent replay, a runtime restart or agent
+reload can establish a fresh registration under the current configuration,
+routes, allowlists, admission rules, and loaded membership. Unloaded agents
+receive nothing. Explicit disable, or an enable attempt that retires a
+registration and then fails, revokes intent; rejection before retirement leaves
+it unchanged. A live configuration change retires runtime authority and defeats
+pending restoration; a later reload may resume retained intent under that new
+configuration.
+
+Restoration resumes prior explicit intent rather than synthesizing a model tool
+call or deriving authority from historical roles or UI summaries. Only paired
+accepted starts and recognized versioned effective terminal metadata establish
+intent; old metadata-free results, unfinished or unrecognized outcomes,
+incomplete replay, and bounded correlation exhaustion do not. The bridge gives
+no fallback prompt or notification and does not retry failed restoration in the
+same load; an explicit enable remains available. It restores no old queue,
+native route, source reply reference, or reaction ownership. Catch-up remains
+independently opt-in, and send-only mode never restores receive registration.
 
 When Zulip rejects the initial or live-re-registration `users_me`,
 `get_stream_id`, `subscribe`, or `register` request, the diagnostic keeps its
@@ -60,6 +86,13 @@ or unavailable category and adds only the operation, HTTP status, and a
 1–64-byte uppercase ASCII `[A-Z0-9_]` machine error code. Missing, malformed,
 or oversized codes show as `unknown`; no response message/body, request data,
 headers, URL data, or credentials appear.
+
+Separately, published diagnostic revision
+`866a0a8bd12e37e9725c111bb621fa1512f6c467` has not rolled out to the host. It
+adds fixed content-free malformed-poll subtype diagnostics only; it makes no
+recovery or limit change. The incident's exact subtype and root cause remain
+unobserved, and that diagnostic revision does not include registration
+restoration.
 
 The separately maintained `tau-ext-zulip` project owns the complete operational,
 security, testing, architecture, and routing documentation.
