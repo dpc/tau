@@ -104,6 +104,15 @@
         # lane plain and non-interactive so terminal detection cannot add progress
         # frames or ANSI escapes to those persistent logs.
         nextestReporterArgs = "--color never --show-progress none --status-level none --no-input-handler";
+        # Nextest otherwise detects host CPUs independently of the Nix build
+        # budget. Zero/unset budgets retain its normal CPU-count selection.
+        nextestBuildBudget = ''
+          export NEXTEST_TEST_THREADS="''${NIX_BUILD_CORES:-num-cpus}"
+          if [ "$NEXTEST_TEST_THREADS" = 0 ]; then
+            export NEXTEST_TEST_THREADS=num-cpus
+          fi
+          echo "Nextest test concurrency: $NEXTEST_TEST_THREADS"
+        '';
         buildSrc =
           # The universal release binary needs parallel LLVM optimization. This
           # evaluation guard prevents normal release builds from silently
@@ -265,6 +274,7 @@
               # build the candidate explicitly rather than reusing a stale
               # artifact from the workspace dependency cache.
               preCheck = ''
+                ${nextestBuildBudget}
                 cargo build --profile $CARGO_PROFILE --locked -p dpc-tau --bin tau
               '';
               # This terminal gate has no downstream Cargo consumer. Exporting
@@ -370,6 +380,7 @@
               pname = "${projectName}-tests-ccov";
               cargoArtifacts = workspaceCcov;
               buildPhaseCargoCommand = ''
+                ${nextestBuildBudget}
                 source <(cargo llvm-cov show-env --export-prefix)
                 cargo nextest run --locked --workspace --all-targets --profile coverage --cargo-profile $CARGO_PROFILE ${nextestReporterArgs}
                 mkdir -p $out
