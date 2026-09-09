@@ -62,7 +62,7 @@ fn compaction_prompt_uses_explicit_start_parent_not_write_cursor() {
             source: None,
             event,
             parent,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::default(),
         };
         tree.apply_persisted_record(&record).expect("append");
@@ -572,7 +572,7 @@ fn background_preview_only_context_uses_typed_node_provenance() {
         source: None,
         event: event.clone(),
         parent: tau_core::AgentEventParent::InheritHead,
-        fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::new(1),
     };
     let mut live = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
@@ -1916,7 +1916,7 @@ fn human_ui_prompt_projects_fieldless_user_envelope_without_changing_canonical_t
         source: None,
         event: event.clone(),
         parent: tau_core::AgentEventParent::InheritHead,
-        fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::new(1),
     };
     let replay_tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[persisted]);
@@ -2122,7 +2122,7 @@ fn human_ui_steer_projects_complete_expanded_skill_prompt() {
             source: None,
             event,
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         }],
     );
@@ -2185,7 +2185,7 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
             source: None,
             event: compacted,
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         }],
     );
@@ -2242,7 +2242,7 @@ fn synthetic_compaction_summary_origin_drives_live_and_replay_provenance() {
             source: None,
             event,
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         }],
     );
@@ -2338,7 +2338,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
                 "old fact",
             )),
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
         tau_core::PersistedAgentEvent {
@@ -2365,7 +2365,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
                 })],
             }),
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     ];
@@ -2402,7 +2402,7 @@ fn raw_message_fact_preflight_matches_live_and_cold_materialization() {
             "raw message fact",
         )),
         parent: tau_core::AgentEventParent::InheritHead,
-        fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::new(1),
     };
     let mut live = tau_core::AgentTree::from_events(agent_id.clone(), &[]);
@@ -2853,7 +2853,7 @@ fn agent_message_prompt_projection_is_identical_after_cold_replay() {
             source: None,
             event: sent,
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         }],
     );
@@ -2880,7 +2880,7 @@ fn agent_message_prompt_projection_is_identical_after_cold_replay() {
             source: None,
             event: received,
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         }],
     );
@@ -3274,7 +3274,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
             source: None,
             event,
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(seq as u64),
         })
         .collect::<Vec<_>>();

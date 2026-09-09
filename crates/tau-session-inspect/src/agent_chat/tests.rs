@@ -11,7 +11,7 @@ fn record(seq: u64, event: Event) -> PersistedAgentEvent {
     record_at(
         seq,
         AgentEventParent::InheritHead,
-        tau_core::AgentJournalFoldSemantics::Legacy,
+        tau_core::AgentJournalFoldSemantics::CommitOrder,
         event,
     )
 }
@@ -279,7 +279,7 @@ fn inference_deferred_prompt_keeps_response_and_prompt_classification() {
         record_at(
             4,
             AgentEventParent::Under(tau_core::NodeId::new(0)),
-            tau_core::AgentJournalFoldSemantics::Legacy,
+            tau_core::AgentJournalFoldSemantics::CommitOrder,
             response(&agent_id, owner_prompt_id.as_str(), "first answer"),
         ),
     ];

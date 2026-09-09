@@ -14,7 +14,7 @@ fn hosted_search_citations_and_opaque_call_survive_live_cold_restart() {
             source: None,
             event,
             parent: AgentEventParent::InheritHead,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: UnixMicros::new(u64::from(index)),
         }
     }
@@ -243,7 +243,7 @@ fn randomized_prevalidated_live_fold_matches_cold_replay() {
                 message_class: Default::default(),
             }),
             parent: valid_parent,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: UnixMicros::new(step),
         };
         let validated = live
@@ -278,7 +278,7 @@ fn randomized_prevalidated_live_fold_matches_cold_replay() {
                     message_class: Default::default(),
                 }),
                 parent: valid_parent,
-                fold_semantics: AgentJournalFoldSemantics::Legacy,
+                fold_semantics: AgentJournalFoldSemantics::CommitOrder,
                 recorded_at: UnixMicros::new(step + 100),
             };
             match invalid_class {
@@ -503,11 +503,23 @@ fn persisted_event_source_wire_shapes_round_trip() {
     }
 }
 
-/// Historical CBOR records without the private marker decode as Legacy.
+/// Commit-order journals retain the historical `legacy` discriminator and
+/// missing-marker default so old records preserve their placement behavior.
 #[test]
-fn persisted_agent_event_missing_fold_semantics_defaults_to_legacy() {
+fn persisted_agent_event_commit_order_preserves_legacy_spelling_and_missing_default() {
+    assert_eq!(
+        serde_json::to_value(AgentJournalFoldSemantics::CommitOrder)
+            .expect("serialize commit-order semantics"),
+        serde_json::json!("legacy")
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentJournalFoldSemantics>(serde_json::json!("legacy"))
+            .expect("deserialize historical spelling"),
+        AgentJournalFoldSemantics::CommitOrder
+    );
+
     let agent_id = agent_id();
-    let record = PersistedAgentEvent {
+    let mut record = PersistedAgentEvent {
         observation_id: tau_proto::ObservationId::from_bytes([7; 16]),
         seq: PersistedAgentEventSeq::new(0),
         source: None,
@@ -516,9 +528,26 @@ fn persisted_agent_event_missing_fold_semantics_defaults_to_legacy() {
             head: AgentHead::Root,
         }),
         parent: AgentEventParent::InheritHead,
-        fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        fold_semantics: AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::new(1),
     };
+
+    let mut omitted = Vec::new();
+    ciborium::into_writer(&record, &mut omitted).expect("encode commit-order record");
+    let ciborium::Value::Map(fields) =
+        ciborium::from_reader::<ciborium::Value, _>(omitted.as_slice())
+            .expect("decode commit-order record shape")
+    else {
+        panic!("commit-order record must encode as map");
+    };
+    assert!(
+        fields
+            .iter()
+            .all(|(key, _)| key != &ciborium::Value::Text("fold_semantics".to_owned())),
+        "default commit-order records must omit the private marker"
+    );
+
+    record.fold_semantics = AgentJournalFoldSemantics::InferenceDeferredInputV1;
     let mut encoded = Vec::new();
     ciborium::into_writer(&record, &mut encoded).expect("encode record");
     let mut value =
@@ -531,7 +560,10 @@ fn persisted_agent_event_missing_fold_semantics_defaults_to_legacy() {
     ciborium::into_writer(&value, &mut encoded).expect("encode historical shape");
     let decoded = ciborium::from_reader::<PersistedAgentEvent, _>(encoded.as_slice())
         .expect("decode historical record");
-    assert_eq!(decoded.fold_semantics, AgentJournalFoldSemantics::Legacy);
+    assert_eq!(
+        decoded.fold_semantics,
+        AgentJournalFoldSemantics::CommitOrder
+    );
 }
 
 /// Applies one contiguous durable record through the sole canonical fold path.
@@ -548,7 +580,7 @@ fn apply_persisted_test_record(
             source: None,
             event,
             parent,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::default(),
         })
         .expect("test record is contiguous and valid");
@@ -569,7 +601,7 @@ fn apply_timed_persisted_test_record(
             source: None,
             event,
             parent,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(seq.get().saturating_add(1)),
         })
         .expect("timed test record is contiguous and valid");
@@ -1202,7 +1234,7 @@ fn compaction_chain_view_is_live_cold_and_restart_equivalent() {
             source: None,
             event,
             parent: AgentEventParent::InheritHead,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: UnixMicros::new(recorded_at),
         };
         tree.apply_persisted_record(&record)
@@ -1410,7 +1442,7 @@ fn compaction_chain_view_tracks_correlated_provider_response_cut() {
             source: None,
             event,
             parent: AgentEventParent::InheritHead,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: UnixMicros::new(recorded_at),
         };
         tree.apply_persisted_record(&record)
@@ -1678,7 +1710,7 @@ fn randomized_live_and_cold_ancestry_matches_allocating_reference_at_every_head(
                 message_class: Default::default(),
             }),
             parent,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: UnixMicros::new(step),
         };
         let validated = live
@@ -2663,7 +2695,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
             checkpoint.agent_prompt_id.clone(),
             InferenceDispatchFold {
                 head_move_generation: HeadMoveGeneration::default(),
-                fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+                fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
                 checkpoint: checkpoint.clone(),
                 finished: true,
                 recovery_disposition:
@@ -2868,7 +2900,7 @@ fn compaction_start_uses_explicit_parent_with_divergent_write_cursor() {
             source: None,
             event,
             parent: AgentEventParent::Under(parent),
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::default(),
         };
         tree.apply_persisted_record(&record).expect("control");
@@ -2888,7 +2920,7 @@ fn compaction_start_uses_explicit_parent_with_divergent_write_cursor() {
                 message_class: Default::default(),
             }),
             parent: AgentEventParent::Root,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::default(),
         };
         tree.apply_persisted_record(&record).expect("branch");
@@ -2965,7 +2997,7 @@ fn compaction_start_uses_explicit_parent_with_divergent_write_cursor() {
         source: None,
         event: Event::AgentStandaloneCompactionStarted(start.clone()),
         parent: AgentEventParent::Under(a),
-        fold_semantics: AgentJournalFoldSemantics::Legacy,
+        fold_semantics: AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::default(),
     };
     tree.apply_persisted_record(&record)
@@ -3229,7 +3261,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             source: None,
             event,
             parent: AgentEventParent::InheritHead,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::default(),
         }
     }
@@ -3395,7 +3427,7 @@ fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
         source: None,
         event,
         parent: AgentEventParent::InheritHead,
-        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::default(),
     };
     let user = |text: &str| {
@@ -3603,7 +3635,7 @@ fn randomized_branched_rolling_provider_windows_match_reference_live_and_cold() 
             source: None,
             event,
             parent,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: UnixMicros::new(seq.get()),
         };
         let node = tree
@@ -4022,7 +4054,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
         source: None,
         event,
         parent: AgentEventParent::InheritHead,
-        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::default(),
     };
     let user = |text: &str, inference_activation| {
@@ -4215,7 +4247,7 @@ fn no_resume_compaction_success_allows_later_independent_start() {
         source: None,
         event,
         parent: AgentEventParent::InheritHead,
-        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::default(),
     };
     let mut tree = AgentTree::from_events(agent_id(), &[]);
@@ -5038,7 +5070,7 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
             0,
             AgentEventParent::Root,
             initial,
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         record(
             1,
@@ -5050,25 +5082,25 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
             2,
             AgentEventParent::Under(NodeId::new(0)),
             input,
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         record(
             3,
             AgentEventParent::Under(NodeId::new(0)),
             second_input,
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         record(
             4,
             AgentEventParent::InheritHead,
             raw_input,
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         record(
             5,
             AgentEventParent::Under(NodeId::new(0)),
             Event::ProviderResponseFinished(response),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
     ];
     let mut live = AgentTree::from_events(agent_id.clone(), &[]);
@@ -5159,17 +5191,17 @@ fn deferred_background_preview_provenance_matches_live_and_cold_replay() {
         responses_raw_json: None,
     })];
     let records = vec![
-        record(0, initial, AgentJournalFoldSemantics::Legacy),
+        record(0, initial, AgentJournalFoldSemantics::CommitOrder),
         record(
             1,
             checkpoint,
             AgentJournalFoldSemantics::InferenceDeferredInputV1,
         ),
-        record(2, preview, AgentJournalFoldSemantics::Legacy),
+        record(2, preview, AgentJournalFoldSemantics::CommitOrder),
         record(
             3,
             Event::ProviderResponseFinished(response),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
     ];
 
@@ -5222,7 +5254,7 @@ fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
                 message_class: Default::default(),
             }),
             parent: AgentEventParent::Root,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(0),
         },
         PersistedAgentEvent {
@@ -5235,7 +5267,7 @@ fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
                 vec![call_id.clone()],
             )),
             parent: AgentEventParent::Under(NodeId::new(0)),
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         },
         PersistedAgentEvent {
@@ -5254,7 +5286,7 @@ fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
                 ctx_id: None,
             }),
             parent: AgentEventParent::Under(NodeId::new(1)),
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(2),
         },
         PersistedAgentEvent {
@@ -5273,7 +5305,7 @@ fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
                 originator: PromptOriginator::User,
             }),
             parent: AgentEventParent::Under(NodeId::new(1)),
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(3),
         },
     ];
@@ -5339,7 +5371,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                 inference_activation: false,
                 message_class: Default::default(),
             }),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         );
         if reactive_recovery {
             let prefix_call = ToolCallId::from("call-v1-reactive-prefix");
@@ -5351,7 +5383,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                     "ap-v1-reactive-prefix",
                     vec![prefix_call.clone()],
                 )),
-                AgentJournalFoldSemantics::Legacy,
+                AgentJournalFoldSemantics::CommitOrder,
             );
             append(
                 &mut tree,
@@ -5367,7 +5399,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                     display: None,
                     originator: PromptOriginator::User,
                 }),
-                AgentJournalFoldSemantics::Legacy,
+                AgentJournalFoldSemantics::CommitOrder,
             );
         }
         let owner_through = tree.head().expect("owner through");
@@ -5395,7 +5427,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                 inference_activation: true,
                 message_class: Default::default(),
             }),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         );
         let call_id = ToolCallId::from("call-v1-compact");
         let response = if reactive_recovery {
@@ -5425,7 +5457,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
             &mut tree,
             AgentEventParent::Under(owner_through),
             Event::ProviderResponseFinished(response),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         );
         if with_tool {
             append(
@@ -5442,7 +5474,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                     display: None,
                     originator: PromptOriginator::User,
                 }),
-                AgentJournalFoldSemantics::Legacy,
+                AgentJournalFoldSemantics::CommitOrder,
             );
         }
         let suffix_end = AgentHead::Node(tree.head().expect("Q suffix head"));
@@ -5471,7 +5503,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
             &mut tree,
             AgentEventParent::InheritHead,
             Event::AgentStandaloneCompactionStarted(started.clone()),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         );
         append(
             &mut tree,
@@ -5495,7 +5527,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                     responses_raw_json: None,
                 })],
             }),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         );
 
         let replay =
@@ -5871,12 +5903,13 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
     }
 }
 
-/// Mixed journals preserve Legacy allocation and old explicit NodeId targets
-/// while later V1 records use response-before-input placement.
+/// Mixed journals preserve commit-order allocation and old explicit NodeId
+/// targets while later V1 records use response-before-input placement.
 #[test]
-fn mixed_legacy_v1_replay_preserves_old_node_targets() {
+fn mixed_commit_order_v1_replay_preserves_old_node_targets() {
     let agent_id = agent_id();
-    let legacy_prompt = tau_proto::AgentPromptId::parse("ap-legacy").expect("prompt id");
+    let commit_order_prompt =
+        tau_proto::AgentPromptId::parse("ap-commit-order").expect("prompt id");
     let v1_prompt = tau_proto::AgentPromptId::parse("ap-v1-mixed").expect("prompt id");
     let record = |seq, parent, event, fold_semantics| PersistedAgentEvent {
         observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
@@ -5912,13 +5945,13 @@ fn mixed_legacy_v1_replay_preserves_old_node_targets() {
         record(
             1,
             AgentEventParent::Under(NodeId::new(0)),
-            checkpoint(legacy_prompt.clone(), AgentHead::Node(NodeId::new(0))),
+            checkpoint(commit_order_prompt.clone(), AgentHead::Node(NodeId::new(0))),
             Default::default(),
         ),
         record(
             2,
             AgentEventParent::Under(NodeId::new(0)),
-            input("legacy Q"),
+            input("commit-order Q"),
             Default::default(),
         ),
         record(
@@ -5926,7 +5959,7 @@ fn mixed_legacy_v1_replay_preserves_old_node_targets() {
             AgentEventParent::Under(NodeId::new(1)),
             Event::ProviderResponseFinished(tool_calling_response(
                 &agent_id,
-                legacy_prompt.as_str(),
+                commit_order_prompt.as_str(),
                 Vec::new(),
             )),
             Default::default(),
@@ -5965,11 +5998,13 @@ fn mixed_legacy_v1_replay_preserves_old_node_targets() {
     ];
     let tree = AgentTree::try_from_events(agent_id, &records).expect("mixed replay");
     assert!(matches!(
-        tree.node(NodeId::new(1)).expect("legacy input").entry,
+        tree.node(NodeId::new(1)).expect("commit-order input").entry,
         AgentEntry::UserInput { .. }
     ));
     assert!(matches!(
-        tree.node(NodeId::new(2)).expect("legacy response").entry,
+        tree.node(NodeId::new(2))
+            .expect("commit-order response")
+            .entry,
         AgentEntry::AssistantResponse { .. }
     ));
     assert!(matches!(
@@ -6104,7 +6139,7 @@ fn background_terminal_cause_restore_requires_exact_call_and_terminal() {
         source: None,
         event,
         parent: AgentEventParent::InheritHead,
-        fold_semantics: AgentJournalFoldSemantics::Legacy,
+        fold_semantics: AgentJournalFoldSemantics::CommitOrder,
         recorded_at: tau_proto::UnixMicros::new(seq),
     };
     let base = vec![
@@ -6753,7 +6788,7 @@ fn prompt_started_requires_unique_matching_owner() {
             ))),
             event: Event::AgentPromptStarted(started.clone()),
             parent: AgentEventParent::InheritHead,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         })
         .expect_err("compact facts must be harness-authored");
@@ -7223,25 +7258,25 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
             1,
             AgentEventParent::Root,
             Event::AgentOuterTurnStarted(turn),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         output_length_record(
             2,
             AgentEventParent::Root,
             Event::AgentPromptStarted(source_started),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         output_length_record(
             3,
             AgentEventParent::Root,
             Event::ProviderResponseFinished(response),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         output_length_record(
             4,
             AgentEventParent::Under(NodeId::new(0)),
             Event::AgentPromptSteered(steer),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         output_length_record(
             5,
@@ -7253,13 +7288,13 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
             6,
             AgentEventParent::Under(NodeId::new(1)),
             Event::AgentPromptStarted(successor_started),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
         output_length_record(
             7,
             AgentEventParent::Under(NodeId::new(1)),
             Event::ProviderResponseFinished(terminal),
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         ),
     ];
     OutputLengthRecoveryFixture {
@@ -7641,7 +7676,7 @@ fn output_length_recovery_rejects_unmarked_and_side_owned_sources() {
     let mut legacy_source = fixture.through(OutputLengthFixturePhase::Plan).to_vec();
     fixture
         .source_dispatch_in(&mut legacy_source)
-        .fold_semantics = AgentJournalFoldSemantics::Legacy;
+        .fold_semantics = AgentJournalFoldSemantics::CommitOrder;
     assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &legacy_source).is_err());
 
     let mut side_started = fixture.through(OutputLengthFixturePhase::Plan).to_vec();
@@ -7718,7 +7753,7 @@ fn output_length_recovery_rejects_mismatched_and_duplicate_facts() {
         4,
         AgentEventParent::Root,
         Event::ProviderResponseFinished(fixture.source_response()),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &duplicate_plan).is_err());
 
@@ -7739,7 +7774,7 @@ fn output_length_recovery_rejects_mismatched_and_duplicate_facts() {
         8,
         AgentEventParent::Under(fixture.terminal_node()),
         Event::AgentOuterTurnFinished(finish.clone()),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     let finished_tree = AgentTree::try_from_events(fixture.agent_id().clone(), &finished)
         .expect("matching finish closes repair");
@@ -7748,7 +7783,7 @@ fn output_length_recovery_rejects_mismatched_and_duplicate_facts() {
         9,
         AgentEventParent::Under(fixture.terminal_node()),
         Event::AgentOuterTurnFinished(finish),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &finished).is_err());
 }
@@ -7868,7 +7903,7 @@ fn output_length_recovery_selects_later_unresolved_plan() {
             outer_turn_id: owner_continuation.outer_turn_id.clone(),
             disposition: tau_proto::AgentOuterTurnDisposition::Settled,
         }),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     let later_source_prompt_id =
         tau_proto::AgentPromptId::parse("ap-later-source").expect("later source prompt id");
@@ -7904,7 +7939,7 @@ fn output_length_recovery_selects_later_unresolved_plan() {
                     .expect("activation id"),
             },
         }),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     records.push(output_length_record(
         11,
@@ -7920,7 +7955,7 @@ fn output_length_recovery_selects_later_unresolved_plan() {
             originator: PromptOriginator::User,
             ctx_id: None,
         }),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     let mut later_response = fixture.source_response();
     later_response.agent_prompt_id = later_source_prompt_id;
@@ -7935,7 +7970,7 @@ fn output_length_recovery_selects_later_unresolved_plan() {
         12,
         AgentEventParent::Under(fixture.terminal_node()),
         Event::ProviderResponseFinished(later_response),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     let plan_cut = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
         .expect("completed history and later plan cut");
@@ -7952,7 +7987,7 @@ fn output_length_recovery_selects_later_unresolved_plan() {
         13,
         AgentEventParent::Under(later_plan_node),
         Event::AgentPromptSteered(output_length_steer(fixture.agent_id().clone())),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     let steer_cut = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
         .expect("completed history and later steer cut");
@@ -7983,7 +8018,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
             inference_activation: false,
             message_class: Default::default(),
         }),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     let mut tree =
         AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("off-lineage cut");
@@ -8006,7 +8041,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
         records.len() as u64,
         steer_parent,
         steer,
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     tree =
         AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("cold steer cut");
@@ -8098,7 +8133,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
         records.len() as u64,
         terminal_parent,
         terminal,
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     tree = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
         .expect("cold terminal cut");
@@ -8126,7 +8161,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
         records.len() as u64,
         finish_parent,
         finish,
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     tree =
         AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("cold finish cut");
@@ -8151,7 +8186,7 @@ fn output_length_post_start_branch_move_has_no_synthetic_repair() {
             inference_activation: false,
             message_class: Default::default(),
         }),
-        AgentJournalFoldSemantics::Legacy,
+        AgentJournalFoldSemantics::CommitOrder,
     ));
     let tree = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
         .expect("post-start sibling");
@@ -8272,7 +8307,7 @@ fn persisted_full_prompt_record_is_explicitly_unsupported() {
             source: None,
             event: Event::AgentPromptCreated(prompt),
             parent: AgentEventParent::InheritHead,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::new(1),
         })
         .expect_err("cold fold must reject old full prompt records");

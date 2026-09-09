@@ -21,7 +21,7 @@ fn managed_charge_projection(event_count: usize) -> ManagedAgentProjection {
                 message_class: Default::default(),
             }),
             parent: AgentEventParent::InheritHead,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at: UnixMicros::new(index as u64),
         })
         .collect();
@@ -440,7 +440,7 @@ fn oversized_agent_append_is_atomic() {
                 source: None,
                 event: display_name_event(&agent_id, "retry"),
                 parent: AgentEventParent::InheritHead,
-                fold_semantics: AgentJournalFoldSemantics::Legacy,
+                fold_semantics: AgentJournalFoldSemantics::CommitOrder,
                 recorded_at: UnixMicros::new(43),
             },
         ]
@@ -721,7 +721,7 @@ fn strict_replay_rejects_framed_record_with_malformed_watch_work_status() {
             message: String::new(),
         }),
         parent: AgentEventParent::InheritHead,
-        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: UnixMicros::new(42),
     };
     let mut malformed = serde_json::to_value(valid).expect("serialize record value");

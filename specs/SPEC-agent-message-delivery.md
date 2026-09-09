@@ -76,9 +76,9 @@ Sender projections created by a successful message tool therefore remain on the
 active branch after its compact acceptance result. That result includes the stable
 message ID and explicitly says that recipient response is not guaranteed.
 
-Only newly marked ordinary checkpoints use inference-owned placement. Legacy
-checkpoints preserve commit-order placement and node IDs. The private journal
-marker never enters provider or configured-extension DTOs.
+Only newly marked ordinary checkpoints use inference-owned placement.
+Commit-order checkpoints preserve commit-order placement and node IDs. The
+private journal marker never enters provider or configured-extension DTOs.
 
 ## Canonical provider rendering
 

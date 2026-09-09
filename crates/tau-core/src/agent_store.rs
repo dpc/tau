@@ -1475,7 +1475,7 @@ impl AgentStore {
             source,
             event: event.clone(),
             parent: AgentEventParent::InheritHead,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at,
         };
         self.ephemeral_events
@@ -1524,7 +1524,7 @@ impl AgentStore {
             source,
             event,
             parent: AgentEventParent::InheritHead,
-            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
             recorded_at,
         };
         let validated = projection

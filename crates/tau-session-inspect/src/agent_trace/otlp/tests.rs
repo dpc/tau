@@ -25,7 +25,7 @@ fn record(seq: u64, time: u64, event: Event) -> PersistedAgentEvent {
         source: None,
         event,
         parent: AgentEventParent::InheritHead,
-        fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+        fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
         recorded_at: UnixMicros::new(time),
     }
 }

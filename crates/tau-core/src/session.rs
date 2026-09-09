@@ -2628,7 +2628,7 @@ impl AgentTree {
             parent,
             event,
             self.next_event_seq,
-            AgentJournalFoldSemantics::Legacy,
+            AgentJournalFoldSemantics::CommitOrder,
         );
         self.advance_next_event_seq();
         node_id
@@ -2674,7 +2674,7 @@ impl AgentTree {
                 "agent accounting lifecycle facts must be harness-authored source-free records",
             ));
         }
-        if record.fold_semantics != AgentJournalFoldSemantics::Legacy
+        if record.fold_semantics != AgentJournalFoldSemantics::CommitOrder
             && !matches!(record.event, Event::AgentInferenceDispatchStarted(_))
         {
             return Err(AgentEventValidationError::new(
@@ -6939,14 +6939,20 @@ impl PersistedEventSource {
 /// Private agent-journal transcript-fold semantics.
 ///
 /// This discriminator never crosses the harness-extension protocol. Missing
-/// fields decode as [`Self::Legacy`] so historical node allocation remains
-/// byte-for-byte positional.
+/// fields decode as [`Self::CommitOrder`]. Both missing fields and the
+/// persisted `legacy` spelling select the current commit-order behavior, so
+/// historical node allocation remains byte-for-byte positional.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentJournalFoldSemantics {
-    /// Preserve historical commit-order placement.
+    /// Place this occurrence in durable commit order.
+    ///
+    /// This is the current behavior for every event except marked ordinary
+    /// inference checkpoints. Keep the historical serialized spelling so
+    /// existing journals and absent discriminators retain this behavior.
     #[default]
-    Legacy,
+    #[serde(rename = "legacy")]
+    CommitOrder,
     /// Let one marked ordinary inference own later same-branch input placement.
     InferenceDeferredInputV1,
 }
@@ -6957,7 +6963,7 @@ impl AgentJournalFoldSemantics {
         if Self::marked_checkpoint(event).is_some() {
             Self::InferenceDeferredInputV1
         } else {
-            Self::Legacy
+            Self::CommitOrder
         }
     }
 
@@ -6975,7 +6981,7 @@ impl AgentJournalFoldSemantics {
 
     /// Validate that this marker is legal for the event it decorates.
     fn validates(self, event: &Event) -> bool {
-        self == Self::Legacy || Self::marked_checkpoint(event).is_some()
+        self == Self::CommitOrder || Self::marked_checkpoint(event).is_some()
     }
 }
 
@@ -7007,7 +7013,10 @@ pub struct PersistedAgentEvent {
     /// tree.
     pub parent: AgentEventParent,
     /// Private projection semantics selected for this journal occurrence.
-    #[serde(default, skip_serializing_if = "AgentJournalFoldSemantics::is_legacy")]
+    #[serde(
+        default,
+        skip_serializing_if = "AgentJournalFoldSemantics::is_commit_order"
+    )]
     pub fold_semantics: AgentJournalFoldSemantics,
     /// Wall-clock micros since UNIX epoch when the event was
     /// appended, matching the value carried by the harness event delivery and
@@ -7029,10 +7038,10 @@ pub(crate) struct PrevalidatedPersistedRecord<'tree, 'record> {
 }
 
 impl AgentJournalFoldSemantics {
-    /// Return whether this record uses historical placement.
+    /// Return whether this record uses commit-order placement.
     #[must_use]
-    pub const fn is_legacy(&self) -> bool {
-        matches!(self, Self::Legacy)
+    pub const fn is_commit_order(&self) -> bool {
+        matches!(self, Self::CommitOrder)
     }
 }
 

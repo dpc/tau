@@ -1016,7 +1016,7 @@ fn agent_checkpoint_rejects_creationless_identity() {
                 source: None,
                 event: agent_prompt("agent-1", "orphan"),
                 parent: AgentEventParent::InheritHead,
-                fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+                fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
                 recorded_at: tau_proto::UnixMicros::now(),
             }],
         ),
@@ -1173,7 +1173,7 @@ fn agent_checkpoint_matching_creation_rebuilds_as_journal_backed() {
                 ephemeral: false,
             }),
             parent: AgentEventParent::InheritHead,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
@@ -1693,7 +1693,7 @@ fn agent_store_rejects_duplicate_background_completion_on_replay() {
                 source: None,
                 event,
                 parent: AgentEventParent::InheritHead,
-                fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+                fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
                 recorded_at: tau_proto::UnixMicros::now(),
             },
         );
@@ -1743,7 +1743,7 @@ fn agent_store_replays_background_completion_for_explicit_parent_branch() {
                 source: None,
                 event,
                 parent,
-                fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+                fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
                 recorded_at: tau_proto::UnixMicros::now(),
             },
         );
@@ -1815,7 +1815,7 @@ fn agent_store_rejects_non_sequential_persisted_sequence_on_load() {
             source: None,
             event: agent_prompt("agent-1", "hello"),
             parent: AgentEventParent::InheritHead,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
@@ -1854,7 +1854,7 @@ fn agent_store_validates_persisted_parent_references_on_load() {
             source: None,
             event: agent_prompt("agent-1", "hello"),
             parent: AgentEventParent::Under(NodeId::new(99)),
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
@@ -2159,7 +2159,7 @@ fn agent_store_replay_rejects_noncanonical_raw_message_parent() {
             source: None,
             event: delivered_message_fact("agent-1", "m1"),
             parent: AgentEventParent::Under(NodeId::new(99)),
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
@@ -2866,7 +2866,7 @@ fn agent_store_rejects_invalid_agent_directory_names_on_open() {
             source: None,
             event: agent_prompt("agent-1", "hello"),
             parent: AgentEventParent::InheritHead,
-            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );

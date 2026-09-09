@@ -1607,7 +1607,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
                 "bad owner",
             )),
             parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
@@ -1907,7 +1907,7 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                         ctx_id: None,
                     }),
                     parent: tau_core::AgentEventParent::InheritHead,
-                    fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+                    fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
                     recorded_at: tau_proto::UnixMicros::now(),
                 },
             );
