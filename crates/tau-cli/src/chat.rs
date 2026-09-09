@@ -11,6 +11,8 @@ use crate::{list_agents as path_crate_list_agents, theme as path_crate_theme};
 #[cfg(test)]
 mod agent_picker_tests;
 pub(crate) mod cold_attach_stager;
+#[cfg(test)]
+mod configuration_tests;
 mod delivery_memory;
 #[cfg(test)]
 mod event_message_tests;
@@ -1414,10 +1416,7 @@ fn run_chat_session(
     // keybindings or unreadable colors and no clue why. Refuse to
     // start the TUI instead.
     let dirs = path_tau_config_settings::TauDirs::default();
-    let settings = tau_config::settings::load_cli_settings_in(&dirs)
-        .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
-    let theme = crate::theme::select_theme(&dirs, settings.theme.clone())
-        .map_err(|error| CliError::Participant(format!("cli theme failed to load:\n{error}")))?;
+    let (settings, theme) = load_terminal_configuration(&dirs)?;
     let prompt = crate::theme::active_prompt_marker(&theme, &settings.prompt_symbol, None);
     let cwd = std::env::current_dir()?;
     let home_dir = dirs::home_dir();
@@ -1916,6 +1915,18 @@ pub(crate) fn load_initial_prompt_history(store: &PromptHistoryStore) -> Vec<Str
             Vec::new()
         }
     }
+}
+
+/// Loads terminal settings and their selected theme, retaining distinct startup
+/// errors.
+fn load_terminal_configuration(
+    dirs: &path_tau_config_settings::TauDirs,
+) -> Result<(path_tau_config_settings::CliSettings, tau_themes::Theme), CliError> {
+    let settings = tau_config::settings::load_cli_settings_in(dirs)
+        .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
+    let theme = crate::theme::select_theme(dirs, settings.theme.clone())
+        .map_err(|error| CliError::Participant(format!("cli theme failed to load:\n{error}")))?;
+    Ok((settings, theme))
 }
 
 /// Translates static CLI settings into the immutable raw-terminal policy.

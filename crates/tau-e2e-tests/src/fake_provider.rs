@@ -1821,21 +1821,8 @@ impl FakeState {
                 }
                 handle.emit_transient(Event::ProviderResponseFinishedReported(finished))
             }
-            ScenarioActionV2::TextWithUsage { response, .. } => {
-                let mut finished = finished(
-                    prompt,
-                    vec![assistant_message(response)],
-                    ProviderStopReason::EndTurn,
-                );
-                finished.usage = Some(tau_proto::ProviderTokenUsage {
-                    prompt_sent_tokens: 2_000,
-                    prompt_cached_tokens: 0,
-                    response_received_tokens: 1,
-                    ..Default::default()
-                });
-                handle.emit_transient(Event::ProviderResponseFinishedReported(finished))
-            }
-            ScenarioActionV2::DummyToolResultWithUsage { response, .. } => {
+            ScenarioActionV2::TextWithUsage { response, .. }
+            | ScenarioActionV2::DummyToolResultWithUsage { response, .. } => {
                 let mut finished = finished(
                     prompt,
                     vec![assistant_message(response)],
@@ -1880,10 +1867,8 @@ impl FakeState {
             ScenarioActionV2::StandaloneCompaction { narrative } => {
                 emit_local_compaction_narrative(prompt, handle, narrative)
             }
-            ScenarioActionV2::StandaloneOpaqueCompaction => {
-                emit_opaque_compaction_response(prompt, handle)
-            }
-            ScenarioActionV2::ReactiveOpaqueCompaction {
+            ScenarioActionV2::StandaloneOpaqueCompaction
+            | ScenarioActionV2::ReactiveOpaqueCompaction {
                 removed_user_text: _,
                 removed_assistant_text: _,
                 overflow_user_text: _,
@@ -1907,7 +1892,8 @@ impl FakeState {
                 failure_kind,
                 "synthetic canonical context-window rejection".to_owned(),
             ),
-            ScenarioActionV2::StandaloneCompactionHold { timeout_ms } => {
+            ScenarioActionV2::StandaloneCompactionHold { timeout_ms }
+            | ScenarioActionV2::HoldUntilCancel { timeout_ms, .. } => {
                 self.emit_hold_until_cancel(prompt, handle, timeout_ms)
             }
             ScenarioActionV2::DummyToolCall { call_id, .. } => emit_dummy_tool_call(
@@ -2012,9 +1998,6 @@ impl FakeState {
                 Err(ClientError::handler(format!(
                     "deliberate scenario disconnect: {reason}"
                 )))
-            }
-            ScenarioActionV2::HoldUntilCancel { timeout_ms, .. } => {
-                self.emit_hold_until_cancel(prompt, handle, timeout_ms)
             }
             ScenarioActionV2::BarrierText {
                 barrier,
@@ -3340,24 +3323,7 @@ impl FakeState {
                     ));
                 }
                 if let ScenarioActionV2::CoreShellResumeEditCall { nonce, .. } = action {
-                    let context = serde_json::to_string(&prompt.context)
-                        .map_err(|error| ClientError::handler(error.to_string()))?;
-                    if !context.contains(&format!("before:{nonce}")) {
-                        return Err(
-                            self.mismatch(cursor, "resumed provider context lacks old sentinel")
-                        );
-                    }
-                    let workdirs = prompt
-                        .system_prompt
-                        .lines()
-                        .filter(|line| line.starts_with("- default shell tools (`workdir`):"))
-                        .collect::<Vec<_>>();
-                    if workdirs.len() != 1 || !workdirs[0].contains("/shell-base/project") {
-                        return Err(self.mismatch(
-                            cursor,
-                            "resumed provider context lacks restored core-shell workdir",
-                        ));
-                    }
+                    self.validate_core_shell_resume_context(cursor, prompt, nonce)?;
                 }
             }
             ScenarioActionV2::CoreShellParallelCalls {
@@ -3408,15 +3374,12 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "core-shell result continuity mismatch"));
                 }
             }
-            ScenarioActionV2::CoreShellParallelResult { call_ids, .. } => {
-                let ScenarioActionV2::CoreShellParallelResult {
-                    wait_call_id,
-                    advertise_parallel,
-                    ..
-                } = action
-                else {
-                    unreachable!()
-                };
+            ScenarioActionV2::CoreShellParallelResult {
+                call_ids,
+                wait_call_id,
+                advertise_parallel,
+                ..
+            } => {
                 if let Err(detail) = validate_complete_parallel_wait_round(
                     prompt,
                     call_ids,
@@ -3432,6 +3395,33 @@ impl FakeState {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Requires both the old edit sentinel and the restored shell workdir after
+    /// resume.
+    fn validate_core_shell_resume_context(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        nonce: &str,
+    ) -> ClientResult<()> {
+        let context = serde_json::to_string(&prompt.context)
+            .map_err(|error| ClientError::handler(error.to_string()))?;
+        if !context.contains(&format!("before:{nonce}")) {
+            return Err(self.mismatch(cursor, "resumed provider context lacks old sentinel"));
+        }
+        let workdirs = prompt
+            .system_prompt
+            .lines()
+            .filter(|line| line.starts_with("- default shell tools (`workdir`):"))
+            .collect::<Vec<_>>();
+        if workdirs.len() != 1 || !workdirs[0].contains("/shell-base/project") {
+            return Err(self.mismatch(
+                cursor,
+                "resumed provider context lacks restored core-shell workdir",
+            ));
         }
         Ok(())
     }

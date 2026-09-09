@@ -8,4 +8,4 @@ default-excludes = ["benches/**", "examples/**", "tests/**"]
 epsilon = 0.01
 missing = "pessimistic"
 sort = "crap"
-threshold = 500
+threshold = 400

@@ -126,13 +126,7 @@ impl TestProtocolItem {
             HarnessOutputMessage::UiQuitDispositionChanged(message) => {
                 Self::Message(TestMessage::UiQuitDispositionChanged(message))
             }
-            HarnessOutputMessage::Deliver(delivery) => {
-                if !delivery.replay && delivery.recorded_at.is_some() {
-                    Self::Message(TestMessage::LiveDelivery(delivery))
-                } else {
-                    Self::Event(delivery.into_event())
-                }
-            }
+            HarnessOutputMessage::Deliver(delivery) => Self::from_delivery(delivery),
             HarnessOutputMessage::InterceptRequest(message) => {
                 Self::Message(TestMessage::InterceptRequest(message))
             }
@@ -172,6 +166,16 @@ impl TestProtocolItem {
             HarnessOutputMessage::UiQuitResult(disposition) => {
                 Self::Message(TestMessage::UiQuitResult(disposition))
             }
+        }
+    }
+
+    /// Keeps live recorded delivery metadata available to delivery-order
+    /// assertions.
+    fn from_delivery(delivery: EventDelivery) -> Self {
+        if !delivery.replay && delivery.recorded_at.is_some() {
+            Self::Message(TestMessage::LiveDelivery(delivery))
+        } else {
+            Self::Event(delivery.into_event())
         }
     }
 
@@ -2461,6 +2465,7 @@ mod interception;
 mod lifecycle;
 mod mode;
 mod model;
+mod protocol_items;
 mod provider_execution_reports;
 mod quota;
 mod replay;

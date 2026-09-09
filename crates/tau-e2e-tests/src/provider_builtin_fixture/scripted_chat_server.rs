@@ -1,6 +1,9 @@
 //! Bounded, joined loopback Chat Completions server for production
 //! provider-builtin acceptance.
 
+#[cfg(test)]
+mod tests;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsFd;
@@ -358,8 +361,16 @@ fn read_request(stream: &mut TcpStream) -> Result<CapturedChatRequest, String> {
 }
 
 /// Writes one bounded HTTP response from the selected fixed script.
-fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(), String> {
-    let (status, content_type, body, retry_after) = match step {
+/// Selects exact fixture response bytes independently of HTTP serialization.
+fn scripted_response_parts(
+    step: ScriptStep,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+) {
+    match step {
         ScriptStep::Throttle => (
             "429 Too Many Requests",
             "application/json",
@@ -480,7 +491,11 @@ fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(
              data: [DONE]\n\n",
             None,
         ),
-    };
+    }
+}
+
+fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(), String> {
+    let (status, content_type, body, retry_after) = scripted_response_parts(step);
     write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",

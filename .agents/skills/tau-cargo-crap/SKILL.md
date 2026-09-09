@@ -30,7 +30,8 @@ sed -n '1,120p' result-crap-report/cargo-crap.md
 - `.#ci.crapRegression` compares against `nix/cargo-crap-baseline.json` with `--fail-regression`.
 - `.#ci.crapAbsolute` fails current entries above the severe threshold with `--fail-above`.
 - `.#ci.crap` is the aggregate/selfci compatibility output that builds both gates.
-- The gates are intentionally focused on severe entries with `--threshold 1000 --min 1000`.
+- The absolute gate uses `.cargo-crap.toml`'s threshold of 400 with `--min 100`.
+- The regression gate remains focused on severe entries with `--threshold 1000 --min 1000`.
 - Do not “fix” failures by raising the threshold. Refactor/decompose flagged code or add meaningful coverage.
 
 ## Baseline regeneration
@@ -54,7 +55,7 @@ Generate the baseline through Nix. The LCOV paths in this setup are `/build/sour
 
 ## Refactoring flagged code
 
-For code fixes, preserve behavior first and split dispatch-heavy functions into named helpers with focused tests. A zero-coverage function needs roughly cyclomatic complexity `< 32` to get below a CRAP score of 1000, so extraction without tests may just move the hotspot. Prefer adding regression tests for behavior you touch.
+For code fixes, preserve behavior first and extract coherent semantic operations with focused tests, not arbitrary match fragments. A zero-coverage function needs cyclomatic complexity below 20 to stay under the absolute score of 400, so extraction without tests may just move the hotspot. Prefer adding regression tests for behavior you touch.
 
 ## Validation
 

@@ -1689,16 +1689,9 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
     let session_id = tau_proto::SessionId::parse(eager_session_id)
         .map_err(|error| HarnessError::Participant(error.to_string()))?;
-    let mut session_claim = notify_startup_error(
-        runtime_dir::claim_session(&project_root, &session_id),
-        &mut initial_client_error_stream,
-    )?;
-    session_claim.reclaim_stale_socket()?;
+    let (mut session_claim, listener) =
+        claim_session_listener(&project_root, &session_id, &mut initial_client_error_stream)?;
     let socket_path = session_claim.socket_path().to_path_buf();
-    let listener = notify_startup_error(
-        SocketListener::bind_fresh(&socket_path).map_err(HarnessError::from),
-        &mut initial_client_error_stream,
-    )?;
 
     let state_dir = tau_session_inspect::default_state_dir();
     let dirs = options.dirs.clone().unwrap_or_default();
@@ -2114,6 +2107,27 @@ fn run_component_with_internal_tools_and_initial_client(
         send_initial_client_startup_error(initial_client_error_output.take(), error.as_ref());
     }
     result
+}
+
+/// Claims and binds this session's endpoint before any durable harness startup.
+///
+/// The caller retains both resources through shutdown. Stale-socket reclamation
+/// preserves its original direct error path rather than notifying the client.
+fn claim_session_listener(
+    project_root: &Path,
+    session_id: &tau_proto::SessionId,
+    error_stream: &mut Option<InitialClientStartupErrorOutput>,
+) -> Result<(runtime_dir::SessionClaim, SocketListener), HarnessError> {
+    let session_claim = notify_startup_error(
+        runtime_dir::claim_session(project_root, session_id),
+        error_stream,
+    )?;
+    session_claim.reclaim_stale_socket()?;
+    let listener = notify_startup_error(
+        SocketListener::bind_fresh(session_claim.socket_path()).map_err(HarnessError::from),
+        error_stream,
+    )?;
+    Ok((session_claim, listener))
 }
 
 fn notify_startup_error<T, E>(

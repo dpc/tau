@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex, mpsc as std_mpsc};
 use std::{sync as path_std_sync, thread, time as path_std_time};
@@ -2582,100 +2583,122 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
         };
         match msg {
             Message::Text(text) => {
-                let parsed: serde_json::Value =
-                    serde_json::from_str(text.as_str()).unwrap_or(serde_json::Value::Null);
-                let (fault_now, response_gate, silent_response, scripted_error, scripted_events) = {
-                    let mut s = state.lock().expect("server state lock");
-                    assert!(s.requests.len() < 128, "fake Codex request bound");
-                    s.requests.push(parsed.clone());
-                    s.turns_per_connection[conn_idx] += 1;
-                    s.active_turns += 1;
-                    s.max_active_turns = s.max_active_turns.max(s.active_turns);
-                    let fault_now = s
-                        .fault
-                        .filter(|f| f.on_conn_index == conn_idx && turn_counter >= f.after_turn);
-                    (
-                        fault_now,
-                        s.response_gate.clone(),
-                        s.silent_response,
-                        s.scripted_error.clone(),
-                        s.scripted_events.clone(),
-                    )
-                };
-                turn_counter += 1;
-                if let Some(gate) = response_gate {
-                    gate.arrive_and_wait();
-                }
-                if fault_now.is_some() {
-                    // Mimic the live Codex 1011 WebSocket-control-ping timeout
-                    // drop: send a close frame and bail without
-                    // streaming the response body. Client side
-                    // sees `Message::Close` → `LlmError(0, "stream
-                    // error: ws closed mid-stream ...")`.
-                    let _ = ws.send(Message::Close(Some(tungstenite::protocol::CloseFrame {
-                        code: path_tungstenite_protocol_frame_coding::CloseCode::Error,
-                        reason: "keepalive ping timeout".into(),
-                    })));
-                    finish_server_turn(&state);
+                if respond_to_text_request(
+                    &mut ws,
+                    &state,
+                    conn_idx,
+                    &mut turn_counter,
+                    text.as_str(),
+                )
+                .is_break()
+                {
                     return;
                 }
-                if silent_response {
-                    while let Ok(message) = ws.read() {
-                        if matches!(message, Message::Close(_)) {
-                            break;
-                        }
-                    }
-                    finish_server_turn(&state);
-                    return;
-                }
-                if let Some(error) = scripted_error {
-                    ws.send(Message::Text(error.to_string().into()))
-                        .expect("write scripted provider error");
-                    finish_server_turn(&state);
-                    continue;
-                }
-                if let Some(events) = scripted_events {
-                    for event in events {
-                        if ws.send(Message::Text(event.to_string().into())).is_err() {
-                            finish_server_turn(&state);
-                            return;
-                        }
-                    }
-                    finish_server_turn(&state);
-                    continue;
-                }
-                // Stream a tiny canned event sequence: one
-                // visible-text delta, then completed.
-                let events = [
-                    serde_json::json!({
-                        "type": "response.output_text.delta",
-                        "delta": "hello",
-                    }),
-                    serde_json::json!({
-                        "type": "response.completed",
-                        "response": {
-                            "id": format!("resp_{conn_idx}_{turn_counter}"),
-                            "usage": {
-                                "input_tokens": 1,
-                                "output_tokens": 1,
-                                "input_tokens_details": { "cached_tokens": 0 },
-                            },
-                        },
-                    }),
-                ];
-                for ev in events {
-                    let txt = serde_json::to_string(&ev).expect("serialize");
-                    if ws.send(Message::Text(txt.into())).is_err() {
-                        finish_server_turn(&state);
-                        return;
-                    }
-                }
-                finish_server_turn(&state);
             }
             Message::Close(_) => return,
             _ => continue,
         }
     }
+}
+
+/// Handles one request with the original fault/gate ordering and balanced turn
+/// accounting.
+fn respond_to_text_request(
+    ws: &mut tungstenite::WebSocket<TcpStream>,
+    state: &Arc<Mutex<ServerState>>,
+    conn_idx: usize,
+    turn_counter: &mut usize,
+    text: &str,
+) -> ControlFlow<()> {
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+    let (fault_now, response_gate, silent_response, scripted_error, scripted_events) = {
+        let mut s = state.lock().expect("server state lock");
+        assert!(s.requests.len() < 128, "fake Codex request bound");
+        s.requests.push(parsed.clone());
+        s.turns_per_connection[conn_idx] += 1;
+        s.active_turns += 1;
+        s.max_active_turns = s.max_active_turns.max(s.active_turns);
+        let fault_now = s
+            .fault
+            .filter(|f| f.on_conn_index == conn_idx && *turn_counter >= f.after_turn);
+        (
+            fault_now,
+            s.response_gate.clone(),
+            s.silent_response,
+            s.scripted_error.clone(),
+            s.scripted_events.clone(),
+        )
+    };
+    *turn_counter += 1;
+    if let Some(gate) = response_gate {
+        gate.arrive_and_wait();
+    }
+    if fault_now.is_some() {
+        // Mimic the live Codex 1011 WebSocket-control-ping timeout
+        // drop: send a close frame and bail without
+        // streaming the response body. Client side
+        // sees `Message::Close` → `LlmError(0, "stream
+        // error: ws closed mid-stream ...")`.
+        let _ = ws.send(Message::Close(Some(tungstenite::protocol::CloseFrame {
+            code: path_tungstenite_protocol_frame_coding::CloseCode::Error,
+            reason: "keepalive ping timeout".into(),
+        })));
+        finish_server_turn(state);
+        return ControlFlow::Break(());
+    }
+    if silent_response {
+        while let Ok(message) = ws.read() {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+        finish_server_turn(state);
+        return ControlFlow::Break(());
+    }
+    if let Some(error) = scripted_error {
+        ws.send(Message::Text(error.to_string().into()))
+            .expect("write scripted provider error");
+        finish_server_turn(state);
+        return ControlFlow::Continue(());
+    }
+    if let Some(events) = scripted_events {
+        for event in events {
+            if ws.send(Message::Text(event.to_string().into())).is_err() {
+                finish_server_turn(state);
+                return ControlFlow::Break(());
+            }
+        }
+        finish_server_turn(state);
+        return ControlFlow::Continue(());
+    }
+    // Stream a tiny canned event sequence: one
+    // visible-text delta, then completed.
+    let events = [
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "delta": "hello",
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": format!("resp_{conn_idx}_{turn_counter}"),
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "input_tokens_details": { "cached_tokens": 0 },
+                },
+            },
+        }),
+    ];
+    for ev in events {
+        let txt = serde_json::to_string(&ev).expect("serialize");
+        if ws.send(Message::Text(txt.into())).is_err() {
+            finish_server_turn(state);
+            return ControlFlow::Break(());
+        }
+    }
+    finish_server_turn(state);
+    ControlFlow::Continue(())
 }
 
 fn finish_server_turn(state: &Arc<Mutex<ServerState>>) {

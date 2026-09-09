@@ -13,6 +13,66 @@ use tempfile::TempDir;
 use super::*;
 use crate::harness::Harness;
 
+/// Endpoint setup must return a still-held session claim, so listener lifetime
+/// never opens a window for a second daemon to acquire the same session.
+#[test]
+fn claimed_listener_retains_session_ownership_until_caller_releases_it() {
+    let root = tempfile::Builder::new()
+        .prefix("c")
+        .tempdir()
+        .expect("runtime root");
+    runtime_dir::with_runtime_dir(Some(root.path()), || {
+        let session_id = tau_proto::SessionId::parse("claimed-listener").expect("session id");
+        let (claim, listener) =
+            claim_session_listener(root.path(), &session_id, &mut None).expect("claim and bind");
+        assert!(claim.socket_path().exists());
+        assert!(runtime_dir::claim_session(root.path(), &session_id).is_err());
+        drop(listener);
+        assert!(runtime_dir::claim_session(root.path(), &session_id).is_err());
+        drop(claim);
+        let (claim, listener) =
+            claim_session_listener(root.path(), &session_id, &mut None).expect("claim again");
+        drop(listener);
+        drop(claim);
+    });
+}
+
+/// Stale non-socket refusal must preserve its direct I/O error and leave the
+/// startup-notification stream untouched, while releasing the failed claim.
+#[test]
+fn claimed_listener_preserves_reclamation_error_and_notification_ownership() {
+    let root = tempfile::Builder::new()
+        .prefix("c")
+        .tempdir()
+        .expect("runtime root");
+    runtime_dir::with_runtime_dir(Some(root.path()), || {
+        runtime_dir::prepare_harnesses_dir().expect("runtime directories");
+        let session_id = tau_proto::SessionId::parse("refused-listener").expect("session id");
+        let socket = runtime_dir::socket_path(&runtime_dir::harness_path_for_session(&session_id));
+        std::fs::write(&socket, b"not a socket").expect("non-socket obstruction");
+        let (harness_end, _ui_end) = UnixStream::pair().expect("stream pair");
+        let mut output = Some(InitialClientStartupErrorOutput::Stream(harness_end));
+        let result = claim_session_listener(root.path(), &session_id, &mut output);
+        assert!(matches!(result, Err(HarnessError::Io(error))
+        if error.kind() == std::io::ErrorKind::PermissionDenied
+            && error.to_string() == format!(
+                "refusing to replace non-owned socket path `{}`", socket.display()
+            )));
+        assert!(
+            output.is_some(),
+            "reclamation must not consume the error stream"
+        );
+        assert_eq!(
+            std::fs::read(&socket).expect("preserved obstruction"),
+            b"not a socket"
+        );
+        assert!(
+            runtime_dir::claim_session(root.path(), &session_id).is_ok(),
+            "the failed setup must release its claim",
+        );
+    });
+}
+
 /// Teardown must report the original bootstrap error and fail closed on a
 /// successful or missing result paired with a bootstrap-failure shutdown.
 #[test]

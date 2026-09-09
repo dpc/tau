@@ -2,6 +2,8 @@
 //! provider-builtin acceptance.
 
 mod scripted_chat_server;
+#[cfg(test)]
+mod tests;
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -205,11 +207,33 @@ impl ProviderBuiltinFixture {
         let profile_dir = config_dir.join("providers/provider-builtin");
         std::fs::create_dir_all(&profile_dir)?;
         let qwen = matches!(server_script, Script::Qwen);
-        let compaction = matches!(
-            server_script,
-            Script::Compaction | Script::CompactionContinuation
-        );
         write_fixture_profile(&profile_dir, &server.base_url(), server_script)?;
+        std::fs::write(
+            config_dir.join("harness.yaml"),
+            Self::render_harness_config(server_script, &provider_bin, dummy_bin.as_deref())?,
+        )?;
+        Ok(Self {
+            tempdir: Some(tempdir),
+            _runtime_tempdir: runtime_tempdir,
+            runtime_dir,
+            config_dir,
+            state_dir,
+            harness_state_dir,
+            server,
+            failed: Cell::new(false),
+            test_dummy: qwen,
+        })
+    }
+
+    /// Renders the closed role/model/tool and executable pairing for one
+    /// script.
+    fn render_harness_config(
+        script: Script,
+        provider_bin: &Path,
+        dummy_bin: Option<&Path>,
+    ) -> Result<String, serde_json::Error> {
+        let qwen = matches!(script, Script::Qwen);
+        let compaction = matches!(script, Script::Compaction | Script::CompactionContinuation);
         let (role, model) = if qwen {
             ("provider-builtin-qwen", "local/Qwen/Qwen3.8-27B")
         } else if compaction {
@@ -237,72 +261,58 @@ impl ProviderBuiltinFixture {
         } else {
             String::new()
         };
-        std::fs::write(
-            config_dir.join("harness.yaml"),
-            format!(
-                concat!(
-                    "agents:\n",
-                    "  default_role: {role}\n",
-                    "  idTemplate: main\n",
-                    "  role_groups:\n",
-                    "    e2e:\n",
-                    "      roles:\n",
-                    "        {role}:\n",
-                    "          model: {model}\n",
-                    "{effort}",
-                    "          tools: {tools}\n",
-                    "extensions:\n",
-                    "  provider-builtin:\n",
-                    "    command: [{}]\n",
-                    "    role: provider\n",
-                    "    require: true\n",
-                    "{dummy_extension}",
-                    "  core-shell:\n",
-                    "    enable: false\n",
-                    "  test-dummy:\n",
-                    "    enable: false\n",
-                    "  std-rhai:\n",
-                    "    enable: false\n",
-                    "  std-rostra:\n",
-                    "    enable: false\n",
-                    "  std-notifications:\n",
-                    "    enable: false\n",
-                    "  std-slack:\n",
-                    "    enable: false\n",
-                    "  std-telegram:\n",
-                    "    enable: false\n",
-                    "  std-zulip:\n",
-                    "    enable: false\n",
-                    "  std-xmpp:\n",
-                    "    enable: false\n",
-                    "  std-utils:\n",
-                    "    enable: false\n",
-                    "  std-websearch:\n",
-                    "    enable: false\n",
-                    "  std-pim:\n",
-                    "    enable: false\n",
-                    "  std-email:\n",
-                    "    enable: false\n",
-                ),
-                serde_json::to_string(&provider_bin.display().to_string())?,
-                role = role,
-                model = model,
-                tools = tools,
-                effort = effort,
-                dummy_extension = dummy_extension,
+        Ok(format!(
+            concat!(
+                "agents:\n",
+                "  default_role: {role}\n",
+                "  idTemplate: main\n",
+                "  role_groups:\n",
+                "    e2e:\n",
+                "      roles:\n",
+                "        {role}:\n",
+                "          model: {model}\n",
+                "{effort}",
+                "          tools: {tools}\n",
+                "extensions:\n",
+                "  provider-builtin:\n",
+                "    command: [{}]\n",
+                "    role: provider\n",
+                "    require: true\n",
+                "{dummy_extension}",
+                "  core-shell:\n",
+                "    enable: false\n",
+                "  test-dummy:\n",
+                "    enable: false\n",
+                "  std-rhai:\n",
+                "    enable: false\n",
+                "  std-rostra:\n",
+                "    enable: false\n",
+                "  std-notifications:\n",
+                "    enable: false\n",
+                "  std-slack:\n",
+                "    enable: false\n",
+                "  std-telegram:\n",
+                "    enable: false\n",
+                "  std-zulip:\n",
+                "    enable: false\n",
+                "  std-xmpp:\n",
+                "    enable: false\n",
+                "  std-utils:\n",
+                "    enable: false\n",
+                "  std-websearch:\n",
+                "    enable: false\n",
+                "  std-pim:\n",
+                "    enable: false\n",
+                "  std-email:\n",
+                "    enable: false\n",
             ),
-        )?;
-        Ok(Self {
-            tempdir: Some(tempdir),
-            _runtime_tempdir: runtime_tempdir,
-            runtime_dir,
-            config_dir,
-            state_dir,
-            harness_state_dir,
-            server,
-            failed: Cell::new(false),
-            test_dummy: qwen,
-        })
+            serde_json::to_string(&provider_bin.display().to_string())?,
+            role = role,
+            model = model,
+            tools = tools,
+            effort = effort,
+            dummy_extension = dummy_extension,
+        ))
     }
 
     /// Returns the private artifact root for failure diagnostics.

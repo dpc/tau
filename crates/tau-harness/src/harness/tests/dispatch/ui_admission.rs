@@ -1637,6 +1637,66 @@ fn ui_prompt_auto_resume_rejects_incomplete_runtime_state() {
     ]);
 }
 
+/// Establishes the source transport and authority for one negative admission
+/// case.
+fn connect_rejected_prompt_source(h: &mut Harness, case: RejectedAutoResumeCase) -> &'static str {
+    match case {
+        RejectedAutoResumeCase::ExternalPeer => {
+            connect_test_client_with_origin(
+                h,
+                "prompt-source",
+                tau_proto::ClientKind::External,
+                ConnectionOrigin::Socket,
+            );
+        }
+        RejectedAutoResumeCase::PromotedExternalPeer => {
+            connect_test_client_with_origin(
+                h,
+                "prompt-source",
+                tau_proto::ClientKind::Ui,
+                ConnectionOrigin::Socket,
+            );
+            h.peer_messaging
+                .external_message_peers
+                .insert(crate::test_connection_id("prompt-source"));
+        }
+        RejectedAutoResumeCase::InMemoryUi => {
+            connect_test_client_with_origin(
+                h,
+                "prompt-source",
+                tau_proto::ClientKind::Ui,
+                ConnectionOrigin::InMemory,
+            );
+        }
+        RejectedAutoResumeCase::SocketTool => {
+            connect_test_client_with_origin(
+                h,
+                "prompt-source",
+                tau_proto::ClientKind::Tool,
+                ConnectionOrigin::Socket,
+            );
+        }
+        RejectedAutoResumeCase::ConfiguredExtension => {
+            connect_ready_configured_extension(
+                h,
+                "prompt-source",
+                "prompt-extension",
+                tau_proto::ClientKind::Tool,
+            );
+        }
+        RejectedAutoResumeCase::MissingPeer => {}
+        _ => {
+            connect_test_client_with_origin(
+                h,
+                "prompt-source",
+                tau_proto::ClientKind::Ui,
+                ConnectionOrigin::Socket,
+            );
+        }
+    }
+    "prompt-source"
+}
+
 fn assert_ui_prompt_auto_resume_rejected_cases(cases: &[RejectedAutoResumeCase]) {
     for &case in cases {
         let case_name = case.name();
@@ -1667,66 +1727,7 @@ fn assert_ui_prompt_auto_resume_rejected_cases(cases: &[RejectedAutoResumeCase])
             )
             .expect("observer subscription");
         observer.lock().expect("observer frames").clear();
-        let source_id = match case {
-            RejectedAutoResumeCase::ExternalPeer => {
-                connect_test_client_with_origin(
-                    &mut h,
-                    "prompt-source",
-                    tau_proto::ClientKind::External,
-                    ConnectionOrigin::Socket,
-                );
-                "prompt-source"
-            }
-            RejectedAutoResumeCase::PromotedExternalPeer => {
-                connect_test_client_with_origin(
-                    &mut h,
-                    "prompt-source",
-                    tau_proto::ClientKind::Ui,
-                    ConnectionOrigin::Socket,
-                );
-                h.peer_messaging
-                    .external_message_peers
-                    .insert(crate::test_connection_id("prompt-source"));
-                "prompt-source"
-            }
-            RejectedAutoResumeCase::InMemoryUi => {
-                connect_test_client_with_origin(
-                    &mut h,
-                    "prompt-source",
-                    tau_proto::ClientKind::Ui,
-                    ConnectionOrigin::InMemory,
-                );
-                "prompt-source"
-            }
-            RejectedAutoResumeCase::SocketTool => {
-                connect_test_client_with_origin(
-                    &mut h,
-                    "prompt-source",
-                    tau_proto::ClientKind::Tool,
-                    ConnectionOrigin::Socket,
-                );
-                "prompt-source"
-            }
-            RejectedAutoResumeCase::ConfiguredExtension => {
-                connect_ready_configured_extension(
-                    &mut h,
-                    "prompt-source",
-                    "prompt-extension",
-                    tau_proto::ClientKind::Tool,
-                );
-                "prompt-source"
-            }
-            RejectedAutoResumeCase::MissingPeer => "prompt-source",
-            _ => {
-                connect_test_client_with_origin(
-                    &mut h,
-                    "prompt-source",
-                    tau_proto::ClientKind::Ui,
-                    ConnectionOrigin::Socket,
-                );
-                "prompt-source"
-            }
-        };
+        let source_id = connect_rejected_prompt_source(&mut h, case);
         if matches!(case, RejectedAutoResumeCase::TerminatingTarget) {
             h.agent_runtime
                 .agent_registry
