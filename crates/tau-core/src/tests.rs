@@ -758,8 +758,10 @@ fn agent_store_rejects_empty_display_name() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
+/// Durable summaries must reconstruct explicit human-interaction facts without
+/// relying on an independent metadata representation.
 #[test]
-fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
+fn agent_summary_initializes_and_explicitly_bumps_last_user_interaction() {
     // Accepted visible interactions must be durable content-free facts so the
     // checkpoint can reconstruct them after sidecar loss.
     let agents_dir = temp_dir("last-user-interaction");
@@ -781,12 +783,16 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
             }),
         )
         .expect("commit creation");
-    let meta = store
-        .agent_meta("agent-1")
-        .expect("read initial agent meta")
-        .expect("agent meta exists");
-    assert_ne!(meta.created_at, 0);
-    assert_eq!(meta.last_user_interaction_time, 0);
+    let fold_summary = |store: &AgentStore| {
+        let mut summary = crate::AgentSummary::default();
+        for record in store.agent_events("agent-1").expect("agent events") {
+            summary.apply(&record);
+        }
+        summary
+    };
+    let summary = fold_summary(&store);
+    assert!(summary.created_at_micros.is_some());
+    assert_eq!(summary.last_user_interaction_at_micros, None);
 
     store
         .append_agent_event(
@@ -798,20 +804,14 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
             }),
         )
         .expect("append display-name event");
-    let meta = store
-        .agent_meta("agent-1")
-        .expect("read meta after background event")
-        .expect("agent meta exists");
-    assert_eq!(meta.last_user_interaction_time, 0);
+    let summary = fold_summary(&store);
+    assert_eq!(summary.last_user_interaction_at_micros, None);
 
     store
         .record_agent_user_interaction("agent-1")
         .expect("record explicit user interaction");
-    let meta = store
-        .agent_meta("agent-1")
-        .expect("read meta after user interaction")
-        .expect("agent meta exists");
-    assert!(meta.last_user_interaction_time > 0);
+    let summary = fold_summary(&store);
+    assert!(summary.last_user_interaction_at_micros.is_some());
 
     let _ = std::fs::remove_dir_all(agents_dir);
 }
@@ -931,6 +931,30 @@ fn agent_checkpoint_repair_rejects_declared_frame_over_budget() {
     .expect("bounded list");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].status, crate::AgentListStatus::RepairFailed);
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Obsolete metadata without a journal must neither appear in discovery nor
+/// reserve its directory name as an agent identity.
+#[test]
+fn metadata_only_agent_is_not_listed_or_reserved() {
+    let agents_dir = temp_dir("metadata-only-agent");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let sidecar = br#"{"created_at":1,"last_touched":1,"last_user_interaction_time":1}"#;
+    std::fs::write(agent_dir.join("meta.json"), sidecar).expect("old metadata");
+
+    let store = AgentStore::open_lazy(&agents_dir).expect("open lazy store");
+    assert!(!store.agent_id_is_reserved("agent-1"));
+    assert!(
+        crate::list_agent_entries(&agents_dir)
+            .expect("list agents")
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read(agent_dir.join("meta.json")).expect("sidecar retained"),
+        sidecar
+    );
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1167,23 +1191,16 @@ fn agent_checkpoint_matching_creation_rebuilds_as_journal_backed() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
-/// A legacy sidecar retains its existing journal-backed deferred classification
-/// when the repair budget cannot scan its associated journal.
+/// An obsolete sidecar cannot supply a fallback summary when its associated
+/// journal exceeds the bounded foreground repair budget.
 #[test]
-fn agent_checkpoint_budget_deferred_legacy_summary_remains_journal_backed() {
+fn agent_checkpoint_budget_deferred_old_sidecar_has_no_summary() {
     let agents_dir = temp_dir("agent-checkpoint-legacy-budget-deferred-rebuild");
     let agent_dir = agents_dir.join("agent-1");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     std::fs::write(
         agent_dir.join("meta.json"),
-        serde_json::to_vec(&crate::AgentMeta {
-            created_at: 1,
-            last_touched: 1,
-            last_user_interaction_time: 0,
-            display_name: None,
-            latest_user_prompt_preview: None,
-        })
-        .expect("encode legacy summary"),
+        br#"{"created_at":1,"last_touched":1,"last_user_interaction_time":0}"#,
     )
     .expect("write legacy summary");
     std::fs::write(agent_dir.join("events.cbor"), vec![0_u8; 300 * 1024])
@@ -1197,7 +1214,8 @@ fn agent_checkpoint_budget_deferred_legacy_summary_remains_journal_backed() {
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].identity, crate::AgentListIdentity::JournalBacked);
-    assert_eq!(entries[0].status, crate::AgentListStatus::Legacy);
+    assert_eq!(entries[0].status, crate::AgentListStatus::CorruptSummary);
+    assert_eq!(entries[0].summary, None);
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1749,7 +1767,7 @@ fn agent_store_ephemeral_transcript_folds_and_replays_without_files() {
     store
         .mark_agent_ephemeral("agent-ephemeral")
         .expect("mark ephemeral");
-    assert!(store.agent_exists("agent-ephemeral"));
+    assert!(store.agent_id_is_reserved("agent-ephemeral"));
     let outcome = store
         .append_agent_event(
             "agent-ephemeral",
@@ -1772,19 +1790,9 @@ fn agent_store_ephemeral_transcript_folds_and_replays_without_files() {
         .agent_events("agent-ephemeral")
         .expect("ephemeral replay events");
     assert_eq!(events.len(), 1);
-    assert_eq!(
-        store
-            .agent_meta("agent-ephemeral")
-            .expect("read ephemeral meta")
-            .expect("ephemeral meta")
-            .latest_user_prompt_preview
-            .as_deref(),
-        Some("keep this live only")
-    );
-
     let reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
     assert!(
-        !reopened.agent_exists("agent-ephemeral"),
+        !reopened.agent_id_is_reserved("agent-ephemeral"),
         "ephemeral agent must be forgotten on store reopen"
     );
 
@@ -2816,7 +2824,6 @@ fn agent_store_rejects_path_escaping_agent_ids_for_read_paths() {
         .agent_events("../escaped")
         .expect_err("path escaping id must fail");
     assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
-    assert!(store.agent_meta("../escaped").is_err());
     assert!(crate::agent_is_locked(&agents_dir, "../escaped").is_err());
 
     let _ = std::fs::remove_dir_all(agents_dir);
@@ -2836,10 +2843,6 @@ fn agent_store_rejects_invalid_agent_ids_without_panicking() {
     let error = store
         .mark_agent_ephemeral("../escaped")
         .expect_err("invalid ephemeral id must fail");
-    assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
-    let error = store
-        .record_agent_meta("../escaped")
-        .expect_err("invalid metadata id must fail");
     assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
     let error = store
         .record_agent_user_interaction("../escaped")

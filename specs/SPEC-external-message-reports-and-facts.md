@@ -199,11 +199,12 @@ The six canonical event types are intrinsically durable. The harness, not peer
 `Emit` metadata, chooses durability when publishing them.
 
 A parsed target is known when it is in the current session membership, has a
-live agent route, or `AgentStore::agent_exists` reports its in-memory/on-disk
-journal or metadata. A known agent uses its ordinary agent journal even when it
-is not presently runnable. If the raw target does not parse as `AgentId`, or
-the parsed ID is not known by that rule, append the fact once to the current
-session event journal as an unprojectable message fact, then broadcast it. Do
+live agent route, or `AgentStore::agent_is_known_for_routing` validates a loaded
+or journal-backed creation identity. A known agent uses its ordinary agent
+journal even when it is not presently runnable. Metadata-only directories are
+not known targets. If the raw target does not parse as `AgentId`, or the parsed
+ID is not known by that rule, append the fact once to the current session event
+journal as an unprojectable message fact, then broadcast it. Do
 not invent an agent, reroute the fact, or retroactively move it if an agent with
 that ID later appears. This fallback is what preserves an invalid/unsupported
 target. A failure to append either selected journal is an ordinary storage

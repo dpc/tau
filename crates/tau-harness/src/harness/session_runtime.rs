@@ -2183,18 +2183,11 @@ impl Harness {
                 .and_then(|tree| tree.head());
             let cid = agent_id.clone();
             self.seed_agent_creator_topology(&agent_id);
-            let meta = self
-                .session_runtime
-                .agent_store
-                .agent_meta(agent_id.as_str())
-                .ok()
-                .flatten();
             let display_name = self
                 .session_runtime
                 .agent_store
                 .agent(agent_id.as_str())
-                .and_then(|tree| tree.display_name().map(str::to_owned))
-                .or_else(|| meta.and_then(|meta| meta.display_name));
+                .and_then(|tree| tree.display_name().map(str::to_owned));
             let restored_runtime = self.restored_agent_runtime_from_log(agent_id.as_str());
             if !restored_runtime.resumable {
                 self.agent_runtime

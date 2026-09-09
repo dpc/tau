@@ -482,8 +482,9 @@ transcript state. Their `meta.json` files are content-minimized, atomically
 replaced derived checkpoints, not routing authority. Checkpoints bind an exact
 frame boundary and sequence to journal file identity and a boundary witness;
 stale or invalid checkpoints are repaired only under nonblocking byte, record,
-and time budgets. Metadata-only, empty, corrupt, or otherwise unvalidated
-artifacts reserve ids but cannot receive routed facts.
+and time budgets. Metadata-only artifacts do not reserve ids; journal artifacts
+and retired-ID tombstones do. Empty, corrupt, or otherwise unvalidated journals
+remain reserved but cannot receive routed facts.
 
 Agent `events.cbor` and session `events.cbor`/`restore-events.cbor` use
 length-prefixed CBOR frames. Prefix or payload-write failure triggers truncation
@@ -593,9 +594,13 @@ session detach may return after a crash. Focused filesystem, reference,
 tombstone, and ordering oracles live beside `session_cleanup`, `agent_cleanup`,
 `retention_cleanup`, and `diagnostic_cleanup`.
 
-Summary files intentionally omit prompt previews. Legacy preview-bearing
-sidecars are unverified hints and are scrubbed when strict journal migration can
-acquire the agent lock. Bounded checkpoint repair never rewrites journal facts.
+Summary files intentionally omit prompt previews. Standalone metadata from older
+builds is not read as an identity or summary hint. Reusing its id requires a
+regular sidecar and an absent journal; Tau first preserves the sidecar
+non-overwriting as `meta.legacy.json` and synchronizes the directory. A distinct
+existing archive, symbolic link, or nonregular sidecar fails closed without
+replacement. Existing regular legacy locks are acquired and retained; unrelated
+files remain untouched. Bounded checkpoint repair never rewrites journal facts.
 Writer recovery may truncate only an incomplete EOF crash tail; complete invalid
 frames and their suffix remain unchanged and fail closed.
 Failure to publish derived metadata does not invalidate an already committed record.

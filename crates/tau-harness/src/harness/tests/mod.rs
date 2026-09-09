@@ -959,10 +959,12 @@ fn minting_agent_ids_falls_back_after_configured_template_collisions() {
     )));
 }
 
+/// Metadata-only directories must leave the configured identifier available
+/// because they no longer establish or reserve agent identity.
 #[test]
-fn minting_agent_ids_skips_persisted_agent_dirs() {
-    // A rendered id already present on disk must stay reserved even when the
-    // lazy store has not loaded that agent tree into memory yet.
+fn minting_agent_ids_ignores_metadata_only_agent_dirs() {
+    // An obsolete metadata-only directory has no journal identity and must not
+    // consume an otherwise available configured agent id.
     let td = TempDir::new().expect("tempdir");
     let agents_dir = td.path().join("agents");
     let store = AgentStore::open_lazy(agents_dir.clone()).expect("agent store");
@@ -975,7 +977,35 @@ fn minting_agent_ids_skips_persisted_agent_dirs() {
         "engineer",
         "engineer",
         "engineer_0",
-        |agent_id| store.agent_exists(agent_id),
+        |agent_id| store.agent_id_is_reserved(agent_id),
+        &mut super::deterministic_agent_id_rng(),
+        |kind, warning| warnings.push((kind, warning)),
+    );
+
+    assert_eq!(agent_id, "engineer_0");
+    assert_agent_id_chars(&agent_id);
+    assert!(warnings.is_empty());
+}
+
+/// Journal artifacts must continue to reserve configured identifiers before
+/// the lazy store loads their agent trees.
+#[test]
+fn minting_agent_ids_skips_journal_agent_dirs() {
+    // A journal artifact remains the durable reservation authority even when
+    // the lazy store has not loaded its agent tree.
+    let td = TempDir::new().expect("tempdir");
+    let agents_dir = td.path().join("agents");
+    let store = AgentStore::open_lazy(agents_dir.clone()).expect("agent store");
+    let reserved_dir = agents_dir.join("engineer_0");
+    std::fs::create_dir_all(&reserved_dir).expect("agent dir");
+    std::fs::write(reserved_dir.join("events.cbor"), []).expect("agent journal");
+
+    let mut warnings = Vec::new();
+    let agent_id = super::mint_available_agent_id_for_role_with(
+        "engineer",
+        "engineer",
+        "engineer_0",
+        |agent_id| store.agent_id_is_reserved(agent_id),
         &mut super::deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );

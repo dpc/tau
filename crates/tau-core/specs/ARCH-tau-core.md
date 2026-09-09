@@ -130,7 +130,13 @@ Memory-only streams use the same semantic fold as journal-backed streams and
 support same-daemon replay, but create no durable artifact. Agent journals remain
 the sole durable identity and listing authority: atomically replaced `meta.json`
 files are versioned, journal-bound derived checkpoints rather than a second
-index or evidence of durability. On the persistence worker, a complete journal
+index or evidence of durability. Standalone metadata from older builds is ignored
+for discovery and ID reservation. Later creation may reuse that directory only
+when `meta.json` and any existing lock are regular files and no journal exists.
+It acquires the old lock, preserves the sidecar non-overwriting as
+`meta.legacy.json`, synchronizes that archive name before checkpoint replacement,
+and leaves unrelated files untouched. A distinct archive, symbolic link, or
+nonregular sidecar fails closed without replacement. On the persistence worker, a complete journal
 frame precedes checkpoint replacement. Missing, stale, corrupt, or over-budget checkpoints
 must not hide a valid journal-backed agent, and recovery invalidates a checkpoint
 when it truncates an incomplete EOF crash tail.

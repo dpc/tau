@@ -10,7 +10,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, Event, UnixMicros};
 
-use crate::{AgentMeta, AgentTree, PersistedAgentEvent, PersistedAgentEventSeq};
+use crate::{AgentTree, PersistedAgentEvent, PersistedAgentEventSeq};
 
 /// Exact no-repair age evidence for one durable agent transcript.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,17 +176,6 @@ impl AgentSummary {
             _ => {}
         }
     }
-
-    /// Convert the v2 summary to the legacy public metadata view.
-    pub(crate) fn legacy_view(&self) -> AgentMeta {
-        AgentMeta {
-            created_at: micros_to_seconds(self.created_at_micros),
-            last_touched: micros_to_seconds(self.last_touched_at_micros),
-            last_user_interaction_time: micros_to_seconds(self.last_user_interaction_at_micros),
-            display_name: self.display_name.clone(),
-            latest_user_prompt_preview: None,
-        }
-    }
 }
 
 /// Identity and exact prefix covered by one checkpoint.
@@ -224,8 +213,6 @@ pub struct AgentCheckpoint {
 pub enum AgentListIdentity {
     /// A journal exists and supplies semantic identity.
     JournalBacked,
-    /// Only a legacy sidecar exists; it reserves the id but is not routable.
-    LegacyMetaOnly,
     /// Artifacts exist but cannot currently establish identity.
     UnverifiedArtifact,
 }
@@ -239,8 +226,6 @@ pub enum AgentListStatus {
     Stale,
     /// An active writer prevented nonblocking repair.
     Busy,
-    /// An old unwatermarked sidecar was found.
-    Legacy,
     /// No summary file exists.
     MissingSummary,
     /// Summary JSON or schema is invalid.
@@ -256,7 +241,7 @@ pub enum AgentListStatus {
 pub struct AgentListEntry {
     /// Agent directory id.
     pub id: AgentId,
-    /// Best available derived or legacy-hint summary.
+    /// Best available journal-derived summary.
     pub summary: Option<AgentSummary>,
     /// Strength of semantic identity evidence.
     pub identity: AgentListIdentity,
@@ -395,7 +380,7 @@ pub(crate) fn journal_position(file: &mut File) -> io::Result<CommittedJournalPo
     })
 }
 
-/// Enumerate journal-backed and legacy artifact rows using bounded repair.
+/// Enumerate journal-backed artifact rows using bounded repair.
 pub fn list_agent_entries(agents_dir: &Path) -> io::Result<Vec<AgentListEntry>> {
     list_agent_entries_until(agents_dir, Instant::now() + MAX_REPAIR_TIME_PER_LIST)
 }
@@ -430,13 +415,16 @@ fn list_agent_entries_until(
         let Ok(id) = AgentId::parse(name) else {
             continue;
         };
-        entries.push(inspect_agent_dir(
+        let Some(entry) = inspect_agent_dir(
             id,
             &dir_entry.path(),
             &mut remaining_repair_bytes,
             repair_deadline,
             true,
-        ));
+        ) else {
+            continue;
+        };
+        entries.push(entry);
     }
     entries.sort_by(|left, right| {
         right
@@ -460,71 +448,56 @@ fn inspect_agent_dir(
     remaining_repair_bytes: &mut u64,
     repair_deadline: Instant,
     retry_inconsistent_observation: bool,
-) -> AgentListEntry {
+) -> Option<AgentListEntry> {
     let meta_path = dir.join("meta.json");
     let journal_path = dir.join("events.cbor");
     let checkpoint_result = read_checkpoint(&meta_path);
-    let journal = File::open(&journal_path);
-    if journal.is_err() {
-        let legacy = read_legacy_hint(&meta_path);
-        return AgentListEntry {
-            id,
-            summary: legacy,
-            identity: if meta_path.exists() {
-                AgentListIdentity::LegacyMetaOnly
-            } else {
-                AgentListIdentity::UnverifiedArtifact
-            },
-            status: if meta_path.exists() {
-                AgentListStatus::Legacy
-            } else {
-                AgentListStatus::MissingSummary
-            },
-        };
-    }
+    let journal = match File::open(&journal_path) {
+        Ok(journal) => journal,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(_) => {
+            return Some(unverified_entry(id, None, AgentListStatus::RepairFailed));
+        }
+    };
     let Ok(checkpoint) = checkpoint_result else {
-        let legacy_hint = read_legacy_hint(&meta_path);
-        let status = if legacy_hint.is_some() {
-            AgentListStatus::Legacy
-        } else if meta_path.exists() {
+        let status = if meta_path.exists() {
             AgentListStatus::CorruptSummary
         } else {
             AgentListStatus::MissingSummary
         };
-        return try_bounded_full_rebuild(
+        return Some(try_bounded_full_rebuild(
             id,
             dir,
             status,
             remaining_repair_bytes,
             repair_deadline,
-            legacy_hint,
-        );
+            None,
+        ));
     };
     if checkpoint.agent_id != id || !checkpoint_is_structurally_valid(&checkpoint) {
-        return try_bounded_full_rebuild(
+        return Some(try_bounded_full_rebuild(
             id,
             dir,
             AgentListStatus::CorruptSummary,
             remaining_repair_bytes,
             repair_deadline,
             None,
-        );
+        ));
     }
-    let journal = journal.expect("checked above");
     let metadata = match journal.metadata() {
         Ok(metadata) => metadata,
         Err(_) if retry_inconsistent_observation => {
             return inspect_agent_dir(id, dir, remaining_repair_bytes, repair_deadline, false);
         }
         Err(_) => {
-            return try_bounded_full_rebuild(
+            return Some(try_bounded_full_rebuild(
                 id,
                 dir,
                 AgentListStatus::ReplacedOrTruncated,
                 remaining_repair_bytes,
                 repair_deadline,
                 None,
-            );
+            ));
         }
     };
     let (device, inode) = match file_identity(&journal) {
@@ -533,14 +506,14 @@ fn inspect_agent_dir(
             return inspect_agent_dir(id, dir, remaining_repair_bytes, repair_deadline, false);
         }
         Err(_) => {
-            return try_bounded_full_rebuild(
+            return Some(try_bounded_full_rebuild(
                 id,
                 dir,
                 AgentListStatus::ReplacedOrTruncated,
                 remaining_repair_bytes,
                 repair_deadline,
                 None,
-            );
+            ));
         }
     };
     if device != checkpoint.journal.device
@@ -550,24 +523,30 @@ fn inspect_agent_dir(
         if retry_inconsistent_observation {
             return inspect_agent_dir(id, dir, remaining_repair_bytes, repair_deadline, false);
         }
-        return try_bounded_full_rebuild(
+        return Some(try_bounded_full_rebuild(
             id,
             dir,
             AgentListStatus::ReplacedOrTruncated,
             remaining_repair_bytes,
             repair_deadline,
             None,
-        );
+        ));
     }
     if metadata.len() == checkpoint.journal.covered_bytes {
-        return AgentListEntry {
+        return Some(AgentListEntry {
             id,
             summary: Some(checkpoint.summary),
             identity: AgentListIdentity::JournalBacked,
             status: AgentListStatus::Fresh,
-        };
+        });
     }
-    try_bounded_suffix_repair(id, dir, checkpoint, remaining_repair_bytes, repair_deadline)
+    Some(try_bounded_suffix_repair(
+        id,
+        dir,
+        checkpoint,
+        remaining_repair_bytes,
+        repair_deadline,
+    ))
 }
 
 fn checkpoint_is_structurally_valid(checkpoint: &AgentCheckpoint) -> bool {
@@ -894,17 +873,6 @@ fn read_one_record_or_eof(
     Ok(Some(record))
 }
 
-fn read_legacy_hint(path: &Path) -> Option<AgentSummary> {
-    let bytes = read_bounded_json(path).ok()?;
-    let meta: AgentMeta = serde_json::from_slice(&bytes).ok()?;
-    Some(AgentSummary {
-        created_at_micros: seconds_to_micros(meta.created_at),
-        last_touched_at_micros: seconds_to_micros(meta.last_touched),
-        last_user_interaction_at_micros: seconds_to_micros(meta.last_user_interaction_time),
-        display_name: meta.display_name,
-    })
-}
-
 fn read_bounded_json(path: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     File::open(path)?
@@ -965,14 +933,6 @@ fn normalize_name(value: &str) -> Option<String> {
 
 fn boundary_digest(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..32].to_owned()
-}
-
-fn micros_to_seconds(value: Option<UnixMicros>) -> u64 {
-    value.map_or(0, |value| value.get() / 1_000_000)
-}
-
-fn seconds_to_micros(value: u64) -> Option<UnixMicros> {
-    (value != 0).then(|| UnixMicros::new(value.saturating_mul(1_000_000)))
 }
 
 pub(crate) fn file_identity(file: &File) -> io::Result<(u64, u64)> {

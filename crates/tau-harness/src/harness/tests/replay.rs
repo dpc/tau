@@ -965,8 +965,8 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     h.shutdown().expect("shutdown");
 }
 
-/// A legacy sidecar-only ghost reserves its id but cannot redirect a message
-/// fact away from the session journal without validated agent identity.
+/// An obsolete sidecar-only ghost neither reserves its id nor redirects a
+/// message fact away from the session journal without validated agent identity.
 #[test]
 fn metadata_only_offline_agent_message_fact_uses_session_journal() {
     let td = TempDir::new().expect("tempdir");
@@ -982,6 +982,11 @@ fn metadata_only_offline_agent_message_fact_uses_session_journal() {
         br#"{"created_at":1,"last_touched":1,"last_user_interaction_time":1}"#,
     )
     .expect("seed legacy metadata-only ghost");
+    assert!(
+        !h.session_runtime
+            .agent_store
+            .agent_id_is_reserved("offline-agent")
+    );
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("configured-bridge")
             .expect("canonical publisher id must satisfy the identifier grammar"),
@@ -1320,7 +1325,7 @@ fn live_route_only_message_fact_uses_agent_journal() {
     assert!(
         !h.session_runtime
             .agent_store
-            .agent_exists(agent_id.as_str())
+            .agent_id_is_reserved(agent_id.as_str())
     );
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("configured-bridge")
@@ -1470,10 +1475,6 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             }),
         )
         .expect("cache loaded membership");
-    h.session_runtime
-        .agent_store
-        .record_agent_meta(agent_id.as_str())
-        .expect("reserve agent");
     h.commit_message_fact(
         Some(&crate::test_connection_id("bridge-connection")),
         Event::MessageDelivered(tau_proto::MessageDelivered::new(

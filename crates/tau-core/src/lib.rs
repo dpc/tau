@@ -30,8 +30,8 @@ pub use agent_checkpoint::{
 pub use agent_store::{
     AgentAppendOutcome, AgentCreationFacts, AgentCreationFactsBudget,
     AgentCreationFactsBudgetExceeded, AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot,
-    AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked, list_agent_metas,
-    read_agent_creation_record, retired_agent_tombstone, retired_agents_dir,
+    AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked, read_agent_creation_record,
+    retired_agent_tombstone, retired_agents_dir,
 };
 pub use bus::{DeliveryOutcomeCount, EventBus};
 pub use compaction_chain_view::{
@@ -55,12 +55,12 @@ pub use semantic_persistence::{
 };
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics,
-    AgentMessageDirection, AgentMeta, AgentMetadataEntry, AgentNode, AgentTree,
-    BackgroundToolCallState, BackgroundToolCompletion, BackgroundToolPlaceholder,
-    InferenceDispatchRecovery, ManualCompactionOutcome, ManualCompactionRecovery, NodeId,
-    OutputLengthContinuationRecovery, OutputLengthDormantRepair, OutputLengthTerminalIncomplete,
-    PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource, ReactiveCompactionProgress,
-    SessionMeta, StandaloneCompactionRecovery,
+    AgentMessageDirection, AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState,
+    BackgroundToolCompletion, BackgroundToolPlaceholder, InferenceDispatchRecovery,
+    ManualCompactionOutcome, ManualCompactionRecovery, NodeId, OutputLengthContinuationRecovery,
+    OutputLengthDormantRepair, OutputLengthTerminalIncomplete, PersistedAgentEvent,
+    PersistedAgentEventSeq, PersistedEventSource, ReactiveCompactionProgress, SessionMeta,
+    StandaloneCompactionRecovery,
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,

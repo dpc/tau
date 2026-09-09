@@ -341,8 +341,9 @@ receives no second pair. Canonical terminal publication follows
 New durable agents commit `AgentStarted` as journal sequence zero before the
 harness publishes their route or session membership. Loading an existing agent
 into another session publishes membership but never appends a second creation
-fact. A sidecar-only artifact reserves its id but is not a semantic routing
-identity. See
+fact. A sidecar-only artifact neither reserves its id nor establishes a semantic
+routing identity. Journal artifacts and retired-ID tombstones remain reservation
+authority. See
 [ARCH-tau-core](../../tau-core/specs/ARCH-tau-core.md).
 
 ## Navigation classification

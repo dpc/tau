@@ -7036,23 +7036,6 @@ impl AgentJournalFoldSemantics {
     }
 }
 
-/// Per-agent sidecar metadata at `<agents_dir>/<agent_id>/meta.json`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct AgentMeta {
-    /// Unix epoch seconds when the agent was first created.
-    pub created_at: u64,
-    /// Unix epoch seconds of the most recent append.
-    pub last_touched: u64,
-    /// Unix epoch seconds of the most recent human-authored interaction.
-    pub last_user_interaction_time: u64,
-    /// Optional human-friendly name shown in UIs. Falls back to the agent id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// Preview of the latest user-authored prompt, used by the resume picker.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_user_prompt_preview: Option<String>,
-}
-
 /// Canonical durable-session manifest at
 /// `<sessions_dir>/<session_id>/meta.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

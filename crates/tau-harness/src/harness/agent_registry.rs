@@ -2036,7 +2036,7 @@ impl Harness {
             |agent_id| {
                 agent_routes.contains_key(agent_id)
                     || stopped_agent_ids.contains(agent_id)
-                    || agent_store.agent_exists(agent_id)
+                    || agent_store.agent_id_is_reserved(agent_id)
                     || reserved_start_agent_ids.contains_key(agent_id)
                     || pending_start_agent_requests
                         .iter()

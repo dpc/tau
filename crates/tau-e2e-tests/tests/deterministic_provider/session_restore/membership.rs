@@ -158,7 +158,7 @@ fn seed_unloaded_worker(
     }
 
     let mut agents = tau_core::AgentStore::open_fixture(state_root.join("agents"))?;
-    if agents.agent_exists(agent_id.as_str()) {
+    if agents.agent_id_is_reserved(agent_id.as_str()) {
         return Err("seeded unloaded worker already had a durable journal".into());
     }
     let outcome = agents.append_agent_event(
@@ -285,7 +285,7 @@ fn assert_ephemeral_not_durable(
         return Err("ephemeral worker entered durable session membership".into());
     }
     let agents = tau_core::AgentStore::open(state_root.join("agents"))?;
-    if agents.agent_exists(ephemeral.as_str())
+    if agents.agent_id_is_reserved(ephemeral.as_str())
         || state_root.join("agents").join(ephemeral.as_str()).exists()
     {
         return Err("ephemeral worker created a durable journal or directory".into());

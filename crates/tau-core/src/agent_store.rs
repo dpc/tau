@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-persistence"))]
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use loaded_tool_call_ids::LoadedToolCallIds;
@@ -33,11 +32,13 @@ use tau_proto::{
     AgentId, AgentIdParseError, Event, EventName, MessageAgentTarget, NodeId, UnixMicros,
 };
 
-use crate::agent_checkpoint::{AgentSummary, read_checkpoint, read_journal_bound_checkpoint};
+#[cfg(test)]
+use crate::agent_checkpoint::read_checkpoint;
+use crate::agent_checkpoint::{AgentSummary, read_journal_bound_checkpoint};
 use crate::record_log::MAX_RECORD_BYTES;
 use crate::semantic_persistence::{AgentCheckpointCandidate, RetentionCharge, StagedFrame};
 use crate::session::{
-    AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics, AgentMeta, AgentTree,
+    AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics, AgentTree,
     PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource,
 };
 use crate::{PersistenceAdmissionError, PersistenceLease, SemanticPersistenceOwner};
@@ -376,7 +377,7 @@ pub struct AgentAppendOutcome {
 /// ```text
 /// <agents_dir>/<agent_id>/
 ///   events.cbor   # length-prefixed PersistedAgentEvent stream — the source of truth
-///   meta.json     # AgentMeta sidecar (cwd, created_at, last_touched)
+///   meta.json     # journal-bound AgentCheckpoint projection
 ///   lock          # exclusively flock'd while this store has the agent loaded for write
 /// ```
 ///
@@ -416,8 +417,6 @@ pub struct AgentStore {
     ephemeral_agents: HashSet<AgentId>,
     /// Replay records for memory-only agents.
     ephemeral_events: HashMap<AgentId, Vec<PersistedAgentEvent>>,
-    /// Sidecar metadata for memory-only agents.
-    ephemeral_meta: HashMap<AgentId, AgentMeta>,
     /// Journal-derived summaries retained alongside loaded durable trees.
     summaries: HashMap<AgentId, AgentSummary>,
     /// Unique Harness-lifecycle persistence owner for managed durable streams.
@@ -629,7 +628,6 @@ impl AgentStore {
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
-            ephemeral_meta: HashMap::new(),
             summaries: HashMap::new(),
             persistence_owner: None,
             persistence_leases: HashMap::new(),
@@ -684,7 +682,6 @@ impl AgentStore {
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
-            ephemeral_meta: HashMap::new(),
             summaries: HashMap::new(),
             persistence_owner: None,
             persistence_leases: HashMap::new(),
@@ -713,7 +710,6 @@ impl AgentStore {
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
-            ephemeral_meta: HashMap::new(),
             summaries: HashMap::new(),
             persistence_owner: Some(owner),
             persistence_leases: HashMap::new(),
@@ -768,7 +764,7 @@ impl AgentStore {
     ) -> Result<PersistenceLease, AgentStoreError> {
         let agent_id = parse_agent_id_for_store(agent_id)?;
         let live_path = self.agent_dir(agent_id.as_str());
-        if path_reserves_id(&live_path)
+        if agent_path_reserves_id(&live_path)
             || path_reserves_id(&retired_agent_tombstone(&self.agents_dir, &agent_id))
         {
             return Err(AgentStoreError::PersistenceConflict {
@@ -921,8 +917,9 @@ impl AgentStore {
 
     /// Returns whether an agent already exists in memory or on disk.
     ///
-    /// A durable `events.cbor` log or `meta.json` sidecar reserves the
-    /// id even when this lazy store has not loaded that agent yet.
+    /// A durable `events.cbor` log reserves the id even when this lazy store
+    /// has not loaded that agent yet. An obsolete metadata-only directory
+    /// does not.
     #[must_use]
     pub fn agent_id_is_reserved(&self, agent_id: &str) -> bool {
         let Ok(aid) = AgentId::parse(agent_id) else {
@@ -937,7 +934,7 @@ impl AgentStore {
         if self.default_persistence.is_ephemeral() {
             return false;
         }
-        path_reserves_id(&self.agent_dir(agent_id))
+        agent_path_reserves_id(&self.agent_dir(agent_id))
             || path_reserves_id(&retired_agent_tombstone(&self.agents_dir, &aid))
     }
 
@@ -980,23 +977,17 @@ impl AgentStore {
             && AgentTree::try_from_events(agent_id.clone(), &events).is_ok()
     }
 
-    /// Compatibility alias for conservative id reservation.
-    #[must_use]
-    pub fn agent_exists(&self, agent_id: &str) -> bool {
-        self.agent_id_is_reserved(agent_id)
-    }
-
     /// Marks an agent id as memory-only before its first transcript write.
     ///
-    /// The id must not already be reserved by durable events or metadata. Once
-    /// marked, all future event and metadata operations for this id stay
+    /// The id must not already be reserved by a durable journal or retired-ID
+    /// tombstone. Once marked, all future event operations for this id stay
     /// process-local and [`Self::agent_events`] returns the in-memory replay
     /// stream.
     pub fn mark_agent_ephemeral(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
         let agent_dir = self.agent_dir(agent_id);
         if self.default_persistence.is_durable()
-            && (path_reserves_id(&agent_dir)
+            && (agent_path_reserves_id(&agent_dir)
                 || path_reserves_id(&retired_agent_tombstone(&self.agents_dir, &aid)))
         {
             return Err(AgentStoreError::PersistenceConflict {
@@ -1301,11 +1292,6 @@ impl AgentStore {
         if matches!(&record.event, Event::AgentStarted(_)) {
             self.created_agents.insert(sid.clone());
         }
-        touch_ephemeral_meta_for_event(
-            self.ephemeral_meta.entry(sid).or_default(),
-            &record.event,
-            unix_now(),
-        );
         Ok(AgentAppendOutcome {
             observation_id: record.observation_id,
             seq: next_seq,
@@ -1500,11 +1486,6 @@ impl AgentStore {
             .apply_persisted_record(&record)
             .expect("canonical raw fact matches its journal owner and sequence");
         let selected_head_id = tree.head();
-        touch_ephemeral_meta_for_event(
-            self.ephemeral_meta.entry(aid).or_default(),
-            &event,
-            recorded_at.get() / 1_000_000,
-        );
         Ok(AgentAppendOutcome {
             observation_id: record.observation_id,
             seq,
@@ -1804,67 +1785,9 @@ impl AgentStore {
         self.loaded_tool_call_ids.counters()
     }
 
-    /// Reads sidecar metadata for one durable or ephemeral agent, if it exists.
-    pub fn agent_meta(&self, agent_id: &str) -> io::Result<Option<AgentMeta>> {
-        let parsed_agent_id = AgentId::parse(agent_id)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if self.agent_is_memory_only(&parsed_agent_id) {
-            return Ok(self.ephemeral_meta.get(&parsed_agent_id).cloned());
-        }
-        if let Some(projection) = self.managed_projections.get(&parsed_agent_id) {
-            return Ok(Some(projection.summary.legacy_view()));
-        }
-        let path = self.agent_dir(parsed_agent_id.as_str()).join("meta.json");
-        match read_checkpoint(&path) {
-            Ok(checkpoint) if checkpoint.agent_id == parsed_agent_id => {
-                Ok(Some(checkpoint.summary.legacy_view()))
-            }
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "agent checkpoint id mismatch",
-            )),
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => match read_meta(&path) {
-                Ok(mut meta) => {
-                    meta.latest_user_prompt_preview = None;
-                    Ok(Some(meta))
-                }
-                Err(error) => Err(error),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Initializes process-local metadata for an ephemeral agent.
-    ///
-    /// Durable agents intentionally ignore this legacy compatibility call:
-    /// their checkpoint can only be created from journal facts.
-    pub fn record_agent_meta(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
-        let aid = parse_agent_id_for_store(agent_id)?;
-        if self.agent_is_memory_only(&aid) {
-            initialize_ephemeral_meta(
-                self.ephemeral_meta.entry(aid).or_default(),
-                unix_now(),
-                true,
-            );
-            return Ok(());
-        }
-        // Durable metadata is now exclusively a projection of journal facts.
-        // Creation commits `AgentStarted`; a metadata-only identity is
-        // forbidden.
-        Ok(())
-    }
-
     /// Appends the content-free fact that a human interacted with an agent.
     pub fn record_agent_user_interaction(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
-        if self.agent_is_memory_only(&aid) {
-            let now = unix_now();
-            let meta = self.ephemeral_meta.entry(aid).or_default();
-            initialize_ephemeral_meta(meta, now, false);
-            meta.last_user_interaction_time = now;
-            return Ok(());
-        }
         self.append_agent_event(
             agent_id,
             None,
@@ -1903,25 +1826,13 @@ fn path_reserves_id(path: &Path) -> bool {
     }
 }
 
-/// Lists agent metadata across `agents_dir` without taking any flocks.
-///
-/// Agents whose `meta.json` is missing are skipped silently (the
-/// agent may have just been created and not yet touched). A
-/// `meta.json` that *exists* but fails to parse is also skipped, but
-/// emits a warning to stderr so a corrupt sidecar does not become
-/// invisible to operators. The goal is best-effort discovery for
-/// `tau resume` discovery, not strict listing.
-pub fn list_agent_metas(agents_dir: &Path) -> io::Result<Vec<(AgentId, AgentMeta)>> {
-    crate::list_agent_entries(agents_dir).map(|entries| {
-        entries
-            .into_iter()
-            .filter_map(|entry| {
-                entry
-                    .summary
-                    .map(|summary| (entry.id, summary.legacy_view()))
-            })
-            .collect()
-    })
+fn agent_path_reserves_id(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => path_reserves_id(&path.join("events.cbor")),
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 /// Best-effort check whether an agent's lock is currently held.
@@ -1940,94 +1851,6 @@ pub fn agent_is_locked(agents_dir: &Path, agent_id: &str) -> io::Result<bool> {
             Ok(false)
         }
         Err(_) => Ok(true),
-    }
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn read_meta(path: &Path) -> io::Result<AgentMeta> {
-    const MAX_LEGACY_META_BYTES: u64 = 64 * 1024;
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_LEGACY_META_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_LEGACY_META_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "legacy agent metadata exceeds maximum size",
-        ));
-    }
-    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-fn initialize_ephemeral_meta(meta: &mut AgentMeta, now: u64, initialize_user_interaction: bool) {
-    if meta.created_at == 0 {
-        meta.created_at = now;
-    }
-    if meta.last_touched == 0 {
-        meta.last_touched = now;
-    }
-    if initialize_user_interaction && meta.last_user_interaction_time == 0 {
-        meta.last_user_interaction_time = now;
-    }
-}
-
-fn touch_ephemeral_meta_for_event(meta: &mut AgentMeta, event: &Event, now: u64) {
-    if meta.created_at == 0 {
-        meta.created_at = now;
-    }
-    meta.last_touched = now;
-    if let Some(display_name) = display_name_for_event(event).and_then(normalize_display_name) {
-        meta.display_name = Some(display_name);
-    }
-    if let Some(text) = user_prompt_text(event) {
-        meta.latest_user_prompt_preview = Some(preview_text(text, 48));
-    }
-}
-
-fn normalize_display_name(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_owned())
-}
-
-fn display_name_for_event(event: &Event) -> Option<&str> {
-    match event {
-        Event::AgentStarted(started) => started.display_name.as_deref(),
-        Event::AgentDisplayNameSet(name) => Some(&name.display_name),
-        _ => None,
-    }
-}
-
-fn user_prompt_text(event: &Event) -> Option<&str> {
-    match event {
-        Event::AgentPromptSubmitted(prompt)
-            if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
-        {
-            Some(&prompt.text)
-        }
-        Event::AgentPromptSteered(steered) if !steered.message_class.is_internal() => {
-            Some(&steered.text)
-        }
-        _ => None,
-    }
-}
-
-fn preview_text(text: &str, max: usize) -> String {
-    preview_text_from_chars(text.chars(), max)
-}
-
-fn preview_text_from_chars(chars: impl Iterator<Item = char>, max: usize) -> String {
-    let mut chars = chars.map(|character| if character == '\n' { ' ' } else { character });
-    let preview = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        format!("{preview}…")
-    } else {
-        preview
     }
 }
 

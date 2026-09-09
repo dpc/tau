@@ -1,6 +1,6 @@
 //! Deterministic production-backend persistence failure oracles.
 
-use std::fs::{File, Permissions};
+use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -815,6 +815,273 @@ fn new_agent_collision_preserves_existing_bytes() {
         std::fs::read(journal).expect("old journal"),
         old_bytes,
         "reservation rejection must preserve existing canonical bytes"
+    );
+}
+
+/// New creation may reuse an obsolete metadata-only directory while preserving
+/// unrelated files and establishing a current journal-backed identity.
+#[test]
+fn new_agent_creation_adopts_metadata_only_directory() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let agents = root.path().join("agents");
+    let agent_dir = agents.join("reused-agent");
+    std::fs::create_dir_all(&agent_dir).expect("metadata-only directory");
+    let old_metadata = br#"{"created_at":1,"last_touched":1,"last_user_interaction_time":1}"#;
+    std::fs::write(agent_dir.join("meta.json"), old_metadata).expect("old metadata");
+    std::fs::write(agent_dir.join("lock"), []).expect("old lock");
+    std::fs::write(agent_dir.join("user-note"), b"keep").expect("unrelated file");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(&agents, owner.clone()).expect("store");
+    let agent_id = tau_proto::AgentId::parse("reused-agent").expect("agent id");
+
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("creation accepted");
+    owner
+        .release(&store.managed_persistence_leases(), Duration::from_secs(2))
+        .expect("creation durable");
+
+    assert!(agent_dir.join("events.cbor").exists());
+    assert!(agent_dir.join("lock").exists());
+    assert_eq!(
+        std::fs::read(agent_dir.join("meta.legacy.json")).expect("old metadata preserved"),
+        old_metadata
+    );
+    assert_eq!(
+        std::fs::read(agent_dir.join("user-note")).expect("unrelated file retained"),
+        b"keep"
+    );
+    let entries = crate::list_agent_entries(&agents).expect("list reused agent");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, agent_id);
+}
+
+/// Archive directory-sync failure must retry before checkpoint replacement so
+/// the preserved sidecar name is durable before canonical metadata changes.
+#[test]
+fn new_agent_creation_retries_legacy_metadata_archive_sync() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let agents = root.path().join("agents");
+    let agent_dir = agents.join("archive-sync-retry");
+    std::fs::create_dir_all(&agent_dir).expect("metadata-only directory");
+    let old_metadata = b"old metadata";
+    std::fs::write(agent_dir.join("meta.json"), old_metadata).expect("old metadata");
+    std::fs::write(agent_dir.join("lock"), []).expect("old lock");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("owner"),
+    );
+    let mut store = AgentStore::open_managed(&agents, owner.clone()).expect("store");
+    let agent_id = tau_proto::AgentId::parse("archive-sync-retry").expect("agent id");
+
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    backend.fail_next_sync_all.store(true, Ordering::SeqCst);
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("creation accepted");
+    assert!(owner.wait_for_failure_for_test(PersistenceFailureKind::Sync, Duration::from_secs(2)));
+    owner
+        .release(&store.managed_persistence_leases(), Duration::from_secs(2))
+        .expect("archive sync retry completes");
+
+    assert!(agent_dir.join("events.cbor").exists());
+    assert_eq!(
+        std::fs::read(agent_dir.join("meta.legacy.json")).expect("old metadata preserved"),
+        old_metadata
+    );
+}
+
+/// Reusing a metadata-only directory must fail before mutation when a distinct
+/// preservation archive already occupies the non-overwriting archive path.
+#[test]
+fn new_agent_creation_rejects_existing_legacy_metadata_archive() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let agents = root.path().join("agents");
+    let agent_dir = agents.join("archive-collision");
+    std::fs::create_dir_all(&agent_dir).expect("metadata-only directory");
+    let old_metadata = b"old metadata";
+    let existing_archive = b"existing archive";
+    std::fs::write(agent_dir.join("meta.json"), old_metadata).expect("old metadata");
+    std::fs::write(agent_dir.join("meta.legacy.json"), existing_archive).expect("existing archive");
+    std::fs::write(agent_dir.join("user-note"), b"keep").expect("unrelated file");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(&agents, owner.clone()).expect("store");
+    let agent_id = tau_proto::AgentId::parse("archive-collision").expect("agent id");
+
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("creation accepted");
+    assert!(
+        owner.wait_for_failure_for_test(PersistenceFailureKind::Collision, Duration::from_secs(2))
+    );
+
+    assert!(!agent_dir.join("events.cbor").exists());
+    assert!(!agent_dir.join("lock").exists());
+    assert_eq!(
+        std::fs::read(agent_dir.join("meta.json")).expect("old metadata retained"),
+        old_metadata
+    );
+    assert_eq!(
+        std::fs::read(agent_dir.join("meta.legacy.json")).expect("archive retained"),
+        existing_archive
+    );
+    assert_eq!(
+        std::fs::read(agent_dir.join("user-note")).expect("unrelated file retained"),
+        b"keep"
+    );
+}
+
+/// A held regular legacy lock must reject reuse before archive publication or
+/// any other mutation of the metadata-only directory.
+#[test]
+fn new_agent_creation_rejects_held_legacy_lock_before_archiving() {
+    use fs2::FileExt as _;
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let agents = root.path().join("agents");
+    let agent_dir = agents.join("held-legacy-lock");
+    std::fs::create_dir_all(&agent_dir).expect("metadata-only directory");
+    let old_metadata = b"old metadata";
+    std::fs::write(agent_dir.join("meta.json"), old_metadata).expect("old metadata");
+    std::fs::write(agent_dir.join("user-note"), b"keep").expect("unrelated file");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(agent_dir.join("lock"))
+        .expect("legacy lock");
+    lock.lock_exclusive().expect("hold legacy lock");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(&agents, owner.clone()).expect("store");
+    let agent_id = tau_proto::AgentId::parse("held-legacy-lock").expect("agent id");
+
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("creation accepted");
+    assert!(
+        owner.wait_for_failure_for_test(PersistenceFailureKind::Collision, Duration::from_secs(2))
+    );
+
+    assert!(!agent_dir.join("meta.legacy.json").exists());
+    assert!(!agent_dir.join("events.cbor").exists());
+    assert_eq!(
+        std::fs::read(agent_dir.join("meta.json")).expect("old metadata retained"),
+        old_metadata
+    );
+    assert_eq!(
+        std::fs::read(agent_dir.join("user-note")).expect("unrelated file retained"),
+        b"keep"
+    );
+}
+
+/// Reusing a metadata-only directory must not follow an unexpected sidecar
+/// symlink or mutate its target.
+#[cfg(unix)]
+#[test]
+fn new_agent_creation_rejects_symlink_metadata_sidecar() {
+    use std::os::unix::fs as unix_fs;
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let agents = root.path().join("agents");
+    let agent_dir = agents.join("symlink-metadata");
+    std::fs::create_dir_all(&agent_dir).expect("metadata-only directory");
+    let target = root.path().join("outside-metadata");
+    std::fs::write(&target, b"outside").expect("symlink target");
+    unix_fs::symlink(&target, agent_dir.join("meta.json")).expect("metadata symlink");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(&agents, owner.clone()).expect("store");
+    let agent_id = tau_proto::AgentId::parse("symlink-metadata").expect("agent id");
+
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("creation accepted");
+    assert!(
+        owner.wait_for_failure_for_test(PersistenceFailureKind::Collision, Duration::from_secs(2))
+    );
+
+    assert!(!agent_dir.join("events.cbor").exists());
+    assert!(!agent_dir.join("meta.legacy.json").exists());
+    assert_eq!(std::fs::read(target).expect("target retained"), b"outside");
+}
+
+/// Reusing a metadata-only directory must reject a nonregular sidecar without
+/// creating an archive, lock, or journal or changing unrelated files.
+#[test]
+fn new_agent_creation_rejects_nonregular_metadata_sidecar() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let agents = root.path().join("agents");
+    let agent_dir = agents.join("nonregular-metadata");
+    std::fs::create_dir_all(agent_dir.join("meta.json")).expect("metadata directory");
+    std::fs::write(agent_dir.join("user-note"), b"keep").expect("unrelated file");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(&agents, owner.clone()).expect("store");
+    let agent_id = tau_proto::AgentId::parse("nonregular-metadata").expect("agent id");
+
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("creation accepted");
+    assert!(
+        owner.wait_for_failure_for_test(PersistenceFailureKind::Collision, Duration::from_secs(2))
+    );
+
+    assert!(agent_dir.join("meta.json").is_dir());
+    assert!(!agent_dir.join("meta.legacy.json").exists());
+    assert!(!agent_dir.join("lock").exists());
+    assert!(!agent_dir.join("events.cbor").exists());
+    assert_eq!(
+        std::fs::read(agent_dir.join("user-note")).expect("unrelated file retained"),
+        b"keep"
     );
 }
 

@@ -224,7 +224,7 @@ struct PreparedStream {
 /// Restartable non-destructive creation owned only by the worker.
 #[derive(Default)]
 struct NewAgentCreation {
-    /// This generation successfully created the directory.
+    /// This generation created or safely adopted the directory.
     directory_owned: bool,
     /// The owned directory is verified owner-private.
     directory_private: bool,
@@ -1227,7 +1227,11 @@ fn advance_creation(
                 creation.directory_owned = true;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(CreationError::Collision);
+                if try_adopt_metadata_only_agent_directory(shared, directory, &path, creation)? {
+                    creation.directory_owned = true;
+                } else {
+                    return Err(CreationError::Collision);
+                }
             }
             Err(_) => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
         }
@@ -1296,6 +1300,88 @@ fn advance_creation(
         offset: 0,
         session_meta: None,
     }))
+}
+
+fn try_adopt_metadata_only_agent_directory(
+    shared: &Shared,
+    directory: &Path,
+    journal_path: &Path,
+    creation: &mut NewAgentCreation,
+) -> Result<bool, CreationError> {
+    match shared.backend.existing_path_kind(directory) {
+        Ok(ExistingPathKind::Directory) => {}
+        Ok(_) => return Ok(false),
+        Err(_) => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
+    }
+    match shared.backend.existing_path_kind(journal_path) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
+    }
+    let lock_path = directory.join("lock");
+    if creation.lock.is_none() {
+        match shared
+            .backend
+            .open_existing_regular_file_write_no_follow(&lock_path)
+        {
+            Ok(lock) => {
+                shared
+                    .backend
+                    .try_lock(&lock)
+                    .map_err(|_| CreationError::Collision)?;
+                creation.lock = Some(lock);
+                creation.lock_acquired = true;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Ok(false),
+        }
+    }
+    let meta_path = directory.join("meta.json");
+    let meta = match shared
+        .backend
+        .open_existing_regular_file_read_no_follow(&meta_path)
+    {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Ok(false),
+    };
+    let preserved_path = directory.join("meta.legacy.json");
+    let archive_matches = match shared
+        .backend
+        .publish_no_replace(&meta_path, &preserved_path)
+    {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let preserved = match shared
+                .backend
+                .open_existing_regular_file_read_no_follow(&preserved_path)
+            {
+                Ok(preserved) => preserved,
+                Err(_) => return Ok(false),
+            };
+            match (
+                crate::agent_checkpoint::file_identity(&meta),
+                crate::agent_checkpoint::file_identity(&preserved),
+            ) {
+                (Ok(meta_identity), Ok(preserved_identity)) => meta_identity == preserved_identity,
+                _ => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
+            }
+        }
+        Err(_) => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
+    };
+    if !archive_matches {
+        return Ok(false);
+    }
+    let directory_handle = shared
+        .backend
+        .open_directory(directory)
+        .map_err(|_| CreationError::Retry(PersistenceFailureKind::Open))?;
+    shared
+        .backend
+        .sync_all(&directory_handle)
+        .map_err(|_| CreationError::Retry(PersistenceFailureKind::Sync))?;
+
+    Ok(true)
 }
 
 fn transfer_or_release(shared: &Shared, mut job: FrameJob, debts: &mut VecDeque<DurabilityDebt>) {
