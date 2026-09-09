@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "tau-blocking-notify-channel": "=0.1.0",
-        "tau-proto": "=0.1.1",
+        "tau-proto": "=0.2.0",
     },
 }
 
@@ -144,7 +144,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(4, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(5, 0));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 EOF

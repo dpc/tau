@@ -20,20 +20,20 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-The protocol `4.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
-`0.1.1`, with their unchanged leaf dependencies remaining at
-`dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. This major
-revision adds typed local-summary continuation requests and their durable
-successor trigger. Older providers could silently ignore the continuation
-request and redraft instead; older UI clients cannot decode the trigger. All
-`3.x` extensions and UI clients are therefore rejected before configuration
-and must be rebuilt or updated together with the harness.
+The protocol `5.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
+`0.2.0`, with their unchanged leaf dependencies remaining at
+`dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Protocol 5
+removes the obsolete delegate-progress compatibility surface and adds the
+closed provider-attempt timing capture classification. Extensions and UI
+clients compiled for protocol 4 are rejected before configuration and must be
+rebuilt or updated together with the harness.
 
 Cargo package versions describe Rust source API compatibility. During the
-pre-1.0 series, compatible releases remain within `0.1.x`; a source-incompatible
-SDK API change requires `0.2.0`. Workspace dependencies use both a local path
-and an ordinary Cargo version requirement, so local builds use sibling source
-while published packages resolve the registry release.
+pre-1.0 series, compatible releases remain within the current `0.x` minor
+line; a source-incompatible SDK API change increments that minor version.
+Workspace dependencies use both a local path and an ordinary Cargo version
+requirement, so local builds use sibling source while published packages
+resolve the registry release.
 
 The protocol revision is independent of every Cargo package version. A package
 release does not require a protocol bump unless the harness-extension boundary
@@ -57,9 +57,9 @@ manifests, and builds a small consumer outside the workspace against the exact
 archives. Before the first registry release, the consumer uses temporary Cargo
 patches to stand in for the unpublished packages.
 
-For the protocol `4.0` release, the leaf versions are already published.
-Dry-run and upload `dpc-tau-proto` `0.1.1`, verify that registry release, then
-dry-run and upload `dpc-tau-client` `0.1.1`. Each `cargo publish --dry-run`
+For the protocol `5.0` release, the leaf versions are already published.
+Dry-run and upload `dpc-tau-proto` `0.2.0`, verify that registry release, then
+dry-run and upload `dpc-tau-client` `0.2.0`. Each `cargo publish --dry-run`
 must immediately precede its upload; do not upload a package whose current
 dry-run fails.
 
