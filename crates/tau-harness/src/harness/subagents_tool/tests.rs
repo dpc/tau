@@ -2,6 +2,25 @@ use std::collections as path_std_collections;
 
 use super::*;
 
+/// Only cross-major target admission produces the caller-visible warning
+/// header; compatible and same-major peers retain the existing response.
+#[test]
+fn external_message_protocol_warning_is_major_skew_only() {
+    let local = tau_proto::ProtocolVersion::new(5, 0);
+    assert_eq!(external_message_protocol_warning(None, local), None);
+    assert_eq!(
+        external_message_protocol_warning(Some(tau_proto::ProtocolVersion::new(5, 7)), local),
+        None
+    );
+    assert_eq!(
+        external_message_protocol_warning(Some(tau_proto::ProtocolVersion::new(4, 9)), local)
+            .as_deref(),
+        Some(
+            "WARNING: target harness protocol 4.9 is major-incompatible with local protocol 5.0; delivery was attempted best-effort"
+        )
+    );
+}
+
 /// A terminal-incomplete provider snapshot is final for its exact prompt and
 /// cannot be replaced by a later retry, error, or blocked observation.
 #[test]

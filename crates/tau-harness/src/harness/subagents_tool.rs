@@ -2325,7 +2325,8 @@ impl Harness {
         thread::spawn(move || {
             let _permit = permit;
             let auth_message_id = request.message_id.clone();
-            let result = send_external_agent_message_request(request.clone(), &cancellation);
+            let (result, protocol_warning) =
+                send_external_agent_message_request(request.clone(), &cancellation);
             if let Some(completion) = completion {
                 let _ = tx.send(HarnessEvent::Command(
                     HarnessCommand::ExternalMessageToolCompleted(Box::new(
@@ -2337,6 +2338,7 @@ impl Harness {
                             tool_name: completion.tool_name,
                             tool_type: completion.tool_type,
                             result,
+                            protocol_warning,
                             details: completion.details,
                             auth_message_id,
                             publish_sent,
@@ -3743,30 +3745,97 @@ fn authenticate_external_agent_message_sender(
 fn send_external_agent_message_request(
     request: tau_proto::ExternalAgentMessageRequest,
     cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
-) -> Result<(AgentId, bool), ExternalMessageDeliveryError> {
+) -> (
+    Result<(AgentId, bool), ExternalMessageDeliveryError>,
+    Option<String>,
+) {
+    let result = send_external_agent_message_request_inner(request, cancelled);
+    match result {
+        Ok(success) => (
+            Ok((success.recipient_id, success.started)),
+            success.protocol_warning,
+        ),
+        Err(failure) => (Err(failure.error), failure.protocol_warning),
+    }
+}
+
+/// Successful target delivery plus any warning learned during admission.
+struct ExternalMessageDeliverySuccess {
+    /// Canonical recipient returned by the target harness.
+    recipient_id: AgentId,
+    /// Whether target routing created the recipient.
+    started: bool,
+    /// Best-effort major-skew warning for the caller.
+    protocol_warning: Option<String>,
+}
+
+/// Failed target delivery plus any warning learned before the failure.
+struct ExternalMessageDeliveryFailure {
+    /// Truthful transport, schema, authentication, or target failure.
+    error: ExternalMessageDeliveryError,
+    /// Best-effort major-skew warning retained for the caller.
+    protocol_warning: Option<String>,
+}
+
+fn external_message_delivery_failure(
+    error: ExternalMessageDeliveryError,
+    protocol_warning: Option<String>,
+) -> ExternalMessageDeliveryFailure {
+    ExternalMessageDeliveryFailure {
+        error,
+        protocol_warning,
+    }
+}
+
+fn send_external_agent_message_request_inner(
+    request: tau_proto::ExternalAgentMessageRequest,
+    cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
+) -> Result<ExternalMessageDeliverySuccess, ExternalMessageDeliveryFailure> {
     let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
     let harness_path =
         bounded_runtime_lookup(request.recipient_session_id.as_str(), deadline, cancelled)
-            .map_err(|err| ExternalMessageDeliveryError::Local(err.to_string()))?
+            .map_err(|err| {
+                external_message_delivery_failure(
+                    ExternalMessageDeliveryError::Local(err.to_string()),
+                    None,
+                )
+            })?
             .ok_or_else(|| {
-                ExternalMessageDeliveryError::Local(format!(
-                    "no running daemon for session `{}`",
-                    request.recipient_session_id
-                ))
+                external_message_delivery_failure(
+                    ExternalMessageDeliveryError::Local(format!(
+                        "no running daemon for session `{}`",
+                        request.recipient_session_id
+                    )),
+                    None,
+                )
             })?;
     let socket = crate::runtime_dir::socket_path(&harness_path);
-    check_peer_io_active(deadline, cancelled).map_err(ExternalMessageDeliveryError::Local)?;
+    check_peer_io_active(deadline, cancelled).map_err(|error| {
+        external_message_delivery_failure(ExternalMessageDeliveryError::Local(error), None)
+    })?;
     let mut peer = tau_socket::SocketPeer::connect_with_io_timeout(
         &socket,
         deadline.saturating_duration_since(Instant::now()),
     )
     .map_err(|err| {
-        ExternalMessageDeliveryError::Local(format!("failed to connect to target harness: {err}"))
+        external_message_delivery_failure(
+            ExternalMessageDeliveryError::Local(format!(
+                "failed to connect to target harness: {err}"
+            )),
+            None,
+        )
     })?;
-    check_peer_io_active(deadline, cancelled).map_err(ExternalMessageDeliveryError::Local)?;
+    check_peer_io_active(deadline, cancelled).map_err(|error| {
+        external_message_delivery_failure(ExternalMessageDeliveryError::Local(error), None)
+    })?;
     peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|err| {
-            ExternalMessageDeliveryError::Local(format!("failed to set peer send deadline: {err}"))
+            external_message_delivery_failure(
+                ExternalMessageDeliveryError::Local(format!(
+                    "failed to set peer send deadline: {err}"
+                )),
+                None,
+            )
         })?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         declaration_inspection: false,
@@ -3775,79 +3844,140 @@ fn send_external_agent_message_request(
             crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
         )
         .map_err(|error| {
-            ExternalMessageDeliveryError::Local(format!(
-                "invalid external-message client name: {error}"
-            ))
+            external_message_delivery_failure(
+                ExternalMessageDeliveryError::Local(format!(
+                    "invalid external-message client name: {error}"
+                )),
+                None,
+            )
         })?,
         client_kind: tau_proto::ClientKind::External,
         expected_session_id: Some(request.recipient_session_id.clone()),
         capabilities: Default::default(),
     }))
     .map_err(|err| {
-        ExternalMessageDeliveryError::Local(format!("failed to send external message hello: {err}"))
+        external_message_delivery_failure(
+            ExternalMessageDeliveryError::Local(format!(
+                "failed to send external message hello: {err}"
+            )),
+            None,
+        )
     })?;
-    await_exact_session_acceptance(
+    let peer_protocol_version = await_exact_session_acceptance(
         &mut peer,
         &request.recipient_session_id,
         deadline,
         cancelled,
     )
-    .map_err(ExternalMessageDeliveryError::Local)?;
-    check_peer_io_active(deadline, cancelled).map_err(ExternalMessageDeliveryError::Local)?;
+    .map_err(|error| {
+        external_message_delivery_failure(ExternalMessageDeliveryError::Local(error), None)
+    })?;
+    let protocol_warning =
+        external_message_protocol_warning(peer_protocol_version, tau_proto::PROTOCOL_VERSION);
+    check_peer_io_active(deadline, cancelled).map_err(|error| {
+        external_message_delivery_failure(
+            ExternalMessageDeliveryError::Local(error),
+            protocol_warning.clone(),
+        )
+    })?;
     peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|err| {
-            ExternalMessageDeliveryError::Local(format!("failed to set peer send deadline: {err}"))
+            external_message_delivery_failure(
+                ExternalMessageDeliveryError::Local(format!(
+                    "failed to set peer send deadline: {err}"
+                )),
+                protocol_warning.clone(),
+            )
         })?;
     peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
         request.clone(),
     ))
     .map_err(|err| {
-        ExternalMessageDeliveryError::Local(format!(
-            "failed to send external message request: {err}"
-        ))
+        external_message_delivery_failure(
+            ExternalMessageDeliveryError::Local(format!(
+                "failed to send external message request: {err}"
+            )),
+            protocol_warning.clone(),
+        )
     })?;
     loop {
-        check_peer_io_active(deadline, cancelled).map_err(ExternalMessageDeliveryError::Local)?;
+        check_peer_io_active(deadline, cancelled).map_err(|error| {
+            external_message_delivery_failure(
+                ExternalMessageDeliveryError::Local(error),
+                protocol_warning.clone(),
+            )
+        })?;
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(ExternalMessageDeliveryError::Local(format!(
-                "timed out after {}s waiting for external message result",
-                EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT.as_secs()
-            )));
+            return Err(external_message_delivery_failure(
+                ExternalMessageDeliveryError::Local(format!(
+                    "timed out after {}s waiting for external message result",
+                    EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT.as_secs()
+                )),
+                protocol_warning,
+            ));
         };
         match peer
             .recv_timeout(timeout.min(Duration::from_millis(100)))
             .map_err(|err| {
-                ExternalMessageDeliveryError::Local(format!(
-                    "failed to receive external message result: {err}"
-                ))
+                external_message_delivery_failure(
+                    ExternalMessageDeliveryError::Local(format!(
+                        "failed to receive external message result: {err}"
+                    )),
+                    protocol_warning.clone(),
+                )
             })? {
             tau_socket::SocketReceive::Message {
                 message: tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(result),
             } if result.request_id == request.request_id => {
                 if let Some(failure) = result.failure {
-                    return Err(ExternalMessageDeliveryError::Target(failure));
+                    return Err(external_message_delivery_failure(
+                        ExternalMessageDeliveryError::Target(failure),
+                        protocol_warning,
+                    ));
                 }
-                return result
-                    .recipient_id
-                    .map(|recipient_id| (recipient_id, result.started))
-                    .ok_or_else(|| {
+                return match result.recipient_id {
+                    Some(recipient_id) => Ok(ExternalMessageDeliverySuccess {
+                        recipient_id,
+                        started: result.started,
+                        protocol_warning,
+                    }),
+                    None => Err(external_message_delivery_failure(
                         ExternalMessageDeliveryError::Local(
                             "target harness returned success without a resolved recipient"
                                 .to_owned(),
-                        )
-                    });
+                        ),
+                        protocol_warning,
+                    )),
+                };
             }
             tau_socket::SocketReceive::Message { .. } => continue,
             tau_socket::SocketReceive::Timeout => {
                 continue;
             }
             tau_socket::SocketReceive::Closed => {
-                return Err(ExternalMessageDeliveryError::Local(
-                    "target harness closed before external message result".to_owned(),
+                return Err(external_message_delivery_failure(
+                    ExternalMessageDeliveryError::Local(
+                        "target harness closed before external message result".to_owned(),
+                    ),
+                    protocol_warning,
                 ));
             }
         }
     }
+}
+
+/// Returns the warning header for a target harness on another major revision.
+fn external_message_protocol_warning(
+    peer_version: Option<tau_proto::ProtocolVersion>,
+    local_version: tau_proto::ProtocolVersion,
+) -> Option<String> {
+    peer_version
+        .filter(|peer_version| peer_version.major != local_version.major)
+        .map(|peer_version| {
+            format!(
+                "WARNING: target harness protocol {peer_version} is major-incompatible with local protocol {local_version}; delivery was attempted best-effort"
+            )
+        })
 }
 
 /// Waits for the exact-session admission acknowledgement before peer semantics.
@@ -3856,7 +3986,7 @@ fn await_exact_session_acceptance(
     session_id: &tau_proto::SessionId,
     deadline: Instant,
     cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
-) -> Result<(), String> {
+) -> Result<Option<tau_proto::ProtocolVersion>, String> {
     loop {
         check_peer_io_active(deadline, cancelled)?;
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
@@ -3868,7 +3998,9 @@ fn await_exact_session_acceptance(
         {
             tau_socket::SocketReceive::Message {
                 message: tau_proto::HarnessOutputMessage::SessionAccepted(accepted),
-            } if accepted.session_id == *session_id => return Ok(()),
+            } if accepted.session_id == *session_id => {
+                return Ok(accepted.harness_protocol_version);
+            }
             tau_socket::SocketReceive::Message {
                 message: tau_proto::HarnessOutputMessage::Disconnect(disconnect),
             } => {

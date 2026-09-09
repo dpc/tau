@@ -762,6 +762,7 @@ fn external_message_no_receiver_failure_is_actionable_to_caller() {
                 result: Err(path_crate_event::ExternalMessageDeliveryError::Target(
                     tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver,
                 )),
+                protocol_warning: None,
                 details: CborValue::Null,
                 auth_message_id: tau_proto::AgentMessageId::parse("no-receiver-message")
                     .expect("test identifier must satisfy its grammar"),
@@ -788,6 +789,121 @@ fn external_message_no_receiver_failure_is_actionable_to_caller() {
     );
     assert!(session_agent_message_sent_events(&h).is_empty());
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A target major-version warning must remain the first caller-visible text
+/// even when the attempted delivery reports its real target failure.
+#[test]
+fn external_message_major_skew_warning_headers_real_failure() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: tau_proto::ToolCallId = "external-message-skew-failure".into();
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    let warning = "WARNING: target harness protocol 4.9 is major-incompatible with local protocol 5.0; delivery was attempted best-effort";
+
+    h.handle_harness_command(
+        path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
+            crate::event::ExternalMessageToolCompletedCommand {
+                _permit: None,
+                conversation_id: cid,
+                session_generation: h.session_runtime.current_session_generation,
+                call_id: call_id.clone(),
+                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+                tool_type: tau_proto::ToolType::Function,
+                result: Err(path_crate_event::ExternalMessageDeliveryError::Target(
+                    tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver,
+                )),
+                protocol_warning: Some(warning.to_owned()),
+                details: CborValue::Null,
+                auth_message_id: tau_proto::AgentMessageId::parse("skew-failure-message")
+                    .expect("test identifier must satisfy its grammar"),
+                publish_sent: true,
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient_session_id: test_session_id("skewed-session"),
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "hello".to_owned(),
+            },
+        )),
+    )
+    .expect("handle completion");
+
+    let error = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ToolError(error) if error.call_id == call_id => Some(error.message),
+            _ => None,
+        })
+        .expect("caller-visible tool error");
+    assert_eq!(
+        error,
+        format!("{warning}\n\ntarget live; no receiver; set `inter_session_receiver`")
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A successful best-effort cross-major delivery must retain the warning as
+/// the status header while reporting the actual committed recipient.
+#[test]
+fn external_message_major_skew_warning_headers_success() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: tau_proto::ToolCallId = "external-message-skew-success".into();
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    let warning = "WARNING: target harness protocol 4.9 is major-incompatible with local protocol 5.0; delivery was attempted best-effort";
+
+    h.handle_harness_command(
+        path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
+            crate::event::ExternalMessageToolCompletedCommand {
+                _permit: None,
+                conversation_id: cid,
+                session_generation: h.session_runtime.current_session_generation,
+                call_id: call_id.clone(),
+                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+                tool_type: tau_proto::ToolType::Function,
+                result: Ok((crate::parse_agent_id("recipient"), false)),
+                protocol_warning: Some(warning.to_owned()),
+                details: CborValue::Null,
+                auth_message_id: tau_proto::AgentMessageId::parse("skew-success-message")
+                    .expect("test identifier must satisfy its grammar"),
+                publish_sent: true,
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient_session_id: test_session_id("skewed-session"),
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "hello".to_owned(),
+            },
+        )),
+    )
+    .expect("handle completion");
+
+    let status = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ToolResult(result) if result.call_id == call_id => {
+                let CborValue::Map(entries) = result.result else {
+                    panic!("expected structured message result");
+                };
+                entries.into_iter().find_map(|(key, value)| {
+                    (key == CborValue::Text("status".to_owned())).then_some(value)
+                })
+            }
+            _ => None,
+        })
+        .expect("caller-visible status");
+    assert_eq!(
+        status,
+        CborValue::Text(format!(
+            "{warning}\n\nMessage committed: skew-success-message; recipient was live; response not guaranteed"
+        ))
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -830,6 +946,7 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                     tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
                     tool_type: tau_proto::ToolType::Function,
                     result: Ok((crate::parse_agent_id(recipient_id), started)),
+                    protocol_warning: None,
                     details: CborValue::Null,
                     auth_message_id: tau_proto::AgentMessageId::parse(message_id)
                         .expect("test identifier must satisfy its grammar"),

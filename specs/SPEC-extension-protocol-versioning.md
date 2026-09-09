@@ -19,8 +19,10 @@ Protocol 5.0 removes the obsolete `tool.delegate_progress` event schema and adds
 the closed `provider_attempt_timing` private capture class. Major skew rejection
 prevents a 4.x peer from sending the formerly valid event or receiving the new
 capture class through a decoder that cannot represent the compiled contract.
-Extensions and UI clients must be rebuilt or updated with the harness before
-activation.
+Configured extensions must be rebuilt or updated with the harness before
+activation. UI and dedicated cross-harness message connections instead continue
+best-effort with a visible warning because partial interactive access and simple
+message delivery are preferable to deliberate rejection.
 
 The current Protocol 5.0 contract also rejects obsolete standalone-compaction
 event shapes without another revision bump. Canonical compaction boundaries,
@@ -50,9 +52,14 @@ configuration:
 - equal revisions continue without a warning;
 - equal majors with different minors continue best-effort in either direction.
   A harness-launched configured extension emits one concise visible warning for
-  that connection; generic socket peers do not add a harness scrollback notice;
-- different majors reject the connection before configuration, declarations,
-  subscriptions, or extension state initialization.
+  that connection;
+- different majors reject configured extensions before configuration,
+  declarations, subscriptions, or extension state initialization;
+- UI connections continue across any revision skew and receive a directed visible
+  warning after exact-session admission when applicable;
+- dedicated cross-harness message connections continue across major skew. The
+  initiating message tool reports a warning header while preserving the actual
+  delivery success or failure.
 
 The configured-extension diagnostic concisely identifies the peer and both
 revisions. A major-skew diagnostic also says that the peer was rejected;
@@ -63,15 +70,15 @@ Admission adds no negotiation round trip, and Configure remains the first harnes
 response to an admitted configured extension.
 
 This policy changes neither session-target validation nor capability, cleanup,
-security, and connection-ownership semantics. It makes no compatibility
-guarantee after a minor-skew admission and does not version or migrate journals.
+security, and connection-ownership semantics. Best-effort admission makes no
+compatibility guarantee: actual wire decoding, transport, authentication, and
+delivery failures remain failures. It does not version or migrate journals.
 
 Socket UI admission additionally returns the harness revision in the existing
 `SessionAccepted` acknowledgement. Protocol 4.0 acknowledgements omit the
 optional field; newer UIs treat absence as lacking later UI controls. This
 allows a newer UI to withhold an additive request from an older harness while
-older UIs and extensions continue best-effort against the newer harness without
-another negotiation round trip. Socket clients may use the acknowledgement for
-client-local compatibility UX, while the harness remains silent for their
-same-major minor skew. Configured extensions still receive Configure as their
-first harness response.
+UIs continue best-effort against a differently versioned harness without another
+negotiation round trip. The harness sends a directed warning after the
+acknowledgement for version-skewed UI connections. Configured extensions still
+receive Configure as their first harness response.

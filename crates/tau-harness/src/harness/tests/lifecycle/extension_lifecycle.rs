@@ -1984,126 +1984,188 @@ fn client_requested_disconnect_does_not_drain_stalled_writer() {
     assert_eq!(served_clients, 1);
 }
 
-/// A protocol mismatch is client-local and must not depend on unrelated
-/// configured-extension startup or disconnect another client.
+/// A major-skew UI must remain usable and receive its directed warning after
+/// exact-session socket admission.
 #[test]
-fn client_hello_protocol_mismatch_disconnects_only_client() {
+fn client_hello_major_protocol_mismatch_warns_and_continues() {
     let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(sp.join("config")),
-        state_dir: Some(sp.join("runtime")),
-    };
-    let mut h = Harness::from_config_without_startup_environment(
-        &Config::default(),
-        &sp,
-        dirs,
-        "s1",
-        tau_proto::SessionStartReason::Initial,
-        crate::HarnessStorageMode::Durable,
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let (server, client) = UnixStream::pair().expect("socket pair");
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let client_id = h.accept_client(server).expect("accept socket UI");
+    let mut output = HarnessOutputReader::new(BufReader::new(client));
+    let session_id = h.session_runtime.current_session_id.clone();
+    let peer_version = tau_proto::ProtocolVersion::new(tau_proto::PROTOCOL_VERSION.major + 1, 0);
+    let message = HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
+        protocol_version: peer_version,
+        client_name: crate::test_extension_name("stale-ui"),
+        client_kind: tau_proto::ClientKind::Ui,
+        expected_session_id: Some(session_id.clone()),
+        capabilities: Default::default(),
+    });
+    let frame_bytes = lifecycle_input_frame_bytes(&message);
+    let mut served_clients = 0;
+
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(message),
+        frame_bytes,
+        &mut served_clients,
     )
-    .expect("start extensionless harness");
-    let observer = connect_test_client(&mut h, "observer", tau_proto::ClientKind::Ui);
-    let events = connect_test_client(&mut h, "stale-ui", tau_proto::ClientKind::Ui);
+    .expect("major-skew UI hello should continue best-effort");
 
-    let keep = h
-        .handle_client_event(
-            "stale-ui",
-            TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
-                declaration_inspection: false,
-                protocol_version: tau_proto::ProtocolVersion::new(
-                    tau_proto::PROTOCOL_VERSION.major + 1,
-                    0,
-                ),
-                client_name: crate::test_extension_name("stale-ui"),
-                client_kind: tau_proto::ClientKind::Ui,
-                expected_session_id: None,
-                capabilities: Default::default(),
-            })),
+    assert_eq!(served_clients, 0);
+    assert!(!h.ui_runtime.pending_socket_admission.contains(&client_id));
+    assert!(h.runtime_io.bus.connection(&client_id).is_some());
+    assert!(matches!(
+        output.read_message().expect("read session acceptance"),
+        Some(HarnessOutputMessage::SessionAccepted(accepted))
+            if accepted.session_id == session_id
+    ));
+    let warning = output
+        .read_message()
+        .expect("read protocol warning")
+        .expect("protocol warning frame");
+    let Some(Event::HarnessNotice(warning)) = peel_inner_event(&warning) else {
+        panic!("expected warning immediately after admission, got {warning:?}");
+    };
+    assert_eq!(warning.level, tau_proto::NoticeLevel::Warning);
+    assert_eq!(
+        warning.message,
+        format!(
+            "`stale-ui`, major protocol mismatch {peer_version} vs harness {}; continuing best-effort",
+            tau_proto::PROTOCOL_VERSION,
         )
-        .expect("mismatched ui hello should not fail harness");
-
-    assert!(!keep);
-    let events = events.lock().expect("events");
-    let expected_reason = format!(
-        "participant error: `stale-ui`, major protocol mismatch {} vs harness {}; rejected",
-        tau_proto::ProtocolVersion::new(tau_proto::PROTOCOL_VERSION.major + 1, 0),
-        tau_proto::PROTOCOL_VERSION,
     );
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.frame,
-            HarnessOutputMessage::Disconnect(disconnect)
-                if disconnect
-                    .reason
-                    .as_deref()
-                    .is_some_and(|reason| reason == expected_reason)
-        )),
-        "expected disconnect for stale UI, got: {events:?}"
-    );
-    assert!(
-        observer.lock().expect("observer events").is_empty(),
-        "a client-local rejection must not disconnect another client"
-    );
+    h.shutdown().expect("shutdown");
 }
 
-/// Generic same-major minor-skew peers remain admitted without adding a
-/// scrollback warning, including after reconnecting with the same connection
-/// id.
+/// A dedicated cross-harness messaging client must pass major-skew socket
+/// admission and reach its restricted RPC surface instead of being closed.
 #[test]
-fn client_minor_protocol_skew_continues_without_notice() {
+fn external_message_client_major_protocol_mismatch_reaches_rpc_surface() {
     let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(sp.join("config")),
-        state_dir: Some(sp.join("runtime")),
-    };
-    let mut h = Harness::from_config_without_startup_environment(
-        &Config::default(),
-        &sp,
-        dirs,
-        "s1",
-        tau_proto::SessionStartReason::Initial,
-        crate::HarnessStorageMode::Durable,
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let (server, client) = UnixStream::pair().expect("socket pair");
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let client_id = h.accept_client(server).expect("accept external socket");
+    let mut output = HarnessOutputReader::new(BufReader::new(client));
+    let session_id = h.session_runtime.current_session_id.clone();
+    let hello = HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
+        protocol_version: tau_proto::ProtocolVersion::new(tau_proto::PROTOCOL_VERSION.major + 1, 0),
+        client_name: crate::test_extension_name(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME),
+        client_kind: tau_proto::ClientKind::External,
+        expected_session_id: Some(session_id.clone()),
+        capabilities: Default::default(),
+    });
+    let hello_bytes = lifecycle_input_frame_bytes(&hello);
+    let mut served_clients = 0;
+
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(hello),
+        hello_bytes,
+        &mut served_clients,
     )
-    .expect("start extensionless harness");
-    let connection_id = crate::test_connection_id("skew-ui");
-    let skewed_hello = || {
-        TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
-            declaration_inspection: false,
-            protocol_version: tau_proto::ProtocolVersion::new(
-                tau_proto::PROTOCOL_VERSION.major,
-                tau_proto::PROTOCOL_VERSION.minor + 1,
-            ),
-            client_name: crate::test_extension_name("skew-ui"),
-            client_kind: tau_proto::ClientKind::Ui,
-            expected_session_id: None,
-            capabilities: Default::default(),
-        }))
-    };
+    .expect("major-skew external-message admission");
+    let probe = HarnessInputMessage::PeerSessionProbe(tau_proto::PeerSessionProbe {
+        request_id: "major-skew-probe".to_owned(),
+        session_id: session_id.clone(),
+    });
+    let probe_bytes = lifecycle_input_frame_bytes(&probe);
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(probe),
+        probe_bytes,
+        &mut served_clients,
+    )
+    .expect("restricted peer RPC remains usable");
+
+    assert_eq!(served_clients, 0);
+    assert!(!h.ui_runtime.pending_socket_admission.contains(&client_id));
+    assert!(h.peer_messaging.external_message_peers.contains(&client_id));
+    assert!(matches!(
+        output.read_message().expect("read acceptance"),
+        Some(HarnessOutputMessage::SessionAccepted(accepted))
+            if accepted.session_id == session_id
+                && accepted.harness_protocol_version == Some(tau_proto::PROTOCOL_VERSION)
+    ));
+    assert!(matches!(
+        output.read_message().expect("read probe result"),
+        Some(HarnessOutputMessage::PeerSessionProbeResult(result))
+            if result.request_id == "major-skew-probe"
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+/// A minor-skew socket UI remains admitted and receives the same ordered
+/// directed warning as a major-skew UI.
+#[test]
+fn client_minor_protocol_skew_warns_and_continues() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let (server, client) = UnixStream::pair().expect("socket pair");
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let client_id = h.accept_client(server).expect("accept socket UI");
+    let mut output = HarnessOutputReader::new(BufReader::new(client));
+    let session_id = h.session_runtime.current_session_id.clone();
+    let peer_version = tau_proto::ProtocolVersion::new(
+        tau_proto::PROTOCOL_VERSION.major,
+        tau_proto::PROTOCOL_VERSION.minor + 1,
+    );
+    let hello = HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
+        protocol_version: peer_version,
+        client_name: crate::test_extension_name("skew-ui"),
+        client_kind: tau_proto::ClientKind::Ui,
+        expected_session_id: Some(session_id.clone()),
+        capabilities: Default::default(),
+    });
+    let frame_bytes = lifecycle_input_frame_bytes(&hello);
+    let mut served_clients = 0;
     let notices_before = h.runtime_io.replayable_harness_notices.len();
-    connect_test_client(&mut h, "skew-ui", tau_proto::ClientKind::Ui);
 
-    for _ in 0..2 {
-        assert!(
-            h.handle_client_event("skew-ui", skewed_hello())
-                .expect("minor skew continues")
-        );
-    }
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(hello),
+        frame_bytes,
+        &mut served_clients,
+    )
+    .expect("minor-skew UI continues");
+
+    assert_eq!(served_clients, 0);
+    assert!(!h.ui_runtime.pending_socket_admission.contains(&client_id));
     assert_eq!(
         h.runtime_io.replayable_harness_notices.len(),
         notices_before
     );
-
-    h.handle_disconnect(&connection_id);
-    connect_test_client(&mut h, "skew-ui", tau_proto::ClientKind::Ui);
-    assert!(
-        h.handle_client_event("skew-ui", skewed_hello())
-            .expect("reconnected minor skew continues")
-    );
+    assert!(matches!(
+        output.read_message().expect("read acceptance"),
+        Some(HarnessOutputMessage::SessionAccepted(accepted))
+            if accepted.session_id == session_id
+    ));
+    let warning = output
+        .read_message()
+        .expect("read protocol warning")
+        .expect("protocol warning frame");
+    let Some(Event::HarnessNotice(warning)) = peel_inner_event(&warning) else {
+        panic!("expected warning immediately after admission, got {warning:?}");
+    };
+    assert_eq!(warning.level, tau_proto::NoticeLevel::Warning);
     assert_eq!(
-        h.runtime_io.replayable_harness_notices.len(),
-        notices_before
+        warning.message,
+        format!(
+            "`skew-ui`, minor protocol mismatch {peer_version} vs harness {}; continuing best-effort",
+            tau_proto::PROTOCOL_VERSION,
+        )
     );
     h.shutdown().expect("shutdown");
 }
@@ -7629,16 +7691,15 @@ fn hello_protocol_version_admission_matrix_is_explicit() {
     }
 }
 
-/// Current protocol admission remains major-incompatible with protocol-three
-/// peers after the current protocol-five compaction-shape removal.
+/// Configured extension kinds remain major-incompatible after the current
+/// protocol-five compaction-shape removal.
 #[test]
-fn local_summary_continuation_rejects_protocol_three_peers() {
+fn configured_extension_admission_rejects_protocol_three_peers() {
     assert_eq!(tau_proto::PROTOCOL_VERSION.major, 5);
     for client_kind in [
         tau_proto::ClientKind::Provider,
         tau_proto::ClientKind::Tool,
         tau_proto::ClientKind::Core,
-        tau_proto::ClientKind::Ui,
     ] {
         let hello = tau_proto::Hello {
             declaration_inspection: false,
@@ -7650,6 +7711,50 @@ fn local_summary_continuation_rejects_protocol_three_peers() {
         };
         assert!(validate_protocol_version_against(&hello, tau_proto::PROTOCOL_VERSION).is_err());
     }
+}
+
+/// A configured extension's actual startup path must reject major skew before
+/// sending Configure or moving the extension to handshaking.
+#[test]
+fn extension_major_protocol_skew_remains_blocked_before_configuration() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let sink = connect_handshaking_tool(&mut h, "configured-major-skew");
+    h.extensions
+        .entries
+        .get_mut("configured-major-skew")
+        .expect("extension")
+        .state = ExtensionState::Spawning;
+
+    h.handle_extension_message(
+        &crate::test_connection_id("configured-major-skew"),
+        TestMessage::Hello(tau_proto::Hello {
+            declaration_inspection: false,
+            protocol_version: tau_proto::ProtocolVersion::new(
+                tau_proto::PROTOCOL_VERSION.major + 1,
+                0,
+            ),
+            client_name: crate::test_extension_name("major-skew-peer"),
+            client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
+            capabilities: Default::default(),
+        }),
+    )
+    .expect("protocol failure remains extension-local");
+
+    assert!(
+        sink.lock().expect("extension frames").is_empty(),
+        "major-skew extension must not receive Configure"
+    );
+    assert_ne!(
+        h.extensions
+            .entries
+            .get("configured-major-skew")
+            .expect("extension")
+            .state,
+        ExtensionState::Handshaking
+    );
+    h.shutdown().expect("shutdown");
 }
 
 /// A same-major configured extension remains admitted across minor skew,

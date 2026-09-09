@@ -1479,6 +1479,42 @@ fn validate_protocol_version(hello: &Hello) -> Result<Option<String>, HarnessErr
     validate_protocol_version_for_display(hello, &hello.client_name, PROTOCOL_VERSION)
 }
 
+/// Validates a socket client's version while allowing the two best-effort
+/// interactive/coordination paths explicitly permitted across major skew.
+fn validate_socket_protocol_version(hello: &Hello) -> Result<Option<String>, HarnessError> {
+    let best_effort_major_skew = hello.client_kind == ClientKind::Ui
+        || (hello.client_kind == ClientKind::External
+            && hello.client_name.as_str() == EXTERNAL_AGENT_MESSAGE_CLIENT_NAME);
+    if best_effort_major_skew {
+        return Ok(protocol_version_skew_warning(
+            hello,
+            &hello.client_name,
+            PROTOCOL_VERSION,
+        ));
+    }
+    validate_protocol_version(hello)
+}
+
+/// Returns the concise caller-visible warning for any protocol revision skew.
+fn protocol_version_skew_warning(
+    hello: &Hello,
+    display_name: &tau_proto::ExtensionName,
+    harness_version: tau_proto::ProtocolVersion,
+) -> Option<String> {
+    if hello.protocol_version == harness_version {
+        return None;
+    }
+    let skew = if hello.protocol_version.major == harness_version.major {
+        "minor"
+    } else {
+        "major"
+    };
+    Some(format!(
+        "`{display_name}`, {skew} protocol mismatch {} vs harness {harness_version}; continuing best-effort",
+        hello.protocol_version,
+    ))
+}
+
 #[cfg(test)]
 fn validate_protocol_version_against(
     hello: &Hello,
@@ -3004,16 +3040,19 @@ impl Harness {
         }
         match message {
             HarnessInputMessage::Hello(hello) => {
-                if let Err(error) = validate_protocol_version(&hello) {
-                    let _ = self.runtime_io.bus.send_to(
-                        client_id,
-                        None,
-                        HarnessOutputMessage::Disconnect(Disconnect {
-                            reason: Some(error.to_string()),
-                        }),
-                    );
-                    return Ok(ClientMessageDisposition::CloseAfterReply);
-                }
+                let protocol_version_warning = match validate_socket_protocol_version(&hello) {
+                    Ok(warning) => warning,
+                    Err(error) => {
+                        let _ = self.runtime_io.bus.send_to(
+                            client_id,
+                            None,
+                            HarnessOutputMessage::Disconnect(Disconnect {
+                                reason: Some(error.to_string()),
+                            }),
+                        );
+                        return Ok(ClientMessageDisposition::CloseAfterReply);
+                    }
+                };
                 let socket_connection = self
                     .runtime_io
                     .bus
@@ -3072,6 +3111,21 @@ impl Harness {
                     self.ui_runtime
                         .runtime_probe_peers
                         .insert(client_id.clone());
+                }
+                if hello.client_kind == ClientKind::Ui
+                    && let Some(warning) = protocol_version_warning
+                {
+                    self.runtime_io.bus.send_to(
+                        client_id,
+                        None,
+                        HarnessOutputMessage::deliver(Event::HarnessNotice(
+                            tau_proto::HarnessNotice::alert(
+                                tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                                warning,
+                                tau_proto::NoticeLevel::Warning,
+                            ),
+                        )),
+                    )?;
                 }
                 Ok(ClientMessageDisposition::Continue)
             }

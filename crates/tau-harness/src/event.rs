@@ -85,6 +85,8 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     pub(crate) tool_type: tau_proto::ToolType,
     /// Resolved recipient and started flag on delivery success.
     pub(crate) result: Result<(tau_proto::AgentId, bool), ExternalMessageDeliveryError>,
+    /// Caller-visible warning retained after best-effort major-skew admission.
+    pub(crate) protocol_warning: Option<String>,
     /// Original call arguments for error details.
     pub(crate) details: tau_proto::CborValue,
     /// Pending sender-authentication entry to remove when the async attempt

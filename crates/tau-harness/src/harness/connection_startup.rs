@@ -618,6 +618,11 @@ impl Harness {
                                 }),
                             );
                         }
+                        let status_header = command
+                            .protocol_warning
+                            .as_deref()
+                            .map(|warning| format!("{warning}\n\n"))
+                            .unwrap_or_default();
                         self.finish_harness_owned_tool_with_cbor_result(
                             &command.conversation_id,
                             command.call_id,
@@ -626,10 +631,10 @@ impl Harness {
                             tau_proto::CborValue::Map(vec![
                                 (
                                     tau_proto::CborValue::Text("status".to_owned()),
-                                    tau_proto::CborValue::Text(format!(
-                                        "Message committed: {}; recipient was live; response not guaranteed",
-                                        command.auth_message_id
-                                    )),
+                                     tau_proto::CborValue::Text(format!(
+                                         "{status_header}Message committed: {}; recipient was live; response not guaranteed",
+                                         command.auth_message_id
+                                     )),
                                 ),
                                 (
                                     tau_proto::CborValue::Text("message_id".to_owned()),
@@ -648,14 +653,20 @@ impl Harness {
                             None,
                         );
                     }
-                    Err(error) => self.finish_harness_owned_tool_with_error(
-                        &command.conversation_id,
-                        command.call_id,
-                        command.tool_name,
-                        command.tool_type,
-                        error.tool_message(),
-                        Some(command.details),
-                    ),
+                    Err(error) => {
+                        let message = match command.protocol_warning {
+                            Some(warning) => format!("{warning}\n\n{}", error.tool_message()),
+                            None => error.tool_message(),
+                        };
+                        self.finish_harness_owned_tool_with_error(
+                            &command.conversation_id,
+                            command.call_id,
+                            command.tool_name,
+                            command.tool_type,
+                            message,
+                            Some(command.details),
+                        );
+                    }
                 }
             }
             HarnessCommand::ExternalMessageAuthCompleted(command) => {
