@@ -1,4 +1,4 @@
-//! Offline cache evidence: canonical facts and explicitly partial legacy files.
+//! Offline cache evidence: canonical facts and explicitly partial raw captures.
 //!
 //! This first delivery deliberately does not reconstruct chains, infer
 //! attempts, expose provider IDs, or turn normalized accounting into raw
@@ -12,6 +12,7 @@ mod options;
 mod strict_json;
 #[cfg(test)]
 mod tests;
+mod timing_shape;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -88,7 +89,7 @@ impl CacheReport {
         )?;
         writeln!(
             output,
-            "Legacy capture files are not dispatch counts or exact terminal joins."
+            "Raw capture files are not dispatch counts or exact terminal joins."
         )?;
         for (reason, count) in &self.gaps {
             writeln!(output, "  {reason}: {count}")?;
@@ -288,7 +289,7 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                 "view": format!("{:?}", options.view).to_ascii_lowercase(),
                 "limits": options.limits,
                 "content_policy": "content_free_not_public_safe",
-                "capture_policy": "current_scalar_attempt_join_legacy_files_partial",
+                "capture_policy": "scalar_attempt_join_raw_files_partial",
                 "cache_diagnostic_support": {
                     "codex_inference": "metadata",
                     "public_responses_inference": "metadata",
@@ -303,6 +304,7 @@ fn prepare_cache_report(options: &CacheOptions) -> Result<CacheReport, InspectEr
                     "cache_refresh_owner_outcome": "unavailable",
                     "raw_attribution": "unavailable"
                 },
+                "provider_attempt_timing": "inventory_only",
                 "snapshot_policy": "strict_finite_agent_prefix_membership_rechecked"
                 ,"memory_policy": "conservative_journal_byte_charge_not_measured_peak_memory"
             }
@@ -532,7 +534,7 @@ fn project_agent(
                     Some(counts) if counts.request_files > 1 || counts.response_files > 1 => {
                         "capture_terminal_join_ambiguous"
                     }
-                    Some(_) => "legacy_terminal_join_unavailable",
+                    Some(_) => "capture_terminal_join_unavailable",
                 };
                 *report.gaps.entry(reason).or_default() += 1;
                 let reference = json!({"agent_id": agent, "journal_seq": record.seq});

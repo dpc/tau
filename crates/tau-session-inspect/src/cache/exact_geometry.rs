@@ -38,7 +38,8 @@ pub(super) struct ExactRequest {
     pub(super) prompt: String,
     /// Keyed provider-instance identity.
     pub(super) instance: String,
-    /// Keyed attempt identity, absent for unsupported legacy captures.
+    /// Keyed attempt identity, absent when the capture has no correlation
+    /// identity.
     pub(super) attempt: Option<String>,
     /// Actual capture dispatch index; public Responses requests deliberately
     /// lack it.

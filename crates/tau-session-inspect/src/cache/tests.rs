@@ -107,7 +107,172 @@ fn scalar_cache_capture_is_recognized_for_analysis() {
     );
     assert!(inventory.gaps.is_empty());
     assert!(!inventory.gaps.contains_key("unsupported_capture_schema"));
-    assert!(!inventory.gaps.contains_key("legacy_partial"));
+    assert!(!inventory.gaps.contains_key("raw_capture_partial"));
+}
+
+/// A mixed directory of current producer formats remains analyzable without
+/// retaining private timing dimensions or changing exact-index completeness.
+#[test]
+fn mixed_current_captures_include_timing_inventory_without_payload_export() {
+    let root = tempfile::tempdir().expect("fixture root");
+    capture(
+        root.path(),
+        "request.json.zst",
+        br#"{"session_id":"session","agent_prompt_id":"prompt","backend":"chat_completions",
+        "transport":"http-sse","model":"model","operation":"inference","logical_attempt":1,
+        "wire_dispatch_index":1,"body":{"messages":[{"content":"REQUEST_PRIVATE"}]}}"#,
+    );
+    capture_json(
+        root.path(),
+        "diagnostic.json.zst",
+        &diagnostic("dispatch", 1),
+    );
+    capture_json(root.path(), "failure.json.zst", &current_attempt_failure());
+    capture(
+        root.path(),
+        "timing.json.zst",
+        &current_attempt_timing("TIMING_PRIVATE_MODEL", "TIMING_PRIVATE_PROFILE"),
+    );
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &CacheScanLimits::default(),
+    );
+    assert_eq!(inventory.gaps, BTreeMap::from([("raw_capture_partial", 2)]));
+    assert!(inventory.index_input_complete());
+    let counts = inventory.prompts.values().next().expect("prompt inventory");
+    assert_eq!(counts.request_files, 1);
+    assert_eq!(counts.response_files, 0);
+    assert_eq!(counts.failure_files, 1);
+    assert_eq!(counts.diagnostic_files, 1);
+    assert_eq!(counts.timing_files, 1);
+    let output = serde_json::to_string(counts).expect("serialize content-free counts");
+    assert!(!output.contains("REQUEST_PRIVATE"));
+    assert!(!output.contains("TIMING_PRIVATE"));
+}
+
+/// The reader validates bytes emitted by the current timing serializer rather
+/// than accepting a hand-written approximation of its schema.
+fn current_attempt_timing(model: &str, profile: &str) -> Vec<u8> {
+    use tau_provider::private_attempt_trace::AttemptTiming;
+    use tau_provider::provider_attempt_timing::{
+        AttemptFacts, CaptureMetadata, ResponseMode, ResponseUsage,
+    };
+
+    let session_id = "session".parse().expect("session");
+    let agent_prompt_id = "prompt".parse().expect("prompt");
+    tau_provider::provider_attempt_timing::record(
+        CaptureMetadata {
+            session_id: &session_id,
+            agent_prompt_id: &agent_prompt_id,
+            model,
+            profile: Some(profile),
+            operation: "inference",
+            logical_attempt: Some(1),
+            attempt_id: Some("attempt".to_owned()),
+            final_wire_dispatch_index: Some(1),
+            repair_reason: "none",
+            facts: AttemptFacts {
+                max_output_tokens: Some(1024),
+                tool_enabled: Some(true),
+                tool_produced: Some(false),
+                response_bytes_received: Some(2),
+                usage: Some(ResponseUsage {
+                    prompt_sent_tokens: 10,
+                    prompt_cached_tokens: 8,
+                    prompt_cache_read_ceiling_tokens: Some(10),
+                    response_received_tokens: 2,
+                    cache_read_tokens: Some(8),
+                    cache_write_tokens: None,
+                    cache_miss_tokens: None,
+                    cacheable_prefix_tokens: Some(10),
+                    avoided_prefill_tokens: Some(8),
+                    storage_token_micros: None,
+                }),
+                response_mode: Some(ResponseMode::Ordinary),
+                backend_reached: Some(true),
+            },
+        },
+        AttemptTiming {
+            backend: "codex",
+            transport: "websocket",
+            outcome: "completed",
+            dispatch_origin: "ws_enqueue",
+            total_us: 1,
+            prepare_us: 1,
+            lowering_us: 1,
+            serialization_us: 0,
+            capture_us: 0,
+            pool_wait_us: 0,
+            connect_upgrade_us: 0,
+            enqueue_us: 0,
+            decode_us: 0,
+            dispatch_to_first_input_us: None,
+            dispatch_to_first_associated_event_us: None,
+            dispatch_to_first_text_delta_us: None,
+            dispatch_to_first_reasoning_delta_us: None,
+            dispatch_to_first_actionable_item_us: None,
+            dispatch_to_first_semantic_us: None,
+            dispatch_to_terminal_us: None,
+            terminal_to_return_us: None,
+            request_bytes_total: 1,
+            first_input_bytes: 0,
+            dispatch_count: 1,
+            decode_count: 0,
+            connection_state: "new",
+        },
+    )
+    .expect("current bounded timing record")
+}
+
+/// A malformed record at the supported timing revisions remains a partial
+/// current-capture error rather than becoming unknown-version skew.
+#[test]
+fn malformed_current_attempt_timing_is_partial() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let mut value: Value =
+        serde_json::from_slice(&current_attempt_timing("model", "profile")).expect("timing JSON");
+    value
+        .as_object_mut()
+        .expect("timing object")
+        .remove("timings_us");
+    capture_json(root.path(), "timing.json.zst", &value);
+    let mut inventory = Inventory::default();
+    inventory.scan(
+        root.path(),
+        &"session".parse().expect("session"),
+        &CacheScanLimits::default(),
+    );
+    assert_eq!(
+        inventory.gaps,
+        BTreeMap::from([("malformed_current_provider_attempt_timing", 1)])
+    );
+    assert!(inventory.prompts.is_empty());
+}
+
+/// Future timing schema and metric-definition revisions retain the inspector's
+/// matching-build unsupported-schema policy.
+#[test]
+fn future_attempt_timing_revisions_are_unsupported() {
+    for field in ["schema_version", "metric_definition_version"] {
+        let root = tempfile::tempdir().expect("fixture root");
+        let mut value: Value = serde_json::from_slice(&current_attempt_timing("model", "profile"))
+            .expect("timing JSON");
+        value[field] = 99.into();
+        capture_json(root.path(), "timing.json.zst", &value);
+        let mut inventory = Inventory::default();
+        inventory.scan(
+            root.path(),
+            &"session".parse().expect("session"),
+            &CacheScanLimits::default(),
+        );
+        assert_eq!(
+            inventory.gaps,
+            BTreeMap::from([("unsupported_capture_schema", 1)])
+        );
+        assert!(inventory.prompts.is_empty());
+    }
 }
 
 /// Exact duplicate scalar records are idempotent while a conflicting duplicate
@@ -1028,7 +1193,7 @@ fn empty_report() -> CacheReport {
 
 /// Multiple same-prompt files remain file counts, never inferred attempt joins.
 #[test]
-fn legacy_files_have_explicit_partial_coverage_without_payload_export() {
+fn raw_capture_files_have_explicit_partial_coverage_without_payload_export() {
     let root = tempfile::tempdir().expect("fixture root");
     let body = br#"{"session_id":"session","agent_prompt_id":"prompt","body":{"secret":"CREDENTIAL","previous_response_id":"PRIVATE_RESPONSE"}}"#;
     capture(root.path(), "1.json.zst", body);
@@ -1039,7 +1204,7 @@ fn legacy_files_have_explicit_partial_coverage_without_payload_export() {
         &"session".parse().expect("session id"),
         &CacheScanLimits::default(),
     );
-    assert_eq!(inventory.gaps["legacy_partial"], 2);
+    assert_eq!(inventory.gaps["raw_capture_partial"], 2);
     let counts = inventory.prompts.values().next().expect("capture counts");
     assert_eq!(counts.request_files, 2);
     let output = serde_json::to_string(counts).expect("encode counts");
@@ -1077,9 +1242,10 @@ fn torn_and_bounded_capture_files_are_counted_gaps() {
     assert_eq!(inventory.gaps["compressed_capture_limit"], 1);
 }
 
-/// Unknown schemas are explicitly unsupported, never treated as legacy records.
+/// Unknown schemas are explicitly unsupported, never treated as current
+/// records.
 #[test]
-fn unsupported_schema_is_not_legacy_success() {
+fn unsupported_schema_is_not_current_capture_success() {
     let root = tempfile::tempdir().expect("fixture root");
     capture(
         root.path(),
@@ -1094,6 +1260,41 @@ fn unsupported_schema_is_not_legacy_success() {
     );
     assert_eq!(inventory.gaps["unsupported_capture_schema"], 1);
     assert!(inventory.prompts.is_empty());
+}
+
+/// The removed compact-HTTP discriminator remains unsupported and aborts the
+/// matching-build report instead of silently re-entering capture inventory.
+#[test]
+fn removed_compact_http_failure_schema_aborts_cache_report() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let captures = root.path().join("sessions/session/debug/provider-requests");
+    std::fs::create_dir_all(captures.parent().expect("session directory"))
+        .expect("session directory");
+    File::create(root.path().join("sessions/session/events.cbor")).expect("empty session journal");
+    capture(
+        &captures,
+        "removed.json.zst",
+        br#"{"schema_version":0,"capture_kind":"compact_http_failure",
+        "session_id":"session","agent_prompt_id":"prompt"}"#,
+    );
+    let options = CacheOptions {
+        state_dir: root.path().into(),
+        scope: CacheScope::Session("session".parse().expect("session")),
+        prompt: None,
+        selection: Default::default(),
+        view: CacheView::Summary,
+        limits: CacheScanLimits::default(),
+        producer_build: "fixture".into(),
+        index: None,
+    };
+    let error = match read_cache_report(&options) {
+        Ok(_) => panic!("removed schema must abort the report"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "I/O error: unsupported cache capture schema; use a matching-build inspector"
+    );
 }
 
 /// Duplicate fields cannot overwrite typed attribution or hidden nested
@@ -1431,7 +1632,6 @@ fn current_provider_capture_envelopes_are_inventory_not_unsupported_schema() {
         json!({"backend":"responses","transport":"http-sse","model":"model",
             "response_bytes_received":10,"error":{"kind":"http","body":"PRIVATE_ERROR"}}),
         current_attempt_failure(),
-        current_compact_failure(),
     ];
     for (index, mut envelope) in envelopes.into_iter().enumerate() {
         envelope["session_id"] = "session".into();
@@ -1448,11 +1648,11 @@ fn current_provider_capture_envelopes_are_inventory_not_unsupported_schema() {
         &"session".parse().expect("session"),
         &CacheScanLimits::default(),
     );
-    assert_eq!(inventory.gaps, BTreeMap::from([("legacy_partial", 9)]));
+    assert_eq!(inventory.gaps, BTreeMap::from([("raw_capture_partial", 8)]));
     let counts = inventory.prompts.values().next().expect("prompt inventory");
     assert_eq!(counts.request_files, 2);
     assert_eq!(counts.response_files, 3);
-    assert_eq!(counts.failure_files, 4);
+    assert_eq!(counts.failure_files, 3);
     assert!(
         !serde_json::to_string(counts)
             .expect("counts")
@@ -1476,29 +1676,13 @@ fn current_attempt_failure() -> Value {
     })
 }
 
-/// A current producer-exact compact failure with complete empty decoded body
-/// and no headers.
-fn current_compact_failure() -> Value {
-    json!({
-        "schema_version":0,"capture_kind":"compact_http_failure",
-        "session_id":"session","agent_prompt_id":"prompt",
-        "operation":"compact","backend":{"kind":"responses","transport":"unary_http"},
-        "http":{"status":503,"headers":{"content_type":null,"retry_after":null,
-            "request_id":null,"openai_request_id":null,"x_request_id":null}},
-        "body":{"decoded_bytes_received":0,"retained_bytes":0,"complete":true,
-            "truncated":false,"redacted_prefix_truncated":false,
-            "sha256_decoded_received":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "sha256_coverage":"complete_decoded_body","redacted_decoded_prefix_base64":""}
-    })
-}
-
 /// Recognized discriminators do not make missing or wrong-type evidence
 /// credible.
 #[test]
 fn malformed_current_failure_fields_are_partial_not_valid_inventory() {
     let root = tempfile::tempdir().expect("fixture root");
     let mut malformed = Vec::new();
-    for base in [current_attempt_failure(), current_compact_failure()] {
+    for base in [current_attempt_failure()] {
         for name in base.as_object().expect("fixture object").keys() {
             if [
                 "schema_version",
@@ -1516,10 +1700,6 @@ fn malformed_current_failure_fields_are_partial_not_valid_inventory() {
         }
     }
     for (mut value, pointer) in [
-        (current_compact_failure(), "/body/decoded_bytes_received"),
-        (current_compact_failure(), "/body/complete"),
-        (current_compact_failure(), "/body/sha256_decoded_received"),
-        (current_compact_failure(), "/http/headers"),
         (current_attempt_failure(), "/wire/response_bytes_received"),
         (current_attempt_failure(), "/wire/semantic_progress"),
         (current_attempt_failure(), "/backend/transport_established"),
@@ -1568,15 +1748,6 @@ fn current_failure_nested_optional_shapes_are_validated() {
     assert!(failure_shape::attempt(&attempt));
     attempt["provider"]["message"]["present"] = "false".into();
     assert!(!failure_shape::attempt(&attempt));
-
-    let bytes = json!({"original_bytes":4,"retained_bytes":4,"truncated":false,
-        "base64":"b29wcw==","utf8":"oops","original_unicode_scalars":4,"retained_unicode_scalars":4});
-    let mut compact = current_compact_failure();
-    compact["http"]["headers"]["request_id"] = bytes.clone();
-    compact["body"]["parsed_error"] = json!({"code":bytes});
-    assert!(failure_shape::compact(&compact));
-    compact["body"]["parsed_error"]["code"]["retained_bytes"] = (-1).into();
-    assert!(!failure_shape::compact(&compact));
 }
 
 /// Known discriminators at future versions remain unsupported rather than
@@ -1584,10 +1755,7 @@ fn current_failure_nested_optional_shapes_are_validated() {
 #[test]
 fn future_failure_versions_are_not_current_shape_fallbacks() {
     let root = tempfile::tempdir().expect("fixture root");
-    for (index, mut value) in [current_attempt_failure(), current_compact_failure()]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, mut value) in [current_attempt_failure()].into_iter().enumerate() {
         value["schema_version"] = 99.into();
         capture(
             root.path(),
@@ -1603,7 +1771,7 @@ fn future_failure_versions_are_not_current_shape_fallbacks() {
     );
     assert_eq!(
         inventory.gaps,
-        BTreeMap::from([("unsupported_capture_schema", 2)])
+        BTreeMap::from([("unsupported_capture_schema", 1)])
     );
     assert!(inventory.prompts.is_empty());
 }

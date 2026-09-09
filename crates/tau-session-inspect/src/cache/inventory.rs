@@ -1,4 +1,4 @@
-//! Bounded legacy capture inventory, deliberately not an attempt ledger.
+//! Bounded raw capture inventory, deliberately not an attempt ledger.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -55,6 +55,9 @@ pub(super) struct CaptureCounts {
     pub failure_files: u64,
     /// Recognized scalar files, not reconstructed attempts or canonical joins.
     pub diagnostic_files: u64,
+    /// Current provider-attempt timing files, inventoried without timing
+    /// analysis.
+    pub timing_files: u64,
 }
 
 /// Content-free evidence collected without retaining provider payloads or IDs.
@@ -226,9 +229,15 @@ impl Inventory {
         value: Value,
         limits: &CacheScanLimits,
     ) {
-        let cache_diagnostic = value.get("schema").and_then(Value::as_str)
-            == Some("tau.cache_diagnostic")
+        let schema = value.get("schema").and_then(Value::as_str);
+        let cache_diagnostic = schema == Some("tau.cache_diagnostic")
             && value.get("schema_version").and_then(Value::as_u64) == Some(0);
+        let attempt_timing = schema == Some("tau.provider_attempt_timing")
+            && value.get("schema_version").and_then(Value::as_u64) == Some(1)
+            && value
+                .get("metric_definition_version")
+                .and_then(Value::as_u64)
+                == Some(1);
         let known_failure = value.get("schema").is_none()
             && matches!(
                 (
@@ -236,13 +245,42 @@ impl Inventory {
                     value.get("capture_kind").and_then(Value::as_str)
                 ),
                 (Some(1), Some("provider_attempt_failure"))
-                    | (Some(0), Some("compact_http_failure"))
             );
         if !known_failure
             && !cache_diagnostic
+            && !attempt_timing
             && (value.get("schema").is_some() || value.get("schema_version").is_some())
         {
             self.gap("unsupported_capture_schema");
+            return;
+        }
+        if attempt_timing {
+            if !super::timing_shape::current(&value) {
+                self.gap("malformed_current_provider_attempt_timing");
+                return;
+            }
+            let attribution = &value["attribution"];
+            let captured_session = attribution["session_id"]
+                .as_str()
+                .expect("validated timing session");
+            let prompt = attribution["agent_prompt_id"]
+                .as_str()
+                .expect("validated timing prompt");
+            let Ok(prompt) = AgentPromptId::parse(prompt) else {
+                self.gap("capture_attribution_malformed");
+                return;
+            };
+            if captured_session != session.as_str() {
+                self.gap("capture_session_mismatch");
+                return;
+            }
+            if !self.can_admit_prompt(limits) {
+                return;
+            }
+            self.prompts
+                .entry((session.clone(), prompt))
+                .or_default()
+                .timing_files += 1;
             return;
         }
         let Some(captured_session) = value.get("session_id").and_then(Value::as_str) else {
@@ -302,11 +340,9 @@ impl Inventory {
             }
         }
         if known_failure {
-            let valid = match value.get("capture_kind").and_then(Value::as_str) {
-                Some("compact_http_failure") => super::failure_shape::compact(&value),
-                Some("provider_attempt_failure") => super::failure_shape::attempt(&value),
-                _ => false,
-            };
+            let valid = value.get("capture_kind").and_then(Value::as_str)
+                == Some("provider_attempt_failure")
+                && super::failure_shape::attempt(&value);
             if !valid {
                 self.gap("malformed_current_failure_capture");
                 return;
@@ -350,12 +386,7 @@ impl Inventory {
         {
             self.admit_exact_response(response, limits);
         }
-        if (self.prompts.len() as u64)
-            .saturating_add(1)
-            .saturating_mul(1024)
-            > limits.working_memory_bytes / 2
-        {
-            self.gap("inventory_memory_limit");
+        if !self.can_admit_prompt(limits) {
             return;
         }
         let counts = self.prompts.entry((session.clone(), prompt)).or_default();
@@ -366,8 +397,21 @@ impl Inventory {
             _ => counts.diagnostic_files += 1,
         }
         if !cache_diagnostic {
-            self.gap("legacy_partial");
+            self.gap("raw_capture_partial");
         }
+    }
+
+    /// Checks the conservative prompt-inventory budget before adding one file.
+    fn can_admit_prompt(&mut self, limits: &CacheScanLimits) -> bool {
+        if (self.prompts.len() as u64)
+            .saturating_add(1)
+            .saturating_mul(1024)
+            > limits.working_memory_bytes / 2
+        {
+            self.gap("inventory_memory_limit");
+            return false;
+        }
+        true
     }
 
     /// Deduplicates one validated record or exposes conflicting reuse.

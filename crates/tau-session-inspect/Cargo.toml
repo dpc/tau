@@ -37,3 +37,4 @@ zstd.workspace = true
 
 [dev-dependencies]
 tau-core = { workspace = true, features = ["test-persistence"] }
+tau-provider.workspace = true

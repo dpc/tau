@@ -1,4 +1,4 @@
-//! Exact required shapes of the two existing Codex failure envelopes.
+//! Exact required shape of the current Codex finite-attempt failure envelope.
 //!
 //! These predicates validate private evidence without retaining or projecting
 //! its strings. They are revision-coupled readers, not a historical schema
@@ -8,66 +8,6 @@ use serde_json::Value;
 
 /// One required producer field and its allocation-free structural predicate.
 type FieldCheck<'a> = (&'a str, fn(&Value) -> bool);
-
-/// Validates required current compact-HTTP schema-zero fields recursively.
-pub(super) fn compact(value: &Value) -> bool {
-    fields(
-        value,
-        &[
-            ("operation", |v| literal(v, &["compact"])),
-            ("backend", |v| {
-                fields(
-                    v,
-                    &[
-                        ("kind", |v| literal(v, &["responses"])),
-                        ("transport", |v| literal(v, &["unary_http"])),
-                    ],
-                )
-            }),
-            ("http", |v| {
-                fields(
-                    v,
-                    &[
-                        ("status", u16_value),
-                        ("headers", |v| {
-                            fields(
-                                v,
-                                &[
-                                    ("content_type", nullable_bounded_bytes),
-                                    ("retry_after", nullable_bounded_bytes),
-                                    ("request_id", nullable_bounded_bytes),
-                                    ("openai_request_id", nullable_bounded_bytes),
-                                    ("x_request_id", nullable_bounded_bytes),
-                                ],
-                            )
-                        }),
-                    ],
-                )
-            }),
-            ("body", |v| {
-                fields(
-                    v,
-                    &[
-                        ("decoded_bytes_received", Value::is_u64),
-                        ("retained_bytes", Value::is_u64),
-                        ("complete", Value::is_boolean),
-                        ("truncated", Value::is_boolean),
-                        ("redacted_prefix_truncated", Value::is_boolean),
-                        ("sha256_decoded_received", |v| {
-                            v.as_str().is_some_and(|s| {
-                                s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
-                            })
-                        }),
-                        ("sha256_coverage", |v| {
-                            literal(v, &["complete_decoded_body", "decoded_bytes_received"])
-                        }),
-                        ("redacted_decoded_prefix_base64", Value::is_string),
-                    ],
-                ) && optional(v, "parsed_error", parsed_error)
-            }),
-        ],
-    )
-}
 
 /// Validates required current finite-attempt schema-one fields recursively.
 pub(super) fn attempt(value: &Value) -> bool {
@@ -190,11 +130,6 @@ fn fields(value: &Value, required: &[FieldCheck<'_>]) -> bool {
             .all(|(name, check)| value.get(*name).is_some_and(check))
 }
 
-/// Validates an omitted-or-present field that the producer skips when absent.
-fn optional(value: &Value, name: &str, check: fn(&Value) -> bool) -> bool {
-    value.get(name).is_none_or(check)
-}
-
 /// Checks a closed producer-owned literal without exporting it.
 fn literal(value: &Value, allowed: &[&str]) -> bool {
     value.as_str().is_some_and(|s| allowed.contains(&s))
@@ -225,36 +160,4 @@ fn lengths(value: &Value) -> bool {
             ("unicode_scalars", Value::is_u64),
         ],
     )
-}
-
-/// Validates the explicit-null header representation.
-fn nullable_bounded_bytes(value: &Value) -> bool {
-    value.is_null() || bounded_bytes(value)
-}
-
-/// Validates required byte evidence and the producer's omitted optional fields.
-fn bounded_bytes(value: &Value) -> bool {
-    fields(
-        value,
-        &[
-            ("original_bytes", Value::is_u64),
-            ("retained_bytes", Value::is_u64),
-            ("truncated", Value::is_boolean),
-            ("base64", Value::is_string),
-        ],
-    ) && optional(value, "original_unicode_scalars", Value::is_u64)
-        && optional(value, "retained_unicode_scalars", Value::is_u64)
-        && optional(value, "utf8", Value::is_string)
-}
-
-/// Validates each emitted allowlisted provider field without retaining its
-/// value.
-fn parsed_error(value: &Value) -> bool {
-    value.as_object().is_some_and(|object| {
-        !object.is_empty()
-            && object.iter().all(|(name, value)| {
-                ["code", "type", "param", "message"].contains(&name.as_str())
-                    && bounded_bytes(value)
-            })
-    })
 }

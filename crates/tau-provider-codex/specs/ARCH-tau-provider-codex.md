@@ -335,17 +335,6 @@ does not participate in refresh eligibility, preemption, admission, repair,
 accounting, or the lifecycle in
 [SPEC-provider-cache-refresh-lifecycle](../../../specs/SPEC-provider-cache-refresh-lifecycle.md).
 
-The retired unary compact HTTP path submitted one private
-schema-v0 `compact-http-failure` capture while provider diagnostics are enabled.
-It retains the status, a closed request-correlation/content/retry header
-allowlist, up to 64 KiB of credential-redacted decoded response bytes, and bounded
-common provider code, type, parameter, and message fields. It hashes every body
-byte delivered by reqwest after content decoding, before EOF or bounded
-termination, and states whether the digest covers the complete decoded body.
-This local causal evidence uses the shared zstd and
-harness-owned storage path; it never enters provider terminal normalization,
-events, journals, debug JSONL, or UI traffic.
-
 The parser and transport boundaries construct opaque failure evidence before
 the error reaches retry policy. Persistent records retain only closed
 classification/transport facts, validated codes and IDs, message/reason
@@ -356,11 +345,6 @@ is bounded and redacted but remains a private, potentially credential-bearing
 artifact. Submission and configurable diagnostic retention reuse the shared
 best-effort writer; cleanup defaults to thirty days and may be disabled.
 Omission never changes provider execution.
-That historical compact HTTP failure record is the deliberate exception to the
-prose/header/raw-value exclusions above: it is operator-enabled private forensic
-evidence, redacts exact configured credentials rather than minimizing the
-provider failure, and remains subject to the same bounded best-effort retention.
-
 ## Streaming status boundary
 
 ChatGPT/Codex output implements

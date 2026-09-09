@@ -41,7 +41,9 @@ impl Inventory {
     /// Returns whether bounded capture scanning completed far enough to replace
     /// an index without silently forgetting evidence.
     pub(in crate::cache) fn index_input_complete(&self) -> bool {
-        self.gaps.keys().all(|reason| *reason == "legacy_partial")
+        self.gaps
+            .keys()
+            .all(|reason| *reason == "raw_capture_partial")
     }
 
     /// Admits one body-free request fingerprint set under the exact-evidence

@@ -242,15 +242,9 @@ harness authenticates the Provider connection, derives the instance-specific
 durable-session path, and writes without parsing or decompressing payload bytes.
 Both transport and filesystem queues are bounded and best-effort. Capture
 payloads never enter events, journals, debug JSONL, or generic Debug output.
-Historical explicitly enabled compact HTTP failure captures preserve bounded causal
-provider evidence, including an allowlisted header set and a credential-redacted
-64-KiB decoded body prefix. Reqwest content decoding precedes accounting; captures
-hash exactly the decoded bytes delivered and distinguish complete decoded-body
-from partial coverage. Treat these owner-only local artifacts as
-sensitive: provider error bodies can reflect prompt, account, or service-internal
-data even after configured credentials are removed. Configurable diagnostic
-retention defaults to thirty days; disabling cleanup can retain them
-indefinitely.
+Treat owner-only local provider captures as sensitive: provider error bodies can
+reflect prompt, account, or service-internal data. Configurable diagnostic retention
+defaults to thirty days; disabling cleanup can retain captures indefinitely.
 Default-on Codex, public Responses and Chat Completions inference and
 standalone-compaction scalar cache diagnostics use the same
 private opaque path and retention. Metadata has an independent startup-frozen
@@ -1369,7 +1363,7 @@ usage accounting, and the no-write behavior of offline inspection.
 content-free reports omit bodies, provider IDs, endpoint/account/cache-key values,
 and source paths, but retain local navigation IDs and workload accounting. They
 write no state or indexes, never contact providers, and do not enable captures.
-Legacy private capture files provide only partial inventory evidence, not an
+Raw private capture files provide only partial inventory evidence, not an
 exhaustive attempt ledger or exact terminal joins. See
 [`docs/agent-cache.md`](docs/agent-cache.md) for the initial coverage and
 conservative resource-admission limits.

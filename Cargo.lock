@@ -1209,6 +1209,7 @@ dependencies = [
  "dpc-tau-config",
  "dpc-tau-core",
  "dpc-tau-proto",
+ "dpc-tau-provider",
  "libc",
  "opentelemetry-proto",
  "rand 0.8.6",

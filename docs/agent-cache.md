@@ -34,17 +34,19 @@ per-agent sequence boundary; those boundaries are not cross-agent causal order.
 
 The private capture reader recognizes current Chat Completions, public
 Responses, and Codex request/response envelopes, Chat/Responses failures, and the
-existing Codex finite-attempt and compact HTTP failure envelopes. It also recognizes
-version-0 scalar cache captures as `diagnostic_files`. Current scalar records are
+current Codex finite-attempt failure envelope. It also recognizes version-0 scalar
+cache captures as `diagnostic_files` and current schema-v1 provider-attempt timing
+captures as content-free `timing_files` inventory only. Timing values are not retained,
+joined, or analyzed by this command. Current scalar cache records are
 deduplicated by provider-instance/process record identity; conflicting reuse is
 corruption rather than last-write-wins. Dispatch and attempt-end records join only by
 their explicit capture-local attempt identity, never by adjacency or timestamps.
 It streams compressed files
 one at a time and retains only typed session/prompt attribution and file counts.
-These are **file counts, not attempt or dispatch counts**. Identical legacy files
-still count as two files; there is no stable record identity to deduplicate.
+These are **file counts, not attempt or dispatch counts**. Identical raw files still
+count as two files; there is no stable record identity to deduplicate.
 Multiple same-prompt files expose ambiguous terminal association. Even one
-request and response remain `legacy_partial`: neither adjacency nor timestamps
+request and response remain `raw_capture_partial`: neither adjacency nor timestamps
 establish an exact join, and best-effort capture history is never exhaustive.
 
 JSONL uses `tau.cache_diagnostic`, internal schema version `0`, and the executable
