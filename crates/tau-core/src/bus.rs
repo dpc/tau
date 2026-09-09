@@ -704,8 +704,8 @@ impl EventBus {
     }
 
     /// Delivers one immutable routing decision through shared streams where
-    /// available, falling back to legacy per-connection sinks for tests and
-    /// embedders that have not opted into shared delivery.
+    /// available, falling back to direct per-connection sinks for tests,
+    /// synchronous observers, and in-process embedders.
     fn deliver_eligible(
         &mut self,
         routed: RoutedFrame,
@@ -716,7 +716,7 @@ impl EventBus {
             crate::SharedDeliveryGroup,
             Vec<(ConnectionId, crate::SharedDeliveryTarget)>,
         > = BTreeMap::new();
-        let mut legacy = Vec::new();
+        let mut direct = Vec::new();
         for connection_id in eligible {
             let target = self
                 .connections
@@ -728,7 +728,7 @@ impl EventBus {
                     .or_default()
                     .push((connection_id, target));
             } else {
-                legacy.push(connection_id);
+                direct.push(connection_id);
             }
         }
         for members in shared.into_values() {
@@ -767,7 +767,7 @@ impl EventBus {
                 }
             }
         }
-        for connection_id in legacy {
+        for connection_id in direct {
             let result = self
                 .connections
                 .get_mut(&connection_id)

@@ -55,9 +55,9 @@ struct ModelConnection<'a> {
 
 impl ConnectionSink for ModelSink {
     fn send(&mut self, _frame: RoutedFrame) -> Result<(), ConnectionSendError> {
-        self.trace.record(format!("legacy:{}", self.label));
+        self.trace.record(format!("direct:{}", self.label));
         if self.fail_call {
-            Err(ConnectionSendError::new("injected legacy failure"))
+            Err(ConnectionSendError::new("injected direct failure"))
         } else {
             Ok(())
         }
@@ -173,7 +173,7 @@ fn model_bus() -> (EventBus, DeliveryTrace) {
         &trace,
         Arc::clone(&admitted),
         ModelConnection {
-            label: "legacy-ok",
+            label: "direct-ok",
             kind: ClientKind::Tool,
             shared_target: None,
             fail_call: false,
@@ -186,7 +186,7 @@ fn model_bus() -> (EventBus, DeliveryTrace) {
         &trace,
         Arc::clone(&admitted),
         ModelConnection {
-            label: "legacy-fail",
+            label: "direct-fail",
             kind: ClientKind::Tool,
             shared_target: None,
             fail_call: true,
@@ -237,7 +237,7 @@ fn model_bus() -> (EventBus, DeliveryTrace) {
 }
 
 /// The no-report collector must execute the same selector, filter, exclusion,
-/// shared-generation, retirement, failure, and legacy delivery decisions.
+/// shared-generation, retirement, failure, and direct delivery decisions.
 #[test]
 fn no_report_broadcast_matches_detailed_routing_model() {
     let (mut detailed_bus, detailed_trace) = model_bus();
@@ -285,11 +285,11 @@ fn detailed_route_report_order_is_stable() {
     let expected_failed = [
         test_connection_id("shared-retired"),
         test_connection_id("shared-failing"),
-        test_connection_id("legacy-fail"),
+        test_connection_id("direct-fail"),
     ];
     let expected_delivered = [
         test_connection_id("shared-admitted"),
-        test_connection_id("legacy-ok"),
+        test_connection_id("direct-ok"),
     ];
 
     let first = bus.publish_from_excluding_kinds(None, notice(), &excluded);
@@ -405,7 +405,7 @@ fn lazy_event_broadcast_skips_payload_without_candidate() {
 }
 
 /// A lazy event broadcast must preserve the ordinary selector, visibility,
-/// exclusion, shared-generation, failure, and legacy fanout decisions.
+/// exclusion, shared-generation, failure, and direct fanout decisions.
 #[test]
 fn lazy_event_broadcast_matches_eager_fanout() {
     let (mut eager_bus, eager_trace) = model_bus();
@@ -501,7 +501,7 @@ fn lazy_event_broadcast_filters_the_built_projection() {
         || notice_with_message("observer projection"),
     );
 
-    assert_eq!(trace.normalized(), ["legacy:projection-filter".to_owned()]);
+    assert_eq!(trace.normalized(), ["direct:projection-filter".to_owned()]);
 }
 
 /// A lazy event broadcast must reject a builder result whose event identity

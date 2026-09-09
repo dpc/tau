@@ -672,14 +672,8 @@ impl HarnessEvent {
     }
 }
 
-/// Commands accepted by per-connection writer threads.
+/// Permanent follow control accepted by each per-connection writer thread.
 pub(crate) enum WriterCommand {
-    /// Write one protocol frame to the connection.
-    #[cfg(test)]
-    Message(HarnessOutputMessage),
-    /// Flush all previously queued frames, then acknowledge completion.
-    #[cfg(test)]
-    Flush(Sender<()>),
     /// Switches this writer permanently to cursor-followed shared delivery.
     Follow {
         /// Shared logical live stream.
@@ -1118,7 +1112,8 @@ struct SupervisedWriterCompletion {
     watchdog: Arc<WriterWatchdog>,
 }
 
-/// Writer thread — one per connection, drains channel and writes to stream.
+/// Writer thread — one per connection, follows the shared log and writes to the
+/// stream.
 pub(crate) fn spawn_writer_thread(
     writer: impl Write + Send + 'static,
     protocol_io: Option<ProtocolIoMeter>,
@@ -1209,81 +1204,50 @@ fn spawn_writer_thread_inner(
     let (tx, rx) = mpsc::channel::<WriterCommand>();
     let writer_thread = thread::spawn(move || {
         let mut w = HarnessOutputWriter::new(BufWriter::new(writer));
-        // Drain output messages until the channel closes. Write failures still
-        // fall through to the shutdown sequence so supervised children are
-        // reaped instead of being abandoned after stdin breaks.
+        // Install the connection's permanent shared-stream follower. Closure
+        // before installation and later write failures both fall through to the
+        // shutdown sequence so supervised children are reaped.
         let mut can_write_disconnect = true;
-        #[cfg_attr(
-            not(test),
-            expect(
-                clippy::never_loop,
-                reason = "production receives one permanent Follow command; tests also exercise legacy messages"
-            )
-        )]
-        while let Ok(command) = rx.recv() {
-            match command {
-                #[cfg(test)]
-                WriterCommand::Message(message) => {
-                    let Ok(frame_bytes) = w.write_message_with_size(&message) else {
-                        can_write_disconnect = false;
-                        break;
-                    };
-                    if w.flush().is_err() {
-                        can_write_disconnect = false;
-                        break;
-                    }
-                    if let Some(protocol_io) = &protocol_io {
-                        protocol_io.record_downlink_frame_bytes(&message, frame_bytes);
-                    }
-                }
-                #[cfg(test)]
-                WriterCommand::Flush(ack) => {
-                    let _ = w.flush();
-                    let _ = ack.send(());
-                }
-                WriterCommand::Follow {
-                    log,
-                    consumer,
-                    failure_tx,
-                    connection_id,
-                } => {
-                    let mut writer_failed = false;
-                    while let Some(pending) = log.next_egress(consumer) {
-                        let message = pending.frame();
-                        let Ok(frame_bytes) = w.write_message_with_size(message) else {
-                            can_write_disconnect = false;
-                            writer_failed = true;
-                            break;
-                        };
-                        if w.flush().is_err() {
-                            can_write_disconnect = false;
-                            writer_failed = true;
-                            break;
-                        }
-                        if let Some(protocol_io) = &protocol_io {
-                            protocol_io.record_downlink_frame_bytes(message, frame_bytes);
-                        }
-                        log.acknowledge_egress(consumer, &pending);
-                    }
-                    log.retire_consumer_after_io(consumer);
-                    // A local UI's ingress reader remains authoritative for
-                    // disconnect ordering while the downlink fails
-                    // concurrently. Supervised extensions
-                    // retain writer-failure reporting
-                    // because their owned-child lifecycle has no independent
-                    // local-UI ingress transition to preserve.
-                    let report_failure = match &shutdown {
-                        WriterShutdown::CloseStream { report_failure } => *report_failure,
-                        WriterShutdown::Supervised { .. } => true,
-                    };
-                    if writer_failed && report_failure {
-                        let _ = failure_tx.send(HarnessEvent::ReadFailed {
-                            connection_id,
-                            error: "connection writer failed".to_owned(),
-                        });
-                    }
+        if let Ok(WriterCommand::Follow {
+            log,
+            consumer,
+            failure_tx,
+            connection_id,
+        }) = rx.recv()
+        {
+            let mut writer_failed = false;
+            while let Some(pending) = log.next_egress(consumer) {
+                let message = pending.frame();
+                let Ok(frame_bytes) = w.write_message_with_size(message) else {
+                    can_write_disconnect = false;
+                    writer_failed = true;
+                    break;
+                };
+                if w.flush().is_err() {
+                    can_write_disconnect = false;
+                    writer_failed = true;
                     break;
                 }
+                if let Some(protocol_io) = &protocol_io {
+                    protocol_io.record_downlink_frame_bytes(message, frame_bytes);
+                }
+                log.acknowledge_egress(consumer, &pending);
+            }
+            log.retire_consumer_after_io(consumer);
+            // A local UI's ingress reader remains authoritative for
+            // disconnect ordering while the downlink fails concurrently.
+            // Supervised extensions retain writer-failure reporting because
+            // their owned-child lifecycle has no independent local-UI ingress
+            // transition to preserve.
+            let report_failure = match &shutdown {
+                WriterShutdown::CloseStream { report_failure } => *report_failure,
+                WriterShutdown::Supervised { .. } => true,
+            };
+            if writer_failed && report_failure {
+                let _ = failure_tx.send(HarnessEvent::ReadFailed {
+                    connection_id,
+                    error: "connection writer failed".to_owned(),
+                });
             }
         }
 

@@ -122,7 +122,11 @@ impl SharedDeliveryTarget {
 
 /// A sink that accepts routed frames for one live connection.
 pub trait ConnectionSink {
-    /// Sends one frame through the sink's legacy per-connection path.
+    /// Sends one frame through the sink's direct per-connection path.
+    ///
+    /// In-process adapters can implement only this method. Harness transport
+    /// sinks additionally expose a shared-stream target so the bus can admit
+    /// one retained frame for every eligible connection generation.
     fn send(&mut self, frame: RoutedFrame) -> Result<(), ConnectionSendError>;
 
     /// Returns the sink's immutable shared-stream destination, when supported.

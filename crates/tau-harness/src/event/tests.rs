@@ -16,6 +16,20 @@ fn disconnected_event() -> HarnessEvent {
     disconnected_event_named("ingress-test")
 }
 
+fn wait_for_supervised_cleanup(rx: &Receiver<HarnessEvent>, expected_connection: &str) {
+    loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
+                if connection_id.as_str() == expected_connection =>
+            {
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => panic!("waiting for supervised writer cleanup: {error}"),
+        }
+    }
+}
+
 /// Capacity zero must rendezvous with harness consumption rather than using
 /// timing or a hidden forwarding queue as correctness authority.
 #[test]
@@ -562,24 +576,23 @@ fn writer_failure_still_reaps_supervised_child() {
         .expect("spawn child");
     let pid = child.id();
     let (harness_tx, harness_rx) = mpsc::channel();
+    let connection_id = crate::test_connection_id("failing-writer");
     let (tx, mut writer) = spawn_supervised_writer_thread(
-        crate::test_connection_id("failing-writer"),
+        connection_id.clone(),
         FailingWriter,
         child,
         None,
-        harness_tx,
+        harness_tx.clone(),
     );
-
-    tx.send(WriterCommand::Message(
+    let mut sink = ChannelSink::new(&tx, EventLog::new(), harness_tx, connection_id)
+        .expect("attach shared-stream writer");
+    sink.send(tau_core::RoutedFrame::new(
+        None,
         tau_proto::HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason: None }),
     ))
-    .expect("queue output");
+    .expect("admit output");
     drop(tx);
-    assert!(matches!(
-        harness_rx.recv_timeout(Duration::from_secs(5)),
-        Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
-            if connection_id.as_str() == "failing-writer"
-    ));
+    wait_for_supervised_cleanup(&harness_rx, "failing-writer");
     writer.join().expect("join failing writer");
     assert!(!process_exists(pid));
 }
@@ -673,33 +686,32 @@ fn shutdown_watchdog_uses_prearmed_runtime_deadline() {
     let pid = child.id();
     let stdin = child.stdin.take().expect("child stdin");
     let (harness_tx, harness_rx) = mpsc::channel();
+    let connection_id = crate::test_connection_id("prearmed-writer");
     let (writer_tx, mut writer) = spawn_supervised_writer_thread(
-        crate::test_connection_id("prearmed-writer"),
+        connection_id.clone(),
         stdin,
         child,
         None,
-        harness_tx,
+        harness_tx.clone(),
     );
+    let mut sink = ChannelSink::new(&writer_tx, EventLog::new(), harness_tx, connection_id)
+        .expect("attach shared-stream writer");
     writer.arm_cleanup_deadline(Instant::now() + Duration::from_millis(200));
-    writer_tx
-        .send(WriterCommand::Message(HarnessOutputMessage::deliver(
-            tau_proto::Event::HarnessNotice(tau_proto::HarnessNotice {
-                kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
-                message: "x".repeat(2 * 1024 * 1024),
-                level: tau_proto::NoticeLevel::Info,
-                purpose: tau_proto::NoticePurpose::Diagnostic,
-            }),
-        )))
-        .expect("queue blocking frame");
+    sink.send(tau_core::RoutedFrame::new(
+        None,
+        HarnessOutputMessage::deliver(tau_proto::Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
+            message: "x".repeat(2 * 1024 * 1024),
+            level: tau_proto::NoticeLevel::Info,
+            purpose: tau_proto::NoticePurpose::Diagnostic,
+        })),
+    ))
+    .expect("admit blocking frame");
     let started = Instant::now();
 
     let watchdog = writer.start_shutdown_watchdog();
     drop(writer_tx);
-    assert!(matches!(
-        harness_rx.recv_timeout(Duration::from_secs(1)),
-        Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
-            if connection_id.as_str() == "prearmed-writer"
-    ));
+    wait_for_supervised_cleanup(&harness_rx, "prearmed-writer");
     writer.join().expect("join prearmed writer");
     watchdog.join().expect("join prearmed watchdog");
 
@@ -710,29 +722,35 @@ fn shutdown_watchdog_uses_prearmed_runtime_deadline() {
 /// The writer thread must record an output frame only after a successful flush.
 ///
 /// Reading the Unix stream proves that the peer can observe the frame, but it
-/// does not synchronize with the writer's subsequent meter mutation. A FIFO
-/// flush acknowledgement therefore establishes that the writer processed the
-/// preceding post-flush accounting before this test observes cumulative stats.
+/// does not synchronize with the writer's subsequent meter mutation. Waiting
+/// for the shared cursor acknowledgement establishes that the writer processed
+/// the preceding post-flush accounting before this test observes cumulative
+/// stats.
 #[test]
 fn writer_records_protocol_io_after_successful_flush() {
     let (reader_stream, writer_stream) = UnixStream::pair().expect("stream pair");
     let meter = tau_client::ProtocolIoMeter::default();
     let tx = spawn_writer_thread(writer_stream, Some(meter.clone()));
-    tx.send(WriterCommand::Message(
+    let (failure_tx, _failure_rx) = mpsc::channel();
+    let mut sink = ChannelSink::new(
+        &tx,
+        EventLog::new(),
+        failure_tx,
+        crate::test_connection_id("metered-writer"),
+    )
+    .expect("attach shared-stream writer");
+    let consumer = sink.handle();
+    sink.send(tau_core::RoutedFrame::new(
+        None,
         tau_proto::HarnessOutputMessage::deliver(tau_proto::Event::TermBell(
             tau_proto::TermBell {},
         )),
     ))
-    .expect("queue output");
-    let (flush_tx, flush_rx) = mpsc::channel();
-    tx.send(WriterCommand::Flush(flush_tx))
-        .expect("queue accounting barrier");
+    .expect("admit output");
 
     let mut reader = tau_proto::HarnessOutputReader::new(BufReader::new(reader_stream));
     let _ = reader.read_message().expect("read output");
-    flush_rx
-        .recv()
-        .expect("writer processes accounting barrier");
+    consumer.flush();
 
     let stats = meter.cumulative_stats();
     let event_stats = stats.downlink.get("term.bell").expect("term bell stats");
