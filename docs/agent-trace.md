@@ -225,10 +225,8 @@ outcomes separately through lifecycle `status` and object absence.
 The projector never parses rendered output or display text. Cancellation,
 unresolved/source-not-selected terminals, synthetic background placeholders,
 malformed or contradictory maps, unavailable legacy fields, and non-shell
-calls omit the object. A legacy structured map with an exit `status` but no
-reason is treated as `exit` only for final foreground/background result
-payloads and only when the `termination_reason`, `timed_out`, and `signal` keys
-are all absent; error details never use this fallback. Missing data is never
+calls omit the object. A structured map without `termination_reason` has no
+process outcome, even when it carries an exit `status`. Missing data is never
 converted to `unknown`.
 
 The accepted field matrix is exact:

@@ -37,11 +37,12 @@ fn full_shell_result_does_not_claim_process_success() {
         CborValue::Map(vec![
             field("output", CborValue::Text("failed command".to_owned())),
             field("status", CborValue::Integer(7.into())),
+            field("termination_reason", CborValue::Text("exit".to_owned())),
         ]),
     );
     let preview = BackgroundCompletionPreview::from_result(&result);
     let text = preview.render(&mut BackgroundPreviewBudget::default());
-    let body = "status: 7\n\nfailed command";
+    let body = "status: 7\ntermination_reason: exit\n\nfailed command";
     let expected = tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE
         .render_attributed(
             &[
@@ -76,6 +77,7 @@ fn summary_shell_result_reports_coherent_nonzero_exit() {
                 CborValue::Text("x".repeat(BACKGROUND_PREVIEW_GROUP_BODY_BYTES + 1)),
             ),
             field("status", CborValue::Integer(23.into())),
+            field("termination_reason", CborValue::Text("exit".to_owned())),
         ]),
     );
     let preview = BackgroundCompletionPreview::from_result(&result);

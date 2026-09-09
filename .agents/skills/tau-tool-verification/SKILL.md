@@ -78,6 +78,10 @@ for token efficiency. Keep tool output compact: include only non-default,
 non-redundant values that help the agent decide what to do next. Do not emit
 aliases or duplicate fields that carry the same information.
 
+Every completed shell process result is an exception: it carries an explicit
+`termination_reason`, including `exit` with `status: 0`, so downstream
+consumers never infer normal termination from an exit status alone.
+
 Do not include headers that are straight copies of tool invocation arguments.
 The calling agent already knows the arguments it sent, so echoing them wastes
 context and makes the meaningful result harder to scan. Only report a requested

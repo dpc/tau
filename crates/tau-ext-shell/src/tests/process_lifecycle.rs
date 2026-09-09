@@ -285,8 +285,10 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
     );
 }
 
+/// A normal shell exit emits its classification and round-trips through the
+/// shared process-outcome consumer without inferring from the status code.
 #[test]
-fn command_details_value_records_combined_output_stats() {
+fn command_details_value_round_trips_explicit_normal_exit() {
     let details = command_details_value(CommandDetails {
         status: Some(0),
         signal: None,
@@ -305,9 +307,18 @@ fn command_details_value_records_combined_output_stats() {
     assert!(cbor_map_field(&details, "total_bytes").is_none());
     assert!(cbor_map_field(&details, "valid_utf8").is_none());
     assert!(cbor_map_field(&details, "timed_out").is_none());
-    assert!(cbor_map_field(&details, "termination_reason").is_none());
+    assert_eq!(cbor_map_text(&details, "termination_reason"), Some("exit"));
     assert!(cbor_map_field(&details, "truncated").is_none());
     assert!(cbor_map_field(&details, "duration_seconds").is_none());
+
+    let outcome = tau_proto::ShellProcessOutcome::from_result(&details)
+        .expect("explicit normal exit must project");
+    assert!(outcome.success());
+    assert_eq!(
+        outcome.termination_reason(),
+        tau_proto::ShellTerminationReason::Exit
+    );
+    assert_eq!(outcome.exit_code(), Some(0));
 }
 
 #[test]

@@ -1,16 +1,19 @@
 use super::*;
 
-/// The bounded parser accepts approved coherent shapes and rejects
-/// malformed, contradictory, or duplicated recognized fields.
+/// The bounded parser requires an explicit reason and rejects malformed,
+/// contradictory, or duplicated recognized fields.
 #[test]
-fn parser_enforces_approved_coherence() {
+fn parser_requires_explicit_reason_and_enforces_coherence() {
     let map = |entries| CborValue::Map(entries);
     let field = |key: &str, value| (CborValue::Text(key.into()), value);
     let parsed = ShellProcessOutcome::from_cbor(
         ShellProcessOutcomeSource::ToolResult,
-        &map(vec![field("status", CborValue::Integer(0.into()))]),
+        &map(vec![
+            field("status", CborValue::Integer(0.into())),
+            field("termination_reason", CborValue::Text("exit".into())),
+        ]),
     )
-    .expect("legacy result exit");
+    .expect("explicit result exit");
     assert!(parsed.success());
     assert_eq!(parsed.termination_reason(), ShellTerminationReason::Exit);
 
@@ -97,18 +100,21 @@ fn parser_enforces_approved_coherence() {
         .is_none()
     );
 
-    let legacy_with_false = map(vec![
-        field("status", CborValue::Integer(0.into())),
-        field("timed_out", CborValue::Bool(false)),
-    ]);
+    let result_without_reason = map(vec![field("status", CborValue::Integer(0.into()))]);
     assert!(
-        ShellProcessOutcome::from_cbor(ShellProcessOutcomeSource::ToolResult, &legacy_with_false)
-            .is_none()
+        ShellProcessOutcome::from_cbor(
+            ShellProcessOutcomeSource::ToolResult,
+            &result_without_reason
+        )
+        .is_none()
     );
-    let error_legacy = map(vec![field("status", CborValue::Integer(0.into()))]);
+    let error_without_reason = map(vec![field("status", CborValue::Integer(0.into()))]);
     assert!(
-        ShellProcessOutcome::from_cbor(ShellProcessOutcomeSource::ToolErrorDetails, &error_legacy)
-            .is_none()
+        ShellProcessOutcome::from_cbor(
+            ShellProcessOutcomeSource::ToolErrorDetails,
+            &error_without_reason
+        )
+        .is_none()
     );
 
     for malformed in [
@@ -141,10 +147,16 @@ fn integer_fields_enforce_i32_bounds() {
     let outcome = |value: i64| {
         ShellProcessOutcome::from_cbor(
             ShellProcessOutcomeSource::ToolResult,
-            &CborValue::Map(vec![(
-                CborValue::Text("status".into()),
-                CborValue::Integer(value.into()),
-            )]),
+            &CborValue::Map(vec![
+                (
+                    CborValue::Text("status".into()),
+                    CborValue::Integer(value.into()),
+                ),
+                (
+                    CborValue::Text("termination_reason".into()),
+                    CborValue::Text("exit".into()),
+                ),
+            ]),
         )
     };
     assert_eq!(
@@ -184,6 +196,10 @@ fn duplicate_detection_is_bounded_and_projection_specific() {
             CborValue::Text("status".into()),
             CborValue::Integer(i32::MIN.into()),
         ),
+        (
+            CborValue::Text("termination_reason".into()),
+            CborValue::Text("exit".into()),
+        ),
     ]);
     assert!(
         ShellProcessOutcome::from_cbor(
@@ -201,6 +217,10 @@ fn duplicate_detection_is_bounded_and_projection_specific() {
             CborValue::Text("status".into()),
             CborValue::Integer(1.into()),
         ),
+        (
+            CborValue::Text("termination_reason".into()),
+            CborValue::Text("exit".into()),
+        ),
     ]);
     assert!(
         ShellProcessOutcome::from_cbor(ShellProcessOutcomeSource::ToolResult, &duplicate_status)
@@ -212,10 +232,16 @@ fn duplicate_detection_is_bounded_and_projection_specific() {
 /// source field and reject synthetic foreground placeholders.
 #[test]
 fn terminal_event_mapping_preserves_source_and_omits_placeholders() {
-    let result = CborValue::Map(vec![(
-        CborValue::Text("status".into()),
-        CborValue::Integer(0.into()),
-    )]);
+    let result = CborValue::Map(vec![
+        (
+            CborValue::Text("status".into()),
+            CborValue::Integer(0.into()),
+        ),
+        (
+            CborValue::Text("termination_reason".into()),
+            CborValue::Text("exit".into()),
+        ),
+    ]);
     let error = CborValue::Map(vec![(
         CborValue::Text("termination_reason".into()),
         CborValue::Text("start_error".into()),

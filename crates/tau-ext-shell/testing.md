@@ -70,9 +70,10 @@ model/user denial privacy. VCR coverage requires authorization before replay.
 ## Processes, locking, and scheduling
 
 Process tests cover Linux/Android/macOS TTY-backed output descriptors, persistent
-stdin EOF/readiness, separated stdout/stderr capture, foreground exit, timeout,
-cancellation, signals, bounded output, truncation, and descendants retaining PTY
-user endpoints. Unix-only helpers are gated and may skip when unavailable.
+stdin EOF/readiness, separated stdout/stderr capture, explicit termination
+classification for foreground exits, timeout, cancellation, signals, bounded
+output, truncation, and descendants retaining PTY user endpoints. Unix-only
+helpers are gated and may skip when unavailable.
 
 Saved-output regressions cover representative native read/list/user-shell
 renderings under the 10 KiB visible cap and the model-shell native `output`

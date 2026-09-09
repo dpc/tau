@@ -130,9 +130,8 @@ impl ShellProcessOutcome {
     /// ignored. A duplicate or malformed recognized field, or a contradictory
     /// combination, makes the projection unavailable.
     ///
-    /// For legacy logical-result payloads only, a lone `status` infers `exit`.
-    /// Every error-details payload and every other result shape must carry an
-    /// explicit coherent `termination_reason`.
+    /// Every recognized process outcome must carry an explicit coherent
+    /// `termination_reason`.
     #[must_use]
     pub fn from_cbor(source: ShellProcessOutcomeSource, value: &CborValue) -> Option<Self> {
         let CborValue::Map(entries) = value else {
@@ -180,17 +179,7 @@ impl ShellProcessOutcome {
                 _ => {}
             }
         }
-        let reason = match reason {
-            Some(reason) => reason,
-            None if source == ShellProcessOutcomeSource::ToolResult
-                && exit_code.is_some()
-                && timed_out.is_none()
-                && signal.is_none() =>
-            {
-                ShellTerminationReason::Exit
-            }
-            None => return None,
-        };
+        let reason = reason?;
         let did_time_out = timed_out == Some(true);
         let coherent = match reason {
             ShellTerminationReason::Exit => {

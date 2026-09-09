@@ -8,10 +8,16 @@ fn inspection_alias_projects_canonical_terminal() {
         call_id: "call".into(),
         tool_name: tau_proto::ToolName::new("shell"),
         tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Map(vec![(
-            CborValue::Text("status".into()),
-            CborValue::Integer(0.into()),
-        )]),
+        result: CborValue::Map(vec![
+            (
+                CborValue::Text("status".into()),
+                CborValue::Integer(0.into()),
+            ),
+            (
+                CborValue::Text("termination_reason".into()),
+                CborValue::Text("exit".into()),
+            ),
+        ]),
         display: None,
         originator: tau_proto::PromptOriginator::User,
     });

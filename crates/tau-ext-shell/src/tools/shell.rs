@@ -2963,12 +2963,10 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
             CborValue::Bool(true),
         ));
     }
-    if timed_out || signal.is_some() || status != Some(0) || termination_reason != "exit" {
-        entries.push((
-            CborValue::Text("termination_reason".to_owned()),
-            CborValue::Text(termination_reason.to_owned()),
-        ));
-    }
+    entries.push((
+        CborValue::Text("termination_reason".to_owned()),
+        CborValue::Text(termination_reason.to_owned()),
+    ));
     if truncated {
         entries.push((
             CborValue::Text("truncated".to_owned()),
