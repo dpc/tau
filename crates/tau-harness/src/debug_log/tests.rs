@@ -670,7 +670,7 @@ fn published_binary_free_events_borrow_and_match_legacy_json() {
         message_class: Default::default(),
         internal_kind: None,
         originator: PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     });

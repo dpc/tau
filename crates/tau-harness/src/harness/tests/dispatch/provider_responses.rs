@@ -1943,7 +1943,7 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
                 message_class: tau_proto::PromptMessageClass::Internal,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
-                submission_source: Default::default(),
+                submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 display_name: None,
                 ctx_id: None,
             }),

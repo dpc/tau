@@ -294,7 +294,7 @@ fn agent_prompt(agent_id: &str, text: &str) -> Event {
         message_class: PromptMessageClass::User,
         internal_kind: None,
         originator: PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     })

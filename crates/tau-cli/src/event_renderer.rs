@@ -6701,7 +6701,6 @@ impl EventRenderer {
             && matches!(
                 prompt.submission_source,
                 tau_proto::PromptSubmissionSource::HumanUi
-                    | tau_proto::PromptSubmissionSource::Legacy
             )
             && let Some(queued_id) = queued.as_ref().and_then(|queued| queued.id)
         {
@@ -6740,8 +6739,6 @@ impl EventRenderer {
         ) {
             return;
         }
-        // Legacy records intentionally retain their historical rendering:
-        // there is no safe prefix-based way to reclassify them.
         self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
     }
 
@@ -6856,8 +6853,7 @@ impl EventRenderer {
                     });
                 true
             }
-            tau_proto::PromptSubmissionSource::HumanUi
-            | tau_proto::PromptSubmissionSource::Legacy => false,
+            tau_proto::PromptSubmissionSource::HumanUi => false,
         }
     }
 
@@ -6882,8 +6878,7 @@ impl EventRenderer {
                 self.internal_notice_block(text)
             }
             tau_proto::PromptSubmissionSource::HarnessInternal
-            | tau_proto::PromptSubmissionSource::HumanUi
-            | tau_proto::PromptSubmissionSource::Legacy => Self::empty_block(),
+            | tau_proto::PromptSubmissionSource::HumanUi => Self::empty_block(),
         }
     }
 
@@ -7065,15 +7060,14 @@ impl EventRenderer {
             && matches!(
                 steered.submission_source,
                 tau_proto::PromptSubmissionSource::HumanUi
-                    | tau_proto::PromptSubmissionSource::Legacy
             )
             && self.front_queued_user_prompt_matches(&steered.text)
         {
             // Queue records lack a submission source. A front-exact match is
-            // authoritative only for user or legacy prompt provenance;
-            // extension and harness facts retain their source-aware
-            // presentation. Never consume a different queued item
-            // merely because a later item has the same text.
+            // authoritative only for user prompt provenance; extension and
+            // harness facts retain their source-aware presentation. Never
+            // consume a different queued item merely because a later item has
+            // the same text.
             let Some(queued) = self.transcript.runtime.queued_user_blocks.pop_front() else {
                 return;
             };

@@ -452,7 +452,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     }));
@@ -513,29 +513,18 @@ fn extension_prompt_steered_uses_message_marker() {
         internal_kind: None,
         ctx_id: None,
     }));
-    for (text, submission_source) in [
-        (
-            "legacy internal payload",
-            tau_proto::PromptSubmissionSource::Legacy,
-        ),
-        (
-            "human internal payload",
-            tau_proto::PromptSubmissionSource::HumanUi,
-        ),
-    ] {
-        renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
-            inference_activation: false,
-            agent_id: agent_id("engineer_abc12345"),
-            text: text.to_owned(),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::Internal,
-            internal_kind: None,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source,
-            display_name: None,
-            ctx_id: None,
-        }));
-    }
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "human internal payload".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+        display_name: None,
+        ctx_id: None,
+    }));
     sync(&handle);
 
     assert!(vt.screen_contains(100, "■ External `fixture` message:"));
@@ -608,7 +597,6 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
     assert!(vt.screen_contains(100, "extension steered payload"));
     assert!(!vt.screen_contains(100, "harness submitted payload"));
     assert!(!vt.screen_contains(100, "harness steered payload"));
-    assert!(!vt.screen_contains(100, "legacy internal payload"));
     assert!(!vt.screen_contains(100, "human internal payload"));
 
     renderer.apply_setting("show-internal-prompts", "on");
@@ -618,7 +606,6 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
     assert_eq!(enabled.matches("harness steered payload").count(), 1);
     assert_eq!(enabled.matches("extension submitted payload").count(), 1);
     assert_eq!(enabled.matches("extension steered payload").count(), 1);
-    assert!(!enabled.contains("legacy internal payload"));
     assert!(!enabled.contains("human internal payload"));
 
     renderer.toggle_verbose_mode();
@@ -1344,7 +1331,7 @@ fn accepted_prompt_submission_starts_main_turn_before_provider_activity() {
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     }));
@@ -1392,7 +1379,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: originator.clone(),
-            submission_source: Default::default(),
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             display_name: None,
             ctx_id: None,
         },

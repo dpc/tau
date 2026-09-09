@@ -308,7 +308,7 @@ fn append_capacity_history(h: &mut Harness, cid: &AgentId, text: &str) {
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
             display_name: None,
             ctx_id: None,
         }),

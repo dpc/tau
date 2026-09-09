@@ -1237,7 +1237,7 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
         message_class: PromptMessageClass::User,
         internal_kind: None,
         originator: PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     }

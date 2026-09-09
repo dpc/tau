@@ -832,7 +832,7 @@ fn replayed_daily_prompt_advances_reconstructed_schedule() {
             message_class: PromptMessageClass::Internal,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             display_name: None,
             ctx_id: Some("timer:daily:1".to_owned()),
         },
@@ -881,7 +881,7 @@ fn replayed_timer_prompt_removes_one_shot() {
             message_class: PromptMessageClass::Internal,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             display_name: None,
             ctx_id: Some("timer:once:1".to_owned()),
         },
@@ -1004,18 +1004,12 @@ fn replayed_steered_timer_prompt_removes_one_shot() {
         internal_kind: None,
         ctx_id: Some("timer:busy:1".to_owned()),
     };
-    let submitted = AgentPromptSubmitted {
-        inference_activation: false,
-        agent_id: steered.agent_id.clone(),
-        text: steered.text,
-        trusted_internal_spans: Vec::new(),
-        message_class: steered.message_class,
-        internal_kind: None,
-        originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
-        display_name: None,
-        ctx_id: steered.ctx_id,
-    };
+    let submitted = submitted_prompt_from_steered(&steered);
+    assert_eq!(
+        submitted.submission_source,
+        tau_proto::PromptSubmissionSource::HarnessInternal,
+        "steered timer replay must preserve harness provenance"
+    );
 
     rt.handle_prompt_replay(&submitted, Some(UnixMicros::new(10_000_000)));
 

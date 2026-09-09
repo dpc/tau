@@ -511,6 +511,12 @@ fn user_prompt_submitted_for_agent(
     text: impl Into<String>,
     originator: tau_proto::PromptOriginator,
 ) -> Event {
+    let submission_source = match &originator {
+        tau_proto::PromptOriginator::User => tau_proto::PromptSubmissionSource::HumanUi,
+        tau_proto::PromptOriginator::Extension { .. } => {
+            tau_proto::PromptSubmissionSource::HarnessInternal
+        }
+    };
     Event::AgentPromptSubmitted(AgentPromptSubmitted {
         inference_activation: false,
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
@@ -519,7 +525,7 @@ fn user_prompt_submitted_for_agent(
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator,
-        submission_source: Default::default(),
+        submission_source,
         display_name: None,
         ctx_id: None,
     })
@@ -933,7 +939,7 @@ fn agent_start_hook_renders_multiple_configured_actions() {
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
             display_name: Some("Friendly main".to_owned()),
             ctx_id: None,
         }))
@@ -1027,7 +1033,7 @@ fn agent_start_hook_uses_display_name_set_with_id_fallback_for_blank_prompt_name
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
             display_name: Some("   ".to_owned()),
             ctx_id: None,
         }))
@@ -3293,7 +3299,7 @@ fn runtime_invalid_osc1337_key_is_skipped() {
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
             display_name: Some("bad=key".to_owned()),
             ctx_id: None,
         }))

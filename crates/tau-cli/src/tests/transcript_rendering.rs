@@ -3948,7 +3948,7 @@ fn timer_wakeup_prompt_submitted_renders_visible_marker() {
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         display_name: None,
         ctx_id: Some("timer:wake:1".to_owned()),
     }));
@@ -4049,7 +4049,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     }));

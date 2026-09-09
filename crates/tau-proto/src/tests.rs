@@ -1619,7 +1619,7 @@ fn representative_events() -> Vec<Event> {
             message_class: PromptMessageClass::User,
             internal_kind: None,
             originator: PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: PromptSubmissionSource::HumanUi,
             display_name: None,
             ctx_id: None,
         }),
@@ -3571,7 +3571,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
         message_class: PromptMessageClass::User,
         internal_kind: None,
         originator: PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     };
@@ -5747,7 +5747,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             message_class: PromptMessageClass::User,
             internal_kind: None,
             originator: PromptOriginator::User,
-            submission_source: Default::default(),
+            submission_source: PromptSubmissionSource::HumanUi,
             display_name: None,
             ctx_id: None,
         }),
@@ -5811,7 +5811,8 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
 
     let submitted: AgentPromptSubmitted = serde_json::from_value(serde_json::json!({
         "agent_id": "worker",
-        "text": "submitted"
+        "text": "submitted",
+        "submission_source": "human_ui"
     }))
     .expect("agent prompt decodes");
     assert_eq!(submitted.message_class, PromptMessageClass::User);
@@ -5841,19 +5842,43 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     assert!(internal.get("internal_kind").is_none());
 }
 
-/// Steered prompt provenance is required so replay never guesses which provider
-/// presentation applies to a queued prompt.
+/// Durable prompt provenance is required so replay never guesses which
+/// provider presentation applies to an accepted prompt.
 #[test]
-fn steered_prompt_requires_submission_source() {
+fn durable_prompts_require_submission_source() {
+    let missing_source = serde_json::json!({
+        "agent_id": "worker",
+        "text": "submitted"
+    });
+    assert!(
+        serde_json::from_value::<AgentPromptSubmitted>(missing_source).is_err(),
+        "submitted prompt without typed provenance must not decode"
+    );
+    assert!(
+        serde_json::from_value::<PromptSubmissionSource>(serde_json::json!("legacy")).is_err(),
+        "removed compatibility provenance must not decode"
+    );
     let missing_source = serde_json::json!({
         "agent_id": "worker",
         "text": "steered"
     });
     assert!(
         serde_json::from_value::<AgentPromptSteered>(missing_source).is_err(),
-        "old steered records without typed provenance must not decode"
+        "steered prompt without typed provenance must not decode"
     );
 
+    let submitted = AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("worker"),
+        text: "submitted".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: PromptMessageClass::User,
+        internal_kind: None,
+        originator: PromptOriginator::User,
+        submission_source: PromptSubmissionSource::HumanUi,
+        display_name: None,
+        ctx_id: None,
+    };
     let steered = AgentPromptSteered {
         self_compaction_terminal: None,
         inference_activation: true,
@@ -5865,6 +5890,27 @@ fn steered_prompt_requires_submission_source() {
         internal_kind: None,
         ctx_id: None,
     };
+    let encoded = serde_json::to_value(&submitted).expect("serialize submitted prompt");
+    assert_eq!(encoded["submission_source"], serde_json::json!("human_ui"));
+    assert_eq!(
+        serde_json::from_value::<AgentPromptSubmitted>(encoded).expect("decode submitted prompt"),
+        submitted
+    );
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&submitted, &mut encoded).expect("serialize submitted prompt as CBOR");
+    let mut value =
+        ciborium::from_reader::<ciborium::Value, _>(encoded.as_slice()).expect("decode CBOR value");
+    let ciborium::Value::Map(fields) = &mut value else {
+        panic!("submitted prompt must encode as a CBOR map");
+    };
+    fields.retain(|(key, _)| key != &ciborium::Value::Text("submission_source".to_owned()));
+    encoded.clear();
+    ciborium::into_writer(&value, &mut encoded).expect("encode old submitted prompt shape");
+    assert!(
+        ciborium::from_reader::<AgentPromptSubmitted, _>(encoded.as_slice()).is_err(),
+        "old journal prompt without typed provenance must not decode"
+    );
+
     let encoded = serde_json::to_value(&steered).expect("serialize steered prompt");
     assert_eq!(encoded["submission_source"], serde_json::json!("human_ui"));
     assert_eq!(

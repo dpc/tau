@@ -320,7 +320,7 @@ fn rewritten_submitted_initial_failure_preserves_newer_queue() {
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
-        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         display_name: None,
         ctx_id: Some("ctx-rewritten".into()),
     }));
@@ -559,7 +559,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
                 .expect("test identifier must satisfy its grammar"),
             query_id: "q-worker".to_owned(),
         },
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         display_name: None,
         ctx_id: None,
     };

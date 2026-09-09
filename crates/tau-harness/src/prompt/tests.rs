@@ -518,7 +518,7 @@ fn context_text(item: &ContextItem) -> Option<&str> {
 }
 
 fn user_prompt(text: &str) -> Event {
-    sourced_user_prompt(text, tau_proto::PromptSubmissionSource::default())
+    sourced_user_prompt(text, tau_proto::PromptSubmissionSource::HumanUi)
 }
 
 fn sourced_user_prompt(text: &str, source: tau_proto::PromptSubmissionSource) -> Event {
@@ -2503,7 +2503,11 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .iter()
             .filter_map(context_text)
             .collect::<Vec<_>>(),
-        vec!["summary C1", "suffix one", "suffix two"]
+        vec![
+            "summary C1",
+            "<user>suffix one</user>",
+            "<user>suffix two</user>"
+        ]
     );
     let compact_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), suffix_one)
         .expect("logical rolling prefix");
@@ -2514,7 +2518,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .iter()
             .filter_map(context_text)
             .collect::<Vec<_>>(),
-        vec!["summary C1", "suffix one"]
+        vec!["summary C1", "<user>suffix one</user>"]
     );
     let manual_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), first_boundary)
         .expect("replacement-only prefix");
@@ -2539,7 +2543,11 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .iter()
             .filter_map(context_text)
             .collect::<Vec<_>>(),
-        vec!["manual summary", "suffix one", "suffix two"]
+        vec![
+            "manual summary",
+            "<user>suffix one</user>",
+            "<user>suffix two</user>"
+        ]
     );
 
     tree.apply_event(&boundary("ct-2", suffix_one, first_boundary, "summary C2"));
@@ -2647,7 +2655,7 @@ fn assemble_conversation_includes_tool_error_details() {
         display: None,
     }));
 
-    assert_preflight_matches_materialization(&tree, false);
+    assert_preflight_matches_materialization(&tree, true);
     let items = assemble_conversation_from(&tree, tree.head());
     let tool_result = items
         .iter()

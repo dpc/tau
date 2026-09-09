@@ -25,7 +25,7 @@ pub enum InternalPromptKind {
 }
 
 /// Prompt submission provenance stamped by the harness boundary.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptSubmissionSource {
     /// Authenticated interactive UI.
@@ -37,9 +37,6 @@ pub enum PromptSubmissionSource {
     },
     /// Harness-internal input.
     HarnessInternal,
-    /// Legacy record without explicit provenance.
-    #[default]
-    Legacy,
 }
 
 /// Return whether untrusted metadata must be rendered as a visible escape.

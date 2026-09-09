@@ -191,20 +191,14 @@ fn conversation_node(
         Event::AgentPromptSubmitted(prompt)
             if !prompt.message_class.is_internal()
                 && prompt.originator.is_user()
-                && matches!(
-                    prompt.submission_source,
-                    PromptSubmissionSource::HumanUi | PromptSubmissionSource::Legacy
-                ) =>
+                && prompt.submission_source == PromptSubmissionSource::HumanUi =>
         {
             tree.node_for_durable_event_seq(record.seq)
                 .map(|node_id| (node_id, AgentChatSpeaker::User))
         }
         Event::AgentPromptSteered(prompt)
             if !prompt.message_class.is_internal()
-                && matches!(
-                    prompt.submission_source,
-                    PromptSubmissionSource::HumanUi | PromptSubmissionSource::Legacy
-                ) =>
+                && prompt.submission_source == PromptSubmissionSource::HumanUi =>
         {
             tree.node_for_durable_event_seq(record.seq)
                 .map(|node_id| (node_id, AgentChatSpeaker::User))

@@ -4445,7 +4445,6 @@ pub struct AgentPromptSubmitted {
     #[serde(default)]
     pub originator: PromptOriginator,
     /// Harness-stamped provenance of this accepted prompt.
-    #[serde(default)]
     pub submission_source: PromptSubmissionSource,
     /// Human-friendly display name known when the prompt was submitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1371,18 +1371,7 @@ fn handle_delivery(
                 .state_mut()
                 .handle_prompt_replay(prompt, delivery.recorded_at),
             Event::AgentPromptSteered(prompt) => {
-                let submitted = AgentPromptSubmitted {
-                    inference_activation: false,
-                    agent_id: prompt.agent_id.clone(),
-                    text: prompt.text.clone(),
-                    trusted_internal_spans: Vec::new(),
-                    message_class: prompt.message_class,
-                    internal_kind: None,
-                    originator: tau_proto::PromptOriginator::User,
-                    submission_source: Default::default(),
-                    display_name: None,
-                    ctx_id: prompt.ctx_id.clone(),
-                };
+                let submitted = submitted_prompt_from_steered(prompt);
                 runtime
                     .state_mut()
                     .handle_prompt_replay(&submitted, delivery.recorded_at);
@@ -1429,6 +1418,22 @@ fn handle_delivery(
         _ => {}
     }
     Ok(())
+}
+
+/// Project a steered prompt into the submitted shape consumed by timer replay.
+fn submitted_prompt_from_steered(prompt: &tau_proto::AgentPromptSteered) -> AgentPromptSubmitted {
+    AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: prompt.agent_id.clone(),
+        text: prompt.text.clone(),
+        trusted_internal_spans: Vec::new(),
+        message_class: prompt.message_class,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: prompt.submission_source.clone(),
+        display_name: None,
+        ctx_id: prompt.ctx_id.clone(),
+    }
 }
 
 fn report_timer_tool(

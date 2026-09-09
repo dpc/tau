@@ -640,7 +640,7 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         self_compaction_terminal: None,
         inference_activation: false,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         agent_id: agent_id("main"),
         text: "steered submitted prompt".to_owned(),
         trusted_internal_spans: Vec::new(),
@@ -656,7 +656,7 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
     }));
