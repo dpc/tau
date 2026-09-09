@@ -1440,13 +1440,7 @@ fn run_chat_session(
     let cli_state =
         path_tau_config_settings::CliState::load_with_default(&dirs, settings.default_state());
     let prompt_history = PromptHistoryStore::new(&dirs);
-    let input_history = match prompt_history.load() {
-        Ok(history) => history,
-        Err(error) => {
-            tracing::warn!(target: "tau_cli::ui", %error, "failed to load persistent prompt history");
-            Vec::new()
-        }
-    };
+    let input_history = load_initial_prompt_history(&prompt_history);
     let terminal_options = terminal_options_from_settings(&settings);
     let (mut term, handle) = HighTerm::new_with_completion_rules_and_data(
         prompt,
@@ -1910,6 +1904,18 @@ fn spawn_renderer_thread(
             }
         }
     })
+}
+
+/// Loads persisted history without letting an unavailable history file prevent
+/// UI startup.
+pub(crate) fn load_initial_prompt_history(store: &PromptHistoryStore) -> Vec<String> {
+    match store.load() {
+        Ok(history) => history,
+        Err(error) => {
+            tracing::warn!(target: "tau_cli::ui", %error, "failed to load persistent prompt history");
+            Vec::new()
+        }
+    }
 }
 
 /// Translates static CLI settings into the immutable raw-terminal policy.

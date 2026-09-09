@@ -1,5 +1,27 @@
 use super::*;
 
+/// UI startup retains persisted order and multiline text but still starts with
+/// empty history when the backing path cannot be read as a history file.
+#[test]
+fn initial_ui_history_preserves_entries_and_recovers_from_load_failure() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = PromptHistoryStore::for_path(tmp.path().join(HISTORY_FILE));
+    assert_eq!(store.append("first"), PromptHistoryAdmission::Queued);
+    assert_eq!(store.append("second\nline"), PromptHistoryAdmission::Queued);
+    store.wait_for_persistence();
+    assert_eq!(
+        crate::chat::load_initial_prompt_history(&store),
+        vec!["first", "second\nline"]
+    );
+
+    let unreadable = PromptHistoryStore::for_path(tmp.path().to_path_buf());
+    assert!(
+        unreadable.load().is_err(),
+        "a directory is not a history file"
+    );
+    assert!(crate::chat::load_initial_prompt_history(&unreadable).is_empty());
+}
+
 fn append_raw_record(path: &Path, record: &PromptHistoryRecord) {
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).expect("encode record");

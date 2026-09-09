@@ -5069,126 +5069,15 @@ where
                         .expect("retry scheduler starts with the runtime waker")
                         .schedule(job, independent_due, cooldown_constraint);
                 }
-                Ok(WorkerMessage::RetryDue(mut job)) => {
-                    if let Some(observation) = job.receipt_observation.as_mut() {
-                        observation.cooldown_dequeued();
-                    }
-                    if let Some(scheduler) = &self.retry_scheduler {
-                        scheduler
-                            .delayed_count
-                            .fetch_sub(1, AtomicOrdering::Relaxed);
-                    }
-                    if self.input_closed
-                        || job.cancel_generation != self.cancel_generation
-                        || self.cancellation.take_canceled(&job.agent_prompt_id)
-                    {
-                        finish_receipt_canceled(&mut job.receipt_observation);
-                        self.finish_canceled_job(&job, handle)?;
-                        continue;
-                    }
-                    let Some(PendingPromptAdmissionKind::RetryDue(mut job)) = self
-                        .start_retry_credential_read(PendingPromptAdmissionKind::RetryDue(job))?
-                    else {
-                        continue;
-                    };
-                    let mut profiles =
-                        self.load_selected_profile(&job.prompt.model.provider, handle)?;
-                    let backend =
-                        self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
-                    if !automatic_retry_identity_matches(
-                        job.pinned_chatgpt_identity.as_ref(),
-                        &backend,
-                    ) {
-                        self.finish_identity_changed_prompt(&job, handle)?;
-                        continue;
-                    }
-                    job.backend = backend;
-                    job.profile_identity = backend_profile_identity(&job.backend);
-                    if let Some(observation) = job.receipt_observation.as_mut() {
-                        observation.queued(self.prompt_queue.len().saturating_add(1));
-                    }
-                    self.prompt_queue.push_back(job);
+                Ok(WorkerMessage::RetryDue(job)) => {
+                    self.admit_due_retry(job, handle)?;
                 }
                 Ok(WorkerMessage::ManualRetry {
-                    mut job,
+                    job,
                     request_id,
                     agent_prompt_id,
                 }) => {
-                    let status = if let Some(owned_job) = job.take() {
-                        let mut owned_job = owned_job;
-                        if let Some(observation) = owned_job.receipt_observation.as_mut() {
-                            observation.cooldown_dequeued();
-                        }
-                        if let Some(scheduler) = &self.retry_scheduler {
-                            scheduler
-                                .delayed_count
-                                .fetch_sub(1, AtomicOrdering::Relaxed);
-                        }
-                        if self.input_closed
-                            || owned_job.cancel_generation != self.cancel_generation
-                            || self.cancellation.take_canceled(&owned_job.agent_prompt_id)
-                        {
-                            finish_receipt_canceled(&mut owned_job.receipt_observation);
-                            self.finish_canceled_job(&owned_job, handle)?;
-                            tau_proto::RetryPromptStatus::NotParked
-                        } else {
-                            let Some(PendingPromptAdmissionKind::Manual {
-                                job: mut owned_job,
-                                request_id: _,
-                            }) = self.start_retry_credential_read(
-                                PendingPromptAdmissionKind::Manual {
-                                    job: owned_job,
-                                    request_id: request_id.clone(),
-                                },
-                            )?
-                            else {
-                                // The response is emitted only after this
-                                // admission reaches the FIFO-ready head.
-                                continue;
-                            };
-                            let mut profiles = self
-                                .load_selected_profile(&owned_job.prompt.model.provider, handle)?;
-                            owned_job.backend = self.resolve_backend_with_quota(
-                                &owned_job.prompt.model,
-                                &mut profiles,
-                                handle,
-                            )?;
-                            owned_job.profile_identity =
-                                backend_profile_identity(&owned_job.backend);
-                            owned_job.manual_cooldown_bypass = true;
-                            owned_job.cooldown_probe = self
-                                .shared_cooldowns
-                                .get(&owned_job.prompt.model.provider)
-                                .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
-                                .map(|cooldown| CooldownProbe {
-                                    provider: owned_job.prompt.model.provider.clone(),
-                                    generation: cooldown.generation,
-                                });
-                            if let Some(observation) = owned_job.receipt_observation.as_mut() {
-                                observation.queued(self.prompt_queue.len().saturating_add(1));
-                            }
-                            self.prompt_queue.push_back(owned_job);
-                            tau_proto::RetryPromptStatus::Accepted
-                        }
-                    } else {
-                        tau_proto::RetryPromptStatus::NotParked
-                    };
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        agent_prompt_id = %agent_prompt_id,
-                        status = ?status,
-                        "manual provider retry resolved",
-                    );
-                    let mut frame_writer = handle_report_sink(handle);
-                    frame_writer.send_report(HarnessInputMessage::emit_transient(
-                        Event::ProviderRetryPromptResultReported(
-                            tau_proto::ProviderRetryPromptResult {
-                                request_id,
-                                agent_prompt_id,
-                                status,
-                            },
-                        ),
-                    ))?;
+                    self.admit_manual_retry(job, request_id, agent_prompt_id, handle)?;
                 }
                 Ok(WorkerMessage::DelayedCanceled {
                     mut job,
@@ -5261,50 +5150,182 @@ where
                     profile_epoch,
                     refresh_generation,
                 }) => {
-                    if self
-                        .quota
-                        .refresh_is_current(&provider, &profile_epoch, refresh_generation)
-                    {
-                        let mut profiles = self.load_selected_profile(&provider, handle)?;
-                        let observes_oauth_refresh =
-                            profiles.chatgpt_credential_reference(&provider).is_some();
-                        let config = models_for_profiles(&profiles)
-                            .into_iter()
-                            .find(|model| model.id.provider == provider)
-                            .and_then(|model| {
-                                resolve_responses_backend(
-                                    &model.id,
-                                    &mut profiles,
-                                    &mut self.oauth_refresh_rejections,
-                                    self.codex_runtime.network(),
-                                    self.extension_data_client.as_ref(),
-                                )
-                            });
-                        self.observe_selected_oauth_resolution(
-                            &provider,
-                            observes_oauth_refresh,
-                            handle,
-                        )?;
-                        if let Some(config) = config {
-                            let started = self.ensure_quota_profile(&provider, &config, handle)?;
-                            if !started && let Some(epoch) = self.quota.profile_epoch(&provider) {
-                                self.schedule_quota_refresh(
-                                    provider,
-                                    epoch,
-                                    QUOTA_FETCH_MIN_INTERVAL,
-                                );
-                            }
-                        } else if let Some(event) = self.quota.clear_profile(&provider) {
-                            self.clear_prewarm_profile(&provider);
-                            handle.send(quota_report_message(event))?;
-                        } else {
-                            self.clear_prewarm_profile(&provider);
-                        }
-                    }
+                    self.refresh_quota_if_current(
+                        provider,
+                        profile_epoch,
+                        refresh_generation,
+                        handle,
+                    )?;
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
             }
         }
+    }
+
+    /// Reconciles a due quota refresh only while its profile epoch and
+    /// scheduling generation still own it, reloading the selected profile
+    /// before any fetch.
+    fn refresh_quota_if_current(
+        &mut self,
+        provider: ProviderName,
+        profile_epoch: tau_proto::ProviderQuotaEpoch,
+        refresh_generation: u64,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        if self
+            .quota
+            .refresh_is_current(&provider, &profile_epoch, refresh_generation)
+        {
+            let mut profiles = self.load_selected_profile(&provider, handle)?;
+            let observes_oauth_refresh = profiles.chatgpt_credential_reference(&provider).is_some();
+            let config = models_for_profiles(&profiles)
+                .into_iter()
+                .find(|model| model.id.provider == provider)
+                .and_then(|model| {
+                    resolve_responses_backend(
+                        &model.id,
+                        &mut profiles,
+                        &mut self.oauth_refresh_rejections,
+                        self.codex_runtime.network(),
+                        self.extension_data_client.as_ref(),
+                    )
+                });
+            self.observe_selected_oauth_resolution(&provider, observes_oauth_refresh, handle)?;
+            if let Some(config) = config {
+                let started = self.ensure_quota_profile(&provider, &config, handle)?;
+                if !started && let Some(epoch) = self.quota.profile_epoch(&provider) {
+                    self.schedule_quota_refresh(provider, epoch, QUOTA_FETCH_MIN_INTERVAL);
+                }
+            } else if let Some(event) = self.quota.clear_profile(&provider) {
+                self.clear_prewarm_profile(&provider);
+                handle.send(quota_report_message(event))?;
+            } else {
+                self.clear_prewarm_profile(&provider);
+            }
+        }
+        Ok(())
+    }
+
+    /// Transfers one automatically due job from delayed ownership to fresh
+    /// credential admission, preserving cancellation and pinned-identity
+    /// checks.
+    fn admit_due_retry(&mut self, mut job: PromptJob, handle: &ClientHandle) -> ClientResult<()> {
+        if let Some(observation) = job.receipt_observation.as_mut() {
+            observation.cooldown_dequeued();
+        }
+        if let Some(scheduler) = &self.retry_scheduler {
+            scheduler
+                .delayed_count
+                .fetch_sub(1, AtomicOrdering::Relaxed);
+        }
+        if self.input_closed
+            || job.cancel_generation != self.cancel_generation
+            || self.cancellation.take_canceled(&job.agent_prompt_id)
+        {
+            finish_receipt_canceled(&mut job.receipt_observation);
+            self.finish_canceled_job(&job, handle)?;
+            return Ok(());
+        }
+        let Some(PendingPromptAdmissionKind::RetryDue(mut job)) =
+            self.start_retry_credential_read(PendingPromptAdmissionKind::RetryDue(job))?
+        else {
+            return Ok(());
+        };
+        let mut profiles = self.load_selected_profile(&job.prompt.model.provider, handle)?;
+        let backend = self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
+        if !automatic_retry_identity_matches(job.pinned_chatgpt_identity.as_ref(), &backend) {
+            self.finish_identity_changed_prompt(&job, handle)?;
+            return Ok(());
+        }
+        job.backend = backend;
+        job.profile_identity = backend_profile_identity(&job.backend);
+        if let Some(observation) = job.receipt_observation.as_mut() {
+            observation.queued(self.prompt_queue.len().saturating_add(1));
+        }
+        self.prompt_queue.push_back(job);
+        Ok(())
+    }
+
+    /// Resolves a manual scheduler transfer, deferring its correlated response
+    /// while credentials are pending and granting only the owned job a bypass.
+    fn admit_manual_retry(
+        &mut self,
+        mut job: Option<PromptJob>,
+        request_id: tau_proto::RetryPromptRequestId,
+        agent_prompt_id: tau_proto::AgentPromptId,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let status = if let Some(owned_job) = job.take() {
+            let mut owned_job = owned_job;
+            if let Some(observation) = owned_job.receipt_observation.as_mut() {
+                observation.cooldown_dequeued();
+            }
+            if let Some(scheduler) = &self.retry_scheduler {
+                scheduler
+                    .delayed_count
+                    .fetch_sub(1, AtomicOrdering::Relaxed);
+            }
+            if self.input_closed
+                || owned_job.cancel_generation != self.cancel_generation
+                || self.cancellation.take_canceled(&owned_job.agent_prompt_id)
+            {
+                finish_receipt_canceled(&mut owned_job.receipt_observation);
+                self.finish_canceled_job(&owned_job, handle)?;
+                tau_proto::RetryPromptStatus::NotParked
+            } else {
+                let Some(PendingPromptAdmissionKind::Manual {
+                    job: mut owned_job,
+                    request_id: _,
+                }) = self.start_retry_credential_read(PendingPromptAdmissionKind::Manual {
+                    job: owned_job,
+                    request_id: request_id.clone(),
+                })?
+                else {
+                    // The response is emitted only after this admission
+                    // reaches the FIFO-ready head.
+                    return Ok(());
+                };
+                let mut profiles =
+                    self.load_selected_profile(&owned_job.prompt.model.provider, handle)?;
+                owned_job.backend = self.resolve_backend_with_quota(
+                    &owned_job.prompt.model,
+                    &mut profiles,
+                    handle,
+                )?;
+                owned_job.profile_identity = backend_profile_identity(&owned_job.backend);
+                owned_job.manual_cooldown_bypass = true;
+                owned_job.cooldown_probe = self
+                    .shared_cooldowns
+                    .get(&owned_job.prompt.model.provider)
+                    .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
+                    .map(|cooldown| CooldownProbe {
+                        provider: owned_job.prompt.model.provider.clone(),
+                        generation: cooldown.generation,
+                    });
+                if let Some(observation) = owned_job.receipt_observation.as_mut() {
+                    observation.queued(self.prompt_queue.len().saturating_add(1));
+                }
+                self.prompt_queue.push_back(owned_job);
+                tau_proto::RetryPromptStatus::Accepted
+            }
+        } else {
+            tau_proto::RetryPromptStatus::NotParked
+        };
+        tracing::info!(
+            target: LOG_TARGET,
+            agent_prompt_id = %agent_prompt_id,
+            status = ?status,
+            "manual provider retry resolved",
+        );
+        let mut frame_writer = handle_report_sink(handle);
+        frame_writer.send_report(HarnessInputMessage::emit_transient(
+            Event::ProviderRetryPromptResultReported(tau_proto::ProviderRetryPromptResult {
+                request_id,
+                agent_prompt_id,
+                status,
+            }),
+        ))?;
+        Ok(())
     }
 
     fn park_cooled_queued_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {

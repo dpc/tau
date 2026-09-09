@@ -1779,17 +1779,25 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     session_claim.retire()?;
     if shutdown_cause == Some(ShutdownCause::BootstrapFailure) {
         let receiver = bootstrap_result.expect("bootstrap failure owns a result receiver");
-        return match receiver.recv() {
-            Ok(Err(error)) => Err(error),
-            Ok(Ok(_)) => Err(HarnessError::Participant(
-                "bootstrap failure shutdown carried a successful result".to_owned(),
-            )),
-            Err(_) => Err(HarnessError::Participant(
-                "bootstrap failure shutdown lost its result".to_owned(),
-            )),
-        };
+        return Err(bootstrap_shutdown_error(receiver.recv()));
     }
     result
+}
+
+/// Recovers the bootstrap failure after daemon teardown, rejecting inconsistent
+/// results.
+fn bootstrap_shutdown_error(
+    result: Result<Result<tau_proto::AgentId, HarnessError>, mpsc::RecvError>,
+) -> HarnessError {
+    match result {
+        Ok(Err(error)) => error,
+        Ok(Ok(_)) => HarnessError::Participant(
+            "bootstrap failure shutdown carried a successful result".to_owned(),
+        ),
+        Err(_) => {
+            HarnessError::Participant("bootstrap failure shutdown lost its result".to_owned())
+        }
+    }
 }
 
 /// Retires listener ownership before checking admission and closing transports.

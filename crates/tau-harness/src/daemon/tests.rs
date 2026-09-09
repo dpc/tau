@@ -13,6 +13,30 @@ use tempfile::TempDir;
 use super::*;
 use crate::harness::Harness;
 
+/// Teardown must report the original bootstrap error and fail closed on a
+/// successful or missing result paired with a bootstrap-failure shutdown.
+#[test]
+fn bootstrap_shutdown_preserves_failure_and_rejects_inconsistent_results() {
+    let error = bootstrap_shutdown_error(Ok(Err(HarnessError::Participant(
+        "original bootstrap failure".to_owned(),
+    ))));
+    assert!(
+        matches!(error, HarnessError::Participant(message) if message == "original bootstrap failure")
+    );
+
+    let error = bootstrap_shutdown_error(Ok(Ok(
+        tau_proto::AgentId::parse("bootstrap-agent").expect("valid agent id")
+    )));
+    assert!(
+        matches!(error, HarnessError::Participant(message) if message == "bootstrap failure shutdown carried a successful result")
+    );
+
+    let error = bootstrap_shutdown_error(Err(mpsc::RecvError));
+    assert!(
+        matches!(error, HarnessError::Participant(message) if message == "bootstrap failure shutdown lost its result")
+    );
+}
+
 /// Bootstrap ids accept only the bounded stable ASCII generation grammar.
 #[test]
 fn bootstrap_id_validation_is_strict_and_semantic() {

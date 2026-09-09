@@ -4062,7 +4062,6 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
     let mut removed_tag = tagged.clone();
     let mut rewritten_text = tagged.clone();
     let mut rewritten_spans = tagged.clone();
-    let mut untagged = tagged.clone();
     match &mut removed_tag {
         Event::AgentPromptSubmitted(prompt) => prompt.internal_kind = None,
         Event::AgentPromptSteered(prompt) => prompt.internal_kind = None,
@@ -4084,11 +4083,7 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
         }
         _ => unreachable!(),
     }
-    match &mut untagged {
-        Event::AgentPromptSubmitted(prompt) => prompt.internal_kind = None,
-        Event::AgentPromptSteered(prompt) => prompt.internal_kind = None,
-        _ => unreachable!(),
-    }
+    let untagged = removed_tag.clone();
     let mut rewritten_untagged = untagged.clone();
     match &mut rewritten_untagged {
         Event::AgentPromptSubmitted(prompt) => {
@@ -4123,11 +4118,7 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
         let mut original = original;
         let mut replacement = replacement;
         for event in [&mut original, &mut replacement] {
-            match event {
-                Event::AgentPromptSubmitted(prompt) => prompt.agent_id = agent_id.clone(),
-                Event::AgentPromptSteered(prompt) => prompt.agent_id = agent_id.clone(),
-                _ => unreachable!("internal prompt fixture"),
-            }
+            set_internal_prompt_fixture_agent(event, &agent_id);
         }
         let _interceptor = connect_test_tool(&mut h, "context-alert-rewriter");
         h.handle_extension_event(
@@ -4160,11 +4151,7 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
     let mut untagged = untagged;
     let mut rewritten_untagged = rewritten_untagged;
     for event in [&mut untagged, &mut rewritten_untagged] {
-        match event {
-            Event::AgentPromptSubmitted(prompt) => prompt.agent_id = agent_id.clone(),
-            Event::AgentPromptSteered(prompt) => prompt.agent_id = agent_id.clone(),
-            _ => unreachable!("internal prompt fixture"),
-        }
+        set_internal_prompt_fixture_agent(event, &agent_id);
     }
     let _interceptor = connect_test_tool(&mut h, "ordinary-prompt-rewriter");
     h.handle_extension_event(
@@ -4188,6 +4175,15 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
     let events = event_log_events(&h);
     assert!(!events.contains(&untagged));
     assert!(events.contains(&rewritten_untagged));
+}
+
+/// Binds either internal-prompt fixture shape to the harness-created agent.
+fn set_internal_prompt_fixture_agent(event: &mut Event, agent_id: &tau_proto::AgentId) {
+    match event {
+        Event::AgentPromptSubmitted(prompt) => prompt.agent_id = agent_id.clone(),
+        Event::AgentPromptSteered(prompt) => prompt.agent_id = agent_id.clone(),
+        _ => unreachable!("internal prompt fixture"),
+    }
 }
 
 /// Sink that rejects intercepted frames to exercise failed-delivery recovery.

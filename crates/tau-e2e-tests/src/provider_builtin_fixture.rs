@@ -12,6 +12,62 @@ use tempfile::TempDir;
 
 use crate::{bounded_runtime_tempdir, sanitize_name};
 
+/// Writes the keyless loopback profile with the exact closed script's model
+/// policy.
+fn write_fixture_profile(
+    profile_dir: &Path,
+    base_url: &str,
+    script: Script,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut profile = serde_json::json!({
+        "kind": "chat_completions",
+        "base_url": base_url,
+        "models": [{"id": "retry-model"}],
+        "credential": {"kind": "none"}
+    });
+    if matches!(script, Script::Qwen) {
+        profile["extra_body"] = serde_json::json!({
+            "chat_template_kwargs": {
+                "enable_thinking": true,
+                "preserve_thinking": true
+            },
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.0,
+            "presence_penalty": 0.0,
+            "repetition_penalty": 1.0
+        });
+        profile["models"] = serde_json::json!([{
+            "id": "Qwen/Qwen3.8-27B",
+            "context_window": 262144,
+            "compat": {
+                "stream_options": true,
+                "reasoning_effort": {
+                    "mapping": [
+                        {"from": "0.0", "level": "low"},
+                        {"from": "0.35", "level": "medium"},
+                        {"from": "0.8", "level": "xhigh"}
+                    ],
+                    "wire": "literal"
+                },
+                "reasoning_replay": "both",
+                "single_initial_system_message": true
+            }
+        }]);
+    } else if matches!(script, Script::Compaction | Script::CompactionContinuation) {
+        profile["models"] = serde_json::json!([{
+            "id": "llama-compaction-model",
+            "context_window": 8192,
+        }]);
+    }
+    std::fs::write(
+        profile_dir.join("local.json"),
+        serde_json::to_vec_pretty(&profile)?,
+    )?;
+    Ok(())
+}
+
 /// Valid-by-construction inputs for each closed production-provider script.
 enum FixtureScript<'a> {
     /// Retry script with no tool extension.
@@ -149,69 +205,20 @@ impl ProviderBuiltinFixture {
         let profile_dir = config_dir.join("providers/provider-builtin");
         std::fs::create_dir_all(&profile_dir)?;
         let qwen = matches!(server_script, Script::Qwen);
-        let mut profile = serde_json::json!({
-            "kind": "chat_completions",
-            "base_url": server.base_url(),
-            "models": [{"id": "retry-model"}],
-            "credential": {"kind": "none"}
-        });
         let compaction = matches!(
             server_script,
             Script::Compaction | Script::CompactionContinuation
         );
-        if qwen {
-            profile["extra_body"] = serde_json::json!({
-                "chat_template_kwargs": {
-                    "enable_thinking": true,
-                    "preserve_thinking": true
-                },
-                "temperature": 1.0,
-                "top_p": 0.95,
-                "top_k": 20,
-                "min_p": 0.0,
-                "presence_penalty": 0.0,
-                "repetition_penalty": 1.0
-            });
-            profile["models"] = serde_json::json!([{
-                "id": "Qwen/Qwen3.8-27B",
-                "context_window": 262144,
-                "compat": {
-                    "stream_options": true,
-                    "reasoning_effort": {
-                        "mapping": [
-                            {"from": "0.0", "level": "low"},
-                            {"from": "0.35", "level": "medium"},
-                            {"from": "0.8", "level": "xhigh"}
-                        ],
-                        "wire": "literal"
-                    },
-                    "reasoning_replay": "both",
-                    "single_initial_system_message": true
-                }
-            }]);
+        write_fixture_profile(&profile_dir, &server.base_url(), server_script)?;
+        let (role, model) = if qwen {
+            ("provider-builtin-qwen", "local/Qwen/Qwen3.8-27B")
         } else if compaction {
-            profile["models"] = serde_json::json!([{
-                "id": "llama-compaction-model",
-                "context_window": 8192,
-            }]);
-        }
-        std::fs::write(
-            profile_dir.join("local.json"),
-            serde_json::to_vec_pretty(&profile)?,
-        )?;
-        let role = if qwen {
-            "provider-builtin-qwen"
-        } else if compaction {
-            "provider-builtin-compaction"
+            (
+                "provider-builtin-compaction",
+                "local/llama-compaction-model",
+            )
         } else {
-            "provider-builtin-retry"
-        };
-        let model = if qwen {
-            "local/Qwen/Qwen3.8-27B"
-        } else if compaction {
-            "local/llama-compaction-model"
-        } else {
-            "local/retry-model"
+            ("provider-builtin-retry", "local/retry-model")
         };
         let tools = if qwen { "[restart_test_dummy]" } else { "[]" };
         let effort = if qwen { "          effort: 1.0\n" } else { "" };
