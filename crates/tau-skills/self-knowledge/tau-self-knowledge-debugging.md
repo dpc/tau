@@ -49,7 +49,7 @@ Shell tools run through a supervised configured component. By default,
 read-only `${XDG_RUNTIME_DIR}/tau/harnesses` mount. Consequently, `tau session
 list --json` run there can correctly return `[]` while host-side listeners are
 live. Perform daemon discovery from the host, outside the supervised extension
-namespace. Set `tau_runtime_socket_access: legacy` only for a trusted component
+namespace. Set `tau_runtime_socket_access: ambient` only for a trusted component
 that genuinely needs ambient harness discovery; do not change the default.
 See the [extension configuration](../../../docs/extensions.md#runtime-socket-discovery)
 and [configured-extension boundary](../../../SECURITY.md) for the policy.

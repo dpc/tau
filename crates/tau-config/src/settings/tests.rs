@@ -5538,13 +5538,13 @@ fn tau_state_access_rejects_removed_legacy_configuration() {
 }
 
 /// Ensures runtime socket access stays fail-closed unless one component
-/// explicitly requests the legacy ambient view.
+/// explicitly requests the ambient view.
 #[test]
 fn tau_runtime_socket_access_requires_an_explicit_component_opt_out() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
-        "extensions:\n  masked:\n    command: [demo]\n  trusted:\n    command: [demo]\n    tau_runtime_socket_access: legacy\n",
+        "extensions:\n  masked:\n    command: [demo]\n  trusted:\n    command: [demo]\n    tau_runtime_socket_access: ambient\n",
     )
     .expect("write");
     let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
@@ -5554,7 +5554,41 @@ fn tau_runtime_socket_access_requires_an_explicit_component_opt_out() {
     );
     assert_eq!(
         settings.extensions["trusted"].tau_runtime_socket_access,
-        Some(TauRuntimeSocketAccess::Legacy)
+        Some(TauRuntimeSocketAccess::Ambient)
+    );
+}
+
+/// Ensures the removed legacy runtime-socket value cannot silently restore
+/// ambient socket access through file or command-line configuration.
+#[test]
+fn tau_runtime_socket_access_rejects_removed_legacy_configuration() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "extensions:\n  trusted:\n    command: [demo]\n    tau_runtime_socket_access: legacy\n",
+    )
+    .expect("write stale configuration");
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("legacy runtime socket configuration must be rejected");
+    assert!(
+        error.to_string().contains("legacy"),
+        "error should identify the rejected value: {error}"
+    );
+
+    let cli_td = TempDir::new().expect("CLI tempdir");
+    let override_value =
+        HarnessConfigCliOverride::from_str("extensions.trusted.tau_runtime_socket_access=legacy")
+            .expect("generic override syntax");
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(cli_td.path()),
+        None,
+        &[],
+        &[override_value],
+    )
+    .expect_err("legacy runtime socket command-line override must be rejected");
+    assert!(
+        error.to_string().contains("legacy"),
+        "override error should identify the rejected value: {error}"
     );
 }
 

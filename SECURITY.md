@@ -228,8 +228,8 @@ in a persistent harness can therefore read other Tau session and agent state
 unless its policy is explicitly `hidden`. Memory-only harnesses force `hidden`,
 create no host state, and mask an existing state root if one exists.
 Supervised components also receive an empty bind-mounted harness runtime socket
-directory by default. A per-component `tau_runtime_socket_access: legacy`
-opt-out restores ambient socket discovery for a trusted component without
+directory by default. A per-component `tau_runtime_socket_access: ambient`
+opt-out presents the ambient socket directory for a trusted component without
 changing its state or secret access.
 The launcher covers its temporary real-state staging tree with an empty
 read-only mount before exec, after installing the exact destination binds, so

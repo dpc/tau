@@ -206,7 +206,7 @@ impl TestEnvironment {
         std::fs::write(
             self.config_home.join("tau/harness.yaml"),
             format!(
-                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: legacy\n"
+                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: ambient\n"
             ),
         )
         .expect("configure shutdown canary");
@@ -237,7 +237,7 @@ impl TestEnvironment {
         std::fs::write(
             self.config_home.join("tau/harness.yaml"),
             format!(
-                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: legacy\n"
+                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: ambient\n"
             ),
         )
         .expect("configure stderr canary");
@@ -332,7 +332,7 @@ impl TestEnvironment {
         std::fs::write(
             self.config_home.join("tau/harness.yaml"),
             format!(
-                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: legacy\n"
+                "extensions:\n  provider-builtin:\n    enable: false\n  core-shell:\n    enable: false\n  std-notifications:\n    command: {command}\n    require: true\n    tau_runtime_socket_access: ambient\n"
             ),
         )
         .expect("configure respawn overlap");

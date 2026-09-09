@@ -8,8 +8,8 @@ The shipped default is `read_only`;
 is a final process-wide force after all configuration layers. The CLI rejects
 that force on attach because it cannot change an existing daemon.
 Each supervised component independently defaults
-`tau_runtime_socket_access` to `hidden`; only the explicit `legacy` value
-restores its ambient view of Tau harness runtime sockets.
+`tau_runtime_socket_access` to `hidden`; only the explicit `ambient` value
+presents its ambient view of Tau harness runtime sockets.
 
 Extension availability is layered in this order: built-in defaults, harness
 configuration/drop-ins, selected profiles, and ordered `--harness-config` layers,

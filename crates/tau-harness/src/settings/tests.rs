@@ -95,7 +95,7 @@ fn extension_resolution_recursively_merges_builtin_and_user_config() {
 }
 
 /// Runtime socket masking resolves fail-closed while preserving one explicit
-/// trusted-component legacy opt-out.
+/// trusted-component ambient opt-out.
 #[test]
 fn extension_resolution_defaults_runtime_sockets_hidden() {
     let mut settings = HarnessSettings::built_in();
@@ -112,7 +112,7 @@ fn extension_resolution_defaults_runtime_sockets_hidden() {
         ExtensionEntry {
             command: Some(vec!["trusted".to_owned()]),
             tau_runtime_socket_access: Some(
-                path_tau_config_settings::TauRuntimeSocketAccess::Legacy,
+                path_tau_config_settings::TauRuntimeSocketAccess::Ambient,
             ),
             ..ExtensionEntry::default()
         },
@@ -133,7 +133,7 @@ fn extension_resolution_defaults_runtime_sockets_hidden() {
     );
     assert_eq!(
         trusted.tau_runtime_socket_access,
-        path_tau_config_settings::TauRuntimeSocketAccess::Legacy
+        path_tau_config_settings::TauRuntimeSocketAccess::Ambient
     );
 }
 

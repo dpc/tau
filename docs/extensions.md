@@ -52,12 +52,12 @@ every supervised component by default. Thus, `tau session list --json` inside a
 supervised shell can correctly return `[]` even when host-side harness listeners
 are live. Run discovery outside the supervised extension namespace. A trusted
 component that genuinely must discover or connect to Tau harnesses can explicitly
-restore the historical ambient view:
+request the ambient runtime socket view:
 
 ```yaml
 extensions:
   trusted-coordinator:
-    tau_runtime_socket_access: legacy
+    tau_runtime_socket_access: ambient
 ```
 
 This opt-out affects runtime socket discovery only. It does not weaken state or

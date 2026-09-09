@@ -21,7 +21,7 @@ Secret request and result payloads remain absent from events, journals, logs, ge
 Every supervised extension starts inside a harness-owned outer Linux user and mount namespace. The launcher makes propagation private, masks the whole Tau secret root before applying configured cwd, closes setup authority, and then executes the complete configured prefix, command, and suffix. `tau_state_access` defaults to `read_only`, which presents the real state tree recursively read-only; `hidden` presents an empty read-only state tree. In both modes the exact persistent `<state>/ext/<instance>` tree is restored read-write. A Provider additionally receives its selected settings tree read-only. Provider debug captures cross a dedicated bounded non-journaled protocol message as opaque zstd bytes; the harness derives and writes the durable session/instance path without exposing another writable mount. Tool instances receive no Provider exception. Secrets remain masked in every mode. Any namespace, mapping, mount, cwd, or exec failure fails extension startup. Non-Linux systems have no unmasked fallback.
 Independently of state access, supervised components receive an empty read-only
 view of the Tau harness runtime socket directory. Per-component
-`tau_runtime_socket_access: legacy` restores the historical ambient socket view
+`tau_runtime_socket_access: ambient` presents the ambient socket directory
 without changing state or secret access.
 
 Recursive read-only presentation uses Linux 5.12 `mount_setattr` with

@@ -278,8 +278,9 @@ pub enum TauRuntimeSocketAccess {
     /// Present an empty read-only harness runtime directory.
     #[default]
     Hidden,
-    /// Retain the historical ambient harness runtime directory view.
-    Legacy,
+    /// Present the ambient harness runtime directory for discovery and
+    /// connection.
+    Ambient,
 }
 
 impl std::fmt::Display for TauStateAccess {
@@ -2533,7 +2534,7 @@ pub struct ExtensionEntry {
     pub prefix: Option<Vec<String>>,
     /// Optional instance-specific Tau-state presentation.
     pub tau_state_access: Option<TauStateAccess>,
-    /// Optional restoration of the historical ambient Tau runtime socket view.
+    /// Optional ambient Tau runtime socket view for discovery and connection.
     pub tau_runtime_socket_access: Option<TauRuntimeSocketAccess>,
 
     /// Optional immutable prefix for this instance's structural tool names.
