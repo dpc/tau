@@ -6864,61 +6864,66 @@ fn provider_model_preserves_zero_standalone_compaction_prefix_budget() {
     );
 }
 
-/// Legacy durable compaction records must decode their mislabeled input field
-/// as provider output accounting, while new records encode only the honest
-/// field name.
+/// Compaction accounting must retain numeric current-schema counts across JSON
+/// and CBOR without accepting the removed object representation.
 #[test]
-fn agent_compacted_migrates_legacy_output_token_field_name() {
-    let provider_reported = serde_json::json!({
+fn agent_compacted_accepts_only_numeric_token_accounting() {
+    let current = serde_json::json!({
         "agent_id": "agent",
-        "original_input_tokens": {
-            "tokens": 11,
-            "provenance": "provider_reported"
-        },
-        "compacted_input_tokens": {
-            "tokens": 7,
-            "provenance": "provider_reported"
-        },
+        "original_input_tokens": 11,
+        "compaction_output_tokens": 7,
         "replacement_window": []
     });
     let compacted: AgentCompacted =
-        serde_json::from_value(provider_reported.clone()).expect("decode legacy JSON record");
+        serde_json::from_value(current.clone()).expect("decode current JSON record");
     assert_eq!(compacted.original_input_tokens, Some(TokenCount::new(11)));
     assert_eq!(compacted.compaction_output_tokens, Some(TokenCount::new(7)));
 
     let mut cbor = Vec::new();
-    ciborium::into_writer(&provider_reported, &mut cbor).expect("encode legacy CBOR");
+    ciborium::into_writer(&current, &mut cbor).expect("encode current CBOR");
     let from_cbor: AgentCompacted =
-        ciborium::from_reader(cbor.as_slice()).expect("decode legacy CBOR record");
+        ciborium::from_reader(cbor.as_slice()).expect("decode current CBOR record");
     assert_eq!(from_cbor, compacted);
 
-    let encoded = serde_json::to_value(compacted).expect("encode migrated compacted record");
+    let encoded = serde_json::to_value(compacted).expect("encode current compacted record");
     assert_eq!(encoded["original_input_tokens"], serde_json::json!(11));
     assert_eq!(encoded["compaction_output_tokens"], serde_json::json!(7));
-    assert!(
-        encoded.get("compacted_input_tokens").is_none(),
-        "new records must not preserve the misleading legacy field name"
-    );
 
-    let estimated = serde_json::json!({
+    for field in ["original_input_tokens", "compaction_output_tokens"] {
+        let mut legacy_object = current.clone();
+        legacy_object[field] = serde_json::json!({"tokens": 11, "provenance": "provider_reported"});
+        serde_json::from_value::<AgentCompacted>(legacy_object.clone())
+            .expect_err("legacy JSON accounting object must be rejected");
+
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&legacy_object, &mut cbor).expect("encode legacy CBOR object");
+        ciborium::from_reader::<AgentCompacted, _>(cbor.as_slice())
+            .expect_err("legacy CBOR accounting object must be rejected");
+    }
+}
+
+/// The removed misleading output-token alias must follow the schema's normal
+/// unknown-field behavior and leave optional output accounting absent.
+#[test]
+fn agent_compacted_ignores_removed_output_token_alias() {
+    let legacy_alias = serde_json::json!({
         "agent_id": "agent",
-        "original_input_tokens": {"tokens": 11, "provenance": "estimated"},
-        "compacted_input_tokens": {"tokens": 7, "provenance": "estimated"},
+        "original_input_tokens": 11,
+        "compacted_input_tokens": 7,
         "replacement_window": []
     });
-    let estimated_json: AgentCompacted =
-        serde_json::from_value(estimated.clone()).expect("decode estimated JSON record");
-    assert_eq!(estimated_json.original_input_tokens, None);
-    assert_eq!(estimated_json.compaction_output_tokens, None);
+    let compacted: AgentCompacted =
+        serde_json::from_value(legacy_alias.clone()).expect("ignore legacy JSON alias");
+    assert_eq!(compacted.original_input_tokens, Some(TokenCount::new(11)));
+    assert_eq!(compacted.compaction_output_tokens, None);
+
     let mut cbor = Vec::new();
-    ciborium::into_writer(&estimated, &mut cbor).expect("encode estimated CBOR");
-    let estimated_cbor: AgentCompacted =
-        ciborium::from_reader(cbor.as_slice()).expect("decode estimated CBOR record");
-    assert_eq!(estimated_cbor, estimated_json);
-    let reencoded = serde_json::to_value(estimated_json).expect("re-encode estimated record");
-    assert!(reencoded.get("original_input_tokens").is_none());
-    assert!(reencoded.get("compaction_output_tokens").is_none());
+    ciborium::into_writer(&legacy_alias, &mut cbor).expect("encode legacy CBOR alias");
+    let from_cbor: AgentCompacted =
+        ciborium::from_reader(cbor.as_slice()).expect("ignore legacy CBOR alias");
+    assert_eq!(from_cbor, compacted);
 }
+
 /// Terminal provider failure categories have stable snake-case wire values,
 /// while old response frames without the additive field remain decodable.
 #[test]

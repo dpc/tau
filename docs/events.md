@@ -319,8 +319,9 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   counts are provider-reported accounting only. The output count measures compact
   item generation, not resulting context; UIs may learn the exact after-size only
   from the transaction-owned first continuation's provider input usage. Absent
-  fields preserve older journal semantics, and legacy estimate provenance grants
-  no authority.
+  fields remain absent. Accounting objects under current field names fail
+  decoding, while the removed `compacted_input_tokens` alias is ignored as an
+  unknown field and therefore supplies no output accounting.
   Connection ids are intentionally not
   durable. Either form invalidates any previous-response chain.
 - **`agent.display_name_set`** — Durable fact that changes an agent's

@@ -475,10 +475,14 @@ transaction-owned first continuation reports `prompt_sent_tokens`; until then,
 the UI reports it as unknown. A missing continuation or missing usage remains
 unknown, and unrelated later prompts cannot supply it. These content-free
 fields never become scheduling authority; absent provider usage remains absent.
-Legacy `compacted_input_tokens` decodes as the provider output count, while new
-records encode `compaction_output_tokens`. Because the fields live on the
-at-most-once boundary, live publication, late catch-up, and cold replay expose
-the same values without publishing the private standalone response.
+The accounting fields accept only numeric token counts. The removed
+`{tokens, provenance}` representation fails decoding when used under a current
+field name. The removed `compacted_input_tokens` alias follows the schema's
+normal unknown-field handling, so a record containing only that old output
+field loads with output accounting absent. Current records encode
+`original_input_tokens` and `compaction_output_tokens`. Because the fields live
+on the at-most-once boundary, live publication, late catch-up, and cold replay
+expose the same values without publishing the private standalone response.
 Rejected terminals retain the transaction cut/resume and context/cache baselines,
 while their report/accounting behavior is owned by
 [SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).

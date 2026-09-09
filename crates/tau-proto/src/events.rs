@@ -4987,63 +4987,16 @@ pub struct AgentCompacted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<PromptOperation>,
     /// Provider-reported compact-request input tokens.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_provider_reported_tokens"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_input_tokens: Option<crate::TokenCount>,
     /// Provider output tokens consumed to produce the compacted replacement.
     ///
-    /// This is display/accounting metadata and never scheduling authority. The
-    /// alias interprets the legacy field according to what providers actually
-    /// reported there.
-    #[serde(
-        default,
-        alias = "compacted_input_tokens",
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_provider_reported_tokens"
-    )]
+    /// This is display/accounting metadata and never scheduling authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_output_tokens: Option<crate::TokenCount>,
     /// Provider-validated ordered context that replaces all older model-visible
     /// history.
     pub replacement_window: Vec<ContextItem>,
-}
-
-fn deserialize_optional_provider_reported_tokens<'de, D>(
-    deserializer: D,
-) -> Result<Option<crate::TokenCount>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum CompatibleTokens {
-        Exact(crate::TokenCount),
-        Legacy {
-            tokens: crate::TokenCount,
-            provenance: LegacyProvenance,
-        },
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum LegacyProvenance {
-        ProviderReported,
-        Estimated,
-    }
-    Ok(
-        Option::<CompatibleTokens>::deserialize(deserializer)?.and_then(|value| match value {
-            CompatibleTokens::Exact(tokens)
-            | CompatibleTokens::Legacy {
-                tokens,
-                provenance: LegacyProvenance::ProviderReported,
-            } => Some(tokens),
-            CompatibleTokens::Legacy {
-                provenance: LegacyProvenance::Estimated,
-                ..
-            } => None,
-        }),
-    )
 }
 
 /// A previously queued user or harness-internal prompt folded into an in-flight
