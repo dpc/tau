@@ -40,6 +40,11 @@ function job_lint() {
   if ! python3 .agents/skills/tau-qodq/test_extract_quota.py; then
     selfci step fail
   fi
+
+  selfci step start "native packaging unit tests"
+  if ! python3 packaging/test_native.py; then
+    selfci step fail
+  fi
 }
 
 function job_cargo() {

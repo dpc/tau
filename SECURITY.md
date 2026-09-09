@@ -1,5 +1,18 @@
 # Security policy
 
+## Native packaging tools
+
+The [local native packaging harness](packaging/README.md) creates non-release
+candidates, not qualified distributions. Source inventory reads exact commit
+objects with Git replacements disabled, but does not attest a supplied binary's
+relationship to that source or its runtime compatibility. Git, readelf and nFPM
+on PATH are trusted build tools; the nFPM version check verifies its reported
+version only, not the tool's origin. Output is staged and published to a new
+directory only after packaging succeeds. Checksums detect corruption, not
+authenticity. See the packaging README for qualification and publication limits.
+
+## Runtime boundaries
+
 Provider-hosted web search runs inside the selected inference provider and does
 not cross Tau's registered-tool dispatch boundary. Search queries, actions,
 returned content, URLs, titles, and citation metadata are untrusted external
