@@ -589,12 +589,11 @@ tombstone, and ordering oracles live beside `session_cleanup`, `agent_cleanup`,
 `retention_cleanup`, and `diagnostic_cleanup`.
 
 Summary files intentionally omit prompt previews. Standalone metadata from older
-builds is not read as an identity or summary hint. Reusing its id requires a
-regular sidecar and an absent journal; Tau first preserves the sidecar
-non-overwriting as `meta.legacy.json` and synchronizes the directory. A distinct
-existing archive, symbolic link, or nonregular sidecar fails closed without
-replacement. Existing regular legacy locks are acquired and retained; unrelated
-files remain untouched. Bounded checkpoint repair never rewrites journal facts.
+builds is not read as an identity or summary hint. A directory without a journal
+does not reserve its id and may be reused after Tau acquires any existing regular
+lock. Current checkpoint publication may replace obsolete `meta.json` contents;
+other unrelated files remain untouched. Bounded checkpoint repair never rewrites
+journal facts.
 Writer recovery may truncate only an incomplete EOF crash tail; complete invalid
 frames and their suffix remain unchanged and fail closed.
 Failure to publish derived metadata does not invalidate an already committed record.

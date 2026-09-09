@@ -1227,7 +1227,7 @@ fn advance_creation(
                 creation.directory_owned = true;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if try_adopt_metadata_only_agent_directory(shared, directory, &path, creation)? {
+                if try_adopt_unclaimed_agent_directory(shared, directory, &path, creation)? {
                     creation.directory_owned = true;
                 } else {
                     return Err(CreationError::Collision);
@@ -1302,7 +1302,7 @@ fn advance_creation(
     }))
 }
 
-fn try_adopt_metadata_only_agent_directory(
+fn try_adopt_unclaimed_agent_directory(
     shared: &Shared,
     directory: &Path,
     journal_path: &Path,
@@ -1336,51 +1336,6 @@ fn try_adopt_metadata_only_agent_directory(
             Err(_) => return Ok(false),
         }
     }
-    let meta_path = directory.join("meta.json");
-    let meta = match shared
-        .backend
-        .open_existing_regular_file_read_no_follow(&meta_path)
-    {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => return Ok(false),
-    };
-    let preserved_path = directory.join("meta.legacy.json");
-    let archive_matches = match shared
-        .backend
-        .publish_no_replace(&meta_path, &preserved_path)
-    {
-        Ok(()) => true,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let preserved = match shared
-                .backend
-                .open_existing_regular_file_read_no_follow(&preserved_path)
-            {
-                Ok(preserved) => preserved,
-                Err(_) => return Ok(false),
-            };
-            match (
-                crate::agent_checkpoint::file_identity(&meta),
-                crate::agent_checkpoint::file_identity(&preserved),
-            ) {
-                (Ok(meta_identity), Ok(preserved_identity)) => meta_identity == preserved_identity,
-                _ => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
-            }
-        }
-        Err(_) => return Err(CreationError::Retry(PersistenceFailureKind::Open)),
-    };
-    if !archive_matches {
-        return Ok(false);
-    }
-    let directory_handle = shared
-        .backend
-        .open_directory(directory)
-        .map_err(|_| CreationError::Retry(PersistenceFailureKind::Open))?;
-    shared
-        .backend
-        .sync_all(&directory_handle)
-        .map_err(|_| CreationError::Retry(PersistenceFailureKind::Sync))?;
-
     Ok(true)
 }
 

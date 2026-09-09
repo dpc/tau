@@ -131,15 +131,13 @@ support same-daemon replay, but create no durable artifact. Agent journals remai
 the sole durable identity and listing authority: atomically replaced `meta.json`
 files are versioned, journal-bound derived checkpoints rather than a second
 index or evidence of durability. Standalone metadata from older builds is ignored
-for discovery and ID reservation. Later creation may reuse that directory only
-when `meta.json` and any existing lock are regular files and no journal exists.
-It acquires the old lock, preserves the sidecar non-overwriting as
-`meta.legacy.json`, synchronizes that archive name before checkpoint replacement,
-and leaves unrelated files untouched. A distinct archive, symbolic link, or
-nonregular sidecar fails closed without replacement. On the persistence worker, a complete journal
-frame precedes checkpoint replacement. Missing, stale, corrupt, or over-budget checkpoints
-must not hide a valid journal-backed agent, and recovery invalidates a checkpoint
-when it truncates an incomplete EOF crash tail.
+for discovery and ID reservation. Later creation may reuse a directory without a
+journal, acquiring an existing regular lock when present and leaving unrelated
+files untouched. Current checkpoint publication may replace obsolete `meta.json`
+contents; it does not create a compatibility archive. On the persistence worker,
+a complete journal frame precedes checkpoint replacement. Missing, stale, corrupt,
+or over-budget checkpoints must not hide a valid journal-backed agent, and recovery
+invalidates a checkpoint when it truncates an incomplete EOF crash tail.
 
 Current-session roster enrichment is read-only and path-exact: `AgentStore`
 reads at most the bounded first record plus an already-loaded or journal-bound checkpoint
