@@ -74,7 +74,6 @@ fn harness_configuration_preserves_exact_script_pairings() {
                 "  std-utils:\n    enable: false\n",
                 "  std-websearch:\n    enable: false\n",
                 "  std-pim:\n    enable: false\n",
-                "  std-email:\n    enable: false\n",
             ),
             role = role,
             model = model,

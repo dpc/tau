@@ -135,7 +135,6 @@ impl GateFixture {
             "std-utils",
             "std-websearch",
             "std-pim",
-            "std-email",
         ] {
             extensions.insert(name.to_owned(), serde_json::json!({ "enable": false }));
         }

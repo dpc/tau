@@ -45,10 +45,10 @@ binary.
 
 The separately maintained `tau-ext-pim` project owns its email, calendar,
 OAuth, storage, approval, provider, protocol, and standalone-process tests. Tau
-retains focused settings oracles proving that disabled `std-pim` and its legacy
-`std-email` alias both select the external `tau-ext-pim` command with no Tau
-component suffix, plus a generic test-fixture process oracle for Configure-time
-User-scope writes during ephemeral previews.
+retains a focused settings oracle proving that disabled `std-pim` selects the
+external `tau-ext-pim` command with no Tau component suffix, plus a generic
+test-fixture process oracle for Configure-time User-scope writes during
+ephemeral previews.
 
 ## Tau Swarm extension
 

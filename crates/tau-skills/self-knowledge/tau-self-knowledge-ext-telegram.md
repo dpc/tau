@@ -13,6 +13,8 @@ through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r)
 owns its source and detailed operational documentation; its Cargo README
 installation instructions remain conditional on a future registry publication.
+The current executable speaks Tau protocol 5.0 only and requires a matching
+protocol-5 harness.
 
 Local-poll mode requires a named bot-token secret, a nonempty numeric
 `allowed_user_ids` list, and an optional exact `chat_id`. Without `chat_id`, an
@@ -38,6 +40,18 @@ destinations in that mode; the gateway owns polling, sender and chat admission,
 durable update checkpoints, and outbound routing. Mutual authentication does
 not contain malicious same-UID processes, and external Telegram text always
 remains untrusted content.
+
+A separate trusted instance can use `mode: gateway_fixed_chat_send` to send
+summaries through an existing gateway credential without receiving Telegram
+messages. Configure only `gateway_socket_path`, `gateway_client_secret`, and a
+nonempty exact `allowed_agent_ids` list; the named secret must already be
+declared for that instance, and the gateway must already have its fixed
+`--chat-id`. This mode declares only `telegram_send`, never registers or polls,
+and never accepts bot-token, destination, Telegram allowlist, or polling fields.
+It sends text verbatim without the normal agent prefix and shares the gateway's
+existing aggregate rate limit. The shared gateway key still authorizes normal
+route operations as well as route-free fixed sends, so this mode is trusted
+extension/session policy rather than containment of compromised same-key code.
 
 The standalone project's README, security notes, linked specifications, and
 tests own the detailed command, routing, retry, replay, durability, gateway,

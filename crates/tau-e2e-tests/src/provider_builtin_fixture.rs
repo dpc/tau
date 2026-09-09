@@ -303,8 +303,6 @@ impl ProviderBuiltinFixture {
                 "    enable: false\n",
                 "  std-pim:\n",
                 "    enable: false\n",
-                "  std-email:\n",
-                "    enable: false\n",
             ),
             serde_json::to_string(&provider_bin.display().to_string())?,
             role = role,

@@ -157,15 +157,15 @@ proactive-send, or catch-up authority.
 
 ## PIM
 
-The separately maintained `std-pim` instance and alternate `std-email` name are
-disabled by default. Tau does not bundle their source or executable. Install
-`tau-ext-pim`, ensure it is available through `PATH`, and enable only one
-instance name. Both names launch the same executable through Tau's normal
-supervised stdio extension route.
+The separately maintained `std-pim` instance is disabled by default. Tau does
+not bundle its source or executable. Install `tau-ext-pim`, ensure it is
+available through `PATH`, and enable the instance. The removed `std-email`
+alias must be renamed to `std-pim`, and its configuration must use the nested
+`config.email` module shape.
 
 The standalone `tau-ext-pim` project owns its source plus the authoritative
 email/calendar configuration, OAuth, storage, approval, security, and testing
-documentation. Tau retains the standard instance names, managed-secret
+documentation. Tau retains the standard instance name, managed-secret
 delivery, per-instance state paths, tool prefixing, role policy, action routing,
 and terminal redaction behavior. Running a separate executable does not change
 those boundaries.
@@ -179,7 +179,9 @@ package, ensure the executable is available through `PATH`, and then enable the
 instance. The
 [`tau-ext-xmpp` project](https://radicle.network/nodes/radicle.dpc.pw/rad%3AzpN6uwkd6ok9qRAX5yZaF7w8xzDd)
 owns the authoritative XMPP configuration, security, lifecycle, and testing
-documentation.
+documentation. The current executable speaks Tau protocol 5.0 only. The removed
+`muc.room_prefix` key is an error; `muc.room_template` controls the complete
+room localpart.
 
 Tau retains the `std-xmpp` instance name, empty default configuration,
 managed-secret delivery, per-instance state paths, publisher identity, tool
@@ -195,7 +197,8 @@ optional (`require: false`). Tau does not bundle its source or executable.
 Install `tau-ext-swarm`, ensure it is available through `PATH`, and then enable
 the instance. Its standalone project owns the authoritative configuration,
 bounds, retry, process-memory semantics, and implementation tests. The
-extension registers the agent-scoped `task_info`, `task_blocker`, and
+extension speaks Tau protocol 5.0 only and registers the agent-scoped
+`task_info`, `task_blocker`, and
 `task_update` tools, but none is model-visible by default even after the
 extension starts. Opt in deliberately for selected roles:
 
@@ -282,6 +285,9 @@ prefixing, network policy, and stdio supervision semantics. Running a separate
 executable does not widen its ingress, reply, reaction, proactive-send, or
 dynamic-DM authority. The standalone project owns the detailed setup,
 migration, security, routing, testing, and troubleshooting documentation.
+The current executable speaks Tau protocol 5.0 only. The removed
+`prefix_agent_id` option is rejected; replies and proactive sends use the
+agent-supplied message unchanged.
 
 The separately maintained `std-telegram` instance is disabled by default. Tau
 does not bundle its source or executables. Install the Tau flake's
@@ -301,6 +307,10 @@ supervision semantics. Running a separate executable does not widen Telegram
 sender, chat, registration, reply, gateway endpoint, or gateway-client access
 authority. The standalone project owns detailed setup, migration, security,
 gateway, testing, and troubleshooting documentation.
+The current executable speaks Tau protocol 5.0 only. Its
+`gateway_fixed_chat_send` mode uses an already-declared gateway client secret
+and the gateway's fixed chat to provide send-only access to an exact agent
+allowlist without receiving or polling.
 
 `std-utils` keeps its best-effort `papercut` reporter disabled unless its
 instance config sets `papercut.enable: true`. See the

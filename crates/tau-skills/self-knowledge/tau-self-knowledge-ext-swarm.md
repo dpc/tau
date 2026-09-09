@@ -11,7 +11,8 @@ separately maintained `tau-ext-swarm` executable and make it available through
 `PATH` before enabling it. Set the pinned `config.endpoint.peer_id`, public
 `credential_id`, and `credential_secret` name. Declare that name under the
 extension's `secrets`; the extension never reads an ambient credential
-environment variable.
+environment variable. The current executable speaks Tau protocol 5.0 only
+using registry SDK 0.2.0.
 
 `endpoint.relay_url` and `endpoint.direct_addresses` are optional route hints.
 With neither set, Iroh resolves the pinned identity through standard N0

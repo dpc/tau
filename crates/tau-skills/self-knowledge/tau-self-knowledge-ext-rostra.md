@@ -14,6 +14,12 @@ starts it through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o)
 owns its source and detailed operational documentation.
 
+The current executable speaks Tau protocol 5.0 only using registry SDK 0.2.0.
+Declaration inspection returns the complete 11-tool inventory before Tau
+supplies a state directory or secrets. That path parses only public
+configuration and does not open `rostra.redb`, load or derive the identity,
+construct the asynchronous runtime, or start Rostra network work.
+
 One instance owns one Rostra identity and its private durable local view. It
 uses relay-only Iroh peer transport and Pkarr HTTPS/DNS discovery; it never
 enables direct peer-IP transport. Rostra signatures identify Rostra authors,

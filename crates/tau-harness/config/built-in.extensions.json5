@@ -104,11 +104,4 @@
         enable: false,
         config: {},
     },
-    {
-        name: "std-email",
-        command: ["tau-ext-pim"],
-        role: "tool",
-        enable: false,
-        config: {},
-    },
 ]

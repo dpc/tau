@@ -189,7 +189,6 @@
 #       muc:
 #         # Domain-only MUC service JID.
 #         service: conference.example.org
-#         room_prefix: tau
 #         # Recommended: configure Prosody/MUC defaults to create hidden,
 #         # members-only rooms that expose real JIDs to Tau.
 #         expose_real_jids: true

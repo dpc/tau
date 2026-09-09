@@ -12,9 +12,10 @@ tools such as `email_list_folders`, `email_read`, `email_send`,
 `calendar_search`, and `calendar_create`, and publishes `:email` and `:calendar`
 user actions.
 
-The alternate `std-email` standard-instance name remains available, but it uses
-the current nested PIM config shape. Prefer `std-pim` for new configs. Do not
-enable both `std-pim` and `std-email` for the same account set.
+The executable speaks Tau protocol 5.0 only using registry SDK 0.2.0. The old
+`std-email` standard-instance alias is removed; rename it to `std-pim`. PIM
+configuration accepts only the nested `config.email` and `config.calendar`
+module keys.
 
 Use this skill when helping a user configure PIM. Do not include personal addresses, server names, passwords, tokens, calendar URLs, event details, or message contents unless the user explicitly provided them for that answer.
 

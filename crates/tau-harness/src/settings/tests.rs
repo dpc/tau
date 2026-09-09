@@ -238,13 +238,6 @@ fn builtins() -> Vec<BuiltinExtension> {
             false,
             serde_json::json!({}),
         ),
-        external_builtin(
-            "std-email",
-            "tau-ext-pim",
-            "tool",
-            false,
-            serde_json::json!({}),
-        ),
     ]
 }
 
@@ -627,7 +620,6 @@ fn resolve_extensions_builtin_can_start_disabled() {
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
     assert!(resolved.iter().all(|e| e.name != "test-dummy"));
     assert!(resolved.iter().all(|e| e.name != "std-pim"));
-    assert!(resolved.iter().all(|e| e.name != "std-email"));
 }
 
 /// Ensures public environment enables are applied after configuration and
@@ -742,29 +734,6 @@ fn resolve_extensions_enables_disabled_std_pim_builtin() {
 }
 
 #[test]
-fn resolve_extensions_enables_disabled_std_email_builtin() {
-    // The legacy standard email extension ships disabled. A user opt-in should
-    // keep the external executable and place the entry at its
-    // built-in order position.
-    let mut s = HarnessSettings::built_in();
-    s.extensions.insert(
-        "std-email".into(),
-        ExtensionEntry {
-            enable: Some(true),
-            ..Default::default()
-        },
-    );
-    let resolved = resolve_extensions(&s, builtins()).expect("resolve");
-    let email = resolved
-        .iter()
-        .find(|e| e.name == "std-email")
-        .expect("std-email enabled");
-    assert_eq!(email.command, "tau-ext-pim");
-    assert!(email.args.is_empty());
-    assert_eq!(email.role.as_deref(), Some("tool"));
-}
-
-#[test]
 fn resolve_extensions_cli_overrides_apply_after_user_config() {
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(
@@ -818,7 +787,6 @@ fn resolve_extensions_enable_all_skips_test_dummy_builtin() {
         .collect::<Vec<_>>();
 
     assert!(names.contains(&"std-pim"));
-    assert!(names.contains(&"std-email"));
     assert!(
         !names.contains(&"test-dummy"),
         "the test fixture must require explicit --enable-extension test-dummy"
@@ -1064,7 +1032,6 @@ fn resolve_extensions_empty_entry_does_not_re_enable_disabled_builtin() {
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
     assert!(resolved.iter().all(|e| e.name != "test-dummy"));
     assert!(resolved.iter().all(|e| e.name != "std-pim"));
-    assert!(resolved.iter().all(|e| e.name != "std-email"));
 }
 
 #[test]
@@ -1204,28 +1171,26 @@ fn built_in_extensions_json5_contains_disabled_optional_std_swarm() {
     assert!(swarm.suffix.is_none());
 }
 
-/// Ensures both standard PIM names launch the same external executable without
+/// Ensures the standard PIM instance launches the external executable without
 /// retaining a removed Tau component suffix.
 #[test]
-fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
+fn built_in_extensions_json5_contains_disabled_external_std_pim() {
     // Guard the real embedded JSON5, not the local test fixture, so the
-    // disabled-by-default PIM extension and legacy email alias keep the
-    // documented external command and tool role when future built-ins are
-    // edited.
+    // disabled-by-default PIM extension keeps the documented external command
+    // and tool role when future built-ins are edited.
     let defs = built_in_extension_defs();
-    for name in ["std-pim", "std-email"] {
-        let extension = defs
-            .iter()
-            .find(|def| def.name == name)
-            .expect("built-in extension");
-        assert!(!extension.enable);
-        assert_eq!(
-            extension.command.as_deref(),
-            Some(["tau-ext-pim".to_owned()].as_slice())
-        );
-        assert!(extension.suffix.is_none());
-        assert_eq!(extension.role.as_deref(), Some("tool"));
-    }
+    let extension = defs
+        .iter()
+        .find(|def| def.name == "std-pim")
+        .expect("built-in extension");
+    assert!(!extension.enable);
+    assert_eq!(
+        extension.command.as_deref(),
+        Some(["tau-ext-pim".to_owned()].as_slice())
+    );
+    assert!(extension.suffix.is_none());
+    assert_eq!(extension.role.as_deref(), Some("tool"));
+    assert!(defs.iter().all(|def| def.name != "std-email"));
 }
 
 /// Ensures the standard XMPP bridge launches its separately installed

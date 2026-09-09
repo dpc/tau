@@ -1,17 +1,16 @@
 ---
 name: tau-self-knowledge-email
-description: Use this skill when the user asks how to configure Tau's standard PIM/email extension, std-pim/std-email/tau-ext-pim, mail accounts, IMAP/SMTP, email approvals, incoming authentication, DKIM, Authentication-Results, or email security policy.
+description: Use this skill when the user asks how to configure Tau's standard PIM/email extension, std-pim/tau-ext-pim, mail accounts, IMAP/SMTP, email approvals, incoming authentication, DKIM, Authentication-Results, or email security policy.
 advertise: false
 ---
 
 # Tau std-pim email configuration
 
-Tau's preferred standard PIM extension is named `std-pim`. It runs the separately
+Tau's standard PIM extension is named `std-pim`. It runs the separately
 installed `tau-ext-pim` executable, registers split model-visible email tools such
 as `email_list_folders`, `email_read`, and `email_send`, and publishes `:email`
-approval/denial actions. The `std-email` instance name remains available, but
-both instances use the current nested PIM config shape; do not enable both names
-together.
+approval/denial actions. The old `std-email` instance alias is removed; rename it
+to `std-pim` and nest email settings under `config.email`.
 
 Use this skill when helping a user configure email. Do not include personal addresses, server names, passwords, authserv-ids, or message contents unless the user explicitly provided them for that answer.
 
@@ -20,7 +19,7 @@ Use this skill when helping a user configure email. Do not include personal addr
 
 Start from fail-closed settings:
 
-- Keep `extensions.std-pim.enable: true` only when the user really wants PIM access. `extensions.std-email.enable: true` selects the same current extension shape under the alternate instance name.
+- Keep `extensions.std-pim.enable: true` only when the user really wants PIM access.
 - Set the email module's `config.email.enable: true`; it is false by default.
 - Set each account's `enable: true`; accounts are disabled by default.
 - Keep `policy.incoming_auth.require: true`; this is the default and should normally stay true.
@@ -101,7 +100,7 @@ extensions:
 
 Important fields:
 
-- Preferred standard extension name: `std-pim`; alternate instance name: `std-email`.
+- Standard extension name: `std-pim`.
 - Model-visible email tools are split by command, for example `email_list_folders`, `email_list_recent`, `email_read`, `email_request_access`, and `email_send`.
 - IMAP default: port 993 with `tls: required`.
 - SMTP default: port 587 with `tls: start_tls`.

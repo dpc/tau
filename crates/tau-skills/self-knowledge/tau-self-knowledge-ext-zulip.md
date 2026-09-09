@@ -13,7 +13,10 @@ starts it through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd)
 owns its source and detailed operational documentation. The bridge uses bot
 email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
-`GET /api/v1/events`; it does not use webhooks.
+`GET /api/v1/events`; it does not use webhooks. The current executable requires
+Tau protocol 5.0 and registry SDK 0.2.0. Its configuration schema, snake_case
+keys, secret bindings, and catch-up checkpoint format did not change in that
+migration.
 
 Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_secret`, a nonempty numeric `allowed_user_ids`, optional sender aliases, optional `direct_messages: { receive: all_messages }`, optional `proactive_direct_messages` aliases with one fixed recipient each, and name-based stream/topic routes. Keep the identity key stable across API-key rotation; changing it deliberately starts a new opaque sender/conversation/message namespace. `allowed_user_ids` admits inbound senders only; it does not authorize proactive DMs. Routes independently select `receive: mentions_only|all_messages` and `proactive_send`; every configured channel name resolves to a private native ID before queue registration, and `all_messages` subscribes the bot idempotently before that registration without later unsubscribing. Exact proactive stream names remain the default, while `agent_chosen_topic: true` on a proactive name without `topic` explicitly grants agent topic choice within that configured channel. Production requires HTTPS.
 
@@ -47,27 +50,21 @@ merges/deduplicates the live overlap, and advances only after its canonical
 delivered fact returns on the post-persistence downpath. First use establishes
 the current baseline without replay. Offline edits, deletes, and reactions are
 not recovered; filter changes do not rescan before the checkpoint. Crash
-recovery is at-least-once and can duplicate messages. Runtime references
-disappear on restart, and an unspecified installed `tau-ext-zulip` must be
-assumed not to restore a receive registration. The bridge is Markdown text-only and
+recovery is at-least-once and can duplicate messages. Runtime reply/reaction
+references disappear on restart. The bridge is Markdown text-only and
 deliberately provides no file upload/download capability. Admitted Zulip
 Markdown remains exact through canonical facts, replay, and provider context,
 including a leading addressed bot mention.
 
-Receive-registration restoration is implemented only by reviewed standalone
-revision `ed760eee15994b7b0af83d355a882be8037eeb68`. That revision passed full
-CI but remains an unintegrated isolated sibling: it is not published, pinned,
-or activated here. Review and CI do not make an installed bot restore
-registrations. In that revision, a successfully completed ordinary-mode
-`zulip_register {"enabled":true}` records explicit receive resume-intent.
-After complete successful session and agent replay, a runtime restart or agent
-reload can establish a fresh registration under the current configuration,
-routes, allowlists, admission rules, and loaded membership. Unloaded agents
-receive nothing. Explicit disable, or an enable attempt that retires a
-registration and then fails, revokes intent; rejection before retirement leaves
-it unchanged. A live configuration change retires runtime authority and defeats
-pending restoration; a later reload may resume retained intent under that new
-configuration.
+A successfully completed ordinary-mode `zulip_register {"enabled":true}`
+records explicit receive resume-intent. After complete successful session and
+agent replay, a runtime restart or agent reload can establish a fresh
+registration under the current configuration, routes, allowlists, admission
+rules, and loaded membership. Unloaded agents receive nothing. Explicit
+disable, or an enable attempt that actually retires registration and then
+fails, revokes intent; rejection before retirement leaves it unchanged. A live
+configuration change retires runtime authority and defeats pending restoration;
+a later reload may resume retained intent under that new configuration.
 
 Restoration resumes prior explicit intent rather than synthesizing a model tool
 call or deriving authority from historical roles or UI summaries. Only paired
@@ -77,22 +74,16 @@ incomplete replay, and bounded correlation exhaustion do not. The bridge gives
 no fallback prompt or notification and does not retry failed restoration in the
 same load; an explicit enable remains available. It restores no old queue,
 native route, source reply reference, or reaction ownership. Catch-up remains
-independently opt-in, and send-only mode never restores receive registration.
+independently opt-in and keeps its existing checkpoint; send-only mode never
+restores receive registration.
 
-When Zulip rejects the initial or live-re-registration `users_me`,
-`get_stream_id`, `subscribe`, or `register` request, the diagnostic keeps its
-authentication, rate-limit, invalid-request,
-or unavailable category and adds only the operation, HTTP status, and a
-1–64-byte uppercase ASCII `[A-Z0-9_]` machine error code. Missing, malformed,
-or oversized codes show as `unknown`; no response message/body, request data,
-headers, URL data, or credentials appear.
-
-Separately, published diagnostic revision
-`866a0a8bd12e37e9725c111bb621fa1512f6c467` has not rolled out to the host. It
-adds fixed content-free malformed-poll subtype diagnostics only; it makes no
-recovery or limit change. The incident's exact subtype and root cause remain
-unobserved, and that diagnostic revision does not include registration
-restoration.
+Queue-poll failures retain content-free classifications for bounded body-read,
+JSON, result-envelope, queue, and events-shape failures. Startup and
+re-registration failures retain only the operation, HTTP status, and a bounded
+uppercase Zulip machine code. These diagnostics expose no response bodies,
+credentials, queue IDs, native IDs, routes, or message content. They classify
+future failures but do not prove the exact subtype or root cause of any past
+live incident.
 
 The separately maintained `tau-ext-zulip` project owns the complete operational,
 security, testing, architecture, and routing documentation.

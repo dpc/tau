@@ -6,18 +6,11 @@ advertise: false
 
 # Tau std-slack extension self-knowledge
 
-`std-slack` is Tau's disabled-by-default configuration for the separately
-maintained `tau-ext-slack` executable. Tau does not bundle or install that
-executable. Install the Tau flake's `tau-ext-slack` package and ensure it is
-available through `PATH` before enabling the instance. Tau still starts it
-through the normal supervised stdio extension route. The
-[standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3NJhEtKWCbHPa28wDQSYJ8eEfBjg)
-owns its source and detailed operational documentation; its Cargo README
-installation instructions remain conditional on a future registry publication.
-It exposes
-`slack_register`, `slack_conversations`, `slack_send`, and default-off
-`slack_react`; `tool_prefix` scopes all four tools and their group for multiple
-accounts. Slack text is always untrusted external content.
+`std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
+`slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`; `tool_prefix` scopes
+all four tools and their group for multiple accounts. Slack text is always
+untrusted external content. The current executable speaks Tau protocol 5.0
+only and requires a protocol-5-compatible harness.
 
 Configuration requires app/bot token secrets, nonempty exact U/W
 `allowed_user_ids`, and an active `conversations` and/or
@@ -28,7 +21,7 @@ independent `proactive_send`, plus an optional operator-authored description on
 any active static record. Native ids and raw thread selectors are never model
 inputs. `channel_ids`,
 `listening_scope`, and `send_destinations` were removed and are hard errors.
-Follow the standalone `tau-ext-slack` project's README migration procedure.
+Follow the [README migration procedure](../README.md#migration-from-removed-keys).
 Optional `sender_aliases` bind at most 64 exact U/W ids one-to-one to unique
 lowercase aliases. Native U/W identity remains extension-local authority.
 Model-facing facts use an installation-scoped opaque sender reference; a
@@ -90,9 +83,15 @@ reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
 extension/session authority and effective tool policy.
 
-Replies and proactive sends contain the agent-supplied message unchanged.
-Message limits, retry budget, Tau-issued reply authority, routing, threads,
-authorization, and configuration freeze are independent of message contents.
+The 1,024-entry incoming native-owner index retains sources pinned by owned or
+in-flight agent reactions. Evicting an unpinned source also revokes its reply and
+reaction selectors and deferred activation, without consuming pending reports.
+If every native owner is pinned, a new canonical create installs no local
+authority; it still confirms its report and releases its admission slot.
+
+Replies and proactive sends use the agent-supplied message unchanged. Message
+limits, retry budget, Tau-issued reply authority, routing, threads,
+authorization, and configuration freeze remain independent of its contents.
 Agent-authored text may use ordinary mrkdwn but raw `<@`, `<!`, and `<#` Slack
 native controls are rejected. Bridge help/control/error output is escaped,
 bounded, and sent with mrkdwn/link expansion disabled.
@@ -165,7 +164,14 @@ shutdown. Report-bearing work retains its slot through canonical confirmation;
 missing echoes saturate admission and reconnect without ACK so Slack can retry.
 Socket Mode ACK remains separate from Tau commit. The FIFO survives
 reconnect but is memory-only; process death after ACK can still lose an occurrence.
-The worker sends its first WebSocket Ping after 10 seconds and repeats every 10
+DNS, TCP, TLS, and WebSocket upgrade establishment share a 30-second deadline,
+remain preemptible by shutdown, and time out through the existing bounded
+connection-failure notice and reconnect backoff. DNS retains OS/NSS results and
+ordering. An executing OS lookup cannot be cancelled, so it retains the sole
+process-wide resolver permit after caller timeout or shutdown; retries and
+concurrent extension instances cannot accumulate resolver calls. This bounds the
+worker, not runtime destruction if the OS lookup never returns. The worker sends its first
+WebSocket Ping after 10 seconds and repeats every 10
 seconds. An independent deadline reconnects 40 seconds after the latest Pong;
 other traffic does not refresh liveness, and blocked Ping/Pong/ACK writes remain
 preemptible by shutdown and the deadline. This prevents a half-open connection
@@ -215,8 +221,9 @@ These are deliberately closed-category logs: Slack-owned records omit tokens,
 websocket URLs, native IDs, message payloads, and provider response text. The
 raw per-extension stderr file is nevertheless private and unredacted at its sink
 boundary; dependency or custom-extension output can contain identifiers or local
-paths. Review it before sharing. See the standalone `tau-ext-slack` project's
-README troubleshooting procedure for the detailed reconnection runbook.
+paths. Review it before sharing. See the [README troubleshooting
+procedure](../README.md#troubleshooting) for the detailed
+reconnection runbook.
 
 For missing delivery, check the exact `message.*`/`app_mention` subscription and
 history/app-mention scope, reinstall after scope changes, verify app membership,
@@ -240,6 +247,10 @@ Slack success commits local add/remove ownership only after the successful tool
 result is written and flushed locally. Writer failure retires the whole Slack
 session without retrying or compensating the remote reaction; local flush is
 not a harness commit acknowledgement.
+The extension retains 256 reaction call attempts without eviction until agent or
+session lifecycle cleanup. When this ledger is full, new call IDs fail with
+`Slack reaction attempt capacity is full` before Slack I/O; exact retained
+replays still return or coalesce their original disposition without reposting.
 The CLI renders inbound reaction action, the bounded configured alias/display
 when available (otherwise the opaque actor reference), and the exact
 custom/skin-tone name; it performs no Unicode emoji lookup.
