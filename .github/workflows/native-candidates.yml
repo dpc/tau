@@ -1,0 +1,79 @@
+name: Native Linux core candidates (not releases)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact lowercase 40-character source commit SHA
+        required: true
+        type: string
+
+# Arbitrary source is executable code. No release, signing, OIDC or environment
+# secrets belong in this workflow, even when the input happens to name a tag.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'dpc/tau' && github.ref == 'refs/heads/master'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+      PACKAGE_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Check out trusted workflow tooling, not selected source tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Validate immutable identities before selecting source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          sys.path.insert(0, "tooling/packaging")
+          from native import require_sha
+          require_sha(os.environ["SOURCE_SHA"])
+          require_sha(os.environ["WORKFLOW_SHA"])
+          PY
+      - name: Check out selected application source without persisted credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Build and inspect unqualified native core candidates
+        shell: bash
+        run: |
+          python3 tooling/packaging/build.py \
+            --repo "$GITHUB_WORKSPACE/source" \
+            --source-sha "$SOURCE_SHA" --workflow-sha "$WORKFLOW_SHA" \
+            --arch "$PACKAGE_ARCH" --output "$RUNNER_TEMP/native-candidates" \
+            --maintainer 'Tau manual candidate builder <noreply@example.invalid>' \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
+      - name: Upload expiring manual artifacts only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tau-core-test-${{ inputs.source_sha }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-candidates/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false

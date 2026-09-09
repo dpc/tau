@@ -45,6 +45,9 @@ function job_lint() {
   if ! python3 packaging/test_native.py; then
     selfci step fail
   fi
+  if ! python3 packaging/test_build.py; then
+    selfci step fail
+  fi
 }
 
 function job_cargo() {

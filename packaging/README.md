@@ -1,17 +1,22 @@
 # Native Linux packaging: local candidate harness
 
-This is the first implementation slice, **not a release pipeline or qualified
+This is **manual candidate tooling, not a release pipeline or qualified
 distribution**. It inventories immutable Tau/external sources, rejects ELF
-runtime linkage outside a conservative GNU baseline, and wraps a caller-supplied
-core binary into test DEB/RPM/archive assets with nFPM. Existing Nix packages
-remain unchanged. Do not repackage Nix executables by patching their loader.
+runtime linkage outside a conservative GNU baseline, and creates test core
+DEB/RPM/archive assets with nFPM. Existing Nix packages remain unchanged. Do not
+repackage Nix executables by patching their loader.
+
+The [native build driver and manual Actions workflow](native-builds.md) add
+digest-pinned baseline images and checksum-pinned Rust/nFPM downloads. They have
+local orchestration tests but have **not been executed on native build runners**.
+The low-level supplied-binary commands below remain useful independently.
 
 ## Run locally
 
 Requires Python 3.11+, Git, GNU readelf, and nFPM **2.46.3** on PATH. nFPM is
-version-checked, not downloaded by the harness. The eventual builder must pin its
-tool provenance as well as version; this script alone is not a reproducible
-toolchain. The nFPM JSON configuration uses its YAML-compatible config schema.
+version-checked, not downloaded by `native.py`; this low-level script alone is
+not a reproducible toolchain. The nFPM JSON configuration uses its YAML-compatible
+config schema.
 
 ```console
 python3 packaging/test_native.py
@@ -30,7 +35,7 @@ file inventory and absence of activation scripts, and extracts the DEB. The
 test replaces ELF inspection only for that inert fixture; it does not run Tau
 or install packages and is not runtime qualification. The dependency-free unit
 suite runs in SelfCI's lint job; the real-tool suite is a separate explicit gate
-until the native builder/tool inputs are pinned.
+alongside the native builder's eventual execution checks.
 
 Use `arm64` for AArch64. `inventory` reads Git objects with replacement objects
 disabled, not dirty worktree files or locally substituted history; the commit
@@ -71,8 +76,8 @@ are normalized; byte-for-byte reproducibility is not claimed.
 
 Before release authority or download links are added:
 
-* Build native x86_64 and ARM64 in pinned baseline images with pinned Rust and
-  nFPM, bounded resources and `cargo build --locked --release -p dpc-tau`.
+* Execute the native x86_64 and ARM64 builder with its pinned baseline images,
+  Rust and nFPM, bounded resources and `cargo build --locked --release -p dpc-tau`.
   Record compiler, image digest, source/workflow SHAs and build identity;
   validate the actual `tau --version` against source.
 * Run real package-manager install/metadata/ownership/uninstall tests with
@@ -88,8 +93,8 @@ Before release authority or download links are added:
   binaries, including separate Telegram gateway), preserving their own versions
   and recording SDK/protocol/tested Tau compatibility. Do not omit an
   unqualified package silently.
-* Add least-privilege exact-SHA manual Actions builds with expiring artifacts,
-  separate trusted tag builds and complete-inventory draft publication. Never
+* Validate the least-privilege exact-SHA manual Actions workflow on approved
+  runners, then add separate trusted tag builds and complete-inventory draft publication. Never
   execute candidate scripts/binaries in the publisher or promote arbitrary
   manual artifacts to releases.
 * Publish source archives, complete provenance and the approved full inventory.

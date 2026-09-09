@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "rust_version": "1.97.0",
+  "nfpm_version": "2.46.3",
+  "architectures": {
+    "amd64": {
+      "machine": "x86_64",
+      "image": "quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c",
+      "rust_target": "x86_64-unknown-linux-gnu",
+      "rust_sha256": "1cf17e4905b841d4c8e3f76467ac148d55fb3f54bf213c86f0d287a36471d904",
+      "nfpm_arch": "x86_64",
+      "nfpm_sha256": "9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565"
+    },
+    "arm64": {
+      "machine": "aarch64",
+      "image": "quay.io/pypa/manylinux_2_28_aarch64@sha256:ad74e53b713f3b07d8c889c526dc0c6500da9827b45e38739570875fef52e28f",
+      "rust_target": "aarch64-unknown-linux-gnu",
+      "rust_sha256": "4c88fe30a748a8853c19f4e8876a64b32005bc4cbcde48e93732d06a430e808a",
+      "nfpm_arch": "arm64",
+      "nfpm_sha256": "7871d72bb1035924eab56031f962ae3f004b1f7695151789ef018bdbc507a2fa"
+    }
+  }
+}
