@@ -248,19 +248,23 @@ fn picker_lines(
     selected: usize,
     width: usize,
     terminal_height: usize,
-) -> (Vec<Vec<tau_term_screen::style::Cell>>, usize) {
+) -> (Vec<tau_term_screen::CellRow>, usize) {
     if terminal_height <= 1 {
         let item = &items[selected];
         let marker = if item.is_enabled() { '>' } else { 'X' };
         let line = truncate_to_width(&format!("{marker} {} — ? {prompt}", item.label()), width);
-        return (vec![StyledText::from(line).to_cells()], 0);
+        return (vec![StyledText::from(line).to_cells().into()], 0);
     }
 
     // Reserve one row for the prompt; leave at least one item visible.
     let visible = terminal_height.saturating_sub(1).max(1);
     let window = visible_window(items.len(), selected, visible);
     let mut lines = Vec::with_capacity(window.len() + 1);
-    lines.push(StyledText::from(truncate_to_width(&format!("? {prompt}"), width)).to_cells());
+    lines.push(
+        StyledText::from(truncate_to_width(&format!("? {prompt}"), width))
+            .to_cells()
+            .into(),
+    );
     for (idx, item) in items.iter().enumerate().take(window.end).skip(window.start) {
         let marker = if !item.is_enabled() {
             'X'
@@ -270,7 +274,7 @@ fn picker_lines(
             ' '
         };
         let line = truncate_to_width(&format!("{marker} {}", item.label()), width);
-        lines.push(StyledText::from(line).to_cells());
+        lines.push(StyledText::from(line).to_cells().into());
     }
     (lines, selected - window.start + 1)
 }

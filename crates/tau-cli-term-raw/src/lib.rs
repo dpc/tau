@@ -4729,7 +4729,7 @@ fn render_shutdown_if_requested(
     drop(st);
 
     screen.set_width(prev_width);
-    let _ = screen.update_rows(writer, visible, (cursor_in_visible, layout.cursor_col));
+    let _ = screen.update(writer, visible, (cursor_in_visible, layout.cursor_col));
     let below = plan.render_lines.len().saturating_sub(plan.cursor_row + 1);
     for _ in 0..=below {
         let _ = writer.queue(crossterm::style::Print("\r\n"));
@@ -4997,7 +4997,7 @@ fn render_fast_frame(
         // terminal scrollback.
         let suffix = scrolling_suffix(&history_cache.lines, tail, metrics, terminal_model);
         let cursor_row = metrics.cursor_row.saturating_sub(previous_viewport_start);
-        screen.render_scrolling_rows(
+        screen.render_scrolling(
             writer,
             &suffix,
             0,
@@ -5007,7 +5007,7 @@ fn render_fast_frame(
     } else {
         let visible = visible_lines_from_parts(&history_cache.lines, tail, metrics);
         let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
-        screen.update_rows(writer, &visible, (cursor_in_visible, tail.cursor_col))?;
+        screen.update(writer, &visible, (cursor_in_visible, tail.cursor_col))?;
     }
     terminal_model.apply_fast_plan(history_cache, tail, metrics);
     Ok(())
@@ -5187,7 +5187,7 @@ fn render_scrolling_frame(
     // Content pushed log rows off the top. Use the scrolling renderer
     // (Pi-style). Rubber is part of the virtual tail, so it shrinks before any
     // extra log row enters scrollback.
-    screen.render_scrolling_rows(
+    screen.render_scrolling(
         writer,
         &plan.render_lines,
         terminal_model.viewport_start,
@@ -5211,7 +5211,7 @@ fn render_diff_frame(
     // upward.
     let visible = plan.visible_lines(pass.height);
     let cursor_in_visible = plan.cursor_in_visible(pass.height);
-    screen.update_rows(writer, visible, (cursor_in_visible, layout.cursor_col))?;
+    screen.update(writer, visible, (cursor_in_visible, layout.cursor_col))?;
     terminal_model.reset_to_layout(layout, plan.viewport_start, plan.rubber_height);
     Ok(())
 }
@@ -5450,7 +5450,7 @@ fn full_render(
     let visible_end = (effective_viewport_start + height).min(plan.render_lines.len());
     let visible_lines = plan.render_lines[effective_viewport_start..visible_end].to_vec();
     let cursor_in_visible = plan.cursor_row.saturating_sub(effective_viewport_start);
-    screen.reset_to_rows(visible_lines, cursor_in_visible, layout.cursor_col);
+    screen.reset_to(visible_lines, cursor_in_visible, layout.cursor_col);
 
     Ok(())
 }

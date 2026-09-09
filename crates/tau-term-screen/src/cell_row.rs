@@ -72,19 +72,6 @@ impl CellRow {
         }
     }
 
-    /// Copies and normalizes one caller-owned physical terminal row.
-    pub(crate) fn copy_normalized(cells: &[Cell]) -> Self {
-        if cells.is_empty() {
-            return Self::new(Vec::new());
-        }
-        record_cell_copies(cells.len());
-        let cells = cells.iter().map(Cell::normalized).collect();
-        record_allocation();
-        Self {
-            cells: CellRowStorage::Cells(Arc::new(cells)),
-        }
-    }
-
     /// Returns debug-build row-buffer counters for the current thread.
     ///
     /// Release builds return `None` because they compile out hot-path

@@ -19,8 +19,8 @@
 //!
 //! Key design choices:
 //! - Shared immutable line model (`Vec<CellRow>`) — no soft-wrap tracking.
-//!   Legacy `Vec<Vec<Cell>>` methods normalize caller-constructed cells before
-//!   forwarding to the shared-row renderer.
+//!   [`CellRow::new`] normalizes caller-constructed cells before rows reach the
+//!   renderer.
 //! - Relative cursor movement only (`MoveUp`, `\r`, `\n`, `MoveToColumn`).
 //! - `\n` for downward movement (scrolls at bottom edge, unlike `MoveDown`).
 
@@ -36,13 +36,6 @@ use crate::style::{
     sanitize_hyperlink_target, visit_styled_graphemes,
 };
 use crate::{CellRow, style as path_crate_style};
-
-fn normalize_cell_lines(lines: &[Vec<Cell>]) -> Vec<CellRow> {
-    lines
-        .iter()
-        .map(|line| CellRow::copy_normalized(line))
-        .collect()
-}
 
 /// Terminal-column width of a cell slice (sum of individual display widths).
 ///
@@ -140,18 +133,6 @@ impl Screen {
     /// `desired_cursor` is `(row, col)` where the cursor should end up.
     /// The caller owns flushing so it can batch a whole render frame.
     pub fn update(
-        &mut self,
-        w: &mut impl Write,
-        desired_lines: &[Vec<Cell>],
-        desired_cursor: (usize, usize),
-    ) -> io::Result<()> {
-        let normalized_desired_lines = normalize_cell_lines(desired_lines);
-        self.update_rows(w, &normalized_desired_lines, desired_cursor)
-    }
-
-    /// Diffs normalized shared rows and retains their buffers without copying
-    /// cells.
-    pub fn update_rows(
         &mut self,
         w: &mut impl Write,
         desired_lines: &[CellRow],
@@ -278,25 +259,6 @@ impl Screen {
     ///
     /// Inspired by the Pi coding agent's TUI renderer.
     pub fn render_scrolling(
-        &mut self,
-        w: &mut impl Write,
-        all_lines: &[Vec<Cell>],
-        prev_viewport_top: usize,
-        height: usize,
-        desired_cursor: (usize, usize),
-    ) -> io::Result<()> {
-        let normalized_all_lines = normalize_cell_lines(all_lines);
-        self.render_scrolling_rows(
-            w,
-            &normalized_all_lines,
-            prev_viewport_top,
-            height,
-            desired_cursor,
-        )
-    }
-
-    /// Renders normalized shared rows while retaining only shared row pointers.
-    pub fn render_scrolling_rows(
         &mut self,
         w: &mut impl Write,
         all_lines: &[CellRow],
@@ -494,14 +456,7 @@ impl Screen {
     /// Overwrites the internal state to match what is currently on the
     /// terminal. Call after a full render to prepare for future
     /// differential updates.
-    pub fn reset_to(&mut self, lines: Vec<Vec<Cell>>, cursor_row: usize, cursor_col: usize) {
-        self.lines = normalize_cell_lines(&lines);
-        self.cursor_row = cursor_row;
-        self.cursor_col = cursor_col;
-    }
-
-    /// Resets the cache to normalized shared rows without copying cell buffers.
-    pub fn reset_to_rows(&mut self, lines: Vec<CellRow>, cursor_row: usize, cursor_col: usize) {
+    pub fn reset_to(&mut self, lines: Vec<CellRow>, cursor_row: usize, cursor_col: usize) {
         self.lines = lines;
         self.cursor_row = cursor_row;
         self.cursor_col = cursor_col;

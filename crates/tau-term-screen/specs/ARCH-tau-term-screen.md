@@ -72,10 +72,10 @@ differential update. Use `Screen::invalidate`, `Screen::erase_all`,
 
 `CellRow` owns one normalized immutable physical row. Nonempty rows retain their
 cell buffer behind a shared pointer; empty rows use a canonical allocation-free
-representation. Layout owners and `Screen` may pass `CellRow` values through
-`update_rows`, `render_scrolling_rows`, and `reset_to_rows` without copying cell
-buffers. The older owned-row methods remain normalization boundaries for callers
-that construct public `Cell` values directly.
+representation. Layout owners and `Screen` pass `CellRow` values through
+`update`, `render_scrolling`, and `reset_to` without copying cell buffers.
+Callers that construct public `Cell` values directly normalize them through
+`CellRow::new` before rendering.
 
 Scrolling rendering depends on the caller passing the previous viewport top and a
 current terminal height. Resize/full-redraw paths should rebuild the visible model

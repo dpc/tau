@@ -28,7 +28,7 @@ impl TestTerm {
     fn render(&mut self, content: &str, cursor_char_offset: usize) {
         let width = self.screen.width();
         let styled: StyledText = content.into();
-        let desired = layout_lines().content(&styled).width(width).call();
+        let desired = cell_rows(layout_lines().content(&styled).width(width).call());
         let cursor = (cursor_char_offset / width, cursor_char_offset % width);
         let mut buf = Vec::new();
         self.screen
@@ -72,20 +72,23 @@ fn line_chars(lines: &[Vec<Cell>]) -> Vec<String> {
         .collect()
 }
 
-fn plain_cell_lines(lines: &[&str]) -> Vec<Vec<Cell>> {
+fn cell_rows(lines: Vec<Vec<Cell>>) -> Vec<CellRow> {
+    lines.into_iter().map(CellRow::new).collect()
+}
+
+fn plain_cell_lines(lines: &[&str]) -> Vec<CellRow> {
     lines
         .iter()
-        .map(|line| line.chars().map(Cell::plain).collect())
+        .map(|line| CellRow::new(line.chars().map(Cell::plain).collect()))
         .collect()
 }
 
-/// Shared-row updates must remain byte-for-byte equivalent to the legacy owned
-/// row API across varied Unicode content, widths, row counts, and mutations.
+/// Shared-row updates must render varied Unicode content and mutations without
+/// rebuilding row buffers inside the screen cache.
 #[test]
-fn shared_row_updates_match_owned_reference_across_generated_frames() {
+fn shared_row_updates_retain_generated_frame_buffers() {
     let mut seed = 0x4d59_5df4_d0f3_3173_u64;
-    let mut owned_screen = Screen::new(17);
-    let mut shared_screen = Screen::new(17);
+    let mut screen = Screen::new(17);
 
     for frame in 0..256 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -103,51 +106,52 @@ fn shared_row_updates_match_owned_reference_across_generated_frames() {
                 .collect::<Vec<_>>();
             owned_rows.push(cells);
         }
-        let shared_rows = owned_rows
-            .iter()
-            .cloned()
-            .map(CellRow::new)
-            .collect::<Vec<_>>();
+        let rows = cell_rows(owned_rows);
         let cursor = (row_count - 1, frame % 17);
-        let mut owned_output = Vec::new();
-        let mut shared_output = Vec::new();
-
-        owned_screen
-            .update(&mut owned_output, &owned_rows, cursor)
-            .expect("owned reference update should render");
-        shared_screen
-            .update_rows(&mut shared_output, &shared_rows, cursor)
+        screen
+            .update(&mut Vec::new(), &rows, cursor)
             .expect("shared update should render");
 
-        assert_eq!(shared_output, owned_output, "generated frame {frame}");
         assert_eq!(
-            shared_screen.actual_line_count(),
-            owned_screen.actual_line_count(),
+            screen.actual_line_count(),
+            rows.len(),
             "generated frame {frame}"
         );
+        for (index, row) in rows.iter().enumerate() {
+            assert!(
+                screen.shares_row_buffer(index, row),
+                "generated frame {frame}, row {index}"
+            );
+        }
     }
 }
 
-/// Ownership counters must distinguish legacy cell copies from shared pointer
-/// retention and must not mistake separate empty allocations for one buffer.
+/// Ownership counters must record caller-side normalization and cheap screen
+/// retention without mistaking separate empty rows for distinct buffers.
 #[test]
-fn row_buffer_metrics_and_identity_cover_legacy_and_empty_rows() {
-    let owned = plain_cell_lines(&["abc"]);
+fn row_buffer_metrics_and_identity_cover_normalization_and_empty_rows() {
     let mut screen = Screen::new(10);
     CellRow::reset_metrics();
+    let row = CellRow::new(vec![Cell {
+        ch: '\t',
+        style: Style::default(),
+        width: 0,
+        hyperlink: None,
+    }]);
     screen
-        .update(&mut Vec::new(), &owned, (0, 0))
-        .expect("legacy update should render");
+        .update(&mut Vec::new(), std::slice::from_ref(&row), (0, 0))
+        .expect("shared update should render");
     if let Some(metrics) = CellRow::metrics() {
         assert_eq!(
             metrics,
             CellRowMetrics {
                 allocations: 1,
                 pointer_clones: 1,
-                cell_copies: 3,
+                cell_copies: 1,
             }
         );
     }
+    assert!(screen.shares_row_buffer(0, &row));
 
     CellRow::reset_metrics();
     let first_empty = CellRow::new(Vec::new());
@@ -155,7 +159,7 @@ fn row_buffer_metrics_and_identity_cover_legacy_and_empty_rows() {
     if let Some(metrics) = CellRow::metrics() {
         assert_eq!(metrics.allocations, 0);
     }
-    screen.reset_to_rows(vec![first_empty.clone()], 0, 0);
+    screen.reset_to(vec![first_empty.clone()], 0, 0);
     assert!(screen.shares_row_buffer(0, &first_empty));
     assert!(screen.shares_row_buffer(0, &second_empty));
 }
@@ -390,12 +394,12 @@ fn cell_api_sanitizes_controls() {
 #[test]
 fn screen_update_normalizes_public_cells_before_caching() {
     let mut term = TestTerm::new(4, 5);
-    let invalid = vec![vec![Cell {
+    let invalid = vec![CellRow::new(vec![Cell {
         ch: '\x1b',
         style: Style::default(),
         width: 0,
         hyperlink: None,
-    }]];
+    }])];
     let mut buf = Vec::new();
     term.screen
         .update(&mut buf, &invalid, (0, 1))
@@ -407,7 +411,7 @@ fn screen_update_normalizes_public_cells_before_caching() {
     let rendered = String::from_utf8_lossy(&buf);
     assert!(rendered.contains('�'));
 
-    let replacement = vec![vec![Cell::plain('A')]];
+    let replacement = vec![CellRow::new(vec![Cell::plain('A')])];
     buf.clear();
     term.screen
         .update(&mut buf, &replacement, (0, 1))
@@ -819,14 +823,18 @@ fn cursor_moves_without_changing_content() {
 #[test]
 fn changing_combining_mark_repaints_cluster_start() {
     let mut screen = Screen::new(10);
-    let first = layout_lines()
-        .content(&StyledText::from("a\u{0301}"))
-        .width(10)
-        .call();
-    let second = layout_lines()
-        .content(&StyledText::from("a"))
-        .width(10)
-        .call();
+    let first = cell_rows(
+        layout_lines()
+            .content(&StyledText::from("a\u{0301}"))
+            .width(10)
+            .call(),
+    );
+    let second = cell_rows(
+        layout_lines()
+            .content(&StyledText::from("a"))
+            .width(10)
+            .call(),
+    );
 
     let mut buf = Vec::new();
     screen.update(&mut buf, &first, (0, 1)).expect("render ok");
@@ -940,7 +948,7 @@ fn styled_content_renders_with_color() {
         Span::new("world", style),
         Span::plain("!"),
     ]);
-    let desired = layout_lines().content(&styled).width(80).call();
+    let desired = cell_rows(layout_lines().content(&styled).width(80).call());
     let mut buf = Vec::new();
     emit_styled_cells(&mut buf, &desired[0]).expect("cell emission should succeed");
     t.term.process(&buf);
@@ -990,7 +998,7 @@ fn styled_diff_only_rerenders_changed_styles() {
 
     // Second render: same text but bold.
     let styled = StyledText::from(Span::new("hello", bold));
-    let desired = layout_lines().content(&styled).width(80).call();
+    let desired = cell_rows(layout_lines().content(&styled).width(80).call());
     let mut buf = Vec::new();
     t.screen.update(&mut buf, &desired, (0, 5)).expect("ok");
     t.term.process(&buf);
@@ -1237,15 +1245,17 @@ fn scrolling_after_already_scrolled_does_not_rewrite_rows_that_will_drop() {
     );
 }
 
-/// A scrolling frame normalizes a late hand-built cell, repaints that suffix
-/// without redrawing unchanged rows, and caches the normalized viewport.
+/// A scrolling frame accepts a caller-normalized late cell, repaints that
+/// suffix without redrawing unchanged rows, and caches the shared viewport.
 #[test]
 fn scrolling_single_cell_change_has_bounded_output() {
     crossterm::style::force_color_output(true);
     const WIDTH: usize = 5;
     const HEIGHT: usize = 3;
 
-    let before = plain_cell_lines(&["aaaaa", "bbbbb", "ccccc", "ddddd"]);
+    let before_cells = ["aaaaa", "bbbbb", "ccccc", "ddddd"]
+        .map(|line| line.chars().map(Cell::plain).collect::<Vec<_>>());
+    let before = cell_rows(before_cells.to_vec());
     let mut screen = Screen::new(WIDTH);
     let mut term = vt100::Parser::new(HEIGHT as u16, WIDTH as u16, 20);
     let mut initial = Vec::new();
@@ -1254,16 +1264,15 @@ fn scrolling_single_cell_change_has_bounded_output() {
         .expect("initial scrolling render should succeed");
     term.process(&initial);
 
-    let mut raw_after = before.clone();
+    let mut raw_after = before_cells.to_vec();
     raw_after[3][3] = Cell {
         ch: '\t',
         style: Style::default().fg(Color::Cyan),
         width: 1,
         hyperlink: None,
     };
-    let visible_after = &raw_after[1..];
-    let mut normalized_after = before[1..].to_vec();
-    normalized_after[2][3] = Cell::new(' ', Style::default().fg(Color::Cyan));
+    let normalized_after = cell_rows(raw_after);
+    let visible_after = &normalized_after[1..];
     let mut diff = Vec::new();
     screen
         .update(&mut diff, visible_after, (HEIGHT - 1, WIDTH))
@@ -1310,7 +1319,7 @@ fn scrolling_single_cell_change_has_bounded_output() {
             .fgcolor(),
         vt100::Color::Default
     );
-    assert_eq!(screen.lines, normalized_after);
+    assert_eq!(screen.lines, normalized_after[1..]);
 
     let mut unchanged = Vec::new();
     screen
