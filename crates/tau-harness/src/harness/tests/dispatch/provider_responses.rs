@@ -496,14 +496,12 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         );
         assert_eq!(
             successor_checkpoints[0].activation_cut,
-            Some(
-                h.session_runtime
-                    .agent_store
-                    .agent(&durable_agent_id)
-                    .and_then(|tree| tree.node(node_id))
-                    .and_then(|node| node.parent_id)
-                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-            )
+            h.session_runtime
+                .agent_store
+                .agent(&durable_agent_id)
+                .and_then(|tree| tree.node(node_id))
+                .and_then(|node| node.parent_id)
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
         );
         let successors = event_log_events(&h)
             .into_iter()
@@ -1632,9 +1630,9 @@ fn provider_loss_keeps_standalone_checkpoint_uncertain_with_deferred_input() {
             transaction_id: Some(transaction_id.clone()),
             agent_prompt_id: prompt_id.clone(),
             through,
-            model: Some("test/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
         });
     h.publish_for_agent(&cid, checkpoint);
     let provider = h
@@ -1960,9 +1958,9 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
                 transaction_id: None,
                 agent_prompt_id: owner.clone(),
                 through: tau_proto::AgentHead::Node(through),
-                model: Some("echo/model".into()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(tau_proto::AgentHead::Root),
+                model: "echo/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: tau_proto::AgentHead::Root,
             }),
         );
         append_seed_agent_event(

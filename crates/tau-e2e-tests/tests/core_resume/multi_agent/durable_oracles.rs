@@ -400,10 +400,9 @@ fn assert_inference_rounds(
                         || dispatch.transaction_id.is_some()
                         || dispatch.through
                             != tau_proto::AgentHead::Node(tau_proto::NodeId::new(*through))
-                        || dispatch.model.as_ref().map(ToString::to_string).as_deref()
-                            != Some("fake/test")
-                        || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
-                        || dispatch.activation_cut.as_ref() != Some(cut)
+                        || Some(dispatch.model.to_string()).as_deref() != Some("fake/test")
+                        || dispatch.operation != tau_proto::PromptOperation::Inference
+                        || &dispatch.activation_cut != cut
                         || prompt.model.to_string() != "fake/test"
                         || prompt.operation != tau_proto::PromptOperation::Inference
                         || !terminal_defaults(response)
@@ -655,9 +654,9 @@ pub(super) fn assert_snapshot_suffix(
         || dispatch.agent_prompt_id.as_str() != format!("ap-{}-1", identities.worker.as_str())
         || dispatch.transaction_id.is_some()
         || dispatch.through != tau_proto::AgentHead::Node(tau_proto::NodeId::new(3))
-        || dispatch.model.as_ref().map(ToString::to_string).as_deref() != Some("fake/test")
-        || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
-        || dispatch.activation_cut != Some(tau_proto::AgentHead::Node(tau_proto::NodeId::new(2)))
+        || Some(dispatch.model.to_string()).as_deref() != Some("fake/test")
+        || dispatch.operation != tau_proto::PromptOperation::Inference
+        || dispatch.activation_cut != tau_proto::AgentHead::Node(tau_proto::NodeId::new(2))
         || started.model.to_string() != "fake/test"
         || started.operation != tau_proto::PromptOperation::Inference
         || outer_start.agent_prompt_id != dispatch.agent_prompt_id

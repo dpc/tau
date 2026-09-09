@@ -1656,13 +1656,13 @@ fn representative_events() -> Vec<Event> {
         Event::AgentCompacted(AgentCompacted {
             original_input_tokens: None,
             compaction_output_tokens: None,
-            compact_prompt_id: None,
-            model: None,
-            operation: None,
+            compact_prompt_id: test_agent_prompt_id("ap-compacted"),
+            model: ModelId::from("provider/model"),
+            operation: PromptOperation::StandaloneCompaction,
             agent_id: agent_id("engineer_abcd1234"),
-            transaction_id: None,
-            cut: None,
-            suffix_end: None,
+            transaction_id: CompactionTransactionId::parse("ct-compacted").expect("transaction id"),
+            cut: AgentHead::Root,
+            suffix_end: AgentHead::Root,
             replacement_window: vec![user_text_item("summary")],
         }),
         Event::AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted {
@@ -1692,9 +1692,9 @@ fn representative_events() -> Vec<Event> {
             transaction_id: Some(CompactionTransactionId::parse("ct-1").expect("transaction id")),
             agent_prompt_id: test_agent_prompt_id("sp-1"),
             through: AgentHead::Node(NodeId::new(1)),
-            model: None,
-            operation: None,
-            activation_cut: None,
+            model: ModelId::from("provider/model"),
+            operation: PromptOperation::Inference,
+            activation_cut: AgentHead::Root,
             output_length_continuation: None,
         }),
         Event::AgentPromptCreated(AgentPromptCreated {
@@ -6916,6 +6916,12 @@ fn provider_model_preserves_zero_standalone_compaction_prefix_budget() {
 fn agent_compacted_accepts_only_numeric_token_accounting() {
     let current = serde_json::json!({
         "agent_id": "agent",
+        "transaction_id": "ct-accounting",
+        "compact_prompt_id": "ap-accounting",
+        "model": "provider/model",
+        "operation": "standalone_compaction",
+        "cut": {"kind": "root"},
+        "suffix_end": {"kind": "root"},
         "original_input_tokens": 11,
         "compaction_output_tokens": 7,
         "replacement_window": []
@@ -6954,6 +6960,12 @@ fn agent_compacted_accepts_only_numeric_token_accounting() {
 fn agent_compacted_ignores_removed_output_token_alias() {
     let legacy_alias = serde_json::json!({
         "agent_id": "agent",
+        "transaction_id": "ct-accounting-alias",
+        "compact_prompt_id": "ap-accounting-alias",
+        "model": "provider/model",
+        "operation": "standalone_compaction",
+        "cut": {"kind": "root"},
+        "suffix_end": {"kind": "root"},
         "original_input_tokens": 11,
         "compacted_input_tokens": 7,
         "replacement_window": []
@@ -7160,6 +7172,31 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         ciborium::from_reader(bytes.as_slice()).expect("decode CBOR value")
     }
 
+    fn set_cbor_text_field(
+        value: &mut ciborium::value::Value,
+        field: &str,
+        replacement: &str,
+    ) -> bool {
+        match value {
+            path_ciborium_value::Value::Map(entries) => {
+                for (key, value) in entries.iter_mut() {
+                    if matches!(key, ciborium::value::Value::Text(text) if text == field) {
+                        *value = path_ciborium_value::Value::Text(replacement.to_owned());
+                        return true;
+                    }
+                    if set_cbor_text_field(value, field, replacement) {
+                        return true;
+                    }
+                }
+                false
+            }
+            path_ciborium_value::Value::Array(values) => values
+                .iter_mut()
+                .any(|value| set_cbor_text_field(value, field, replacement)),
+            _ => false,
+        }
+    }
+
     fn remove_cbor_field(value: &mut ciborium::value::Value, field: &str) -> bool {
         match value {
             path_ciborium_value::Value::Map(entries) => {
@@ -7176,28 +7213,6 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
             path_ciborium_value::Value::Array(values) => values
                 .iter_mut()
                 .any(|value| remove_cbor_field(value, field)),
-            _ => false,
-        }
-    }
-
-    fn has_cbor_text_field(value: &ciborium::value::Value, field: &str, expected: &str) -> bool {
-        match value {
-            path_ciborium_value::Value::Map(entries) => {
-                entries.iter().any(|(key, value)| {
-                    matches!(
-                        (key, value),
-                        (
-                            ciborium::value::Value::Text(key),
-                            ciborium::value::Value::Text(value)
-                        ) if key == field && value == expected
-                    )
-                }) || entries
-                    .iter()
-                    .any(|(_, value)| has_cbor_text_field(value, field, expected))
-            }
-            path_ciborium_value::Value::Array(values) => values
-                .iter()
-                .any(|value| has_cbor_text_field(value, field, expected)),
             _ => false,
         }
     }
@@ -7220,15 +7235,14 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         supersedes: None,
         trigger: StandaloneCompactionTrigger::Manual,
     };
-    let mut legacy_started = serde_json::to_value(&started).expect("encode manual start");
-    legacy_started
+    let mut missing_trigger = serde_json::to_value(&started).expect("encode manual start");
+    missing_trigger
         .as_object_mut()
         .expect("start object")
         .remove("trigger");
-    assert_eq!(
-        serde_json::from_value::<AgentStandaloneCompactionStarted>(legacy_started)
-            .expect("omitted trigger defaults"),
-        started
+    assert!(
+        serde_json::from_value::<AgentStandaloneCompactionStarted>(missing_trigger).is_err(),
+        "JSON start without explicit trigger must reject"
     );
 
     started.trigger = StandaloneCompactionTrigger::ReactiveContextOverflow {
@@ -7247,33 +7261,73 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
             .expect("decode reactive start CBOR"),
         started
     );
-    started.trigger = StandaloneCompactionTrigger::AutomaticThreshold;
-    let automatic_json = serde_json::to_value(&started).expect("encode automatic start");
-    assert_eq!(
-        automatic_json["trigger"]["kind"],
-        serde_json::json!("automatic_threshold")
-    );
-    assert_eq!(
-        serde_json::from_value::<AgentStandaloneCompactionStarted>(automatic_json)
-            .expect("decode automatic start"),
-        started
-    );
     let manual_event = Event::AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted {
         trigger: StandaloneCompactionTrigger::Manual,
         ..started.clone()
     });
-    let mut legacy_started_cbor = cbor_event(&manual_event);
-    assert!(remove_cbor_field(&mut legacy_started_cbor, "trigger"));
-    assert_eq!(decode_cbor_event(&legacy_started_cbor), manual_event);
-    let automatic_event = Event::AgentStandaloneCompactionStarted(started.clone());
-    assert!(has_cbor_text_field(
-        &cbor_event(&automatic_event),
-        "kind",
-        "automatic_threshold"
-    ));
+    let mut additive_manual =
+        serde_json::to_value(&manual_event).expect("encode additive manual start");
+    additive_manual["payload"]["trigger"]["future_field"] = serde_json::json!("ignored");
     assert_eq!(
-        decode_cbor_event(&cbor_event(&automatic_event)),
-        automatic_event
+        serde_json::from_value::<Event>(additive_manual.clone())
+            .expect("unrelated JSON trigger fields remain additive"),
+        manual_event
+    );
+    let mut additive_manual_cbor = Vec::new();
+    ciborium::into_writer(&additive_manual, &mut additive_manual_cbor)
+        .expect("encode additive manual CBOR");
+    assert_eq!(
+        ciborium::from_reader::<Event, _>(additive_manual_cbor.as_slice())
+            .expect("unrelated CBOR trigger fields remain additive"),
+        manual_event
+    );
+    let mut missing_trigger_cbor = cbor_event(&manual_event);
+    assert!(remove_cbor_field(&mut missing_trigger_cbor, "trigger"));
+    let mut missing_trigger_bytes = Vec::new();
+    ciborium::into_writer(&missing_trigger_cbor, &mut missing_trigger_bytes)
+        .expect("encode modified CBOR");
+    assert!(
+        ciborium::from_reader::<Event, _>(missing_trigger_bytes.as_slice()).is_err(),
+        "CBOR start without explicit trigger must reject"
+    );
+    for obsolete_kind in ["automatic_threshold", "automatic_continuation"] {
+        let mut obsolete_json = serde_json::to_value(&manual_event).expect("encode manual start");
+        obsolete_json["payload"]["trigger"] = serde_json::json!({"kind": obsolete_kind});
+        assert!(
+            serde_json::from_value::<Event>(obsolete_json).is_err(),
+            "obsolete JSON trigger {obsolete_kind} must reject"
+        );
+
+        let mut obsolete_cbor = cbor_event(&manual_event);
+        assert!(set_cbor_text_field(
+            &mut obsolete_cbor,
+            "kind",
+            obsolete_kind
+        ));
+        let mut obsolete_bytes = Vec::new();
+        ciborium::into_writer(&obsolete_cbor, &mut obsolete_bytes)
+            .expect("encode obsolete trigger CBOR");
+        assert!(
+            ciborium::from_reader::<Event, _>(obsolete_bytes.as_slice()).is_err(),
+            "obsolete CBOR trigger {obsolete_kind} must reject"
+        );
+    }
+    let mut obsolete_preflight = serde_json::to_value(&manual_event).expect("encode manual start");
+    obsolete_preflight["payload"]["trigger"] = serde_json::json!({
+        "kind": "automatic_preflight_failure",
+        "previous_transaction_id": "ct-obsolete-preflight-owner",
+        "reason": "prefix_too_large"
+    });
+    assert!(
+        serde_json::from_value::<Event>(obsolete_preflight.clone()).is_err(),
+        "obsolete JSON preflight predecessor correlation must reject"
+    );
+    let mut obsolete_preflight_cbor = Vec::new();
+    ciborium::into_writer(&obsolete_preflight, &mut obsolete_preflight_cbor)
+        .expect("encode obsolete preflight CBOR");
+    assert!(
+        ciborium::from_reader::<Event, _>(obsolete_preflight_cbor.as_slice()).is_err(),
+        "obsolete CBOR preflight predecessor correlation must reject"
     );
 
     let checkpoint = AgentInferenceDispatchStarted {
@@ -7281,9 +7335,9 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         transaction_id: None,
         agent_prompt_id: test_agent_prompt_id("ap-inference"),
         through: AgentHead::Root,
-        model: Some("provider/model".into()),
-        operation: Some(PromptOperation::Inference),
-        activation_cut: Some(AgentHead::Root),
+        model: "provider/model".into(),
+        operation: PromptOperation::Inference,
+        activation_cut: AgentHead::Root,
         output_length_continuation: None,
     };
     let checkpoint_json = serde_json::to_value(&checkpoint).expect("encode checkpoint");
@@ -7292,18 +7346,17 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
             .expect("decode checkpoint"),
         checkpoint
     );
-    let mut legacy_checkpoint = serde_json::to_value(&checkpoint).expect("encode checkpoint");
-    let object = legacy_checkpoint
-        .as_object_mut()
-        .expect("checkpoint object");
-    object.remove("model");
-    object.remove("operation");
-    object.remove("activation_cut");
-    let decoded_legacy = serde_json::from_value::<AgentInferenceDispatchStarted>(legacy_checkpoint)
-        .expect("decode legacy checkpoint");
-    assert_eq!(decoded_legacy.model, None);
-    assert_eq!(decoded_legacy.operation, None);
-    assert_eq!(decoded_legacy.activation_cut, None);
+    for field in ["model", "operation", "activation_cut"] {
+        let mut incomplete = serde_json::to_value(&checkpoint).expect("encode checkpoint");
+        incomplete
+            .as_object_mut()
+            .expect("checkpoint object")
+            .remove(field);
+        assert!(
+            serde_json::from_value::<AgentInferenceDispatchStarted>(incomplete).is_err(),
+            "JSON checkpoint without {field} must reject"
+        );
+    }
     let mut checkpoint_cbor = Vec::new();
     ciborium::into_writer(&checkpoint, &mut checkpoint_cbor).expect("encode checkpoint CBOR");
     assert_eq!(
@@ -7316,22 +7369,68 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         decode_cbor_event(&cbor_event(&checkpoint_event)),
         checkpoint_event
     );
-    let legacy_checkpoint_event =
-        Event::AgentInferenceDispatchStarted(AgentInferenceDispatchStarted {
-            model: None,
-            operation: None,
-            activation_cut: None,
-            output_length_continuation: None,
-            ..checkpoint.clone()
-        });
-    let mut legacy_checkpoint_cbor = cbor_event(&checkpoint_event);
     for field in ["model", "operation", "activation_cut"] {
-        assert!(remove_cbor_field(&mut legacy_checkpoint_cbor, field));
+        let mut incomplete = cbor_event(&checkpoint_event);
+        assert!(remove_cbor_field(&mut incomplete, field));
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&incomplete, &mut bytes).expect("encode incomplete checkpoint CBOR");
+        assert!(
+            ciborium::from_reader::<Event, _>(bytes.as_slice()).is_err(),
+            "CBOR checkpoint without {field} must reject"
+        );
     }
+
+    let boundary = AgentCompacted {
+        agent_id: started.agent_id.clone(),
+        transaction_id: started.transaction_id.clone(),
+        compact_prompt_id: started.compact_prompt_id.clone(),
+        model: started.model.clone(),
+        operation: started.operation,
+        cut: started.cut,
+        suffix_end: started.cut,
+        replacement_window: vec![user_text_item("summary")],
+        original_input_tokens: None,
+        compaction_output_tokens: None,
+    };
     assert_eq!(
-        decode_cbor_event(&legacy_checkpoint_cbor),
-        legacy_checkpoint_event
+        serde_json::from_value::<AgentCompacted>(
+            serde_json::to_value(&boundary).expect("encode boundary")
+        )
+        .expect("decode boundary"),
+        boundary
     );
+    let boundary_event = Event::AgentCompacted(boundary.clone());
+    assert_eq!(
+        decode_cbor_event(&cbor_event(&boundary_event)),
+        boundary_event
+    );
+    for field in [
+        "transaction_id",
+        "compact_prompt_id",
+        "model",
+        "operation",
+        "cut",
+        "suffix_end",
+    ] {
+        let mut incomplete = serde_json::to_value(&boundary).expect("encode boundary");
+        incomplete
+            .as_object_mut()
+            .expect("boundary object")
+            .remove(field);
+        assert!(
+            serde_json::from_value::<AgentCompacted>(incomplete).is_err(),
+            "JSON boundary without {field} must reject"
+        );
+
+        let mut incomplete = cbor_event(&boundary_event);
+        assert!(remove_cbor_field(&mut incomplete, field));
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&incomplete, &mut bytes).expect("encode incomplete boundary CBOR");
+        assert!(
+            ciborium::from_reader::<Event, _>(bytes.as_slice()).is_err(),
+            "CBOR boundary without {field} must reject"
+        );
+    }
 
     let mut response = ProviderResponseFinished {
         automatic_compaction_decision: None,

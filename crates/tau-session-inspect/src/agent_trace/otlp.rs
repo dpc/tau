@@ -550,15 +550,10 @@ fn operation_occurrences(event: &Event) -> Vec<(OperationKey, Phase)> {
             OperationKey::Compaction(value.transaction_id.clone()),
             Phase::Terminal,
         ),
-        Event::AgentCompacted(value) => {
-            let Some(transaction_id) = &value.transaction_id else {
-                return occurrences;
-            };
-            (
-                OperationKey::Compaction(transaction_id.clone()),
-                Phase::Terminal,
-            )
-        }
+        Event::AgentCompacted(value) => (
+            OperationKey::Compaction(value.transaction_id.clone()),
+            Phase::Terminal,
+        ),
         Event::AgentManualCompactionRequested(value) => (
             OperationKey::CompactionRequest(value.request_id.clone()),
             Phase::Start,

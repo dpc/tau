@@ -253,11 +253,11 @@ impl Harness {
                     through == owner.through
                         && continuation == owner.output_length_continuation.as_ref()
                         && self
-                            .select_inference_dispatch(&cid, owner.activation_cut)
+                            .select_inference_dispatch(&cid, Some(owner.activation_cut))
                             .is_ok_and(|selection| {
-                                owner.model.as_ref() == Some(&selection.model)
-                                    && owner.operation == Some(selection.operation)
-                                    && owner.activation_cut == Some(selection.activation_cut)
+                                owner.model == selection.model
+                                    && owner.operation == selection.operation
+                                    && owner.activation_cut == selection.activation_cut
                             })
                 });
             if owner_is_current {
@@ -718,9 +718,9 @@ impl Harness {
         owner.transaction_id() == started.transaction_id.as_ref()
             && agent_prompt_id == &started.agent_prompt_id
             && through == &started.through
-            && started.model.as_ref() == Some(&dispatch.model)
-            && started.operation.as_ref() == Some(&dispatch.operation)
-            && started.activation_cut.as_ref() == Some(&dispatch.activation_cut)
+            && started.model == dispatch.model
+            && started.operation == dispatch.operation
+            && started.activation_cut == dispatch.activation_cut
     }
 
     /// Validate a delayed activation successor against the selected branch
@@ -1058,9 +1058,9 @@ impl Harness {
                 transaction_id: Some(transaction_id),
                 agent_prompt_id,
                 through,
-                model: Some(model),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(activation_cut),
+                model,
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut,
                 output_length_continuation: None,
             }),
         );
@@ -1550,9 +1550,7 @@ impl Harness {
                 through,
                 plan_parent: _,
             } => {
-                let activation_cut = source
-                    .activation_cut
-                    .expect("validated output-length source carries activation cut");
+                let activation_cut = source.activation_cut;
                 (
                     Event::AgentInferenceDispatchStarted(
                         tau_proto::AgentInferenceDispatchStarted {
@@ -1562,7 +1560,7 @@ impl Harness {
                             through,
                             model: source.model,
                             operation: source.operation,
-                            activation_cut: Some(activation_cut),
+                            activation_cut,
                             output_length_continuation: Some(
                                 tau_proto::OutputLengthContinuationOwner {
                                     source_agent_prompt_id: source.agent_prompt_id,
@@ -1768,9 +1766,9 @@ impl Harness {
                 transaction_id: Some(transaction_id),
                 agent_prompt_id,
                 through,
-                model: Some(dispatch.model),
-                operation: Some(dispatch.operation),
-                activation_cut: Some(dispatch.activation_cut),
+                model: dispatch.model,
+                operation: dispatch.operation,
+                activation_cut: dispatch.activation_cut,
                 output_length_continuation: None,
             });
         if !self.activation_successor_matches_selected_head(&event) {
@@ -1797,7 +1795,7 @@ impl Harness {
             .prompt_runtime
             .pending_materialization_timings
             .remove(&started.agent_prompt_id);
-        if let Some(transaction_id) = started.transaction_id.as_ref() {
+        if let Some(transaction_id) = &started.transaction_id {
             self.prompt_coordination
                 .compaction_runtime
                 .enqueued_inference_checkpoints
@@ -3509,31 +3507,26 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
         {
-            if let Some(prompt_id) = compacted.compact_prompt_id.as_ref() {
-                self.clear_finished_response_prompt_route(prompt_id);
-                self.clear_prompt_tool_snapshot(prompt_id);
-            }
-            if let Some(transaction_id) = compacted.transaction_id.as_ref() {
-                self.prompt_coordination
-                    .compaction_runtime
-                    .remove_ui_start(compacted.agent_id.clone(), transaction_id.clone());
-            }
+            self.clear_finished_response_prompt_route(&compacted.compact_prompt_id);
+            self.clear_prompt_tool_snapshot(&compacted.compact_prompt_id);
+            self.prompt_coordination
+                .compaction_runtime
+                .remove_ui_start(compacted.agent_id.clone(), compacted.transaction_id.clone());
             self.clear_agent_context_usage(&cid);
-            if let Some(transaction_id) = compacted.transaction_id.as_ref()
-                && let Some(request) = self
-                    .prompt_coordination
-                    .compaction_runtime
-                    .accepted_manual_tools
-                    .values()
-                    .find(|accepted| {
-                        accepted.request.is_ui_request()
-                            && accepted.request.target_agent_id == compacted.agent_id
-                            && accepted.request.ui_source().is_some_and(|source| {
-                                source.eligible_automatic_transaction_id.as_ref()
-                                    == Some(transaction_id)
-                            })
-                    })
-                    .map(|accepted| accepted.request.clone())
+            if let Some(request) = self
+                .prompt_coordination
+                .compaction_runtime
+                .accepted_manual_tools
+                .values()
+                .find(|accepted| {
+                    accepted.request.is_ui_request()
+                        && accepted.request.target_agent_id == compacted.agent_id
+                        && accepted.request.ui_source().is_some_and(|source| {
+                            source.eligible_automatic_transaction_id.as_ref()
+                                == Some(&compacted.transaction_id)
+                        })
+                })
+                .map(|accepted| accepted.request.clone())
             {
                 let batch_parent = append_outcome
                     .and_then(|outcome| outcome.folded_node_id)
@@ -3545,18 +3538,17 @@ impl Harness {
                         tau_proto::AgentManualCompactionRequestSatisfied {
                             request_id: request.request_id,
                             target_agent_id: request.target_agent_id,
-                            transaction_id: transaction_id.clone(),
+                            transaction_id: compacted.transaction_id.clone(),
                         },
                     ),
                 );
             }
         }
         if let Event::AgentCompacted(compacted) = event
-            && let Some(transaction_id) = compacted.transaction_id.as_ref()
             && let Some(pending) = self
                 .prompt_coordination
                 .compaction_runtime
-                .take_model_tool_start(compacted.agent_id.clone(), transaction_id.clone())
+                .take_model_tool_start(compacted.agent_id.clone(), compacted.transaction_id.clone())
         {
             let self_request = pending.caller_agent_id == pending.target_agent_id;
             let call_id = pending.call_id.clone();
@@ -3570,7 +3562,7 @@ impl Harness {
                 self_compaction_terminal_pending_prompt(tau_proto::SelfCompactionTerminal {
                     request_id: pending.request_id.clone(),
                     tool_call_id: pending.call_id.clone(),
-                    transaction_id: Some(transaction_id.clone()),
+                    transaction_id: Some(compacted.transaction_id.clone()),
                     outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
                 })
             });
@@ -3595,7 +3587,7 @@ impl Harness {
                         ),
                         (
                             tau_proto::CborValue::Text("transaction_id".into()),
-                            tau_proto::CborValue::Text(transaction_id.to_string()),
+                            tau_proto::CborValue::Text(compacted.transaction_id.to_string()),
                         ),
                     ]),
                     provider_content: Vec::new(),
@@ -3620,7 +3612,6 @@ impl Harness {
             }
         }
         if let Event::AgentCompacted(compacted) = event
-            && let Some(transaction_id) = compacted.transaction_id.as_ref()
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
         {
@@ -3635,7 +3626,7 @@ impl Harness {
                         cut,
                         resume_through,
                         ..
-                    } if id == transaction_id && Some(*cut) == compacted.cut => {
+                    } if id == &compacted.transaction_id && *cut == compacted.cut => {
                         Some(*resume_through)
                     }
                     _ => None,
@@ -3651,16 +3642,9 @@ impl Harness {
             }
             if resume.is_some() {
                 let completion = AgentPublishCompletion::StandaloneContinuation {
-                    transaction_id: transaction_id.clone(),
-                    model: compacted.model.clone().expect("qualified compaction model"),
-                    activation_cut: compacted.cut.unwrap_or_else(|| {
-                        self.agent_runtime
-                            .agent_registry
-                            .agents
-                            .get(&cid)
-                            .and_then(|agent| agent.identity.head)
-                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-                    }),
+                    transaction_id: compacted.transaction_id.clone(),
+                    model: compacted.model.clone(),
+                    activation_cut: compacted.cut,
                     batch_parent: self
                         .agent_runtime
                         .agent_registry
@@ -3695,7 +3679,7 @@ impl Harness {
             }
         }
         if let Event::AgentInferenceDispatchStarted(started) = event
-            && let Some(transaction_id) = started.transaction_id.as_ref()
+            && let Some(transaction_id) = &started.transaction_id
         {
             if let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
@@ -3727,23 +3711,23 @@ impl Harness {
                         } if owner.transaction_id() == started.transaction_id.as_ref()
                             && agent_prompt_id == &started.agent_prompt_id
                             && through == &started.through
-                            && started.model.as_ref() == Some(&dispatch.model)
-                            && started.operation == Some(dispatch.operation)
-                            && started.activation_cut == Some(dispatch.activation_cut)
+                            && started.model == dispatch.model
+                            && started.operation == dispatch.operation
+                            && started.activation_cut == dispatch.activation_cut
                     )
                 });
             if checkpoint_matches {
                 let materialization_timing = (started.operation
-                    == Some(tau_proto::PromptOperation::Inference))
-                .then(|| {
-                    PromptMaterializationTiming::after_checkpoint(
-                        self.prompt_coordination
-                            .prompt_runtime
-                            .pending_materialization_timings
-                            .remove(&started.agent_prompt_id),
-                    )
-                })
-                .flatten();
+                    == tau_proto::PromptOperation::Inference)
+                    .then(|| {
+                        PromptMaterializationTiming::after_checkpoint(
+                            self.prompt_coordination
+                                .prompt_runtime
+                                .pending_materialization_timings
+                                .remove(&started.agent_prompt_id),
+                        )
+                    })
+                    .flatten();
                 let capacity_owner_matches = self
                     .runtime_io
                     .publication
@@ -3796,9 +3780,9 @@ impl Harness {
                             owner,
                             agent_prompt_id: started.agent_prompt_id.clone(),
                             through: started.through,
-                            model: started.model.clone(),
-                            operation: started.operation,
-                            activation_cut: started.activation_cut,
+                            model: Some(started.model.clone()),
+                            operation: Some(started.operation),
+                            activation_cut: Some(started.activation_cut),
                         };
                     if matches!(
                         &agent.turn.output_length_continuation,

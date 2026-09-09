@@ -129,7 +129,7 @@ fn standalone_success_is_owed_until_compacted_admission() {
                 matches!(
                     &record.event,
                     Event::AgentCompacted(compacted)
-                        if compacted.transaction_id.as_ref() == Some(&transaction_id)
+                        if compacted.transaction_id == transaction_id
                 )
             })
             .collect::<Vec<_>>()
@@ -166,9 +166,14 @@ fn ui_compaction_satisfaction_is_owed_across_publication_failures() {
             .supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
         let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        let provider_prompt_id = establish_exact_provider_usage(&mut h, &cid, 100);
         let cut = h
             .selected_head_for_agent(&cid)
             .unwrap_or(tau_proto::AgentHead::Root);
+        let provider_input_tokens = h.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .context_input_tokens
+            .expect("exact provider usage");
         let transaction_id =
             tau_proto::CompactionTransactionId::parse("ct-s5-ui-auto").expect("transaction id");
         h.publish_for_agent(
@@ -183,7 +188,14 @@ fn ui_compaction_satisfaction_is_owed_across_publication_failures() {
                 operation: tau_proto::PromptOperation::StandaloneCompaction,
                 originator: tau_proto::PromptOriginator::User,
                 supersedes: None,
-                trigger: tau_proto::StandaloneCompactionTrigger::AutomaticThreshold,
+                trigger: tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence {
+                    evidence: tau_proto::ProactiveCompactionEvidence {
+                        provider_prompt_id,
+                        provider_input_tokens,
+                        threshold: tau_proto::TokenCount::new(1),
+                        threshold_source: tau_proto::CompactionThresholdSource::ProviderDefault,
+                    },
+                },
             }),
         );
         let prompt = event_log_events(&h)
@@ -543,7 +555,7 @@ fn output_length_continuation_delivers_exactly_one_captured_successor() {
             Event::AgentInferenceDispatchStarted(owner)
                 if owner.agent_prompt_id == successor.agent_prompt_id
                     && owner.output_length_continuation.is_some()
-                    && owner.model.as_ref() == Some(&source.model)
+                    && owner.model == source.model
         )
     });
     let successor_start_position = event_position(&|event| {
@@ -624,7 +636,7 @@ fn output_length_continuation_delivers_exactly_one_captured_successor() {
     assert_eq!(owner_record.activation_cut, source_dispatch.activation_cut);
     assert_eq!(
         owner_record.operation,
-        Some(tau_proto::PromptOperation::Inference)
+        tau_proto::PromptOperation::Inference
     );
     assert_eq!(owner_record.agent_id, source.agent_id);
     assert!(

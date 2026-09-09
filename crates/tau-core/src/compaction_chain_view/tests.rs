@@ -25,7 +25,7 @@ fn start(
         originator: PromptOriginator::User,
         supersedes: predecessor
             .map(|id| CompactionTransactionId::parse(id).expect("predecessor transaction id")),
-        trigger: trigger.unwrap_or_default(),
+        trigger: trigger.unwrap_or(StandaloneCompactionTrigger::Manual),
     }
 }
 
@@ -389,12 +389,12 @@ fn terminal_boundaries_do_not_create_passes_or_cost() {
         76,
         Event::AgentCompacted(AgentCompacted {
             agent_id: started.agent_id.clone(),
-            transaction_id: Some(started.transaction_id.clone()),
-            cut: Some(AgentHead::Root),
-            suffix_end: Some(AgentHead::Root),
-            compact_prompt_id: Some(started.compact_prompt_id.clone()),
-            model: Some(started.model.clone()),
-            operation: Some(PromptOperation::StandaloneCompaction),
+            transaction_id: started.transaction_id.clone(),
+            cut: AgentHead::Root,
+            suffix_end: AgentHead::Root,
+            compact_prompt_id: started.compact_prompt_id.clone(),
+            model: started.model.clone(),
+            operation: PromptOperation::StandaloneCompaction,
             original_input_tokens: None,
             compaction_output_tokens: None,
             replacement_window: Vec::new(),

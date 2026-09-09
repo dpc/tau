@@ -837,8 +837,8 @@ fn production_message_tool_delivers_one_canonical_inbound_wrapper()
         })
         .ok_or("received occurrence lacks a following dispatch checkpoint")?;
     if dispatch.agent_id != worker
-        || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
-        || dispatch.activation_cut != Some(pre_receive_head)
+        || dispatch.operation != tau_proto::PromptOperation::Inference
+        || dispatch.activation_cut != pre_receive_head
         || dispatch.through != received_head
     {
         return Err("worker checkpoint does not own the received-message activation".into());
@@ -1056,11 +1056,9 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
     assert_eq!(successor.through, tau_proto::AgentHead::Node(receipt_node));
     assert_eq!(
         successor.activation_cut,
-        Some(
-            tree.node(receipt_node)
-                .and_then(|node| node.parent_id)
-                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-        )
+        tree.node(receipt_node)
+            .and_then(|node| node.parent_id)
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
     );
     assert!(
         target_records

@@ -2795,7 +2795,7 @@ fn intercepted_inference_checkpoint_pins_materialized_model() {
     let Event::AgentInferenceDispatchStarted(checkpoint) = parked else {
         panic!("checkpoint intercepted");
     };
-    assert_eq!(checkpoint.model, Some("echo/model".into()));
+    assert_eq!(checkpoint.model, "echo/model".into());
     h.agent_runtime
         .agent_registry
         .agents
@@ -2813,7 +2813,7 @@ fn intercepted_inference_checkpoint_pins_materialized_model() {
 
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(prompt.agent_prompt_id, checkpoint.agent_prompt_id);
-    assert_eq!(prompt.model, checkpoint.model.expect("qualified model"));
+    assert_eq!(prompt.model, checkpoint.model);
     h.shutdown().expect("shutdown");
 }
 
@@ -3588,9 +3588,9 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
             transaction_id: None,
             agent_prompt_id,
             through: tau_proto::AgentHead::Root,
-            model: Some("test/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         });
     h.publish_for_agent(&cid_a, old_checkpoint.clone());
@@ -3694,9 +3694,9 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
             transaction_id: None,
             agent_prompt_id,
             through: tau_proto::AgentHead::Root,
-            model: Some("test/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         }),
     );

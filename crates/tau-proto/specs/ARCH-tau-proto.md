@@ -1,5 +1,14 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 5.0 requires complete standalone-compaction boundary and
+inference-checkpoint ownership plus an explicit start trigger. Old automatic
+threshold, successful-pass continuation, and preflight
+predecessor-correlation payloads fail decoding rather than receiving migration,
+guessing, or reclassification. The revision remains 5.0 because these canonical
+facts are harness-authored, peers cannot publish them, and matched current 5.0
+sidecars decode every form the harness emits. This does not make arbitrary old
+5.0 payloads or journals compatible.
+
 Protocol 5.0 removes the obsolete `tool.delegate_progress` event schema.
 Major-skew admission rejects 4.x peers before they can send a formerly valid
 event to a decoder that no longer accepts it. Harness and peer integration must

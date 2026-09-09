@@ -54,7 +54,12 @@ readable without changing the underlying whole-second fact.
 
 ### Reactive context recovery correlation
 
-Context-overflow recovery is correlated entirely by durable facts. Inference checkpoints capture the provider-qualified model, operation, and immutable pre-activation cut. The harness, never the provider, stamps an eligible terminal response as `reactive_compaction_planned`; a reactive standalone-compaction start then uniquely claims that failed prompt id. Legacy checkpoints omit the new cut facts and are recovery-ineligible.
+Context-overflow recovery is correlated entirely by durable facts. Inference
+checkpoints require the provider-qualified model, operation, and immutable
+pre-activation cut; missing ownership fields fail decoding without migration or
+inference. The harness, never the provider, stamps an eligible terminal response
+as `reactive_compaction_planned`; a reactive standalone-compaction start then
+uniquely claims that failed prompt id.
 
 ### Durable manual-compaction facts
 

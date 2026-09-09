@@ -1564,7 +1564,6 @@ impl Harness {
         let trigger = fitting_cut.map_or_else(
             || tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
                 decision_id: Some(decision.transaction_id.clone()),
-                previous_transaction_id: None,
                 reason: tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
             },
             |_| tau_proto::StandaloneCompactionTrigger::AutomaticPolicy {
@@ -1738,7 +1737,6 @@ impl Harness {
         let trigger = fitting_cut.map_or_else(
             || tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
                 decision_id: None,
-                previous_transaction_id: None,
                 reason: tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
             },
             |_| tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence {
@@ -2477,8 +2475,8 @@ impl Harness {
                 return None;
             };
             (&started.agent_prompt_id == prompt_id
-                && started.operation == Some(tau_proto::PromptOperation::Inference))
-            .then_some(started)
+                && started.operation == tau_proto::PromptOperation::Inference)
+                .then_some(started)
         })
     }
 }

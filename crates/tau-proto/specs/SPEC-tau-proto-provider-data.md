@@ -57,16 +57,17 @@ records.
 items such as Responses reasoning, compaction, and unknown future provider items.
 
 Standalone compaction control uses bounded transaction identifiers and
-harness-owned started, failed, and inference-dispatch checkpoint facts. New
-starts pre-mint and persist the compact prompt/model/standalone-operation tuple;
+harness-owned started, failed, and inference-dispatch checkpoint facts. Starts
+pre-mint and persist the compact prompt/model/standalone-operation tuple;
 successful boundaries repeat that tuple so replay can validate exact provider
 work ownership. Canonical submitted, injected, and steered inputs carry a
 default-false `inference_activation` marker: new activating writes set it true,
 while passive and legacy facts cannot independently replay-wake inference.
-`agent.compacted` records carry immutable cut and suffix metadata plus optional
+`agent.compacted` records require the complete transaction, prompt, model,
+operation, cut, and suffix ownership tuple, plus optional
 provider-reported compact-request input and output token counts as plain numeric
-values; metadata-free historical records retain legacy hard-boundary replay
-semantics.
+values. Missing ownership fields fail decoding without migration or inferred
+hard-boundary semantics.
 It exists for semantic inspection and compatibility with protocol consumers that
 need structured data.
 

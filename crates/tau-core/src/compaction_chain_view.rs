@@ -252,10 +252,10 @@ impl CompactionChainIndex {
                 facts.timed_facts.push(timed_fact);
             }
             Event::AgentCompacted(compacted) => {
-                let Some(transaction_id) = compacted.transaction_id.as_ref() else {
-                    return;
-                };
-                let facts = self.transactions.entry(transaction_id.clone()).or_default();
+                let facts = self
+                    .transactions
+                    .entry(compacted.transaction_id.clone())
+                    .or_default();
                 facts.boundary = Some(BoundaryFacts {
                     state: if facts
                         .start
@@ -323,13 +323,6 @@ fn explicit_predecessor(
     started: &tau_proto::AgentStandaloneCompactionStarted,
 ) -> Option<CompactionTransactionId> {
     match &started.trigger {
-        StandaloneCompactionTrigger::AutomaticContinuation {
-            previous_transaction_id,
-        }
-        | StandaloneCompactionTrigger::AutomaticPreflightFailure {
-            previous_transaction_id: Some(previous_transaction_id),
-            ..
-        } => Some(previous_transaction_id.clone()),
         StandaloneCompactionTrigger::AutomaticContextRetreat {
             failed_transaction_id,
             ..

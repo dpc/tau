@@ -270,9 +270,9 @@ impl Harness {
                             ),
                             agent_prompt_id: prompt_id.clone(),
                             through: checkpoint.through,
-                            model: checkpoint.model,
-                            operation: checkpoint.operation,
-                            activation_cut: checkpoint.activation_cut,
+                            model: Some(checkpoint.model),
+                            operation: Some(checkpoint.operation),
+                            activation_cut: Some(checkpoint.activation_cut),
                         };
                     agent.dispatch.in_flight_prompt = None;
                 }

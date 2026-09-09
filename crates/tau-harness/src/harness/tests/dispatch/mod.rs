@@ -587,9 +587,9 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
                 transaction_id: None,
                 agent_prompt_id: prompt_id.clone(),
                 through,
-                model: Some(model.into()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(through),
+                model: model.into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: through,
                 output_length_continuation: None,
             }),
         );
@@ -1553,12 +1553,9 @@ fn assert_inference_dispatch_lifecycle(
     assert_eq!(checkpoints.len(), 1);
     let checkpoint = checkpoints[0];
     assert_eq!(checkpoint.through, expected_through);
-    assert_eq!(checkpoint.activation_cut, expected_cut);
-    assert_eq!(checkpoint.model, Some("test/model".into()));
-    assert_eq!(
-        checkpoint.operation,
-        Some(tau_proto::PromptOperation::Inference)
-    );
+    assert_eq!(Some(checkpoint.activation_cut), expected_cut);
+    assert_eq!(checkpoint.model, "test/model".into());
+    assert_eq!(checkpoint.operation, tau_proto::PromptOperation::Inference);
     let sequence = events
         .iter()
         .filter_map(|event| match event {
@@ -1616,7 +1613,7 @@ fn assert_inference_dispatch_owner(
         } if agent_prompt_id == &checkpoint.agent_prompt_id
             && *through == checkpoint.through
             && model == &tau_proto::ModelId::from("test/model")
-            && *activation_cut == checkpoint.activation_cut
+            && *activation_cut == Some(checkpoint.activation_cut)
     ));
 }
 
@@ -2292,7 +2289,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
         .iter()
         .filter(|record| match &record.event {
             Event::AgentCompacted(compacted) => {
-                compacted.transaction_id.as_ref() == Some(&successor.transaction_id)
+                compacted.transaction_id == successor.transaction_id
             }
             Event::AgentStandaloneCompactionFailed(failed) => {
                 failed.transaction_id == successor.transaction_id

@@ -4103,12 +4103,10 @@ impl EventRenderer {
                     );
             }
             Event::AgentCompacted(compacted) => {
-                if let Some(prompt_id) = &compacted.compact_prompt_id {
-                    self.transcript
-                        .status
-                        .agent_activity
-                        .finish_prompt(prompt_id, &[]);
-                }
+                self.transcript
+                    .status
+                    .agent_activity
+                    .finish_prompt(&compacted.compact_prompt_id, &[]);
             }
             Event::AgentPromptTerminated(terminated) => {
                 self.transcript
@@ -9534,18 +9532,12 @@ impl EventRenderer {
             }
             Event::AgentCompacted(compacted) => {
                 self.transcript.history.turn_stats_predecessor = None;
-                let prompt_id = compacted.compact_prompt_id.as_ref().cloned().or_else(|| {
-                    compacted
-                        .transaction_id
-                        .as_ref()
-                        .and_then(|transaction_id| {
-                            self.transcript
-                                .runtime
-                                .standalone_compaction_transactions
-                                .remove(transaction_id)
-                        })
-                });
-                if let Some(prompt_id) = prompt_id {
+                let prompt_id = compacted.compact_prompt_id.clone();
+                self.transcript
+                    .runtime
+                    .standalone_compaction_transactions
+                    .remove(&compacted.transaction_id);
+                {
                     let status = Self::standalone_compaction_success_status(
                         compacted.original_input_tokens,
                         None,
@@ -9576,24 +9568,20 @@ impl EventRenderer {
                         self.resources.handle.redraw();
                         Some(block_id)
                     };
-                    if let Some(transaction_id) = compacted.transaction_id.as_ref() {
-                        self.transcript.runtime.completed_compactions.insert(
-                            transaction_id.clone(),
-                            CompletedCompactionPresentation {
-                                block_id,
-                                original_input_tokens: compacted.original_input_tokens,
-                                self_tool_call_id,
-                            },
-                        );
-                    }
+                    self.transcript.runtime.completed_compactions.insert(
+                        compacted.transaction_id.clone(),
+                        CompletedCompactionPresentation {
+                            block_id,
+                            original_input_tokens: compacted.original_input_tokens,
+                            self_tool_call_id,
+                        },
+                    );
                 }
                 true
             }
             Event::AgentInferenceDispatchStarted(started) => {
-                if matches!(
-                    started.operation,
-                    Some(tau_proto::PromptOperation::Inference)
-                ) && let Some(transaction_id) = started.transaction_id.as_ref()
+                if matches!(started.operation, tau_proto::PromptOperation::Inference)
+                    && let Some(transaction_id) = started.transaction_id.as_ref()
                     && self
                         .transcript
                         .runtime

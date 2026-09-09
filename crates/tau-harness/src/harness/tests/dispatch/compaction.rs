@@ -776,7 +776,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             _ => None,
         })
         .expect("inference checkpoint");
-    assert_eq!(checkpoint.activation_cut, Some(prefix));
+    assert_eq!(checkpoint.activation_cut, prefix);
     assert_eq!(checkpoint.through, results);
 
     h.handle_provider_response_finished(context_overflow_response(&inference))
@@ -1586,12 +1586,12 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id: started.agent_id.clone(),
-            transaction_id: Some(started.transaction_id.clone()),
-            cut: Some(started.cut),
-            suffix_end: Some(suffix_end),
-            compact_prompt_id: Some(started.compact_prompt_id.clone()),
-            model: Some(started.model.clone()),
-            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            transaction_id: started.transaction_id.clone(),
+            cut: started.cut,
+            suffix_end: suffix_end,
+            compact_prompt_id: started.compact_prompt_id.clone(),
+            model: started.model.clone(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -2021,7 +2021,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
             .iter()
             .filter(|record| match &record.event {
                 Event::AgentCompacted(compacted) => {
-                    compacted.transaction_id.as_ref() == Some(&first_transaction_id)
+                    compacted.transaction_id == first_transaction_id
                 }
                 Event::AgentStandaloneCompactionFailed(failed) => {
                     failed.transaction_id == first_transaction_id
@@ -3273,12 +3273,12 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 agent_id: started.agent_id.clone(),
-                transaction_id: Some(transaction_id.clone()),
-                cut: Some(started.cut),
-                suffix_end: Some(suffix_end),
-                compact_prompt_id: Some(started.compact_prompt_id),
-                model: Some(started.model),
-                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+                transaction_id: transaction_id.clone(),
+                cut: started.cut,
+                suffix_end: suffix_end,
+                compact_prompt_id: started.compact_prompt_id,
+                model: started.model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
                 replacement_window: vec![ContextItem::Message(MessageItem {
                     role: ContextRole::Assistant,
                     content: vec![ContentPart::Text {
@@ -3346,11 +3346,11 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             _ => None,
         })
         .expect("checkpoint event");
-    assert_eq!(checkpoint_event.model.as_ref(), Some(&expected_model));
-    assert_eq!(checkpoint_event.activation_cut, Some(expected_cut));
+    assert_eq!(checkpoint_event.model, expected_model);
+    assert_eq!(checkpoint_event.activation_cut, expected_cut);
     assert_eq!(
         checkpoint_event.operation,
-        Some(tau_proto::PromptOperation::Inference)
+        tau_proto::PromptOperation::Inference
     );
     assert!(events.iter().any(|event| matches!(
         event,
@@ -3450,7 +3450,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
                 )
         }
         Event::AgentStandaloneCompactionFailed(event) => event.transaction_id == transaction_id,
-        Event::AgentCompacted(event) => event.transaction_id.as_ref() == Some(&transaction_id),
+        Event::AgentCompacted(event) => event.transaction_id == transaction_id,
         Event::AgentInferenceDispatchStarted(event) => {
             event.transaction_id.as_ref() == Some(&transaction_id)
                 || (event.transaction_id.is_none() && event.agent_prompt_id == initiating_prompt_id)
@@ -3499,9 +3499,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         transaction_id: None,
         agent_prompt_id: initiating_prompt_id.clone(),
         through: originating_through,
-        model: Some(model.clone()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(tau_proto::AgentHead::Root),
+        model: model.clone(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: tau_proto::AgentHead::Root,
     };
     store
         .append_agent_event_at(
@@ -3675,12 +3675,12 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: agent_id.clone(),
-        transaction_id: Some(transaction_id.clone()),
-        cut: Some(compact_cut),
-        suffix_end: Some(compact_cut),
-        compact_prompt_id: Some(compact_prompt_id.clone()),
-        model: Some(model.clone()),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: transaction_id.clone(),
+        cut: compact_cut,
+        suffix_end: compact_cut,
+        compact_prompt_id: compact_prompt_id.clone(),
+        model: model.clone(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -3970,12 +3970,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     assert_eq!(notifications[0].1.ctx_id, None);
     let checkpoint = checkpoints[0].1;
     assert_eq!(checkpoint.agent_id, agent_id);
-    assert_eq!(checkpoint.model.as_ref(), Some(&model));
-    assert_eq!(
-        checkpoint.operation,
-        Some(tau_proto::PromptOperation::Inference)
-    );
-    assert_eq!(checkpoint.activation_cut, Some(compact_cut));
+    assert_eq!(checkpoint.model, model);
+    assert_eq!(checkpoint.operation, tau_proto::PromptOperation::Inference);
+    assert_eq!(checkpoint.activation_cut, compact_cut);
     assert_ne!(checkpoint.agent_prompt_id, initiating_prompt_id);
     assert_ne!(checkpoint.agent_prompt_id, compact_prompt_id);
     let inference_materializations = first_records
@@ -4234,7 +4231,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
                 )
         }
         Event::AgentStandaloneCompactionFailed(event) => event.transaction_id == transaction_id,
-        Event::AgentCompacted(event) => event.transaction_id.as_ref() == Some(&transaction_id),
+        Event::AgentCompacted(event) => event.transaction_id == transaction_id,
         Event::AgentInferenceDispatchStarted(event) => {
             event.transaction_id.as_ref() == Some(&transaction_id)
         }
@@ -4846,12 +4843,12 @@ fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() 
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id: target_id.clone(),
-            transaction_id: Some(started.transaction_id),
-            cut: Some(started.cut),
-            suffix_end: Some(suffix_end),
-            compact_prompt_id: Some(started.compact_prompt_id),
-            model: Some(started.model),
-            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            transaction_id: started.transaction_id,
+            cut: started.cut,
+            suffix_end: suffix_end,
+            compact_prompt_id: started.compact_prompt_id,
+            model: started.model,
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -6828,18 +6825,42 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
                 .context_input_tokens,
             Some(tau_proto::TokenCount::new(900))
         );
+        let transaction_id = tau_proto::CompactionTransactionId::parse("ct-context-usage-reset")
+            .expect("transaction id");
+        let compact_prompt_id = test_agent_prompt_id("ap-context-usage-reset");
+        let cut = h
+            .session_runtime
+            .agent_store
+            .agent("main")
+            .and_then(tau_core::AgentTree::head)
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        h.publish_for_agent(
+            &cid,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                transaction_id: transaction_id.clone(),
+                compact_prompt_id: compact_prompt_id.clone(),
+                cut,
+                resume_through: None,
+                model: tau_proto::ModelId::from("test/model"),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: tau_proto::PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+            }),
+        );
         h.publish_for_agent(
             &cid,
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-                transaction_id: None,
-                cut: None,
-                suffix_end: None,
-                compact_prompt_id: None,
-                model: None,
-                operation: None,
+                transaction_id,
+                cut,
+                suffix_end: cut,
+                compact_prompt_id,
+                model: tau_proto::ModelId::from("test/model"),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
                 replacement_window: vec![ContextItem::Message(MessageItem {
                     role: ContextRole::Assistant,
                     content: vec![ContentPart::Text {
@@ -7383,9 +7404,9 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
             transaction_id: None,
             agent_prompt_id: prompt_id.clone(),
             through,
-            model: Some("provider-b/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "provider-b/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
         }),
     );
     let planned = ProviderResponseFinished {
@@ -7539,9 +7560,9 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
             transaction_id: None,
             agent_prompt_id: prompt_id.clone(),
             through,
-            model: Some("provider-b/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "provider-b/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
         }),
     );
     append_seed_agent_event(
@@ -7924,11 +7945,11 @@ fn reactive_compaction_includes_coalesced_agent_message_wakes() {
         .expect("activation checkpoint");
     assert_eq!(
         checkpoint.activation_cut,
-        Some(tau_proto::AgentHead::Node(prefix))
+        tau_proto::AgentHead::Node(prefix)
     );
     assert_ne!(
         checkpoint.activation_cut,
-        Some(tau_proto::AgentHead::Node(captured_cut))
+        tau_proto::AgentHead::Node(captured_cut)
     );
     assert_eq!(checkpoint.through, tau_proto::AgentHead::Node(through));
 
@@ -8867,9 +8888,9 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
             transaction_id: Some(transaction_id.clone()),
             agent_prompt_id: prompt_id.clone(),
             through,
-            model: Some("test/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
         });
 
     h.agent_runtime
@@ -9651,9 +9672,9 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             transaction_id: None,
             agent_prompt_id: failed_prompt_id.clone(),
             through,
-            model: Some("provider-b/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "provider-b/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
         }),
     );
     append_seed_agent_event(
@@ -9714,12 +9735,12 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id,
-            transaction_id: Some(transaction_id.clone()),
-            cut: Some(tau_proto::AgentHead::Root),
-            suffix_end: Some(suffix_end),
-            compact_prompt_id: Some(compact_prompt_id),
-            model: Some("provider-b/model".into()),
-            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            transaction_id: transaction_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            suffix_end: suffix_end,
+            compact_prompt_id: compact_prompt_id,
+            model: "provider-b/model".into(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -9781,21 +9802,15 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
                 _ => None,
             })
             .expect("qualified terminal checkpoint");
-        assert_eq!(checkpoint.model, Some("provider-b/model".into()));
-        assert_eq!(checkpoint.activation_cut, Some(tau_proto::AgentHead::Root));
-        assert_eq!(
-            checkpoint.operation,
-            Some(tau_proto::PromptOperation::Inference)
-        );
+        assert_eq!(checkpoint.model, "provider-b/model".into());
+        assert_eq!(checkpoint.activation_cut, tau_proto::AgentHead::Root);
+        assert_eq!(checkpoint.operation, tau_proto::PromptOperation::Inference);
         assert!(
             h.session_runtime
                 .agent_store
                 .agent("main")
                 .expect("agent")
-                .contains_head_ancestry(
-                    checkpoint.activation_cut.expect("activation cut"),
-                    checkpoint.through,
-                ),
+                .contains_head_ancestry(checkpoint.activation_cut, checkpoint.through,),
             "checkpoint watermark must remain on the captured compacted branch"
         );
         assert_eq!(checkpoint.transaction_id.as_ref(), Some(&transaction_id));

@@ -155,13 +155,14 @@ fn debug_binary_events(data: Vec<u8>) -> Vec<Event> {
     let compacted = tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
+        compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        transaction_id: None,
-        cut: None,
-        suffix_end: None,
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-required")
+            .expect("transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
         replacement_window: vec![debug_image_context_item(data.clone())],
     };
     let finished = debug_provider_finished(vec![debug_image_context_item(data.clone())]);
@@ -1421,13 +1422,14 @@ fn compacted_window_image_debug_projection_matches_legacy_json() {
     let message = HarnessInputMessage::emit(Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
+        compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        transaction_id: None,
-        cut: None,
-        suffix_end: None,
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-required")
+            .expect("transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
         replacement_window: vec![tau_proto::ContextItem::ToolResult(
             tau_proto::ToolResultItem {
                 presentation: Default::default(),

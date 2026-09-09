@@ -1645,9 +1645,9 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
             transaction_id: None,
             agent_prompt_id: completed_prompt_id.clone(),
             through: tau_proto::AgentHead::Node(through),
-            model: None,
-            operation: None,
-            activation_cut: None,
+            model: tau_proto::ModelId::from("provider/model"),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
         }),
     );
     append_seed_agent_event(

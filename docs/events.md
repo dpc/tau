@@ -312,10 +312,11 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.compacted`** — Durable standalone compaction boundary. Its validated
   ordered replacement window replaces history through its recorded cut while
   the model-visible suffix through `suffix_end` and later branch nodes survive
-  exactly once. New boundaries require the transaction id, cut, suffix end,
+  exactly once. Every boundary requires the transaction id, cut, suffix end,
   compact prompt id, provider-qualified model, and standalone operation as one
-  all-present group matching the durable start. Legacy records have all six
-  absent and remain hard boundaries. Optional compact-request input/output token
+  complete group matching the durable start. Missing ownership fields fail
+  decoding and receive no migration or inferred hard-boundary semantics.
+  Optional compact-request input/output token
   counts are provider-reported accounting only. The output count measures compact
   item generation, not resulting context; UIs may learn the exact after-size only
   from the transaction-owned first continuation's provider input usage. Absent
@@ -1012,17 +1013,18 @@ the closed reason `unexpected_unload` or `restored_delegation_route_lost`.
 
 ### Reactive context recovery fields
 
-`agent.inference_dispatch_started` optionally records the provider-qualified
-`model`, `operation`, and immutable pre-activation `activation_cut`; legacy
-records omit these and cannot authorize automatic recovery.
+`agent.inference_dispatch_started` requires the provider-qualified `model`,
+`operation`, and immutable pre-activation `activation_cut`; its transaction id
+remains optional for ordinary inference. Missing ownership fields fail decoding.
 `provider.response_finished.recovery_disposition` is harness-authored, defaults
 to `none`, and is `reactive_compaction_planned` only for a canonical no-output
 ordinary-inference context rejection.
-`agent.standalone_compaction_started.trigger` defaults to `manual`.
+`agent.standalone_compaction_started.trigger` is required. Explicit `manual`
+remains the direct recovery authority.
 `automatic_threshold_evidence` carries the uniquely claimed newest ancestral
 provider prompt, its nonzero reported input count, the exact crossed threshold,
-and threshold source. Legacy `automatic_threshold` decodes but supplies no new
-authority. `automatic_policy` uniquely claims a terminal-owned eager decision,
+and threshold source. The obsolete evidence-free `automatic_threshold` form
+does not decode. `automatic_policy` uniquely claims a terminal-owned eager decision,
 whose evidence carries the same exact fields. `reactive_context_overflow`
 carries the failed inference prompt id and claims that planned recovery.
 A typed standalone context rejection may commit a `context_retreat` successor
@@ -1030,11 +1032,13 @@ plan for any compaction entrypoint; its `automatic_context_retreat` start must
 claim that exact plan and strict previous provider-closed cut, including the
 replacement alone. An explicit request retains its one delivery owner across
 these starts. The first successful prefix completes the request; fresh ordinary
-usage or no-output rejection can authorize a new one. Legacy
-`automatic_continuation` and `roll_through` remain replay vocabulary, not live
-successful-pass scheduling authority.
+usage or no-output rejection can authorize a new one. The obsolete
+`automatic_continuation` form does not decode. `roll_through` remains current
+correlation on `automatic_context_retreat`; it does not authorize another
+summary after success.
 `automatic_preflight_failure` commits a typed no-provider-dispatch byte-budget or
-route terminal under its correlated authority.
+route terminal under its correlated authority. Its old
+`previous_transaction_id` field does not decode.
 
 `provider.response_finished.automatic_compaction_decision` and the corresponding
 field on a harness-authored canceled `agent.prompt_terminated` are optional

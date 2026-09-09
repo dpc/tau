@@ -331,7 +331,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
                 &record.event,
                 Event::AgentInferenceDispatchStarted(started)
                      if started.agent_prompt_id == successor_agent_prompt_id
-                        && started.model.as_ref() == Some(&source.model)
+                         && started.model == source.model
                         && started.output_length_continuation.as_ref().is_some_and(|owner| {
                             owner.outer_turn_id == outer_turn_id
                                 && owner.source_agent_prompt_id == source.agent_prompt_id
@@ -2084,8 +2084,7 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
         unreachable!("matched fresh dispatch")
     };
     assert_eq!(
-        fresh_started.activation_cut,
-        Some(expected_through),
+        fresh_started.activation_cut, expected_through,
         "fresh successor starts after the exact rejected activation parent"
     );
     let tau_proto::AgentHead::Node(expected_parent) = expected_through else {
@@ -2271,9 +2270,9 @@ fn seed_capacity_rejected_activation(h: &mut Harness, cid: &AgentId) {
         agent_prompt_id: tau_proto::AgentPromptId::parse("ap-retained-0")
             .expect("synthetic prompt id"),
         through,
-        model: Some(selection.model),
-        operation: Some(selection.operation),
-        activation_cut: Some(selection.activation_cut),
+        model: selection.model,
+        operation: selection.operation,
+        activation_cut: selection.activation_cut,
         output_length_continuation: None,
     };
     h.agent_runtime

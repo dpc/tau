@@ -530,14 +530,14 @@ fn manual_standalone_compact_installs_one_boundary() {
     );
     assert_eq!(
         (
-            compacted[0].compact_prompt_id.as_ref(),
-            compacted[0].model.as_ref(),
+            &compacted[0].compact_prompt_id,
+            &compacted[0].model,
             compacted[0].operation,
         ),
         (
-            Some(&started.compact_prompt_id),
-            Some(&started.model),
-            Some(started.operation),
+            &started.compact_prompt_id,
+            &started.model,
+            started.operation,
         ),
         "terminal correlation must be copied from the durable start"
     );

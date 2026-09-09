@@ -123,9 +123,9 @@ fn overlapping_v1_owner_append_rejects_before_mutation() {
             transaction_id: None,
             agent_prompt_id: tau_proto::AgentPromptId::parse(prompt).expect("prompt id"),
             through: tau_proto::AgentHead::Node(NodeId::new(0)),
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         })
     };

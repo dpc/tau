@@ -4563,7 +4563,6 @@ pub struct AgentStandaloneCompactionStarted {
     pub supersedes: Option<CompactionTransactionId>,
     /// Cause that created this transaction and, for reactive recovery, the
     /// rejected inference prompt it uniquely claims.
-    #[serde(default)]
     pub trigger: StandaloneCompactionTrigger,
 }
 
@@ -4757,28 +4756,16 @@ pub struct AgentManualCompactionRequestSatisfied {
 }
 
 /// Durable cause of a standalone compaction transaction.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum StandaloneCompactionTrigger {
-    /// Explicit manual compaction, and the legacy default when the trigger
-    /// field is absent.
-    #[default]
+    /// Explicit manual compaction used by direct recovery paths.
     Manual,
-    /// Legacy automatic threshold trigger. New records use exact provider
-    /// evidence; this variant grants no replay authority.
-    AutomaticThreshold,
     /// Exact-evidence proactive threshold root.
     AutomaticThresholdEvidence {
         /// Exact provider observation and configured threshold claimed once by
         /// this proactive root.
         evidence: ProactiveCompactionEvidence,
-    },
-    /// Legacy successful-pass link, retained for replay only. New requests
-    /// finish on their first successful summary.
-    AutomaticContinuation {
-        /// Immediately preceding successful transaction whose checkpoint this
-        /// start claims instead.
-        previous_transaction_id: CompactionTransactionId,
     },
     /// Canonical standalone rejection authorized one strict predecessor retry.
     AutomaticContextRetreat {
@@ -4801,13 +4788,7 @@ pub enum StandaloneCompactionTrigger {
         /// Terminal-owned automatic decision claimed by this failure, when any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decision_id: Option<CompactionTransactionId>,
-        /// Prior successful rolling pass claimed by this failure, when any.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        previous_transaction_id: Option<CompactionTransactionId>,
-        /// Durable local failure to commit without provider dispatch. Rolling
-        /// continuations use `prefix_too_large` for indivisible material.
-        /// Unfinished reactive-rooted predecessor chains use `route_failed`
-        /// when their captured route/capability disappears.
+        /// Durable local failure to commit without provider dispatch.
         reason: StandaloneCompactionFailureReason,
     },
     /// Eager automatic compaction claiming terminal-owned durable authority.
@@ -4842,6 +4823,116 @@ pub enum StandaloneCompactionTrigger {
         /// Durable local reason repeated by the matching terminal.
         reason: StandaloneCompactionFailureReason,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum StandaloneCompactionTriggerWire {
+    Manual,
+    AutomaticThresholdEvidence {
+        evidence: ProactiveCompactionEvidence,
+    },
+    AutomaticContextRetreat {
+        failed_transaction_id: CompactionTransactionId,
+        roll_through: AgentHead,
+    },
+    AutomaticOutputLengthContinuation {
+        failed_transaction_id: CompactionTransactionId,
+    },
+    AutomaticPreflightFailure {
+        #[serde(default)]
+        decision_id: Option<CompactionTransactionId>,
+        reason: StandaloneCompactionFailureReason,
+    },
+    AutomaticPolicy {
+        decision_id: CompactionTransactionId,
+    },
+    ManualAgentTool {
+        request_id: CompactionRequestId,
+        caller_agent_id: AgentId,
+        initiating_tool_call_id: ToolCallId,
+    },
+    ManualUi {
+        request_id: CompactionRequestId,
+    },
+    ReactiveContextOverflow {
+        failed_agent_prompt_id: AgentPromptId,
+    },
+    ReactivePreflightFailure {
+        failed_agent_prompt_id: AgentPromptId,
+        reason: StandaloneCompactionFailureReason,
+    },
+}
+
+impl<'de> Deserialize<'de> for StandaloneCompactionTrigger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("kind").and_then(serde_json::Value::as_str)
+            == Some("automatic_preflight_failure")
+            && value.get("previous_transaction_id").is_some()
+        {
+            return Err(path_serde_de::Error::custom(
+                "obsolete automatic preflight predecessor correlation",
+            ));
+        }
+        let wire = serde_json::from_value::<StandaloneCompactionTriggerWire>(value)
+            .map_err(path_serde_de::Error::custom)?;
+        Ok(match wire {
+            StandaloneCompactionTriggerWire::Manual => Self::Manual,
+            StandaloneCompactionTriggerWire::AutomaticThresholdEvidence { evidence } => {
+                Self::AutomaticThresholdEvidence { evidence }
+            }
+            StandaloneCompactionTriggerWire::AutomaticContextRetreat {
+                failed_transaction_id,
+                roll_through,
+            } => Self::AutomaticContextRetreat {
+                failed_transaction_id,
+                roll_through,
+            },
+            StandaloneCompactionTriggerWire::AutomaticOutputLengthContinuation {
+                failed_transaction_id,
+            } => Self::AutomaticOutputLengthContinuation {
+                failed_transaction_id,
+            },
+            StandaloneCompactionTriggerWire::AutomaticPreflightFailure {
+                decision_id,
+                reason,
+            } => Self::AutomaticPreflightFailure {
+                decision_id,
+                reason,
+            },
+            StandaloneCompactionTriggerWire::AutomaticPolicy { decision_id } => {
+                Self::AutomaticPolicy { decision_id }
+            }
+            StandaloneCompactionTriggerWire::ManualAgentTool {
+                request_id,
+                caller_agent_id,
+                initiating_tool_call_id,
+            } => Self::ManualAgentTool {
+                request_id,
+                caller_agent_id,
+                initiating_tool_call_id,
+            },
+            StandaloneCompactionTriggerWire::ManualUi { request_id } => {
+                Self::ManualUi { request_id }
+            }
+            StandaloneCompactionTriggerWire::ReactiveContextOverflow {
+                failed_agent_prompt_id,
+            } => Self::ReactiveContextOverflow {
+                failed_agent_prompt_id,
+            },
+            StandaloneCompactionTriggerWire::ReactivePreflightFailure {
+                failed_agent_prompt_id,
+                reason,
+            } => Self::ReactivePreflightFailure {
+                failed_agent_prompt_id,
+                reason,
+            },
+        })
+    }
 }
 
 /// Durable terminal failure of one standalone-compaction transaction.
@@ -4933,17 +5024,12 @@ pub struct AgentInferenceDispatchStarted {
     pub agent_prompt_id: AgentPromptId,
     /// Immutable transcript head represented by the provider prompt.
     pub through: AgentHead,
-    /// Provider-qualified model captured before dispatch. Absent on legacy
-    /// checkpoints, which are deliberately recovery-ineligible.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelId>,
-    /// Provider operation captured before dispatch. Absent on legacy records.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<PromptOperation>,
+    /// Provider-qualified model captured before dispatch.
+    pub model: ModelId,
+    /// Provider operation captured before dispatch.
+    pub operation: PromptOperation,
     /// Immutable transcript head immediately before the owed activation.
-    /// Absent on legacy records.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activation_cut: Option<AgentHead>,
+    pub activation_cut: AgentHead,
     /// Harness-owned output-length continuation correlation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_length_continuation: Option<OutputLengthContinuationOwner>,
@@ -4966,25 +5052,18 @@ pub struct OutputLengthContinuationOwner {
 pub struct AgentCompacted {
     /// Agent transcript receiving the replacement window.
     pub agent_id: AgentId,
-    /// New-format standalone transaction correlation; absent with all five
-    /// other correlation fields on legacy records.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transaction_id: Option<CompactionTransactionId>,
-    /// Immutable compact-input cut; absent on legacy hard boundaries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cut: Option<AgentHead>,
+    /// Standalone transaction correlation.
+    pub transaction_id: CompactionTransactionId,
+    /// Immutable compact-input cut.
+    pub cut: AgentHead,
     /// Last suffix node immediately before this boundary.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suffix_end: Option<AgentHead>,
-    /// Compact provider prompt correlation; absent on legacy boundaries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compact_prompt_id: Option<AgentPromptId>,
-    /// Captured provider-qualified model; absent on legacy boundaries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelId>,
-    /// Captured provider operation; absent on legacy boundaries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<PromptOperation>,
+    pub suffix_end: AgentHead,
+    /// Compact provider prompt correlation.
+    pub compact_prompt_id: AgentPromptId,
+    /// Captured provider-qualified model.
+    pub model: ModelId,
+    /// Captured provider operation.
+    pub operation: PromptOperation,
     /// Provider-reported compact-request input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_input_tokens: Option<crate::TokenCount>,

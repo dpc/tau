@@ -560,12 +560,12 @@ fn partial_compaction_restart_and_replacement_only_retreat_preserve_suffix() {
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 agent_id: agent_id.clone(),
-                transaction_id: Some(started.transaction_id),
-                compact_prompt_id: Some(started.compact_prompt_id.clone()),
-                model: Some(started.model),
-                operation: Some(started.operation),
-                cut: Some(started.cut),
-                suffix_end: Some(suffix_end),
+                transaction_id: started.transaction_id,
+                compact_prompt_id: started.compact_prompt_id.clone(),
+                model: started.model,
+                operation: started.operation,
+                cut: started.cut,
+                suffix_end: suffix_end,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 replacement_window: provider_text_response(

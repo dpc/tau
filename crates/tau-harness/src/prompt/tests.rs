@@ -638,7 +638,7 @@ fn compaction_replacement_loses_and_retained_suffix_keeps_preview_provenance() {
                    retrieval=\"wait\">done</tau_background_result>";
 
     let mut replacement_only = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
-    replacement_only.apply_event(&compacted_event(vec![materialized_message(preview)]));
+    apply_compacted_event(&mut replacement_only, vec![materialized_message(preview)]);
     let replacement = assemble_prompt_context_from(&replacement_only, replacement_only.head());
     assert!(!replacement.contains_payload_envelope_provenance_projection);
     assert_eq!(
@@ -653,20 +653,24 @@ fn compaction_replacement_loses_and_retained_suffix_keeps_preview_provenance() {
     let mut retained = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     retained.apply_event(&user_prompt("consumed prefix"));
     let cut = tau_proto::AgentHead::Node(retained.head().expect("prefix node"));
+    retained.apply_event(&compaction_start_event_with(
+        cut,
+        "ct-preview-suffix",
+        "ap-required",
+    ));
     retained.apply_event(&background_completion_prompt(preview));
     let suffix_end = tau_proto::AgentHead::Node(retained.head().expect("preview node"));
     retained.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
+        compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: crate::parse_agent_id("main"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-preview-suffix").expect("transaction id"),
-        ),
-        cut: Some(cut),
-        suffix_end: Some(suffix_end),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-preview-suffix")
+            .expect("transaction id"),
+        cut: cut,
+        suffix_end: suffix_end,
         replacement_window: vec![materialized_message("summary")],
     }));
 
@@ -688,9 +692,7 @@ fn compaction_replacement_loses_and_retained_suffix_keeps_preview_provenance() {
 #[test]
 fn normal_prompt_assembly_skips_all_measurement_only_work() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
-    tree.apply_event(&compacted_event(vec![materialized_message(
-        "replacement summary",
-    )]));
+    apply_compacted_event(&mut tree, vec![materialized_message("replacement summary")]);
     tree.apply_event(&user_prompt("suffix"));
 
     reset_prompt_measurement_test_counters();
@@ -1873,16 +1875,19 @@ fn cbor_to_text_puts_line_numbered_content_on_next_line() {
 fn assemble_conversation_starts_at_latest_standalone_compaction() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&user_prompt("old history"));
+    let cut = tau_proto::AgentHead::Node(tree.head().expect("old history"));
+    tree.apply_event(&compaction_start_event(cut));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
+        compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        transaction_id: None,
-        cut: None,
-        suffix_end: None,
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-required")
+            .expect("transaction id"),
+        cut,
+        suffix_end: cut,
         replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
             content: vec![tau_proto::ContentPart::Text {
@@ -2148,18 +2153,22 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
     let current_web = "<tau_web_content adapter=\"exa\" operation=\"search\" \
                        content_trust=\"external\">new <claim> & &lt;/tau_web_content&gt;</tau_web_content>";
     let mut isolated = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
-    isolated.apply_event(&compacted_event(vec![materialized_message(
-        historical_internal,
-    )]));
+    apply_compacted_event(
+        &mut isolated,
+        vec![materialized_message(historical_internal)],
+    );
     assert!(
         !assemble_prompt_context_from(&isolated, isolated.head())
             .contains_payload_envelope_provenance_projection
     );
     let mut isolated = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
-    isolated.apply_event(&compacted_event(vec![
-        web_tool_call("call-isolated"),
-        web_tool_result("call-isolated", current_web),
-    ]));
+    apply_compacted_event(
+        &mut isolated,
+        vec![
+            web_tool_call("call-isolated"),
+            web_tool_result("call-isolated", current_web),
+        ],
+    );
     assert!(
         assemble_prompt_context_from(&isolated, isolated.head())
             .contains_payload_envelope_provenance_projection
@@ -2173,21 +2182,14 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
         web_tool_result("call-new", current_web),
     ]);
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    tree.apply_event(&compaction_start_event(tau_proto::AgentHead::Root));
     tree.apply_event(&compacted);
 
     let compacted_live = assemble_prompt_context_from(&tree, tree.head());
     assert!(compacted_live.contains_payload_envelope_provenance_projection);
     let replay_tree = tau_core::AgentTree::from_events(
         crate::parse_agent_id("main"),
-        &[tau_core::PersistedAgentEvent {
-            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
-            seq: tau_core::PersistedAgentEventSeq::new(0),
-            source: None,
-            event: compacted,
-            parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
-            recorded_at: tau_proto::UnixMicros::new(1),
-        }],
+        &compaction_records(compacted),
     );
     let compacted_replay = assemble_prompt_context_from(&replay_tree, replay_tree.head());
     assert_eq!(compacted_replay.context, compacted_live.context);
@@ -2233,19 +2235,10 @@ fn synthetic_compaction_summary_origin_drives_live_and_replay_provenance() {
     });
     let event = compacted_event(vec![summary.clone()]);
     let mut live_tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    live_tree.apply_event(&compaction_start_event(tau_proto::AgentHead::Root));
     live_tree.apply_event(&event);
-    let replay_tree = tau_core::AgentTree::from_events(
-        crate::parse_agent_id("main"),
-        &[tau_core::PersistedAgentEvent {
-            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
-            seq: tau_core::PersistedAgentEventSeq::new(0),
-            source: None,
-            event,
-            parent: tau_core::AgentEventParent::InheritHead,
-            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
-            recorded_at: tau_proto::UnixMicros::new(1),
-        }],
-    );
+    let replay_tree =
+        tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &compaction_records(event));
 
     let live = assemble_prompt_context_from(&live_tree, live_tree.head());
     let replay = assemble_prompt_context_from(&replay_tree, replay_tree.head());
@@ -2258,7 +2251,7 @@ fn synthetic_compaction_summary_origin_drives_live_and_replay_provenance() {
     assert_eq!(live.context.flatten(), vec![summary]);
 
     let mut plain_tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
-    plain_tree.apply_event(&compacted_event(vec![materialized_message(narrative)]));
+    apply_compacted_event(&mut plain_tree, vec![materialized_message(narrative)]);
     assert!(
         !assemble_prompt_context_from(&plain_tree, plain_tree.head())
             .contains_payload_envelope_provenance_projection,
@@ -2281,15 +2274,61 @@ fn compacted_event(replacement_window: Vec<ContextItem>) -> Event {
     Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
+        compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: crate::parse_agent_id("main"),
-        transaction_id: None,
-        cut: None,
-        suffix_end: None,
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-required")
+            .expect("transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
         replacement_window,
     })
+}
+
+fn compaction_start_event(cut: tau_proto::AgentHead) -> Event {
+    compaction_start_event_with(cut, "ct-required", "ap-required")
+}
+
+fn compaction_start_event_with(
+    cut: tau_proto::AgentHead,
+    transaction_id: &str,
+    compact_prompt_id: &str,
+) -> Event {
+    Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+        agent_id: crate::parse_agent_id("main"),
+        transaction_id: tau_proto::CompactionTransactionId::parse(transaction_id)
+            .expect("transaction id"),
+        compact_prompt_id: tau_proto::AgentPromptId::parse(compact_prompt_id).expect("prompt id"),
+        cut,
+        resume_through: None,
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: tau_proto::PromptOriginator::User,
+        supersedes: None,
+        trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+    })
+}
+
+fn apply_compacted_event(tree: &mut tau_core::AgentTree, replacement_window: Vec<ContextItem>) {
+    tree.apply_event(&compaction_start_event(tau_proto::AgentHead::Root));
+    tree.apply_event(&compacted_event(replacement_window));
+}
+
+fn compaction_records(boundary: Event) -> Vec<tau_core::PersistedAgentEvent> {
+    [compaction_start_event(tau_proto::AgentHead::Root), boundary]
+        .into_iter()
+        .enumerate()
+        .map(|(seq, event)| tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+            seq: tau_core::PersistedAgentEventSeq::new(seq as u64),
+            source: None,
+            event,
+            parent: tau_core::AgentEventParent::InheritHead,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
+            recorded_at: tau_proto::UnixMicros::new(seq as u64),
+        })
+        .collect()
 }
 
 fn web_tool_call(call_id: &str) -> ContextItem {
@@ -2319,6 +2358,10 @@ fn web_tool_result(call_id: &str, body: &str) -> ContextItem {
 #[test]
 fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
     let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-message-fact-reset").expect("transaction id");
+    let compact_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-message-fact-reset").expect("prompt id");
     let events = vec![
         tau_core::PersistedAgentEvent {
             observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
@@ -2345,16 +2388,38 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
             observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tau_core::PersistedAgentEventSeq::new(1),
             source: None,
+            event: Event::AgentStandaloneCompactionStarted(
+                tau_proto::AgentStandaloneCompactionStarted {
+                    agent_id: agent_id.clone(),
+                    transaction_id: transaction_id.clone(),
+                    compact_prompt_id: compact_prompt_id.clone(),
+                    cut: tau_proto::AgentHead::Node(tau_proto::NodeId::new(0)),
+                    resume_through: None,
+                    model: tau_proto::ModelId::from("provider/model"),
+                    operation: tau_proto::PromptOperation::StandaloneCompaction,
+                    originator: tau_proto::PromptOriginator::User,
+                    supersedes: None,
+                    trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+                },
+            ),
+            parent: tau_core::AgentEventParent::InheritHead,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::CommitOrder,
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+        tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+            seq: tau_core::PersistedAgentEventSeq::new(2),
+            source: None,
             event: Event::AgentCompacted(tau_proto::AgentCompacted {
                 original_input_tokens: None,
                 compaction_output_tokens: None,
-                compact_prompt_id: None,
-                model: None,
-                operation: None,
+                compact_prompt_id,
+                model: tau_proto::ModelId::from("provider/model"),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
                 agent_id: agent_id.clone(),
-                transaction_id: None,
-                cut: None,
-                suffix_end: None,
+                transaction_id,
+                cut: tau_proto::AgentHead::Node(tau_proto::NodeId::new(0)),
+                suffix_end: tau_proto::AgentHead::Node(tau_proto::NodeId::new(0)),
                 replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
                     role: tau_proto::ContextRole::Assistant,
                     content: vec![tau_proto::ContentPart::Text {
@@ -2425,21 +2490,20 @@ fn assemble_conversation_preserves_new_compaction_suffix() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&user_prompt("old history"));
     let cut = tau_proto::AgentHead::Node(tree.head().expect("old history node"));
+    tree.apply_event(&compaction_start_event_with(cut, "ct-1", "ap-required"));
     tree.apply_event(&user_prompt("activation A"));
     tree.apply_event(&user_prompt("late fact B"));
     let suffix_end = tau_proto::AgentHead::Node(tree.head().expect("suffix end"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
+        compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-1").expect("transaction id"),
-        ),
-        cut: Some(cut),
-        suffix_end: Some(suffix_end),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-1").expect("transaction id"),
+        cut: cut,
+        suffix_end: suffix_end,
         replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
             content: vec![tau_proto::ContentPart::Text {
@@ -2484,15 +2548,14 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
         Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
             compaction_output_tokens: None,
-            compact_prompt_id: None,
-            model: None,
-            operation: None,
+            compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
+            model: tau_proto::ModelId::from("provider/model"),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
             agent_id: agent_id.clone(),
-            transaction_id: Some(
-                tau_proto::CompactionTransactionId::parse(transaction).expect("transaction id"),
-            ),
-            cut: Some(cut),
-            suffix_end: Some(suffix_end),
+            transaction_id: tau_proto::CompactionTransactionId::parse(transaction)
+                .expect("transaction id"),
+            cut: cut,
+            suffix_end: suffix_end,
             replacement_window: vec![materialized_message(summary)],
         })
     };

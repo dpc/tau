@@ -147,36 +147,30 @@ fn reference_active_provider_window(
         };
         let AgentEntry::Compaction {
             replacement_window,
-            transaction_id,
             cut,
-            suffix_end,
+            ..
         } = &node.entry
         else {
             window.transcript.push((node_id, &node.entry));
             continue;
         };
 
-        if transaction_id.is_some() && suffix_end.is_some() {
-            match cut {
-                Some(AgentHead::Root) => {}
-                Some(AgentHead::Node(cut)) if window.replacement_boundary == Some(*cut) => {
-                    // Replacing only the installed summary retains its suffix.
-                }
-                Some(AgentHead::Node(cut)) => {
-                    if let Some(index) = window
-                        .transcript
-                        .iter()
-                        .position(|(node_id, _)| node_id == cut)
-                    {
-                        window.transcript.drain(..=index);
-                    } else {
-                        window.transcript.clear();
-                    }
-                }
-                None => window.transcript.clear(),
+        match cut {
+            AgentHead::Root => {}
+            AgentHead::Node(cut) if window.replacement_boundary == Some(*cut) => {
+                // Replacing only the installed summary retains its suffix.
             }
-        } else {
-            window.transcript.clear();
+            AgentHead::Node(cut) => {
+                if let Some(index) = window
+                    .transcript
+                    .iter()
+                    .position(|(node_id, _)| node_id == cut)
+                {
+                    window.transcript.drain(..=index);
+                } else {
+                    window.transcript.clear();
+                }
+            }
         }
         window.replacement = Some(replacement_window);
         window.replacement_boundary = Some(node_id);
@@ -314,9 +308,9 @@ fn randomized_prevalidated_live_fold_matches_cold_replay() {
                             agent_prompt_id: tau_proto::AgentPromptId::parse("invalid-checkpoint")
                                 .expect("prompt id"),
                             through: tau_proto::AgentHead::Root,
-                            model: None,
-                            operation: None,
-                            activation_cut: None,
+                            model: tau_proto::ModelId::from("provider/model"),
+                            operation: tau_proto::PromptOperation::StandaloneCompaction,
+                            activation_cut: tau_proto::AgentHead::Root,
                             output_length_continuation: None,
                         },
                     );
@@ -401,7 +395,7 @@ fn randomized_prevalidated_live_fold_matches_cold_replay() {
                     "non-checkpoint record carries inference-deferred fold semantics".to_owned()
                 }
                 InvalidClass::InvalidCheckpointMarker => {
-                    "inference-deferred fold semantics require one marked ordinary inference"
+                    "inference checkpoint must have inference operation and an ancestral activation cut"
                         .to_owned()
                 }
                 InvalidClass::RawMessageParent => {
@@ -724,9 +718,9 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
             through: tau_proto::AgentHead::Root,
-            model: Some("test/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         })
     };
@@ -1562,9 +1556,9 @@ fn install_provider_evidence(
                 transaction_id: None,
                 agent_prompt_id: prompt_id.clone(),
                 through: AgentHead::Node(response_node),
-                model: Some("provider/model".into()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: None,
+                model: "provider/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: tau_proto::AgentHead::Root,
                 output_length_continuation: None,
             },
             fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
@@ -1833,12 +1827,10 @@ fn benchmark_indexed_active_provider_window_scaling() {
                     phase: None,
                     responses_raw_json: None,
                 })],
-                transaction_id: Some(
-                    tau_proto::CompactionTransactionId::parse("ct-window-benchmark")
-                        .expect("transaction id"),
-                ),
-                cut: Some(AgentHead::Node(cut)),
-                suffix_end: Some(suffix_end),
+                transaction_id: tau_proto::CompactionTransactionId::parse("ct-window-benchmark")
+                    .expect("transaction id"),
+                cut: AgentHead::Node(cut),
+                suffix_end,
             },
         );
         let queries = (1_048_576 / depth).max(32);
@@ -1962,16 +1954,34 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             results,
             "the whole results node is already closed"
         );
+        let transaction_id =
+            tau_proto::CompactionTransactionId::parse("ct-closed-prefix").expect("transaction id");
+        let compact_prompt_id =
+            tau_proto::AgentPromptId::parse("ap-closed-prefix").expect("prompt id");
+        tree.apply_event(&Event::AgentStandaloneCompactionStarted(
+            tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: agent_id(),
+                transaction_id: transaction_id.clone(),
+                compact_prompt_id: compact_prompt_id.clone(),
+                cut: results,
+                resume_through: None,
+                model: tau_proto::ModelId::from("provider/model"),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+            },
+        ));
         tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id: agent_id(),
-            transaction_id: None,
-            cut: None,
-            suffix_end: None,
-            compact_prompt_id: None,
-            model: None,
-            operation: None,
+            transaction_id,
+            cut: results,
+            suffix_end: results,
+            compact_prompt_id,
+            model: tau_proto::ModelId::from("provider/model"),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -2093,19 +2103,6 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
         )
         .contains("latest matching unresolved failure")
     );
-    let mut automatic_supersession = compaction_start("ct-automatic-supersession");
-    automatic_supersession.cut = equal_cut;
-    automatic_supersession.resume_through = Some(equal_cut);
-    automatic_supersession.supersedes = Some(later_failed.transaction_id);
-    automatic_supersession.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThreshold;
-    assert!(
-        validation_error(
-            &equal_tree,
-            Event::AgentStandaloneCompactionStarted(automatic_supersession)
-        )
-        .contains("only an explicit manual compaction")
-    );
-
     let mut advance_tree = AgentTree::from_events(agent_id(), &[]);
     let original = append_user_input(&mut advance_tree, "original");
     let advanced = append_user_input(&mut advance_tree, "advanced");
@@ -2174,12 +2171,12 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: agent_id(),
-        transaction_id: Some(successful.transaction_id.clone()),
-        cut: Some(successful.cut),
-        suffix_end: Some(AgentHead::Root),
-        compact_prompt_id: Some(successful.compact_prompt_id),
-        model: Some(successful.model),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: successful.transaction_id.clone(),
+        cut: successful.cut,
+        suffix_end: AgentHead::Root,
+        compact_prompt_id: successful.compact_prompt_id.clone(),
+        model: successful.model.clone(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -2189,7 +2186,23 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
             responses_raw_json: None,
         })],
     }));
+    let successful_boundary = AgentHead::Node(successful_tree.head().expect("successful boundary"));
+    successful_tree.apply_event(&Event::AgentInferenceDispatchStarted(
+        tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id(),
+            transaction_id: Some(successful.transaction_id.clone()),
+            agent_prompt_id: "ap-successful-predecessor-resume"
+                .parse()
+                .expect("prompt id"),
+            through: successful_boundary,
+            model: successful.model.clone(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: successful.cut,
+            output_length_continuation: None,
+        },
+    ));
     let mut supersedes_success = compaction_start("ct-after-success");
+    supersedes_success.cut = successful_boundary;
     supersedes_success.supersedes = Some(successful.transaction_id);
     let error = validation_error(
         &successful_tree,
@@ -2239,9 +2252,9 @@ fn automatic_context_retreat_claims_exact_strict_predecessor_plan() {
             transaction_id: Some(rejected.transaction_id.clone()),
             agent_prompt_id: rejected.compact_prompt_id.clone(),
             through: rejected.cut,
-            model: Some(rejected.model.clone()),
-            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
-            activation_cut: None,
+            model: rejected.model.clone(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         },
     ));
@@ -2347,12 +2360,12 @@ fn automatic_context_retreat_claims_exact_strict_predecessor_plan() {
             phase: None,
             responses_raw_json: None,
         })],
-        transaction_id: Some(successor_transaction_id.clone()),
-        cut: Some(successor.cut),
-        suffix_end: Some(rejected_cut),
-        compact_prompt_id: Some(successor.compact_prompt_id),
-        model: Some(successor.model),
-        operation: Some(successor.operation),
+        transaction_id: successor_transaction_id.clone(),
+        cut: successor.cut,
+        suffix_end: rejected_cut,
+        compact_prompt_id: successor.compact_prompt_id,
+        model: successor.model,
+        operation: successor.operation,
     };
     tree.validate_event(&Event::AgentCompacted(compacted.clone()))
         .expect("retreated successor success is valid");
@@ -2398,12 +2411,12 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: agent_id(),
-        transaction_id: Some(successor.transaction_id.clone()),
-        cut: Some(successor.cut),
-        suffix_end: Some(resume),
-        compact_prompt_id: Some(successor.compact_prompt_id.clone()),
-        model: Some(successor.model.clone()),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: successor.transaction_id.clone(),
+        cut: successor.cut,
+        suffix_end: resume,
+        compact_prompt_id: successor.compact_prompt_id.clone(),
+        model: successor.model.clone(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -2430,9 +2443,9 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         through,
-        model: Some(successor.model),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(successor.cut),
+        model: successor.model,
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: successor.cut,
         output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
@@ -2491,9 +2504,9 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
-        model: Some("provider/model".into()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(AgentHead::Root),
+        model: "provider/model".into(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: AgentHead::Root,
         output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
@@ -2567,9 +2580,9 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
-        model: Some("provider/model".into()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(AgentHead::Root),
+        model: "provider/model".into(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: AgentHead::Root,
         output_length_continuation: None,
     };
     let planned_response = tau_proto::ProviderResponseFinished {
@@ -2688,7 +2701,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
             checkpoint.transaction_id =
                 Some(tau_proto::CompactionTransactionId::parse("ct-source").expect("id"));
         } else {
-            checkpoint.operation = Some(tau_proto::PromptOperation::StandaloneCompaction);
+            checkpoint.operation = tau_proto::PromptOperation::StandaloneCompaction;
         }
         let mut tree = AgentTree::from_events(agent_id(), &[]);
         tree.inference_dispatches.insert(
@@ -2789,9 +2802,9 @@ fn compaction_fold_rejects_premature_and_unknown_checkpoints() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
-        model: None,
-        operation: None,
-        activation_cut: None,
+        model: tau_proto::ModelId::from("provider/model"),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: tau_proto::AgentHead::Root,
         output_length_continuation: None,
     };
     assert!(
@@ -2833,12 +2846,12 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
             phase: None,
             responses_raw_json: None,
         })],
-        transaction_id: Some(started.transaction_id.clone()),
-        cut: Some(started.cut),
-        suffix_end: Some(started.cut),
-        compact_prompt_id: Some(started.compact_prompt_id.clone()),
-        model: Some(started.model.clone()),
-        operation: Some(started.operation),
+        transaction_id: started.transaction_id.clone(),
+        cut: started.cut,
+        suffix_end: started.cut,
+        compact_prompt_id: started.compact_prompt_id.clone(),
+        model: started.model.clone(),
+        operation: started.operation,
     };
     tree.validate_event(&Event::AgentCompacted(compacted.clone()))
         .expect("compaction outcome");
@@ -2850,9 +2863,9 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
-        model: Some(started.model),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(started.cut),
+        model: started.model,
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: started.cut,
         output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
@@ -2860,17 +2873,17 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
     for mut mismatched in [
         {
             let mut value = checkpoint.clone();
-            value.model = Some("provider/other".into());
+            value.model = "provider/other".into();
             value
         },
         {
             let mut value = checkpoint.clone();
-            value.operation = Some(tau_proto::PromptOperation::StandaloneCompaction);
+            value.operation = tau_proto::PromptOperation::StandaloneCompaction;
             value
         },
         {
             let mut value = checkpoint.clone();
-            value.activation_cut = None;
+            value.activation_cut = AgentHead::Node(NodeId::new(u64::MAX));
             value
         },
     ] {
@@ -3105,13 +3118,13 @@ fn compaction_boundary_validates_explicit_parent() {
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
-        compact_prompt_id: Some(started.compact_prompt_id.clone()),
-        model: Some(started.model.clone()),
-        operation: Some(started.operation),
+        compact_prompt_id: started.compact_prompt_id.clone(),
+        model: started.model.clone(),
+        operation: started.operation,
         agent_id: agent_id(),
-        transaction_id: Some(started.transaction_id),
-        cut: Some(AgentHead::Node(first)),
-        suffix_end: Some(AgentHead::Node(first)),
+        transaction_id: started.transaction_id,
+        cut: AgentHead::Node(first),
+        suffix_end: AgentHead::Node(first),
         replacement_window: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::User,
             content: vec![tau_proto::ContentPart::Text {
@@ -3124,28 +3137,20 @@ fn compaction_boundary_validates_explicit_parent() {
     tree.validate_event_at(AgentEventParent::Under(first), &boundary)
         .expect("explicit boundary parent, not global head, is authoritative");
 
-    for case in 0..10 {
+    for case in 0..4 {
         let mut invalid = boundary.clone();
         let Event::AgentCompacted(compacted) = &mut invalid else {
             unreachable!()
         };
         match case {
-            0 => compacted.transaction_id = None,
-            1 => compacted.cut = None,
-            2 => compacted.suffix_end = None,
-            3 => compacted.compact_prompt_id = None,
-            4 => compacted.model = None,
-            5 => compacted.operation = None,
-            6 => compacted.cut = Some(AgentHead::Root),
-            7 => {
-                compacted.compact_prompt_id = Some(
-                    "ap-wrong"
-                        .parse::<tau_proto::AgentPromptId>()
-                        .expect("known-safe AgentPromptId must be valid"),
-                )
+            0 => compacted.cut = AgentHead::Root,
+            1 => {
+                compacted.compact_prompt_id = "ap-wrong"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid")
             }
-            8 => compacted.model = Some("other/model".into()),
-            9 => compacted.operation = Some(tau_proto::PromptOperation::Inference),
+            2 => compacted.model = "other/model".into(),
+            3 => compacted.operation = tau_proto::PromptOperation::Inference,
             _ => unreachable!(),
         }
         assert!(
@@ -3159,7 +3164,7 @@ fn compaction_boundary_validates_explicit_parent() {
         unreachable!()
     };
     compacted.transaction_id =
-        Some(tau_proto::CompactionTransactionId::parse("ct-unknown").expect("transaction id"));
+        tau_proto::CompactionTransactionId::parse("ct-unknown").expect("transaction id");
     assert!(
         tree.validate_event_at(AgentEventParent::Under(first), &unknown)
             .expect_err("unknown transaction must fail")
@@ -3174,79 +3179,6 @@ fn compaction_boundary_validates_explicit_parent() {
             .to_string()
             .contains("duplicate outcome")
     );
-}
-
-/// Legacy all-absent compaction boundaries remain valid hard boundaries even
-/// though they cannot participate in new transaction recovery.
-#[test]
-fn legacy_compaction_boundary_without_transaction_metadata_replays() {
-    let mut tree = AgentTree::from_events(agent_id(), &[]);
-    let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
-        original_input_tokens: None,
-        compaction_output_tokens: None,
-        agent_id: agent_id(),
-        transaction_id: None,
-        cut: None,
-        suffix_end: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
-        replacement_window: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
-            role: tau_proto::ContextRole::Assistant,
-            content: vec![tau_proto::ContentPart::Text {
-                text: "legacy summary".to_owned(),
-            }],
-            phase: None,
-            responses_raw_json: None,
-        })],
-    });
-
-    tree.validate_event(&boundary)
-        .expect("legacy all-absent boundary");
-    tree.apply_event(&boundary);
-    assert!(matches!(
-        tree.current_branch().last(),
-        Some(AgentEntry::Compaction { .. })
-    ));
-}
-
-/// Provider-authored opaque compaction items must survive identical live and
-/// persisted boundary validation without a parsed or serialized replacement.
-#[test]
-fn provider_compaction_replacement_has_identical_live_and_replay_state() {
-    let replacement = ContextItem::Compaction(
-        tau_proto::OpaqueProviderItem::from_raw_json(
-            r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#,
-        )
-        .expect("valid opaque compaction"),
-    );
-    let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
-        original_input_tokens: None,
-        compaction_output_tokens: None,
-        agent_id: agent_id(),
-        transaction_id: None,
-        cut: None,
-        suffix_end: None,
-        compact_prompt_id: None,
-        model: None,
-        operation: None,
-        replacement_window: vec![replacement.clone()],
-    });
-    let mut live = AgentTree::from_events(agent_id(), &[]);
-    live.validate_event(&boundary)
-        .expect("live boundary must validate");
-    live.apply_event(&boundary);
-    let mut replay = AgentTree::from_events(agent_id(), &[]);
-    apply_persisted_test_record(&mut replay, AgentEventParent::Root, boundary);
-
-    assert!(matches!(
-        live.current_branch().last(),
-        Some(AgentEntry::Compaction {
-            replacement_window,
-            ..
-        }) if replacement_window == &vec![replacement]
-    ));
-    assert_eq!(live.current_branch(), replay.current_branch());
 }
 
 /// Ensures bounded canonical opaque boundaries have the same complete core
@@ -3280,12 +3212,12 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             compaction_output_tokens: None,
             agent_id: agent_id(),
             replacement_window: vec![replacement.clone()],
-            transaction_id: Some(started.transaction_id.clone()),
-            cut: Some(started.cut),
-            suffix_end: Some(started.cut),
-            compact_prompt_id: Some(started.compact_prompt_id.clone()),
-            model: Some(started.model.clone()),
-            operation: Some(started.operation),
+            transaction_id: started.transaction_id.clone(),
+            cut: started.cut,
+            suffix_end: started.cut,
+            compact_prompt_id: started.compact_prompt_id.clone(),
+            model: started.model.clone(),
+            operation: started.operation,
         };
         let checkpoint = tau_proto::AgentInferenceDispatchStarted {
             agent_id: agent_id(),
@@ -3294,9 +3226,9 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
                 .parse()
                 .expect("bounded test prompt id"),
             through: AgentHead::Root,
-            model: Some(started.model.clone()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(started.cut),
+            model: started.model.clone(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: started.cut,
             output_length_continuation: None,
         };
         let records = [
@@ -3352,18 +3284,14 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         (
             "empty replacement",
             Vec::new(),
-            Some(
-                tau_proto::CompactionTransactionId::parse("ct-invalid-empty")
-                    .expect("bounded test transaction id"),
-            ),
+            tau_proto::CompactionTransactionId::parse("ct-invalid-empty")
+                .expect("bounded test transaction id"),
         ),
         (
             "harness trigger",
             vec![ContextItem::CompactionTrigger],
-            Some(
-                tau_proto::CompactionTransactionId::parse("ct-invalid-trigger")
-                    .expect("bounded test transaction id"),
-            ),
+            tau_proto::CompactionTransactionId::parse("ct-invalid-trigger")
+                .expect("bounded test transaction id"),
         ),
         (
             "unknown transaction",
@@ -3373,10 +3301,8 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
                 )
                 .expect("valid opaque compaction"),
             )],
-            Some(
-                tau_proto::CompactionTransactionId::parse("ct-other")
-                    .expect("bounded test transaction id"),
-            ),
+            tau_proto::CompactionTransactionId::parse("ct-other")
+                .expect("bounded test transaction id"),
         ),
     ] {
         let started = compaction_start("ct-invalid");
@@ -3396,11 +3322,11 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
                 agent_id: agent_id(),
                 replacement_window,
                 transaction_id,
-                cut: Some(started.cut),
-                suffix_end: Some(started.cut),
-                compact_prompt_id: Some(started.compact_prompt_id),
-                model: Some(started.model),
-                operation: Some(started.operation),
+                cut: started.cut,
+                suffix_end: started.cut,
+                compact_prompt_id: started.compact_prompt_id,
+                model: started.model,
+                operation: started.operation,
             }),
         );
 
@@ -3414,438 +3340,6 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             sequence,
             "{label} must not consume its record sequence"
         );
-    }
-}
-
-/// A successful automatic pass, its claimed rolling successor, second boundary,
-/// and final inference checkpoint must fold identically live and cold.
-#[test]
-fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
-    let record = |seq, event| PersistedAgentEvent {
-        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
-        seq: PersistedAgentEventSeq::new(seq),
-        source: None,
-        event,
-        parent: AgentEventParent::InheritHead,
-        fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
-        recorded_at: tau_proto::UnixMicros::default(),
-    };
-    let user = |text: &str| {
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation: false,
-            agent_id: agent_id(),
-            text: text.to_owned(),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: PromptOriginator::User,
-            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
-            display_name: None,
-            ctx_id: None,
-        })
-    };
-    let mut live = AgentTree::from_events(agent_id(), &[]);
-    let mut records = Vec::new();
-    for (seq, event) in [user("prefix"), user("suffix")].into_iter().enumerate() {
-        let record = record(seq as u64, event);
-        live.apply_persisted_record(&record).expect("append input");
-        records.push(record);
-    }
-    let prefix = AgentHead::Node(live.branch_node_ids_from(live.head())[0]);
-    let suffix = AgentHead::Node(live.head().expect("suffix head"));
-    let mut first = compaction_start("ct-auto-first");
-    first.cut = prefix;
-    first.resume_through = Some(suffix);
-    first.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThreshold;
-    let first_start = record(2, Event::AgentStandaloneCompactionStarted(first.clone()));
-    live.apply_persisted_record(&first_start)
-        .expect("append first start");
-    records.push(first_start);
-    let first_boundary_event = Event::AgentCompacted(tau_proto::AgentCompacted {
-        original_input_tokens: None,
-        compaction_output_tokens: None,
-        agent_id: agent_id(),
-        replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
-            role: tau_proto::ContextRole::Assistant,
-            content: vec![tau_proto::ContentPart::Text {
-                text: "summary one".to_owned(),
-            }],
-            phase: None,
-            responses_raw_json: None,
-        })],
-        transaction_id: Some(first.transaction_id.clone()),
-        cut: Some(first.cut),
-        suffix_end: Some(suffix),
-        compact_prompt_id: Some(first.compact_prompt_id.clone()),
-        model: Some(first.model.clone()),
-        operation: Some(first.operation),
-    });
-    let first_boundary_record = record(3, first_boundary_event);
-    live.apply_persisted_record(&first_boundary_record)
-        .expect("append first boundary");
-    records.push(first_boundary_record);
-    let first_boundary = AgentHead::Node(live.head().expect("first boundary"));
-
-    let mut equal_boundary = compaction_start("ct-auto-equal-boundary");
-    equal_boundary.compact_prompt_id = "ap-auto-equal-boundary".parse().expect("prompt id");
-    equal_boundary.cut = first_boundary;
-    equal_boundary.resume_through = Some(first_boundary);
-    equal_boundary.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-        previous_transaction_id: first.transaction_id.clone(),
-    };
-    let equal_boundary_record = record(4, Event::AgentStandaloneCompactionStarted(equal_boundary));
-    assert!(
-        live.apply_persisted_record(&equal_boundary_record).is_err(),
-        "live append must reject an automatic continuation with no strict progress"
-    );
-    let mut replay_records = records.clone();
-    replay_records.push(equal_boundary_record);
-    assert!(
-        AgentTree::try_from_events(agent_id(), &replay_records).is_err(),
-        "cold replay must reject the same equal-boundary automatic continuation"
-    );
-
-    let mut unlinked = live.clone();
-    let mut invalid_manual = compaction_start("ct-unlinked-manual");
-    invalid_manual.compact_prompt_id = "ap-unlinked-manual".parse().expect("prompt id");
-    invalid_manual.cut = first_boundary;
-    invalid_manual.resume_through = Some(first_boundary);
-    assert!(
-        unlinked
-            .apply_persisted_record(&record(
-                4,
-                Event::AgentStandaloneCompactionStarted(invalid_manual),
-            ))
-            .is_err(),
-        "an unlinked manual start cannot steal the successful checkpoint"
-    );
-
-    let mut sibling = live.clone();
-    sibling
-        .apply_persisted_record(&record(
-            4,
-            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
-                agent_id: agent_id(),
-                head: suffix,
-            }),
-        ))
-        .expect("select sibling base");
-    sibling
-        .apply_persisted_record(&record(5, user("sibling")))
-        .expect("append sibling");
-    let sibling_head = AgentHead::Node(sibling.head().expect("sibling head"));
-    let mut invalid_sibling = compaction_start("ct-auto-sibling");
-    invalid_sibling.compact_prompt_id = "ap-auto-sibling".parse().expect("prompt id");
-    invalid_sibling.cut = sibling_head;
-    invalid_sibling.resume_through = Some(sibling_head);
-    invalid_sibling.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-        previous_transaction_id: first.transaction_id.clone(),
-    };
-    assert!(
-        sibling
-            .apply_persisted_record(&record(
-                6,
-                Event::AgentStandaloneCompactionStarted(invalid_sibling),
-            ))
-            .is_err(),
-        "a sibling without the preceding replacement cannot claim its success"
-    );
-
-    let mut second = compaction_start("ct-auto-second");
-    second.compact_prompt_id = "ap-auto-second".parse().expect("prompt id");
-    second.cut = suffix;
-    second.resume_through = Some(first_boundary);
-    second.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-        previous_transaction_id: first.transaction_id.clone(),
-    };
-    let second_start = record(4, Event::AgentStandaloneCompactionStarted(second.clone()));
-    live.apply_persisted_record(&second_start)
-        .expect("append continuation start");
-    records.push(second_start);
-    let second_boundary_record = record(
-        5,
-        Event::AgentCompacted(tau_proto::AgentCompacted {
-            original_input_tokens: None,
-            compaction_output_tokens: None,
-            agent_id: agent_id(),
-            replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
-                role: tau_proto::ContextRole::Assistant,
-                content: vec![tau_proto::ContentPart::Text {
-                    text: "summary two".to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-            transaction_id: Some(second.transaction_id.clone()),
-            cut: Some(second.cut),
-            suffix_end: Some(first_boundary),
-            compact_prompt_id: Some(second.compact_prompt_id.clone()),
-            model: Some(second.model.clone()),
-            operation: Some(second.operation),
-        }),
-    );
-    live.apply_persisted_record(&second_boundary_record)
-        .expect("append second boundary");
-    records.push(second_boundary_record);
-    let second_boundary = AgentHead::Node(live.head().expect("second boundary"));
-    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
-        agent_id: agent_id(),
-        transaction_id: Some(second.transaction_id.clone()),
-        agent_prompt_id: "ap-auto-final".parse().expect("prompt id"),
-        through: second_boundary,
-        model: Some(second.model.clone()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(second.cut),
-        output_length_continuation: None,
-    };
-    let checkpoint_record = record(6, Event::AgentInferenceDispatchStarted(checkpoint.clone()));
-    live.apply_persisted_record(&checkpoint_record)
-        .expect("append final checkpoint");
-    records.push(checkpoint_record);
-
-    let replay = AgentTree::from_events(agent_id(), &records);
-    assert_eq!(live, replay);
-    assert_eq!(
-        replay.standalone_compaction_recovery(),
-        Some(StandaloneCompactionRecovery::DispatchUncertain(checkpoint))
-    );
-}
-
-/// Replay-derived provider-window positions must match the allocating reference
-/// at every head through randomized branches, nested rolling boundaries, live
-/// append, and cold replay.
-#[test]
-fn randomized_branched_rolling_provider_windows_match_reference_live_and_cold() {
-    fn append(
-        tree: &mut AgentTree,
-        records: &mut Vec<PersistedAgentEvent>,
-        parent: AgentEventParent,
-        event: Event,
-    ) -> Option<NodeId> {
-        let seq = tree.next_event_seq();
-        let record = PersistedAgentEvent {
-            observation_id: tau_proto::ObservationId::from_bytes(
-                seq.get()
-                    .to_le_bytes()
-                    .repeat(2)
-                    .try_into()
-                    .expect("16 bytes"),
-            ),
-            seq,
-            source: None,
-            event,
-            parent,
-            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
-            recorded_at: UnixMicros::new(seq.get()),
-        };
-        let node = tree
-            .apply_persisted_record(&record)
-            .expect("generated history must append");
-        records.push(record);
-        node
-    }
-
-    fn assert_every_head(live: &AgentTree, records: &[PersistedAgentEvent], step: usize) {
-        let cold =
-            AgentTree::try_from_events(agent_id(), records).expect("generated history must replay");
-        assert_eq!(live, &cold, "complete live/cold projection step={step}");
-        let unknown = NodeId::new(live.nodes().len() as u64 + 10_000);
-        let heads = std::iter::once(None)
-            .chain(live.nodes().iter().map(|node| Some(node.id)))
-            .chain(std::iter::once(Some(unknown)));
-        for head in heads {
-            let expected = reference_active_provider_window(live, head);
-            for (label, tree) in [("live", live), ("cold", &cold)] {
-                let actual = tree.active_provider_window(head);
-                assert_eq!(
-                    actual.replacement, expected.replacement,
-                    "{label} replacement step={step} head={head:?}"
-                );
-                assert_eq!(
-                    actual.replacement_boundary, expected.replacement_boundary,
-                    "{label} boundary step={step} head={head:?}"
-                );
-                assert_eq!(
-                    actual.transcript, expected.transcript,
-                    "{label} transcript step={step} head={head:?}"
-                );
-                assert_eq!(
-                    tree.active_provider_window_latest(head),
-                    expected.transcript.last().copied(),
-                    "{label} latest step={step} head={head:?}"
-                );
-                assert_eq!(
-                    tree.active_provider_window_transcript_count(head),
-                    expected.transcript.len(),
-                    "{label} count step={step} head={head:?}"
-                );
-                assert_eq!(
-                    tree.active_provider_window_replacement(head),
-                    expected.replacement_boundary.zip(expected.replacement),
-                    "{label} borrowed replacement step={step} head={head:?}"
-                );
-                for cut in std::iter::once(AgentHead::Root)
-                    .chain(live.nodes().iter().map(|node| AgentHead::Node(node.id)))
-                    .chain(std::iter::once(AgentHead::Node(unknown)))
-                {
-                    let expected_contains = match cut {
-                        AgentHead::Root => expected.replacement.is_none(),
-                        AgentHead::Node(node_id) => {
-                            expected.replacement_boundary == Some(node_id)
-                                || expected
-                                    .transcript
-                                    .iter()
-                                    .any(|(candidate, _)| *candidate == node_id)
-                        }
-                    };
-                    assert_eq!(
-                        tree.active_provider_window_contains(
-                            head.map_or(AgentHead::Root, AgentHead::Node),
-                            cut,
-                        ),
-                        expected_contains,
-                        "{label} contains step={step} head={head:?} cut={cut:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    let user = |text: String| {
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation: false,
-            agent_id: agent_id(),
-            text,
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: PromptOriginator::User,
-            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
-            display_name: None,
-            ctx_id: None,
-        })
-    };
-    let replacement = |started: &tau_proto::AgentStandaloneCompactionStarted,
-                       suffix_end: AgentHead,
-                       summary: &str| {
-        Event::AgentCompacted(tau_proto::AgentCompacted {
-            original_input_tokens: None,
-            compaction_output_tokens: None,
-            agent_id: agent_id(),
-            replacement_window: vec![ContextItem::Message(MessageItem {
-                role: ContextRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: summary.to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-            transaction_id: Some(started.transaction_id.clone()),
-            cut: Some(started.cut),
-            suffix_end: Some(suffix_end),
-            compact_prompt_id: Some(started.compact_prompt_id.clone()),
-            model: Some(started.model.clone()),
-            operation: Some(started.operation),
-        })
-    };
-
-    let mut live = AgentTree::from_events(agent_id(), &[]);
-    let mut records = Vec::new();
-    let mut main = Vec::new();
-    for index in 0..32 {
-        let node = append(
-            &mut live,
-            &mut records,
-            AgentEventParent::InheritHead,
-            user(format!("main-{index}")),
-        )
-        .expect("user input node");
-        main.push(node);
-        assert_every_head(&live, &records, records.len());
-    }
-
-    let mut random = 0x94d0_49bb_1331_11eb_u64;
-    for index in 0_usize..24 {
-        random = random
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        append(
-            &mut live,
-            &mut records,
-            AgentEventParent::Under(main[random as usize % main.len()]),
-            user(format!("branch-{index}-{random}")),
-        );
-        assert_every_head(&live, &records, records.len());
-    }
-    let suffix = append(
-        &mut live,
-        &mut records,
-        AgentEventParent::Under(*main.last().expect("main history")),
-        user("main-resume".to_owned()),
-    )
-    .expect("resumed main node");
-    assert_every_head(&live, &records, records.len());
-
-    let mut first = compaction_start("ct-indexed-window-first");
-    first.compact_prompt_id = "ap-indexed-window-first".parse().expect("prompt id");
-    first.cut = AgentHead::Node(main[8]);
-    first.resume_through = Some(AgentHead::Node(suffix));
-    first.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThreshold;
-    append(
-        &mut live,
-        &mut records,
-        AgentEventParent::InheritHead,
-        Event::AgentStandaloneCompactionStarted(first.clone()),
-    );
-    assert_every_head(&live, &records, records.len());
-    let first_boundary = append(
-        &mut live,
-        &mut records,
-        AgentEventParent::InheritHead,
-        replacement(&first, AgentHead::Node(suffix), "summary-one"),
-    )
-    .expect("first boundary");
-    assert_every_head(&live, &records, records.len());
-
-    let mut second = compaction_start("ct-indexed-window-second");
-    second.compact_prompt_id = "ap-indexed-window-second".parse().expect("prompt id");
-    second.cut = AgentHead::Node(suffix);
-    second.resume_through = Some(AgentHead::Node(first_boundary));
-    second.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-        previous_transaction_id: first.transaction_id,
-    };
-    append(
-        &mut live,
-        &mut records,
-        AgentEventParent::InheritHead,
-        Event::AgentStandaloneCompactionStarted(second.clone()),
-    );
-    assert_every_head(&live, &records, records.len());
-    let second_boundary = append(
-        &mut live,
-        &mut records,
-        AgentEventParent::InheritHead,
-        replacement(&second, AgentHead::Node(first_boundary), "summary-two"),
-    )
-    .expect("second boundary");
-    assert_every_head(&live, &records, records.len());
-
-    for index in 0_usize..24 {
-        random = random
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        let parent = if index.is_multiple_of(3) {
-            second_boundary
-        } else {
-            NodeId::new(random % live.nodes().len() as u64)
-        };
-        append(
-            &mut live,
-            &mut records,
-            AgentEventParent::Under(parent),
-            user(format!("post-roll-{index}-{random}")),
-        );
-        assert_every_head(&live, &records, records.len());
     }
 }
 
@@ -3884,359 +3378,6 @@ fn provider_window_indexes_stop_before_dangling_synthetic_parent() {
     assert!(!tree.active_provider_window_contains(AgentHead::Node(node), AgentHead::Node(unknown)));
 }
 
-/// Every provider-window index transition must remain reference-equivalent,
-/// including root retention and fail-closed shapes that durable validation
-/// rejects before folding.
-#[test]
-fn provider_window_index_transition_arms_match_allocating_reference() {
-    fn user_entry(text: &str) -> AgentEntry {
-        AgentEntry::UserInput {
-            items: vec![ContextItem::Message(MessageItem {
-                role: ContextRole::User,
-                content: vec![ContentPart::Text {
-                    text: text.to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-            submission_source: None,
-            inference_activation: false,
-        }
-    }
-
-    fn boundary_entry(
-        transaction: bool,
-        cut: Option<AgentHead>,
-        suffix_end: Option<AgentHead>,
-        summary: &str,
-    ) -> AgentEntry {
-        AgentEntry::Compaction {
-            replacement_window: vec![ContextItem::Message(MessageItem {
-                role: ContextRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: summary.to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-            transaction_id: transaction.then(|| {
-                tau_proto::CompactionTransactionId::parse(format!("ct-{summary}"))
-                    .expect("transaction id")
-            }),
-            cut,
-            suffix_end,
-        }
-    }
-
-    fn assert_queries(tree: &AgentTree, head: NodeId, label: &str) {
-        let expected = reference_active_provider_window(tree, Some(head));
-        let actual = tree.active_provider_window(Some(head));
-        assert_eq!(actual.replacement, expected.replacement, "{label}");
-        assert_eq!(
-            actual.replacement_boundary, expected.replacement_boundary,
-            "{label}"
-        );
-        assert_eq!(actual.transcript, expected.transcript, "{label}");
-        assert_eq!(
-            tree.active_provider_window_latest(Some(head)),
-            expected.transcript.last().copied(),
-            "{label}"
-        );
-        assert_eq!(
-            tree.active_provider_window_transcript_count(Some(head)),
-            expected.transcript.len(),
-            "{label}"
-        );
-        assert_eq!(
-            tree.active_provider_window_replacement(Some(head)),
-            expected.replacement_boundary.zip(expected.replacement),
-            "{label}"
-        );
-        for cut in std::iter::once(AgentHead::Root)
-            .chain(tree.nodes().iter().map(|node| AgentHead::Node(node.id)))
-            .chain(std::iter::once(AgentHead::Node(NodeId::new(10_000))))
-        {
-            let contains = match cut {
-                AgentHead::Root => expected.replacement.is_none(),
-                AgentHead::Node(node_id) => {
-                    expected.replacement_boundary == Some(node_id)
-                        || expected
-                            .transcript
-                            .iter()
-                            .any(|(candidate, _)| *candidate == node_id)
-                }
-            };
-            assert_eq!(
-                tree.active_provider_window_contains(AgentHead::Node(head), cut),
-                contains,
-                "{label} cut={cut:?}"
-            );
-        }
-    }
-
-    let mut base = AgentTree::from_events(agent_id(), &[]);
-    let prefix = base.append_node_at(None, user_entry("prefix"));
-    let suffix_a = base.append_node_at(Some(prefix), user_entry("suffix-a"));
-    let suffix_b = base.append_node_at(Some(suffix_a), user_entry("suffix-b"));
-    let sibling = base.append_node_at(Some(prefix), user_entry("sibling"));
-    let first_boundary = base.append_node_at(
-        Some(suffix_b),
-        boundary_entry(
-            true,
-            Some(AgentHead::Node(prefix)),
-            Some(AgentHead::Node(suffix_b)),
-            "first",
-        ),
-    );
-    assert_queries(&base, first_boundary, "initial suffix boundary");
-
-    let mut root = base.clone();
-    let root_boundary = root.append_node_at(
-        Some(first_boundary),
-        boundary_entry(
-            true,
-            Some(AgentHead::Root),
-            Some(AgentHead::Node(first_boundary)),
-            "root",
-        ),
-    );
-    assert_queries(&root, root_boundary, "root retains prior anchored suffix");
-
-    let mut equal = base.clone();
-    let equal_boundary = equal.append_node_at(
-        Some(first_boundary),
-        boundary_entry(
-            true,
-            Some(AgentHead::Node(first_boundary)),
-            Some(AgentHead::Node(first_boundary)),
-            "equal",
-        ),
-    );
-    assert_queries(
-        &equal,
-        equal_boundary,
-        "replacement-boundary cut retains suffix",
-    );
-
-    let mut legacy = base.clone();
-    let legacy_boundary = legacy.append_node_at(
-        Some(first_boundary),
-        boundary_entry(false, None, None, "legacy"),
-    );
-    assert_queries(&legacy, legacy_boundary, "legacy boundary clears");
-
-    let mut missing = base;
-    let missing_boundary = missing.append_node_at(
-        Some(first_boundary),
-        boundary_entry(
-            true,
-            Some(AgentHead::Node(sibling)),
-            Some(AgentHead::Node(first_boundary)),
-            "missing",
-        ),
-    );
-    assert_queries(
-        &missing,
-        missing_boundary,
-        "qualified missing cut fails closed",
-    );
-}
-
-/// Reactive progress uses the origin activation's logical provider window, so
-/// a final preserved suffix reaches a prior replacement boundary without
-/// compacting the rejected activating input. Live append and cold replay must
-/// agree, and a continuation beyond that target must fail validation.
-#[test]
-fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
-    let record = |seq, event| PersistedAgentEvent {
-        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
-        seq: PersistedAgentEventSeq::new(seq),
-        source: None,
-        event,
-        parent: AgentEventParent::InheritHead,
-        fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
-        recorded_at: tau_proto::UnixMicros::default(),
-    };
-    let user = |text: &str, inference_activation| {
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation,
-            agent_id: agent_id(),
-            text: text.to_owned(),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: PromptOriginator::User,
-            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
-            display_name: None,
-            ctx_id: None,
-        })
-    };
-    let mut live = AgentTree::from_events(agent_id(), &[]);
-    let mut records = Vec::new();
-    for event in [user("old prefix", false), user("preserved suffix", false)] {
-        let persisted = record(records.len() as u64, event);
-        live.apply_persisted_record(&persisted)
-            .expect("append history");
-        records.push(persisted);
-    }
-    let ids = live.branch_node_ids_from(live.head());
-    let old_prefix = AgentHead::Node(ids[0]);
-    let preserved_suffix = AgentHead::Node(ids[1]);
-    let mut prior = compaction_start("ct-prior-logical-window");
-    prior.cut = old_prefix;
-    prior.resume_through = None;
-    let persisted = record(
-        records.len() as u64,
-        Event::AgentStandaloneCompactionStarted(prior.clone()),
-    );
-    live.apply_persisted_record(&persisted)
-        .expect("append prior start");
-    records.push(persisted);
-    let persisted = record(
-        records.len() as u64,
-        Event::AgentCompacted(tau_proto::AgentCompacted {
-            original_input_tokens: None,
-            compaction_output_tokens: None,
-            agent_id: agent_id(),
-            replacement_window: vec![ContextItem::Message(MessageItem {
-                role: ContextRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: "prior summary".to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-            transaction_id: Some(prior.transaction_id),
-            cut: Some(old_prefix),
-            suffix_end: Some(preserved_suffix),
-            compact_prompt_id: Some(prior.compact_prompt_id),
-            model: Some(prior.model),
-            operation: Some(prior.operation),
-        }),
-    );
-    live.apply_persisted_record(&persisted)
-        .expect("append prior boundary");
-    records.push(persisted);
-    let activation_cut = AgentHead::Node(live.head().expect("prior boundary"));
-    let persisted = record(records.len() as u64, user("retained activation", true));
-    live.apply_persisted_record(&persisted)
-        .expect("append activation");
-    records.push(persisted);
-    let through = AgentHead::Node(live.head().expect("activation"));
-    let failed_prompt_id = "ap-reactive-prior-boundary"
-        .parse::<tau_proto::AgentPromptId>()
-        .expect("prompt id");
-    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
-        agent_id: agent_id(),
-        transaction_id: None,
-        agent_prompt_id: failed_prompt_id.clone(),
-        through,
-        model: Some("provider/model".into()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(activation_cut),
-        output_length_continuation: None,
-    };
-    let persisted = record(
-        records.len() as u64,
-        Event::AgentInferenceDispatchStarted(checkpoint),
-    );
-    live.apply_persisted_record(&persisted)
-        .expect("append rejected checkpoint");
-    records.push(persisted);
-    let persisted = record(
-        records.len() as u64,
-        Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-            automatic_compaction_decision: None,
-            estimated_api_cost_rates: None,
-            estimated_api_cost_increment: None,
-            agent_prompt_id: failed_prompt_id.clone(),
-            agent_id: agent_id(),
-            output_items: Vec::new(),
-            stop_reason: tau_proto::ProviderStopReason::Error,
-            error: Some("bounded".to_owned()),
-            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
-            context_limit_telemetry: None,
-            recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
-            output_length_disposition: tau_proto::OutputLengthDisposition::None,
-            originator: PromptOriginator::User,
-            usage: None,
-            compaction_original_input_tokens: None,
-            compaction_output_tokens: None,
-            backend: None,
-            provider_attempt: Default::default(),
-            provider_response_id: None,
-            ws_pool_delta: None,
-        }),
-    );
-    live.apply_persisted_record(&persisted)
-        .expect("append rejection");
-    records.push(persisted);
-    let mut reactive = compaction_start("ct-reactive-prior-boundary");
-    reactive.cut = preserved_suffix;
-    reactive.resume_through = Some(through);
-    reactive.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
-        failed_agent_prompt_id: failed_prompt_id.clone(),
-    };
-    let persisted = record(
-        records.len() as u64,
-        Event::AgentStandaloneCompactionStarted(reactive.clone()),
-    );
-    live.apply_persisted_record(&persisted)
-        .expect("append reactive start");
-    records.push(persisted);
-    let suffix_end = AgentHead::Node(live.head().expect("reactive suffix end"));
-    let persisted = record(
-        records.len() as u64,
-        Event::AgentCompacted(tau_proto::AgentCompacted {
-            original_input_tokens: None,
-            compaction_output_tokens: None,
-            agent_id: agent_id(),
-            replacement_window: vec![ContextItem::Message(MessageItem {
-                role: ContextRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: "reactive summary".to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-            transaction_id: Some(reactive.transaction_id.clone()),
-            cut: Some(reactive.cut),
-            suffix_end: Some(suffix_end),
-            compact_prompt_id: Some(reactive.compact_prompt_id.clone()),
-            model: Some(reactive.model.clone()),
-            operation: Some(reactive.operation),
-        }),
-    );
-    live.apply_persisted_record(&persisted)
-        .expect("append reactive boundary");
-    records.push(persisted);
-
-    let replay = AgentTree::from_events(agent_id(), &records);
-    for tree in [&live, &replay] {
-        assert_eq!(
-            tree.reactive_compaction_progress(&reactive.transaction_id),
-            Some(ReactiveCompactionProgress::ReachedTargetCut)
-        );
-        assert_eq!(
-            tree.reactive_compaction_source_prompt(&reactive.transaction_id),
-            Some(&failed_prompt_id),
-            "live and cold folds keep the exact rejected inference correlation"
-        );
-    }
-    let current = AgentHead::Node(live.head().expect("reactive boundary"));
-    let mut beyond = compaction_start("ct-reactive-beyond-target");
-    beyond.cut = through;
-    beyond.resume_through = Some(current);
-    beyond.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-        previous_transaction_id: reactive.transaction_id,
-    };
-    assert!(
-        live.validate_event(&Event::AgentStandaloneCompactionStarted(beyond))
-            .is_err(),
-        "a durable continuation cannot compact the rejected activation"
-    );
-}
-
 /// A successful idle compaction with no resume watermark owes no checkpoint
 /// and cannot prevent a later independent compaction transaction.
 #[test]
@@ -4272,12 +3413,12 @@ fn no_resume_compaction_success_allows_later_independent_start() {
                 phase: None,
                 responses_raw_json: None,
             })],
-            transaction_id: Some(first.transaction_id),
-            cut: Some(AgentHead::Root),
-            suffix_end: Some(AgentHead::Root),
-            compact_prompt_id: Some(first.compact_prompt_id),
-            model: Some(first.model),
-            operation: Some(first.operation),
+            transaction_id: first.transaction_id,
+            cut: AgentHead::Root,
+            suffix_end: AgentHead::Root,
+            compact_prompt_id: first.compact_prompt_id,
+            model: first.model,
+            operation: first.operation,
         }),
     ))
     .expect("append idle success");
@@ -4569,9 +3710,9 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             transaction_id: None,
             agent_prompt_id: tau_proto::AgentPromptId::parse("sp-tool-round").expect("prompt id"),
             through: AgentHead::Node(NodeId::new(0)),
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Root,
             output_length_continuation: None,
         }),
         parent: AgentEventParent::Under(NodeId::new(0)),
@@ -5014,9 +4155,9 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
             transaction_id: None,
             agent_prompt_id: prompt_id.clone(),
             through: AgentHead::Node(NodeId::new(0)),
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Root,
             output_length_continuation: None,
         });
     let input = Event::AgentMessageReceived(AgentMessageReceived {
@@ -5164,9 +4305,9 @@ fn deferred_background_preview_provenance_matches_live_and_cold_replay() {
             transaction_id: None,
             agent_prompt_id: prompt_id.clone(),
             through: AgentHead::Node(NodeId::new(0)),
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Root,
             output_length_continuation: None,
         });
     let preview = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
@@ -5411,9 +4552,9 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                 transaction_id: None,
                 agent_prompt_id: prompt_id.clone(),
                 through: AgentHead::Node(owner_through),
-                model: Some("provider/model".into()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(AgentHead::Root),
+                model: "provider/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: AgentHead::Root,
                 output_length_continuation: None,
             }),
             AgentJournalFoldSemantics::InferenceDeferredInputV1,
@@ -5512,12 +4653,12 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 agent_id: agent_id.clone(),
-                transaction_id: Some(started.transaction_id),
-                cut: Some(started.cut),
-                suffix_end: Some(suffix_end),
-                compact_prompt_id: Some(started.compact_prompt_id),
-                model: Some(started.model),
-                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+                transaction_id: started.transaction_id,
+                cut: started.cut,
+                suffix_end: suffix_end,
+                compact_prompt_id: started.compact_prompt_id,
+                model: started.model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
                 replacement_window: vec![ContextItem::Message(MessageItem {
                     role: ContextRole::Assistant,
                     content: vec![ContentPart::Text {
@@ -5613,9 +4754,9 @@ fn inference_deferred_input_v1_head_move_resets_branch_eligibility() {
             transaction_id: None,
             agent_prompt_id: prompt_id.clone(),
             through: AgentHead::Node(NodeId::new(0)),
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Root,
             output_length_continuation: None,
         });
     let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
@@ -5704,9 +4845,9 @@ fn inference_deferred_input_v1_defers_only_exact_owner_branch() {
             transaction_id: None,
             agent_prompt_id: prompt_id.clone(),
             through: AgentHead::Node(NodeId::new(1)),
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Node(NodeId::new(0))),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Node(NodeId::new(0)),
             output_length_continuation: None,
         });
     let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
@@ -5814,9 +4955,9 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
                 transaction_id: None,
                 agent_prompt_id: prompt_id.clone(),
                 through: AgentHead::Node(NodeId::new(0)),
-                model: Some("provider/model".into()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(AgentHead::Root),
+                model: "provider/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: AgentHead::Root,
                 output_length_continuation: None,
             });
         let records = [
@@ -5934,9 +5075,9 @@ fn mixed_commit_order_v1_replay_preserves_old_node_targets() {
             transaction_id: None,
             agent_prompt_id: prompt_id,
             through,
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Root,
             output_length_continuation: None,
         })
     };
@@ -6058,9 +5199,9 @@ fn v1_terminal_fallback_restores_selected_queue_not_global_last_node() {
             transaction_id: None,
             agent_prompt_id: prompt_id.clone(),
             through: AgentHead::Node(NodeId::new(0)),
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Root,
             output_length_continuation: None,
         }),
         parent: AgentEventParent::Under(NodeId::new(0)),
@@ -6717,9 +5858,9 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
-        model: Some("provider/model".into()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(AgentHead::Root),
+        model: "provider/model".into(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: AgentHead::Root,
         output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
@@ -6747,9 +5888,9 @@ fn prompt_started_requires_unique_matching_owner() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
-        model: Some("provider/model".into()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(AgentHead::Root),
+        model: "provider/model".into(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: AgentHead::Root,
         output_length_continuation: None,
     };
     let started = tau_proto::AgentPromptStarted {
@@ -6761,7 +5902,7 @@ fn prompt_started_requires_unique_matching_owner() {
         session_id: "session"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        model: checkpoint.model.clone().expect("model"),
+        model: checkpoint.model.clone(),
         operation: tau_proto::PromptOperation::Inference,
         originator: PromptOriginator::User,
         ctx_id: None,
@@ -7114,9 +6255,9 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         transaction_id: None,
         agent_prompt_id: source_prompt_id.clone(),
         through: AgentHead::Root,
-        model: Some(model.clone()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(AgentHead::Root),
+        model: model.clone(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: AgentHead::Root,
         output_length_continuation: None,
     };
     let turn = tau_proto::AgentOuterTurnStarted {
@@ -7182,9 +6323,9 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         transaction_id: None,
         agent_prompt_id: successor_prompt_id,
         through: AgentHead::Node(NodeId::new(1)),
-        model: Some(model.clone()),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(AgentHead::Root),
+        model: model.clone(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: AgentHead::Root,
         output_length_continuation: Some(tau_proto::OutputLengthContinuationOwner {
             source_agent_prompt_id: source_prompt_id,
             outer_turn_id: outer_turn_id.clone(),
@@ -7571,12 +6712,12 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: fixture.agent_id().clone(),
-        transaction_id: Some(started.transaction_id.clone()),
-        cut: Some(started.cut),
-        suffix_end: Some(compact_parent),
-        compact_prompt_id: Some(started.compact_prompt_id.clone()),
-        model: Some(started.model.clone()),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: started.transaction_id.clone(),
+        cut: started.cut,
+        suffix_end: compact_parent,
+        compact_prompt_id: started.compact_prompt_id.clone(),
+        model: started.model.clone(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -7596,9 +6737,9 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         transaction_id: Some(started.transaction_id),
         agent_prompt_id: descendant_prompt_id.clone(),
         through: AgentHead::Node(tree.head().expect("compaction node")),
-        model: Some(started.model),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(started.cut),
+        model: started.model,
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: started.cut,
         output_length_continuation: None,
     };
     let mut unrelated = descendant.clone();
@@ -7621,7 +6762,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         agent_prompt_id: descendant_prompt_id.clone(),
         agent_id: fixture.agent_id().clone(),
         session_id: tau_proto::SessionId::parse("session").expect("session id"),
-        model: descendant.model.clone().expect("descendant model"),
+        model: descendant.model.clone(),
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: Some(continuation.outer_turn_id.clone()),
         operation: tau_proto::PromptOperation::Inference,
@@ -7919,8 +7060,8 @@ fn output_length_recovery_selects_later_unresolved_plan() {
             agent_prompt_id: later_source_prompt_id.clone(),
             through: AgentHead::Node(fixture.terminal_node()),
             model: fixture.owner().model.clone(),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(AgentHead::Node(fixture.terminal_node())),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: AgentHead::Node(fixture.terminal_node()),
             output_length_continuation: None,
         }),
         AgentJournalFoldSemantics::InferenceDeferredInputV1,
@@ -7948,7 +7089,7 @@ fn output_length_recovery_selects_later_unresolved_plan() {
             agent_prompt_id: later_source_prompt_id.clone(),
             agent_id: fixture.agent_id().clone(),
             session_id: tau_proto::SessionId::parse("session").expect("session id"),
-            model: fixture.owner().model.clone().expect("owner model"),
+            model: fixture.owner().model.clone(),
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: Some(later_outer_turn_id.clone()),
             operation: tau_proto::PromptOperation::Inference,
@@ -8230,9 +7371,9 @@ fn output_length_terminal_incomplete_does_not_cross_newer_selected_dispatch() {
             transaction_id: None,
             agent_prompt_id: later_prompt_id.clone(),
             through: selected,
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(selected),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: selected,
             output_length_continuation: None,
         },
     ));
@@ -8492,9 +7633,9 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             transaction_id: None,
             agent_prompt_id: continuation_prompt_id.clone(),
             through: AgentHead::Root,
-            model: Some(model.clone()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: None,
+            model: model.clone(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         },
     ));
@@ -8750,12 +7891,12 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             transaction_id: None,
             agent_prompt_id: prompt_two.clone(),
             through: tree.head().map_or(AgentHead::Root, AgentHead::Node),
-            model: Some(tau_proto::ModelId::new(
+            model: tau_proto::ModelId::new(
                 tau_proto::ProviderName::new("test"),
                 tau_proto::ModelName::new("model"),
-            )),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: None,
+            ),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         },
     ));
@@ -8909,9 +8050,9 @@ fn automatic_policy_tool_trace(rounds: usize) -> AutomaticPolicyToolTrace {
                 transaction_id: None,
                 agent_prompt_id: prompt_id.clone(),
                 through,
-                model: Some(model.clone()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(through),
+                model: model.clone(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: through,
                 output_length_continuation: None,
             }),
         ));
@@ -9157,5 +8298,612 @@ fn assert_automatic_policy_crash_cuts(
             Some(_) => "other",
         };
         assert_eq!(actual, expected, "{} cut={name}", trace.label("projection"));
+    }
+}
+
+/// Randomized branched provider windows match the allocating reference after
+/// every current transaction-owned append and cold replay.
+#[test]
+fn randomized_branched_provider_windows_match_reference_live_and_cold() {
+    fn append(
+        tree: &mut AgentTree,
+        records: &mut Vec<PersistedAgentEvent>,
+        parent: AgentEventParent,
+        event: Event,
+    ) -> Option<NodeId> {
+        let seq = tree.next_event_seq();
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes(
+                seq.get()
+                    .to_le_bytes()
+                    .repeat(2)
+                    .try_into()
+                    .expect("16 bytes"),
+            ),
+            seq,
+            source: None,
+            event,
+            parent,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
+            recorded_at: UnixMicros::new(seq.get()),
+        };
+        let node = tree
+            .apply_persisted_record(&record)
+            .expect("generated history must append");
+        records.push(record);
+        node
+    }
+
+    fn assert_every_head(live: &AgentTree, records: &[PersistedAgentEvent], step: usize) {
+        let cold =
+            AgentTree::try_from_events(agent_id(), records).expect("generated history must replay");
+        assert_eq!(live, &cold, "complete live/cold projection step={step}");
+        let unknown = NodeId::new(live.nodes().len() as u64 + 10_000);
+        let heads = std::iter::once(None)
+            .chain(live.nodes().iter().map(|node| Some(node.id)))
+            .chain(std::iter::once(Some(unknown)));
+        for head in heads {
+            let expected = reference_active_provider_window(live, head);
+            for (label, tree) in [("live", live), ("cold", &cold)] {
+                let actual = tree.active_provider_window(head);
+                assert_eq!(
+                    actual.replacement, expected.replacement,
+                    "{label} replacement step={step} head={head:?}"
+                );
+                assert_eq!(
+                    actual.replacement_boundary, expected.replacement_boundary,
+                    "{label} boundary step={step} head={head:?}"
+                );
+                assert_eq!(
+                    actual.transcript, expected.transcript,
+                    "{label} transcript step={step} head={head:?}"
+                );
+                assert_eq!(
+                    tree.active_provider_window_latest(head),
+                    expected.transcript.last().copied(),
+                    "{label} latest step={step} head={head:?}"
+                );
+                assert_eq!(
+                    tree.active_provider_window_transcript_count(head),
+                    expected.transcript.len(),
+                    "{label} count step={step} head={head:?}"
+                );
+                assert_eq!(
+                    tree.active_provider_window_replacement(head),
+                    expected.replacement_boundary.zip(expected.replacement),
+                    "{label} borrowed replacement step={step} head={head:?}"
+                );
+                for cut in std::iter::once(AgentHead::Root)
+                    .chain(live.nodes().iter().map(|node| AgentHead::Node(node.id)))
+                    .chain(std::iter::once(AgentHead::Node(unknown)))
+                {
+                    let expected_contains = match cut {
+                        AgentHead::Root => expected.replacement.is_none(),
+                        AgentHead::Node(node_id) => {
+                            expected.replacement_boundary == Some(node_id)
+                                || expected
+                                    .transcript
+                                    .iter()
+                                    .any(|(candidate, _)| *candidate == node_id)
+                        }
+                    };
+                    assert_eq!(
+                        tree.active_provider_window_contains(
+                            head.map_or(AgentHead::Root, AgentHead::Node),
+                            cut,
+                        ),
+                        expected_contains,
+                        "{label} contains step={step} head={head:?} cut={cut:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    let user = |text: String| {
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id(),
+            text,
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+    let replacement = |started: &tau_proto::AgentStandaloneCompactionStarted,
+                       suffix_end: AgentHead,
+                       summary: &str| {
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compaction_output_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: summary.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: started.transaction_id.clone(),
+            cut: started.cut,
+            suffix_end,
+            compact_prompt_id: started.compact_prompt_id.clone(),
+            model: started.model.clone(),
+            operation: started.operation,
+        })
+    };
+
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    let mut main = Vec::new();
+    for index in 0..32 {
+        let node = append(
+            &mut live,
+            &mut records,
+            AgentEventParent::InheritHead,
+            user(format!("main-{index}")),
+        )
+        .expect("user input node");
+        main.push(node);
+        assert_every_head(&live, &records, records.len());
+    }
+
+    let mut random = 0x94d0_49bb_1331_11eb_u64;
+    for index in 0_usize..24 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        append(
+            &mut live,
+            &mut records,
+            AgentEventParent::Under(main[random as usize % main.len()]),
+            user(format!("branch-{index}-{random}")),
+        );
+        assert_every_head(&live, &records, records.len());
+    }
+    let suffix = append(
+        &mut live,
+        &mut records,
+        AgentEventParent::Under(*main.last().expect("main history")),
+        user("main-resume".to_owned()),
+    )
+    .expect("resumed main node");
+    assert_every_head(&live, &records, records.len());
+
+    let mut first = compaction_start("ct-indexed-window-first");
+    first.compact_prompt_id = "ap-indexed-window-first".parse().expect("prompt id");
+    first.cut = AgentHead::Node(main[8]);
+    first.resume_through = None;
+    first.trigger = tau_proto::StandaloneCompactionTrigger::Manual;
+    append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        Event::AgentStandaloneCompactionStarted(first.clone()),
+    );
+    assert_every_head(&live, &records, records.len());
+    let first_boundary = append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        replacement(&first, AgentHead::Node(suffix), "summary-one"),
+    )
+    .expect("first boundary");
+    assert_every_head(&live, &records, records.len());
+
+    let mut second = compaction_start("ct-indexed-window-second");
+    second.compact_prompt_id = "ap-indexed-window-second".parse().expect("prompt id");
+    second.cut = AgentHead::Node(suffix);
+    second.resume_through = None;
+    second.trigger = tau_proto::StandaloneCompactionTrigger::Manual;
+    append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        Event::AgentStandaloneCompactionStarted(second.clone()),
+    );
+    assert_every_head(&live, &records, records.len());
+    let second_boundary = append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        replacement(&second, AgentHead::Node(first_boundary), "summary-two"),
+    )
+    .expect("second boundary");
+    assert_every_head(&live, &records, records.len());
+
+    for index in 0_usize..24 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let parent = if index.is_multiple_of(3) {
+            second_boundary
+        } else {
+            NodeId::new(random % live.nodes().len() as u64)
+        };
+        append(
+            &mut live,
+            &mut records,
+            AgentEventParent::Under(parent),
+            user(format!("post-boundary-{index}-{random}")),
+        );
+        assert_every_head(&live, &records, records.len());
+    }
+}
+
+/// Structural provider-window index transitions match the allocating reference,
+/// including defensive fail-closed cuts that durable validation rejects.
+#[test]
+fn provider_window_index_transition_arms_match_allocating_reference() {
+    fn user_entry(text: &str) -> AgentEntry {
+        AgentEntry::UserInput {
+            items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::Text {
+                    text: text.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            submission_source: None,
+            inference_activation: false,
+        }
+    }
+
+    fn boundary_entry(cut: AgentHead, suffix_end: AgentHead, summary: &str) -> AgentEntry {
+        AgentEntry::Compaction {
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: summary.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: tau_proto::CompactionTransactionId::parse(format!("ct-{summary}"))
+                .expect("transaction id"),
+            cut,
+            suffix_end,
+        }
+    }
+
+    fn assert_queries(tree: &AgentTree, head: NodeId, label: &str) {
+        let expected = reference_active_provider_window(tree, Some(head));
+        let actual = tree.active_provider_window(Some(head));
+        assert_eq!(actual.replacement, expected.replacement, "{label}");
+        assert_eq!(
+            actual.replacement_boundary, expected.replacement_boundary,
+            "{label}"
+        );
+        assert_eq!(actual.transcript, expected.transcript, "{label}");
+        assert_eq!(
+            tree.active_provider_window_latest(Some(head)),
+            expected.transcript.last().copied(),
+            "{label}"
+        );
+        assert_eq!(
+            tree.active_provider_window_transcript_count(Some(head)),
+            expected.transcript.len(),
+            "{label}"
+        );
+        assert_eq!(
+            tree.active_provider_window_replacement(Some(head)),
+            expected.replacement_boundary.zip(expected.replacement),
+            "{label}"
+        );
+        for cut in std::iter::once(AgentHead::Root)
+            .chain(tree.nodes().iter().map(|node| AgentHead::Node(node.id)))
+            .chain(std::iter::once(AgentHead::Node(NodeId::new(10_000))))
+        {
+            let contains = match cut {
+                AgentHead::Root => expected.replacement.is_none(),
+                AgentHead::Node(node_id) => {
+                    expected.replacement_boundary == Some(node_id)
+                        || expected
+                            .transcript
+                            .iter()
+                            .any(|(candidate, _)| *candidate == node_id)
+                }
+            };
+            assert_eq!(
+                tree.active_provider_window_contains(AgentHead::Node(head), cut),
+                contains,
+                "{label} cut={cut:?}"
+            );
+        }
+    }
+
+    let mut base = AgentTree::from_events(agent_id(), &[]);
+    let prefix = base.append_node_at(None, user_entry("prefix"));
+    let suffix_a = base.append_node_at(Some(prefix), user_entry("suffix-a"));
+    let suffix_b = base.append_node_at(Some(suffix_a), user_entry("suffix-b"));
+    let sibling = base.append_node_at(Some(prefix), user_entry("sibling"));
+    let first_boundary = base.append_node_at(
+        Some(suffix_b),
+        boundary_entry(AgentHead::Node(prefix), AgentHead::Node(suffix_b), "first"),
+    );
+    assert_queries(&base, first_boundary, "initial suffix boundary");
+
+    let mut root = base.clone();
+    let root_boundary = root.append_node_at(
+        Some(first_boundary),
+        boundary_entry(AgentHead::Root, AgentHead::Node(first_boundary), "root"),
+    );
+    assert_queries(&root, root_boundary, "root retains prior anchored suffix");
+
+    let mut equal = base.clone();
+    let equal_boundary = equal.append_node_at(
+        Some(first_boundary),
+        boundary_entry(
+            AgentHead::Node(first_boundary),
+            AgentHead::Node(first_boundary),
+            "equal",
+        ),
+    );
+    assert_queries(
+        &equal,
+        equal_boundary,
+        "replacement-boundary cut retains suffix",
+    );
+
+    let mut missing = base;
+    let missing_boundary = missing.append_node_at(
+        Some(first_boundary),
+        boundary_entry(
+            AgentHead::Node(sibling),
+            AgentHead::Node(first_boundary),
+            "missing",
+        ),
+    );
+    assert_queries(
+        &missing,
+        missing_boundary,
+        "qualified missing cut fails closed",
+    );
+}
+
+/// Reactive progress reaches a prior suffix-preserving boundary identically
+/// live and cold, then requires an owned inference checkpoint before
+/// redispatch.
+#[test]
+fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
+    let record = |seq, event| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: crate::AgentJournalFoldSemantics::CommitOrder,
+        recorded_at: tau_proto::UnixMicros::default(),
+    };
+    let user = |text: &str, inference_activation| {
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation,
+            agent_id: agent_id(),
+            text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    for event in [user("old prefix", false), user("preserved suffix", false)] {
+        let persisted = record(records.len() as u64, event);
+        live.apply_persisted_record(&persisted)
+            .expect("append history");
+        records.push(persisted);
+    }
+    let ids = live.branch_node_ids_from(live.head());
+    let old_prefix = AgentHead::Node(ids[0]);
+    let preserved_suffix = AgentHead::Node(ids[1]);
+    let mut prior = compaction_start("ct-prior-logical-window");
+    prior.cut = old_prefix;
+    prior.resume_through = None;
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentStandaloneCompactionStarted(prior.clone()),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append prior start");
+    records.push(persisted);
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compaction_output_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "prior summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: prior.transaction_id,
+            cut: old_prefix,
+            suffix_end: preserved_suffix,
+            compact_prompt_id: prior.compact_prompt_id,
+            model: prior.model,
+            operation: prior.operation,
+        }),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append prior boundary");
+    records.push(persisted);
+    let activation_cut = AgentHead::Node(live.head().expect("prior boundary"));
+    let persisted = record(records.len() as u64, user("retained activation", true));
+    live.apply_persisted_record(&persisted)
+        .expect("append activation");
+    records.push(persisted);
+    let through = AgentHead::Node(live.head().expect("activation"));
+    let failed_prompt_id = "ap-reactive-prior-boundary"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("prompt id");
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        agent_prompt_id: failed_prompt_id.clone(),
+        through,
+        model: "provider/model".into(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut,
+        output_length_continuation: None,
+    };
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentInferenceDispatchStarted(checkpoint),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append rejected checkpoint");
+    records.push(persisted);
+    let persisted = record(
+        records.len() as u64,
+        Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: failed_prompt_id.clone(),
+            agent_id: agent_id(),
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::Error,
+            error: Some("bounded".to_owned()),
+            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            originator: PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append rejection");
+    records.push(persisted);
+    let mut reactive = compaction_start("ct-reactive-prior-boundary");
+    reactive.cut = preserved_suffix;
+    reactive.resume_through = Some(through);
+    reactive.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+        failed_agent_prompt_id: failed_prompt_id.clone(),
+    };
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentStandaloneCompactionStarted(reactive.clone()),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append reactive start");
+    records.push(persisted);
+    let suffix_end = AgentHead::Node(live.head().expect("reactive suffix end"));
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compaction_output_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "reactive summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: reactive.transaction_id.clone(),
+            cut: reactive.cut,
+            suffix_end,
+            compact_prompt_id: reactive.compact_prompt_id.clone(),
+            model: reactive.model.clone(),
+            operation: reactive.operation,
+        }),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append reactive boundary");
+    records.push(persisted);
+
+    let replay = AgentTree::try_from_events(agent_id(), &records).expect("cold replay");
+    for tree in [&live, &replay] {
+        assert_eq!(
+            tree.reactive_compaction_progress(&reactive.transaction_id),
+            Some(ReactiveCompactionProgress::ReachedTargetCut)
+        );
+        assert_eq!(
+            tree.reactive_compaction_source_prompt(&reactive.transaction_id),
+            Some(&failed_prompt_id),
+            "live and cold folds keep the exact rejected inference correlation"
+        );
+        assert!(matches!(
+            tree.standalone_compaction_recovery(),
+            Some(StandaloneCompactionRecovery::AwaitingCheckpoint {
+                transaction_id,
+                cut,
+                through: owed_through,
+                ..
+            }) if transaction_id == reactive.transaction_id
+                && cut == reactive.cut
+                && owed_through
+                    == AgentHead::Node(tree.head().expect("reactive boundary head"))
+        ));
+        let activation_node = match through {
+            AgentHead::Node(node) => node,
+            AgentHead::Root => unreachable!("activation is a transcript node"),
+        };
+        assert_eq!(
+            tree.active_provider_window(tree.head())
+                .transcript
+                .iter()
+                .filter(|(node, _)| *node == activation_node)
+                .count(),
+            1,
+            "the rejected activating input remains exactly once in the provider window"
+        );
+    }
+
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: Some(reactive.transaction_id.clone()),
+        agent_prompt_id: "ap-reactive-prior-boundary-resume"
+            .parse()
+            .expect("prompt id"),
+        through: AgentHead::Node(live.head().expect("reactive boundary")),
+        model: reactive.model.clone(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: reactive.cut,
+        output_length_continuation: None,
+    };
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentInferenceDispatchStarted(checkpoint.clone()),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append owned inference checkpoint");
+    records.push(persisted);
+    let replay = AgentTree::try_from_events(agent_id(), &records).expect("checkpoint replay");
+    for tree in [&live, &replay] {
+        assert_eq!(
+            tree.standalone_compaction_recovery(),
+            Some(StandaloneCompactionRecovery::DispatchUncertain(
+                checkpoint.clone()
+            ))
+        );
+        assert_eq!(
+            tree.reactive_compaction_progress(&reactive.transaction_id),
+            None,
+            "a committed checkpoint ends pending reactive progress"
+        );
     }
 }

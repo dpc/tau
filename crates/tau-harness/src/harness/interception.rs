@@ -2200,9 +2200,9 @@ impl Harness {
                 transaction_id: None,
                 agent_prompt_id: checkpoint.agent_prompt_id,
                 through: checkpoint.through,
-                model: Some(checkpoint.selection.model),
-                operation: Some(checkpoint.selection.operation),
-                activation_cut: Some(checkpoint.selection.activation_cut),
+                model: checkpoint.selection.model,
+                operation: checkpoint.selection.operation,
+                activation_cut: checkpoint.selection.activation_cut,
                 output_length_continuation: checkpoint.output_length_continuation,
             }),
         );

@@ -2705,15 +2705,13 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-self")
-                .expect("known-safe transaction id"),
-        ),
-        cut: Some(tau_proto::AgentHead::Root),
-        suffix_end: Some(tau_proto::AgentHead::Root),
-        compact_prompt_id: Some(test_agent_prompt_id("ap-self")),
-        model: Some("test/model".parse().expect("model id")),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-self")
+            .expect("known-safe transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
+        compact_prompt_id: test_agent_prompt_id("ap-self"),
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: Vec::new(),
     }));
     sync(&handle);
@@ -2770,15 +2768,13 @@ fn standalone_compaction_repaints_from_owned_continuation_usage_only() {
         original_input_tokens: Some(tau_proto::TokenCount::new(130_772)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(2_549)),
         agent_id: agent_id("main"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-measure")
-                .expect("known-safe compaction transaction id"),
-        ),
-        cut: Some(tau_proto::AgentHead::Root),
-        suffix_end: Some(tau_proto::AgentHead::Root),
-        compact_prompt_id: Some(test_agent_prompt_id("ap-compact")),
-        model: Some("test/model".parse().expect("model id")),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-measure")
+            .expect("known-safe compaction transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
+        compact_prompt_id: test_agent_prompt_id("ap-compact"),
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: Vec::new(),
     }));
     renderer.handle(&Event::ProviderResponseFinished(
@@ -2824,15 +2820,13 @@ fn hidden_compaction_continuation_repaints_owning_detached_transcript() {
         original_input_tokens: Some(tau_proto::TokenCount::new(100_158)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(2_243)),
         agent_id: agent_id("worker"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-hidden")
-                .expect("known-safe compaction transaction id"),
-        ),
-        cut: Some(tau_proto::AgentHead::Root),
-        suffix_end: Some(tau_proto::AgentHead::Root),
-        compact_prompt_id: Some(test_agent_prompt_id("ap-hidden-compact")),
-        model: Some("test/model".parse().expect("model id")),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-hidden")
+            .expect("known-safe compaction transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
+        compact_prompt_id: test_agent_prompt_id("ap-hidden-compact"),
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: Vec::new(),
     }));
     renderer.handle(&Event::AgentInferenceDispatchStarted(

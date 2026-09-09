@@ -443,9 +443,9 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
             through: tau_proto::AgentHead::Root,
-            model: Some("provider/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
             output_length_continuation: None,
         })
     };
@@ -499,7 +499,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
             operation: tau_proto::PromptOperation::StandaloneCompaction,
             originator: PromptOriginator::User,
             supersedes: None,
-            trigger: tau_proto::StandaloneCompactionTrigger::AutomaticThreshold,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
         }),
         prompt(
             "ap-compact",

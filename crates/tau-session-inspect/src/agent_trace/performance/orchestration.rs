@@ -259,9 +259,7 @@ fn distill_event(observation_id: ObservationId, event: Event) -> FactKind {
             compact_prompt_id: value.compact_prompt_id,
             trigger: trigger_kind(&value.trigger),
         },
-        Event::AgentCompacted(value) => value
-            .transaction_id
-            .map_or(FactKind::Other, FactKind::StandaloneSucceeded),
+        Event::AgentCompacted(value) => FactKind::StandaloneSucceeded(value.transaction_id),
         Event::AgentStandaloneCompactionFailed(value) => FactKind::StandaloneFailed {
             transaction_id: value.transaction_id,
             reason: value.reason,
@@ -1310,11 +1308,9 @@ fn add_wait_outcome(
 fn trigger_kind(trigger: &StandaloneCompactionTrigger) -> &'static str {
     match trigger {
         StandaloneCompactionTrigger::Manual => "manual",
-        StandaloneCompactionTrigger::AutomaticThreshold => "automatic_threshold",
         StandaloneCompactionTrigger::AutomaticThresholdEvidence { .. } => {
             "automatic_threshold_evidence"
         }
-        StandaloneCompactionTrigger::AutomaticContinuation { .. } => "automatic_continuation",
         StandaloneCompactionTrigger::AutomaticContextRetreat { .. } => "automatic_context_retreat",
         StandaloneCompactionTrigger::AutomaticOutputLengthContinuation { .. } => {
             "automatic_output_length_continuation"

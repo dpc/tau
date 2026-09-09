@@ -529,9 +529,9 @@ fn compaction_continuation_started(
         ),
         agent_prompt_id: test_agent_prompt_id(agent_prompt_id),
         through: tau_proto::AgentHead::Root,
-        model: Some("test/model".parse().expect("model id")),
-        operation: Some(tau_proto::PromptOperation::Inference),
-        activation_cut: Some(tau_proto::AgentHead::Root),
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: tau_proto::AgentHead::Root,
         output_length_continuation: None,
     }
 }

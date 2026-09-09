@@ -7190,9 +7190,9 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
                 Event::AgentInferenceDispatchStarted(checkpoint)
                     if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
                         && checkpoint.agent_prompt_id == checkpoint_prompt_id
-                        && checkpoint.model.as_ref() == Some(&captured)
-                        && checkpoint.operation == Some(tau_proto::PromptOperation::Inference)
-                        && checkpoint.activation_cut == Some(tau_proto::AgentHead::Root)
+                        && checkpoint.model == captured
+                        && checkpoint.operation == tau_proto::PromptOperation::Inference
+                        && checkpoint.activation_cut == tau_proto::AgentHead::Root
                         && checkpoint.through == through
             ))
             .count(),
@@ -7330,9 +7330,9 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
                     if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
                         && checkpoint.agent_prompt_id == checkpoint_prompt_id
                         && checkpoint.agent_id == agent_id
-                        && checkpoint.model.as_ref() == Some(&captured)
-                        && checkpoint.operation == Some(tau_proto::PromptOperation::Inference)
-                        && checkpoint.activation_cut == Some(tau_proto::AgentHead::Root)
+                        && checkpoint.model == captured
+                        && checkpoint.operation == tau_proto::PromptOperation::Inference
+                        && checkpoint.activation_cut == tau_proto::AgentHead::Root
                         && checkpoint.through == through
             ))
             .count(),
@@ -7630,7 +7630,7 @@ fn hello_protocol_version_admission_matrix_is_explicit() {
 }
 
 /// Current protocol admission remains major-incompatible with protocol-three
-/// peers after the protocol-five obsolete-event removal.
+/// peers after the current protocol-five compaction-shape removal.
 #[test]
 fn local_summary_continuation_rejects_protocol_three_peers() {
     assert_eq!(tau_proto::PROTOCOL_VERSION.major, 5);

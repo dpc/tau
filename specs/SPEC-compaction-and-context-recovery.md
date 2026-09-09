@@ -358,9 +358,10 @@ operation. The successful boundary repeats this harness-stamped tuple; core
 accepts new boundaries only when all six transaction/cut/suffix/prompt/model/
 operation fields are present, the transaction resolves its start,
 cut/prompt/model/operation match it, operation is standalone, `suffix_end`
-equals the boundary parent, and cut is its ancestor. Legacy boundaries have
-all six absent. Partial groups, unknown transactions, mismatches, and duplicate
-outcomes are rejected identically during live validation and replay. Runtime
+equals the boundary parent, and cut is its ancestor. Missing fields, unknown
+transactions, mismatches, and duplicate outcomes are rejected identically
+during decoding, live validation, and replay; Tau does not migrate or infer
+ownership for obsolete boundary shapes. Runtime
 connection ids are deliberately not persisted:
 they identify a daemon incarnation rather than durable provider work.
 Only the start's post-commit reaction materializes one cut-local compact request
@@ -385,11 +386,10 @@ terminal provider request.
 Inference resumes only after a durable dispatch watermark commits.
 While that checkpoint is interceptable or waiting to persist, an explicit
 `AwaitingCheckpoint` runtime state blocks every ordinary dispatch path.
-New-format inference checkpoints carry provider-qualified model, inference
-operation, and activation cut as one all-present ownership group alongside
-their prompt ID, transaction owner, and transcript head. Legacy all-three-absent
-ownership groups remain replay-compatible but cannot substitute current model
-ownership; partial groups are invalid. A continuation for a successful
+Inference checkpoints carry required provider-qualified model, operation, and
+activation cut alongside their prompt ID, optional standalone transaction
+owner, and transcript head. Missing ownership fields are invalid and receive
+no migration or inferred defaults. A continuation for a successful
 standalone transaction is accepted only when its model equals the start model,
 its operation is inference, and its activation cut equals the start cut. Core
 rejects incomplete or transaction-mismatched ownership correlations. The

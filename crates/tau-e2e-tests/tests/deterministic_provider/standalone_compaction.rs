@@ -87,14 +87,11 @@ fn deterministic_context_overflow_reactively_compacts_and_continues()
     assert_eq!(started.compact_prompt_id, compact_prompt.agent_prompt_id);
     let compacted = recv_until_compacted(&mut peer)?;
     assert_eq!(compacted.agent_id, rejected_prompt.agent_id);
+    assert_eq!(&compacted.transaction_id, &started.transaction_id);
+    assert_eq!(compacted.cut, started.cut);
     assert_eq!(
-        compacted.transaction_id.as_ref(),
-        Some(&started.transaction_id)
-    );
-    assert_eq!(compacted.cut.as_ref(), Some(&started.cut));
-    assert_eq!(
-        compacted.compact_prompt_id.as_ref(),
-        Some(&compact_prompt.agent_prompt_id)
+        &compacted.compact_prompt_id,
+        &compact_prompt.agent_prompt_id
     );
     assert!(matches!(
         compacted.replacement_window.as_slice(),
@@ -174,16 +171,13 @@ fn deterministic_opaque_standalone_compaction_replays_after_clean_restart()
     let compact_prompt = recv_until_compaction_prompt(&mut peer_a)?;
     let compacted = recv_until_compacted(&mut peer_a)?;
     assert_eq!(
-        compacted.compact_prompt_id.as_ref(),
-        Some(&compact_prompt.agent_prompt_id)
+        &compacted.compact_prompt_id,
+        &compact_prompt.agent_prompt_id
     );
+    assert_eq!(&compacted.transaction_id, &started.transaction_id);
     assert_eq!(
-        compacted.transaction_id.as_ref(),
-        Some(&started.transaction_id)
-    );
-    assert_eq!(
-        compacted.compact_prompt_id.as_ref(),
-        Some(&compact_prompt.agent_prompt_id)
+        &compacted.compact_prompt_id,
+        &compact_prompt.agent_prompt_id
     );
     assert!(matches!(
         compacted.replacement_window.as_slice(),
@@ -306,8 +300,8 @@ fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
     let compact_prompt = recv_until_compaction_prompt(&mut peer_a)?;
     let compacted = recv_until_compacted(&mut peer_a)?;
     assert_eq!(
-        compacted.compact_prompt_id.as_ref(),
-        Some(&compact_prompt.agent_prompt_id)
+        &compacted.compact_prompt_id,
+        &compact_prompt.agent_prompt_id
     );
     assert!(matches!(
         compacted.replacement_window.as_slice(),
@@ -441,7 +435,7 @@ fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
     );
     assert_eq!(
         count(&|event| matches!(event, Event::AgentCompacted(value)
-            if value.transaction_id.as_ref() == Some(&started.transaction_id))),
+            if value.transaction_id == started.transaction_id)),
         1
     );
     let position = |predicate: &dyn Fn(&Event) -> bool| {
@@ -574,17 +568,11 @@ fn deterministic_standalone_compaction_replaces_transcript_and_continues()
     let compacted = recv_until_compacted(&mut peer_a)?;
     assert_eq!(compacted.agent_id, first.agent_id);
     assert_eq!(
-        compacted.compact_prompt_id.as_ref(),
-        Some(&compact_prompt.agent_prompt_id)
+        &compacted.compact_prompt_id,
+        &compact_prompt.agent_prompt_id
     );
-    assert_eq!(
-        compacted.transaction_id.as_ref(),
-        Some(&started.transaction_id)
-    );
-    assert_eq!(
-        compacted.operation,
-        Some(PromptOperation::StandaloneCompaction)
-    );
+    assert_eq!(&compacted.transaction_id, &started.transaction_id);
+    assert_eq!(compacted.operation, PromptOperation::StandaloneCompaction);
     assert_eq!(
         compacted.replacement_window,
         vec![ContextItem::Message(tau_proto::MessageItem {
@@ -709,13 +697,10 @@ fn deterministic_standalone_compaction_failure_and_cancellation_remain_recoverab
     assert_eq!(started.compact_prompt_id, compact_prompt.agent_prompt_id);
     let compacted = recv_until_compacted(&mut peer)?;
     assert_eq!(
-        compacted.compact_prompt_id.as_ref(),
-        Some(&compact_prompt.agent_prompt_id)
+        &compacted.compact_prompt_id,
+        &compact_prompt.agent_prompt_id
     );
-    assert_eq!(
-        compacted.transaction_id.as_ref(),
-        Some(&started.transaction_id)
-    );
+    assert_eq!(&compacted.transaction_id, &started.transaction_id);
     submit_prompt(
         &mut peer,
         &first.agent_id,
@@ -1005,7 +990,7 @@ fn assert_durable_compaction(
     }
     if compacted.iter().any(|value| {
         value.agent_id != *expected_agent_id
-            || value.operation != Some(PromptOperation::StandaloneCompaction)
+            || value.operation != PromptOperation::StandaloneCompaction
             || value.replacement_window.len() != 1
             || !value
                 .replacement_window

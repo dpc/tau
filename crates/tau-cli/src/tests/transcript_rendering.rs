@@ -1592,15 +1592,13 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: agent_id("engineer"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-side-success")
-                .expect("known-safe compaction transaction id"),
-        ),
-        cut: Some(tau_proto::AgentHead::Root),
-        suffix_end: Some(tau_proto::AgentHead::Root),
-        compact_prompt_id: Some(test_agent_prompt_id("ap-side-success")),
-        model: Some("test/model".parse().expect("model id")),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-side-success")
+            .expect("known-safe compaction transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
+        compact_prompt_id: test_agent_prompt_id("ap-side-success"),
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: Vec::new(),
     }));
     sync(&handle);
@@ -4668,15 +4666,13 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-private")
-                .expect("known-safe compaction transaction id"),
-        ),
-        cut: Some(tau_proto::AgentHead::Root),
-        suffix_end: Some(tau_proto::AgentHead::Root),
-        compact_prompt_id: Some(test_agent_prompt_id("ap-private")),
-        model: Some("test/model".parse().expect("model id")),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-private")
+            .expect("known-safe compaction transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
+        compact_prompt_id: test_agent_prompt_id("ap-private"),
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: vec![assistant_message_item("private checkpoint")],
     }));
     sync(&handle);

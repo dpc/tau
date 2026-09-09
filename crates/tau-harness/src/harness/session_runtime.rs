@@ -2350,8 +2350,6 @@ impl Harness {
                     };
                     if let Some((source, successor_agent_prompt_id, outer_turn_id, through)) =
                         repair
-                        && let (Some(model), Some(operation), Some(activation_cut)) =
-                            (source.model, source.operation, source.activation_cut)
                     {
                         conv.turn.outer_turn =
                             path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
@@ -2363,9 +2361,9 @@ impl Harness {
                                 ordinal: 1,
                             },
                             dispatch: path_crate_agent::InferenceDispatchOwnership {
-                                model,
-                                operation,
-                                activation_cut,
+                                model: source.model,
+                                operation: source.operation,
+                                activation_cut: source.activation_cut,
                             },
                         };
                         if let Some(through) = through {
@@ -2584,18 +2582,14 @@ impl Harness {
                         .prompt_runtime
                         .agents
                         .insert(status_prompt_id.clone(), cid.clone());
-                    if let Some(model) = checkpoint.model.clone() {
-                        self.prompt_coordination
-                            .prompt_runtime
-                            .models
-                            .insert(status_prompt_id.clone(), model);
-                    }
-                    if let Some(operation) = checkpoint.operation {
-                        self.prompt_coordination
-                            .prompt_runtime
-                            .operations
-                            .insert(status_prompt_id.clone(), (operation, true));
-                    }
+                    self.prompt_coordination
+                        .prompt_runtime
+                        .models
+                        .insert(status_prompt_id.clone(), checkpoint.model.clone());
+                    self.prompt_coordination
+                        .prompt_runtime
+                        .operations
+                        .insert(status_prompt_id.clone(), (checkpoint.operation, true));
                     let restored_lineage_owner = self
                         .session_runtime
                         .agent_store
@@ -2604,13 +2598,7 @@ impl Harness {
                             tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
                         });
                     if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                        if let Some(owner) = restored_lineage_owner
-                            && let (Some(model), Some(operation), Some(activation_cut)) = (
-                                checkpoint.model.clone(),
-                                checkpoint.operation,
-                                checkpoint.activation_cut,
-                            )
-                        {
+                        if let Some(owner) = restored_lineage_owner {
                             conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
                                 owner.outer_turn_id.clone(),
                             );
@@ -2622,9 +2610,9 @@ impl Harness {
                                             owner,
                                             dispatch:
                                                 path_crate_agent::InferenceDispatchOwnership {
-                                                    model,
-                                                    operation,
-                                                    activation_cut,
+                                                    model: checkpoint.model.clone(),
+                                                    operation: checkpoint.operation,
+                                                    activation_cut: checkpoint.activation_cut,
                                                 },
                                         },
                                         through: checkpoint.through,
@@ -2640,9 +2628,9 @@ impl Harness {
                                 },
                                 agent_prompt_id: checkpoint.agent_prompt_id,
                                 through: checkpoint.through,
-                                model: checkpoint.model,
-                                operation: checkpoint.operation,
-                                activation_cut: checkpoint.activation_cut,
+                                model: Some(checkpoint.model),
+                                operation: Some(checkpoint.operation),
+                                activation_cut: Some(checkpoint.activation_cut),
                             };
                     }
                     self.project_agent_watch_provider_state(
@@ -2672,11 +2660,6 @@ impl Harness {
                     .and_then(|tree| {
                         tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
                     })
-                    && let (Some(model), Some(operation), Some(activation_cut)) = (
-                        checkpoint.model.clone(),
-                        checkpoint.operation,
-                        checkpoint.activation_cut,
-                    )
                 {
                     conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
                         owner.outer_turn_id.clone(),
@@ -2688,9 +2671,9 @@ impl Harness {
                                     agent_prompt_id: checkpoint.agent_prompt_id.clone(),
                                     owner,
                                     dispatch: path_crate_agent::InferenceDispatchOwnership {
-                                        model,
-                                        operation,
-                                        activation_cut,
+                                        model: checkpoint.model.clone(),
+                                        operation: checkpoint.operation,
+                                        activation_cut: checkpoint.activation_cut,
                                     },
                                 },
                                 through: checkpoint.through,
@@ -2718,9 +2701,9 @@ impl Harness {
                             },
                             agent_prompt_id: checkpoint.agent_prompt_id,
                             through: checkpoint.through,
-                            model: checkpoint.model,
-                            operation: checkpoint.operation,
-                            activation_cut: checkpoint.activation_cut,
+                            model: Some(checkpoint.model),
+                            operation: Some(checkpoint.operation),
+                            activation_cut: Some(checkpoint.activation_cut),
                         };
                 }
                 self.project_agent_watch_provider_state(

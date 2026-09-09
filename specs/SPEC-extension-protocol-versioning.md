@@ -22,6 +22,15 @@ capture class through a decoder that cannot represent the compiled contract.
 Extensions and UI clients must be rebuilt or updated with the harness before
 activation.
 
+The current Protocol 5.0 contract also rejects obsolete standalone-compaction
+event shapes without another revision bump. Canonical compaction boundaries,
+inference checkpoints, and standalone starts are harness-authored facts that
+external peers cannot publish, and current harness output remains decodable by
+the matched Protocol 5.0 sidecars: complete ownership fields are additive to
+their prior optional fields and every emitted trigger variant is already known.
+This deliberate matched-current compatibility does not restore obsolete journal
+decoding or promise that arbitrary older Protocol 5.0 payloads remain valid.
+
 Protocol 4.2 deliberately permits ordinary minor-skew continuation: declaration
 inspection support is an additive Hello field and runtime-default Configure
 purpose is omitted. Only a collector that first verifies explicit support sends

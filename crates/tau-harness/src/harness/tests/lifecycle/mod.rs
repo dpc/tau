@@ -426,12 +426,12 @@ pub(super) fn seed_restored_compaction_checkpoint(
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id: agent_id.clone(),
-            transaction_id: Some(transaction_id.clone()),
-            cut: Some(tau_proto::AgentHead::Root),
-            suffix_end: Some(tau_proto::AgentHead::Root),
-            compact_prompt_id: Some(compact_prompt_id),
-            model: Some(model.clone()),
-            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            transaction_id: transaction_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            suffix_end: tau_proto::AgentHead::Root,
+            compact_prompt_id: compact_prompt_id,
+            model: model.clone(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {

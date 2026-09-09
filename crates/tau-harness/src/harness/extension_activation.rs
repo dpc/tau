@@ -709,9 +709,9 @@ impl Harness {
                     transaction_id: Some(checkpoint.transaction_id),
                     agent_prompt_id: checkpoint.agent_prompt_id,
                     through: checkpoint.through,
-                    model: Some(checkpoint.dispatch.model),
-                    operation: Some(checkpoint.dispatch.operation),
-                    activation_cut: Some(checkpoint.dispatch.activation_cut),
+                    model: checkpoint.dispatch.model,
+                    operation: checkpoint.dispatch.operation,
+                    activation_cut: checkpoint.dispatch.activation_cut,
                     output_length_continuation: None,
                 });
             if !self.activation_successor_matches_selected_head(&event)

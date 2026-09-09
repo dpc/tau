@@ -1328,9 +1328,7 @@ impl Harness {
         else {
             return ProviderTerminalPlan::Other;
         };
-        let Some(model) = checkpoint.model.clone() else {
-            return ProviderTerminalPlan::Other;
-        };
+        let model = checkpoint.model.clone();
         let current_head = self
             .agent_runtime
             .agent_registry
@@ -1350,10 +1348,7 @@ impl Harness {
                         .output_length_continuation
                         .owns_prompt_model(&response.agent_prompt_id, &model)
             });
-        if checkpoint.activation_cut.is_none() {
-            return ProviderTerminalPlan::Other;
-        }
-        if checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
+        if checkpoint.operation != tau_proto::PromptOperation::Inference
             || checkpoint.agent_prompt_id != response.agent_prompt_id
             || self
                 .prompt_coordination
@@ -1494,14 +1489,7 @@ impl Harness {
             })
             .collect::<Vec<_>>();
         for (cid, checkpoint) in pending {
-            let Some(model) = checkpoint.model.as_ref() else {
-                self.terminalize_replay_blocked_context_recovery(
-                    &cid,
-                    &checkpoint,
-                    tau_proto::StandaloneCompactionFailureReason::StaleBranch,
-                );
-                continue;
-            };
+            let model = &checkpoint.model;
             if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
@@ -1528,25 +1516,24 @@ impl Harness {
                 .get(&self.role_name_for_agent_id(&cid))
                 .and_then(|role| role.inference_compaction)
                 != Some(path_tau_config_settings::RoleCompaction::Disabled);
-            let branch_matches = checkpoint.activation_cut.is_some()
-                && self
-                    .agent_runtime
-                    .agent_registry
-                    .agents
-                    .get(&cid)
-                    .and_then(|agent| agent.identity.agent_id.as_deref())
-                    .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-                    .is_some_and(|tree| {
-                        tree.is_ancestor_head(
-                            checkpoint.through,
-                            self.agent_runtime
-                                .agent_registry
-                                .agents
-                                .get(&cid)
-                                .and_then(|agent| agent.identity.head)
-                                .map_or(AgentHead::Root, AgentHead::Node),
-                        )
-                    });
+            let branch_matches = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .and_then(|agent| agent.identity.agent_id.as_deref())
+                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+                .is_some_and(|tree| {
+                    tree.is_ancestor_head(
+                        checkpoint.through,
+                        self.agent_runtime
+                            .agent_registry
+                            .agents
+                            .get(&cid)
+                            .and_then(|agent| agent.identity.head)
+                            .map_or(AgentHead::Root, AgentHead::Node),
+                    )
+                });
             let matching_failure_suppresses = self
                 .agent_runtime
                 .agent_registry
@@ -1591,8 +1578,8 @@ impl Harness {
             .and_then(|agent| {
                 Some((
                     agent.identity.agent_id.clone()?,
-                    checkpoint.model.clone()?,
-                    checkpoint.activation_cut?,
+                    checkpoint.model.clone(),
+                    checkpoint.activation_cut,
                     agent.identity.originator.clone(),
                     agent.dispatch.next_prompt_index,
                 ))
@@ -1663,12 +1650,7 @@ impl Harness {
         checkpoint: &tau_proto::AgentInferenceDispatchStarted,
         source: Option<&tau_proto::ConnectionId>,
     ) {
-        let Some(model) = checkpoint.model.clone() else {
-            return;
-        };
-        if checkpoint.activation_cut.is_none() {
-            return;
-        }
+        let model = checkpoint.model.clone();
         let Some(agent_id) = self
             .agent_runtime
             .agent_registry
@@ -1950,13 +1932,13 @@ impl Harness {
                     .as_ref()
                     .map(|usage| usage.response_received_tokens)
                     .map(tau_proto::TokenCount::new),
-                compact_prompt_id: Some(compact_prompt_id),
-                model: Some(model),
-                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+                compact_prompt_id,
+                model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
                 agent_id: response.agent_id.clone(),
-                transaction_id: Some(transaction_id),
-                cut: Some(cut),
-                suffix_end: Some(suffix_end),
+                transaction_id,
+                cut,
+                suffix_end,
                 replacement_window: replacement_window.items().to_vec(),
             }),
         ))
@@ -2265,19 +2247,6 @@ impl Harness {
                                     _ => started.cut,
                                 }
                             }
-                            tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
-                                previous_transaction_id,
-                            } => self
-                                .session_runtime
-                                .agent_store
-                                .agent(agent_id)?
-                                .reactive_compaction_progress(previous_transaction_id)
-                                .and_then(|progress| match progress {
-                                    tau_core::ReactiveCompactionProgress::NeedsContinuation {
-                                        target_cut,
-                                    } => Some(target_cut),
-                                    tau_core::ReactiveCompactionProgress::ReachedTargetCut => None,
-                                })?,
                             tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
                                 failed_agent_prompt_id,
                             } => self
@@ -4302,22 +4271,15 @@ impl Harness {
         let Some(source_checkpoint) = source_checkpoint else {
             return;
         };
-        let (Some(model), Some(operation), Some(activation_cut)) = (
-            source_checkpoint.model,
-            source_checkpoint.operation,
-            source_checkpoint.activation_cut,
-        ) else {
-            return;
-        };
         agent.turn.output_length_continuation =
             path_crate_agent::OutputLengthContinuationState::Planned(
                 path_crate_agent::OutputLengthContinuationPlan {
                     agent_prompt_id: successor_agent_prompt_id.clone(),
                     owner,
                     dispatch: path_crate_agent::InferenceDispatchOwnership {
-                        model,
-                        operation,
-                        activation_cut,
+                        model: source_checkpoint.model,
+                        operation: source_checkpoint.operation,
+                        activation_cut: source_checkpoint.activation_cut,
                     },
                 },
             );

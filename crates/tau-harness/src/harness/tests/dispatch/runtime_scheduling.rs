@@ -1266,7 +1266,7 @@ fn cold_restart_rejects_off_branch_checkpoint_as_startup_completion() {
             other => panic!("expected parked checkpoint, got {other:?}"),
         };
         off_branch.through = tau_proto::AgentHead::Root;
-        off_branch.activation_cut = Some(tau_proto::AgentHead::Root);
+        off_branch.activation_cut = tau_proto::AgentHead::Root;
         h.append_direct_agent_semantic_event(
             agent_id.as_str(),
             tau_core::AgentEventParent::Root,
@@ -1732,7 +1732,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         &events,
         &ready_agent_id,
         ready_checkpoint.through,
-        ready_checkpoint.activation_cut,
+        Some(ready_checkpoint.activation_cut),
         ExpectedProviderSubmission::Submitted,
     );
     assert_eq!(
@@ -1789,7 +1789,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
             &events,
             agent_id,
             checkpoint.through,
-            checkpoint.activation_cut,
+            Some(checkpoint.activation_cut),
             ExpectedProviderSubmission::Submitted,
         );
         assert_eq!(
@@ -1891,13 +1891,13 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
             .expect("runnable activation watermark")
     );
     assert_eq!(
-        runnable_checkpoint.activation_cut,
+        Some(runnable_checkpoint.activation_cut),
         runnable_obligation.activation_cut
     );
-    assert_eq!(runnable_checkpoint.model, Some("test/model".into()));
+    assert_eq!(runnable_checkpoint.model, "test/model".into());
     assert_eq!(
         runnable_checkpoint.operation,
-        Some(tau_proto::PromptOperation::Inference)
+        tau_proto::PromptOperation::Inference
     );
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1957,7 +1957,7 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
             .expect("blocked activation watermark")
     );
     assert_eq!(
-        blocked_checkpoints[0].activation_cut,
+        Some(blocked_checkpoints[0].activation_cut),
         blocked_obligation.activation_cut
     );
     assert!(events.iter().any(|event| matches!(
@@ -2892,15 +2892,12 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
         .collect::<Vec<_>>();
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(checkpoints[0].through, through);
-    assert_eq!(checkpoints[0].model, Some("test/model".into()));
+    assert_eq!(checkpoints[0].model, "test/model".into());
     assert_eq!(
         checkpoints[0].operation,
-        Some(tau_proto::PromptOperation::Inference)
+        tau_proto::PromptOperation::Inference
     );
-    assert_eq!(
-        checkpoints[0].activation_cut,
-        Some(open_round_activation_cut)
-    );
+    assert_eq!(checkpoints[0].activation_cut, open_round_activation_cut);
     let sequence = events
         .iter()
         .filter_map(|event| match event {
@@ -3713,9 +3710,9 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
                 transaction_id: None,
                 agent_prompt_id: owner.clone(),
                 through: tau_proto::AgentHead::Node(through),
-                model: Some("echo/model".into()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(tau_proto::AgentHead::Root),
+                model: "echo/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: tau_proto::AgentHead::Root,
             }),
         );
         if activation.message_agent_target().is_some() {

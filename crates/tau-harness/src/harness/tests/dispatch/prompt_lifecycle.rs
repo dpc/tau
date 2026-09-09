@@ -2886,12 +2886,12 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 agent_id: agent_id.clone(),
-                transaction_id: Some(transaction_id.clone()),
-                cut: Some(tau_proto::AgentHead::Root),
-                suffix_end: Some(tau_proto::AgentHead::Root),
-                compact_prompt_id: Some(compact_prompt_id),
-                model: Some(model.clone()),
-                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+                transaction_id: transaction_id.clone(),
+                cut: tau_proto::AgentHead::Root,
+                suffix_end: tau_proto::AgentHead::Root,
+                compact_prompt_id: compact_prompt_id,
+                model: model.clone(),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
                 replacement_window: vec![ContextItem::Message(MessageItem {
                     role: ContextRole::Assistant,
                     content: vec![ContentPart::Text {
@@ -2953,9 +2953,9 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
         Event::AgentInferenceDispatchStarted(checkpoint)
             if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
                 && checkpoint.agent_prompt_id == checkpoint_prompt_id
-                && checkpoint.model.as_ref() == Some(&model)
-                && checkpoint.operation == Some(tau_proto::PromptOperation::Inference)
-                && checkpoint.activation_cut == Some(tau_proto::AgentHead::Root)
+                && checkpoint.model == model
+                && checkpoint.operation == tau_proto::PromptOperation::Inference
+                && checkpoint.activation_cut == tau_proto::AgentHead::Root
                 && checkpoint.through == tau_proto::AgentHead::Root
     )));
     assert!(!events.iter().any(|event| matches!(

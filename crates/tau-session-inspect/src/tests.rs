@@ -190,9 +190,9 @@ fn append_trace_prompt_lifecycle(
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),
                 through: tau_proto::AgentHead::Root,
-                model: Some("provider/model".into()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(tau_proto::AgentHead::Root),
+                model: "provider/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: tau_proto::AgentHead::Root,
                 output_length_continuation: None,
             }),
             tau_proto::UnixMicros::new(timestamp),

@@ -1452,15 +1452,13 @@ fn standalone_compaction_replay_retires_private_progress() {
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),
-        transaction_id: Some(
-            tau_proto::CompactionTransactionId::parse("ct-replay")
-                .expect("known-safe compaction transaction id"),
-        ),
-        cut: Some(tau_proto::AgentHead::Root),
-        suffix_end: Some(tau_proto::AgentHead::Root),
-        compact_prompt_id: Some(test_agent_prompt_id("ap-replay")),
-        model: Some("test/model".parse().expect("model id")),
-        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-replay")
+            .expect("known-safe compaction transaction id"),
+        cut: tau_proto::AgentHead::Root,
+        suffix_end: tau_proto::AgentHead::Root,
+        compact_prompt_id: test_agent_prompt_id("ap-replay"),
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
         replacement_window: vec![assistant_message_item("synthetic checkpoint")],
     }));
     sync(&handle);

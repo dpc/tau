@@ -431,7 +431,7 @@ fn assert_agent_records(
                     Event::AgentInferenceDispatchStarted(value)
                         if value.agent_prompt_id == prompt.agent_prompt_id
                             && value.agent_id == prompt.agent_id
-                            && value.operation == Some(tau_proto::PromptOperation::Inference)
+                            && value.operation == tau_proto::PromptOperation::Inference
                 )
             })
             .count();
