@@ -33,6 +33,8 @@ pub const MARKDOWN_LINK: &str = "markdown.link";
 // Each span has its own style so a theme can paint them differently.
 pub const TOOL_OUTPUT: &str = "tool.output";
 pub const TOOL_NAME: &str = "tool.name";
+/// Presentation-only compaction identity, distinct from ordinary tool names.
+pub const COMPACTION_NAME: &str = "compaction.name";
 pub const WATCHING_NAME: &str = "watching.name";
 pub const TOOL_MODE: &str = "tool.mode";
 pub const TOOL_ARGS: &str = "tool.args";

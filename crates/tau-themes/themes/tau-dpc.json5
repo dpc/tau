@@ -32,6 +32,7 @@
     // whole tool line and refine individual parts below.
     "tool.output":          { },
     "tool.name":            { fg: "yellow" },
+    "compaction.name":      { fg: "dark_yellow" },
     "watching.name":        { fg: "dark_yellow" },
     "tool.mode":            { fg: "yellow" },
     "tool.args":            { },

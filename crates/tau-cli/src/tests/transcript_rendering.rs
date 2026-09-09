@@ -2912,7 +2912,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
         },
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "compact failed"));
+    assert!(vt.screen_contains(100, "compact err: failed"));
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!renderer.agent_has_active_prompt_for_test(&agent_id("main")));
     assert!(!renderer.main_agent_turn_active_for_test());
@@ -2928,7 +2928,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(100, "compact stopped"));
+    assert!(vt.screen_contains(100, "compact err: stopped"));
     assert!(!vt.screen_contains(100, "Compacting…"));
 }
 

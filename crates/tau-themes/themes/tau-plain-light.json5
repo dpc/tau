@@ -28,6 +28,7 @@
     // -- Tool execution --
     "tool.output":          { },
     "tool.name":            { fg: "dark_yellow" },
+    "compaction.name":      { fg: "#875f00" },
     "watching.name":        { fg: "#af5f00" },
     "tool.mode":            { fg: "dark_yellow" },
     "tool.args":            { },

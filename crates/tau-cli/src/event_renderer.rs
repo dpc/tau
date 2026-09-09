@@ -60,14 +60,15 @@ use crate::theme::PromptInputTarget;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolLineSegment, ToolStatus, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
-    config_profile_selection_block, diff_payload_counts, extension_status_block,
-    format_context_token_count, format_token_count, pending_tool_call_display,
-    render_action_output_block, render_compaction_block, render_diff_tool_block,
-    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_header_block, render_tool_use_state, render_tool_use_state_payload_free,
-    render_tool_use_state_without_status, render_turn_stats_projection_block, session_status_block,
-    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
-    tool_duration_suffix, ui_dir_block,
+    compaction_tool_display, config_profile_selection_block, diff_payload_counts,
+    extension_status_block, format_context_token_count, format_token_count,
+    pending_tool_call_display, render_action_output_block, render_compaction_block,
+    render_diff_tool_block, render_harness_notice, render_multi_diff_tool_block,
+    render_shell_block, render_tool_block, render_tool_header_block, render_tool_use_state,
+    render_tool_use_state_payload_free, render_tool_use_state_without_status,
+    render_turn_stats_projection_block, session_status_block, streaming_block,
+    streaming_block_with_indicator_suffix, synthesize_fallback_display, tool_duration_suffix,
+    ui_dir_block,
 };
 use crate::turn_stats_projection::TurnStatsPresentationProjection;
 use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
@@ -7260,10 +7261,7 @@ impl EventRenderer {
         let Some(block_id) = state.block_id else {
             return;
         };
-        let mut display = render_tool_use_state(
-            "compact",
-            &Self::self_compaction_tool_use_state(status, status_text),
-        );
+        let mut display = compaction_tool_display(status_text, status);
         if let Some(duration) = Self::live_tool_duration(state) {
             Self::upsert_tool_duration_suffix(&mut display, duration, state.effective_tool_timeout);
         }
@@ -7273,32 +7271,6 @@ impl EventRenderer {
             state.live_display = Some(display);
         }
         self.resources.handle.redraw();
-    }
-
-    /// Separates standalone-compaction measurements from its terminal lifecycle
-    /// status so generic tool-row styling treats them as information chips.
-    pub(crate) fn self_compaction_tool_use_state(
-        status: CompactionStatus,
-        status_text: String,
-    ) -> tau_proto::ToolUseState {
-        let (status_text, info_chips) = match status {
-            CompactionStatus::Success => status_text
-                .strip_suffix(" ok")
-                .filter(|metrics| !metrics.is_empty())
-                .map(|metrics| ("ok".to_owned(), vec![metrics.to_owned()]))
-                .unwrap_or((status_text, Vec::new())),
-            CompactionStatus::Failure | CompactionStatus::Progress => (status_text, Vec::new()),
-        };
-        tau_proto::ToolUseState {
-            status: match status {
-                CompactionStatus::Failure => tau_proto::ToolUseStatus::Error,
-                CompactionStatus::Success => tau_proto::ToolUseStatus::Success,
-                CompactionStatus::Progress => tau_proto::ToolUseStatus::InProgress,
-            },
-            status_text,
-            info_chips,
-            ..Default::default()
-        }
     }
 
     fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
@@ -7632,10 +7604,7 @@ impl EventRenderer {
             .filter(|suffix| matches!(suffix.status, crate::tool_render::ToolStatus::Time))
             .cloned()
             .collect::<Vec<_>>();
-        let mut display = render_tool_use_state(
-            "compact",
-            &Self::self_compaction_tool_use_state(CompactionStatus::Success, status),
-        );
+        let mut display = compaction_tool_display(status, CompactionStatus::Success);
         display.suffixes.extend(time_suffixes);
         let block = self.render_tool_history_block(&display);
         self.resources.handle.set_block(block_id, block);
@@ -8662,15 +8631,13 @@ impl EventRenderer {
             .and_then(|tool| tool.status.clone())
             .filter(|(status, _)| matches!(status, CompactionStatus::Success))
         {
-            render_tool_use_state(
-                "compact",
-                &Self::self_compaction_tool_use_state(status, status_text),
-            )
+            compaction_tool_display(status_text, status)
         } else if is_blocker {
             render_tool_use_state(tool_name, &synthesize_fallback_display(tool_name, None))
         } else {
             Self::tool_result_display(tool_name, descriptor, diff.as_ref())
         };
+        self.apply_self_compaction_name_style(call_id, &mut display);
         let wait_timeout =
             normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
@@ -8840,6 +8807,7 @@ impl EventRenderer {
                 error.descriptor,
             )
         };
+        self.apply_self_compaction_name_style(error.call_id, &mut display);
         let wait_timeout =
             normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
@@ -8923,6 +8891,7 @@ impl EventRenderer {
         let descriptor =
             normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::Cancelled);
         let mut display = render_tool_use_state(&cancelled.tool_name, &descriptor);
+        self.apply_self_compaction_name_style(&cancelled.call_id, &mut display);
         let is_blocker = prior.is_blocker || is_blocker_tool_name(cancelled.tool_name.as_str());
         let wait_timeout =
             normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
@@ -8937,6 +8906,23 @@ impl EventRenderer {
         self.record_tool_summary_result(prior.summary_block_id, None, None, true);
         self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-cancelled");
         self.render_model_status_after_tool_completion(known_main_tool);
+    }
+
+    /// Keeps generic terminal ownership while retaining the presentation-only
+    /// identity of a durably correlated self-compaction call.
+    fn apply_self_compaction_name_style(
+        &self,
+        call_id: &tau_proto::ToolCallId,
+        display: &mut ToolCallDisplay,
+    ) {
+        if self
+            .transcript
+            .runtime
+            .self_compaction_tools
+            .contains_key(call_id)
+        {
+            display.tool_name_style = Some(tau_themes::names::COMPACTION_NAME);
+        }
     }
 
     fn record_plain_finished_tool_block(

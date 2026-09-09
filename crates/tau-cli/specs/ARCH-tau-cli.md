@@ -222,6 +222,10 @@ rows; it never merges a different self request, an `agent_compact` request, or
 another standalone compaction. The presentation-only correlation moves with the
 owning detached transcript so a reconstructed late tool start can adopt its
 known lifecycle state during attach.
+Both correlated self-compaction and independent native or standalone
+compaction rows use the adaptive tool-call header layout, but `compact` uses
+the separate brown `compaction.name` theme style so the row cannot be mistaken
+for a real tool invocation.
 Successful standalone lifecycle rows initially render the compact request input
 as `compact #before → ? ok`. The generated compact-item token count is not a
 resulting-context measurement and is never presented as the after-size. If the

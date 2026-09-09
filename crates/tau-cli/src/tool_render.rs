@@ -1048,46 +1048,44 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
     }
 }
 
-/// Render a completed provider-side compaction item as a compact session
-/// status line. Compaction is not a model-visible tool invocation, so this
-/// paints the small lifecycle line directly instead of fabricating a
-/// `ToolUseState`.
+/// Projects compaction lifecycle state through the tool-call header layout
+/// while retaining a distinct presentation-only identity style.
+pub(crate) fn compaction_tool_display(
+    status_text: impl Into<String>,
+    status: CompactionStatus,
+) -> ToolCallDisplay {
+    let status_text = status_text.into();
+    let (status_text, info_chips) = match status {
+        CompactionStatus::Success => status_text
+            .strip_suffix(" ok")
+            .filter(|metrics| !metrics.is_empty())
+            .map(|metrics| ("ok".to_owned(), vec![metrics.to_owned()]))
+            .unwrap_or((status_text, Vec::new())),
+        CompactionStatus::Failure | CompactionStatus::Progress => (status_text, Vec::new()),
+    };
+    let state = ToolUseState {
+        status: match status {
+            CompactionStatus::Failure => ToolUseStatus::Error,
+            CompactionStatus::Success => ToolUseStatus::Success,
+            CompactionStatus::Progress => ToolUseStatus::InProgress,
+        },
+        status_text,
+        info_chips,
+        ..Default::default()
+    };
+    let mut display = render_tool_use_state("compact", &state);
+    display.tool_name_style = Some(tau_themes::names::COMPACTION_NAME);
+    display
+}
+
+/// Renders provider-side compaction through the shared adaptive tool-call
+/// header without representing compaction as a real tool invocation.
 pub(crate) fn render_compaction_block(
     theme: &tau_themes::Theme,
     status_text: impl Into<String>,
     status: CompactionStatus,
 ) -> tau_cli_term::StyledBlock {
-    use tau_cli_term::resolve::themed_text;
-    use tau_themes::{SpanTree, ThemedText, names};
-
-    let status_text = status_text.into();
-    let mut themed = ThemedText::new();
-    let output = themed.add_style(names::TOOL_OUTPUT);
-    let name = themed.add_style(names::TOOL_NAME);
-    let spacer = themed.add_style(names::TOOL_ARGS);
-    let status_style = themed.add_style(match status {
-        CompactionStatus::Failure => names::TOOL_STATUS_ERROR,
-        CompactionStatus::Success => names::TOOL_STATUS_SUCCESS,
-        CompactionStatus::Progress => names::PROGRESS_INDICATOR,
-    });
-    let context_style = themed.add_style(names::STATUS_CONTEXT);
-    let mut children = vec![
-        SpanTree::span(name, vec![SpanTree::text("compact")]),
-        SpanTree::span(spacer, vec![SpanTree::text(" ")]),
-    ];
-    for (index, part) in status_text.split(' ').enumerate() {
-        if 0 < index {
-            children.push(SpanTree::span(status_style, vec![SpanTree::text(" ")]));
-        }
-        let style = if part.starts_with('#') {
-            context_style
-        } else {
-            status_style
-        };
-        children.push(SpanTree::span(style, vec![SpanTree::text(part.to_owned())]));
-    }
-    themed.push_tree(SpanTree::span(output, children));
-    tau_cli_term::StyledBlock::new(themed_text(theme, &themed))
+    render_tool_header_block(theme, &compaction_tool_display(status_text, status))
 }
 
 /// Priority bands for one-line tool-call presentation elements.

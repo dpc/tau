@@ -5634,32 +5634,44 @@ fn native_tool_started_update(prompt_id: &str) -> Event {
     })
 }
 
+/// Compaction uses the adaptive tool-call header while keeping a separate
+/// brown identity and the ordinary success status semantics.
 #[test]
-fn render_compaction_block_styles_completed_status() {
-    let theme = cli_test_theme();
+fn render_compaction_block_uses_distinct_tool_like_header() {
+    let theme = tau_themes::Theme::builtin_named("tau-dpc").expect("built-in theme");
 
     let block = render_compaction_block(&theme, "ok", CompactionStatus::Success);
-    let spans = block.content.spans();
+    let cells = priority_header_cells(&block, 100);
+    let text: String = cells.iter().map(|cell| cell.ch).collect();
+    let compact_start = text.find("compact").expect("compaction identity");
+    let ok_start = text.rfind("ok").expect("completed compaction status");
+    let compact_start = text[..compact_start].chars().count();
+    let ok_start = text[..ok_start].chars().count();
+
+    assert_eq!(
+        cells[compact_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::COMPACTION_NAME)
+    );
+    assert_ne!(
+        cells[compact_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_NAME)
+    );
     let success_style =
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_SUCCESS);
-    let ok = spans
-        .iter()
-        .find(|span| span.text == "ok")
-        .expect("completed compaction status span");
 
-    assert_eq!(ok.style, success_style);
+    assert_eq!(cells[ok_start].style, success_style);
 }
 
-/// Self-compaction metrics must use the generic neutral stats chip while only
-/// the terminal `ok` uses the success color.
+/// Native and built-in compaction share the same display builder, with metrics
+/// using the neutral stats chip while only terminal `ok` uses success color.
 #[test]
-fn self_compaction_tool_row_styles_metrics_as_stats() {
+fn compaction_tool_display_styles_metrics_as_stats() {
     let theme = cli_test_theme();
-    let display = EventRenderer::self_compaction_tool_use_state(
-        CompactionStatus::Success,
+    let display = compaction_tool_display(
         "~#110k → ~#27.7k (25%) ok".to_owned(),
+        CompactionStatus::Success,
     );
-    let block = render_tool_block(&theme, &render_tool_use_state("compact", &display));
+    let block = render_tool_block(&theme, &display);
     let cells = priority_header_cells(&block, 100);
     let text: String = cells.iter().map(|cell| cell.ch).collect();
     let metrics_start = text[..text.find("~#110k").expect("compaction metrics")]
@@ -6920,7 +6932,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
+        tau_themes::Theme::builtin_named("tau-dpc").expect("built-in theme"),
     );
     renderer.switch_agent(agent_id("main"));
     renderer.apply_setting("show-tools", "compact");
@@ -7008,6 +7020,38 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
     assert_eq!(text.matches("err: rejected").count(), 1, "{text}");
     assert_eq!(text.matches("err: stopped").count(), 1, "{text}");
     assert!(!text.contains("compact complete"), "{text}");
+
+    for (call_id, message) in [
+        ("call-failed", "terminal failed"),
+        ("call-rejected", "terminal rejected"),
+    ] {
+        renderer.handle(&Event::ToolError(ToolError {
+            presentation: Default::default(),
+            call_id: call_id.into(),
+            tool_name: tau_proto::ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            message: message.to_owned(),
+            details: None,
+            originator: tau_proto::PromptOriginator::User,
+            display: None,
+        }));
+    }
+    renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
+        call_id: "call-cancelled".into(),
+        tool_name: tau_proto::ToolName::new("compact"),
+        tool_type: tau_proto::ToolType::Function,
+        display: None,
+    }));
+    sync(&handle);
+
+    for status in [
+        "compact 0s err: terminal failed",
+        "compact 0s err: terminal rejected",
+        "compact 0s cancelled",
+    ] {
+        assert_rendered_ansi_foreground(&vt, 100, status, 3);
+    }
 }
 
 /// Inter-session receiver rejection must retain its actionable fixed detail in

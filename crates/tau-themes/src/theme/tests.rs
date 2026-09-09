@@ -297,6 +297,33 @@ fn builtin_watching_name_differs_from_tool_name() {
     }
 }
 
+/// Ensures every built-in gives compaction its own brown identity instead of
+/// making the presentation-only row look like an ordinary tool invocation.
+#[test]
+fn builtin_compaction_name_is_brown_and_differs_from_tool_name() {
+    for name in BUILTIN_THEME_NAMES {
+        let theme = Theme::builtin_named(name).expect("built-in theme");
+        let tool_name = theme.resolve_style(&StyleName::new(crate::names::TOOL_NAME));
+        let compaction_name = theme.resolve_style(&StyleName::new(crate::names::COMPACTION_NAME));
+        assert_ne!(
+            compaction_name, tool_name,
+            "{name} should render compaction.name differently from tool.name"
+        );
+        assert!(
+            matches!(
+                compaction_name.fg,
+                Some(Color::DarkYellow)
+                    | Some(Color::Rgb {
+                        r: 0x87,
+                        g: 0x5f,
+                        b: 0x00
+                    })
+            ),
+            "{name} must default compaction.name to brown"
+        );
+    }
+}
+
 /// Ensures every built-in uses brown defaults for independently configurable
 /// agent tools, context, cost, and inner-turn metrics.
 #[test]
