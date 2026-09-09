@@ -42,6 +42,11 @@ pub(super) struct CacheAttempt {
 }
 
 impl CacheAttempt {
+    /// Return the private identity shared with exact and timing captures.
+    pub(super) fn id(&self) -> DiagnosticId {
+        self.id
+    }
+
     /// Select persistable inference or local-summary activity.
     pub(super) fn new(
         prompt: &tau_proto::AgentPromptCreated,

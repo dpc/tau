@@ -1495,6 +1495,8 @@ pub enum ProviderDebugCaptureClass {
     CompactHttpFailure,
     /// Bounded private scalar cache observations, never canonical accounting.
     CacheDiagnostic,
+    /// Bounded private scalar timings for one finite provider attempt.
+    ProviderAttemptTiming,
 }
 
 /// One opaque zstd-compressed Provider debug artifact attributed to a harness

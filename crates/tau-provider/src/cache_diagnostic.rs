@@ -43,6 +43,11 @@ impl std::fmt::Debug for DiagnosticId {
 }
 
 impl DiagnosticId {
+    /// Return the private canonical lowercase-hex representation.
+    pub fn to_hex(self) -> String {
+        self.operation_id().to_hex()
+    }
+
     /// Project the same private random identity into operation capture
     /// transport.
     pub fn operation_id(self) -> tau_proto::CacheOperationId {

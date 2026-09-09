@@ -51,10 +51,24 @@ fn cache_metadata_worker_retains_reservation_until_send_finishes() {
 
 /// Build one typed capture job for worker and queue tests.
 fn job(prompt: &str, json: &[u8]) -> CaptureJob {
+    job_with_class(
+        prompt,
+        tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
+        json,
+    )
+}
+
+/// Build one capture job with an explicit class for shared-FIFO competition
+/// tests.
+fn job_with_class(
+    prompt: &str,
+    class: tau_proto::ProviderDebugCaptureClass,
+    json: &[u8],
+) -> CaptureJob {
     CaptureJob::new(ProviderDebugCapture::new(
         tau_proto::SessionId::parse("session-test").expect("session"),
         tau_proto::AgentPromptId::parse(prompt).expect("prompt"),
-        tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
+        class,
         json.to_vec(),
     ))
 }
@@ -92,6 +106,30 @@ fn production_queue_bound_rejects_new_capture_without_blocking() {
         tau_proto::ProviderDebugCaptureClass::HttpSseRequest
     );
     assert_eq!(rejected.capture.json, b"private rejected capture");
+}
+
+/// The timing record deliberately shares FIFO capacity: at saturation it can
+/// consume the final slot and cause a later exact capture to drop, never block.
+#[test]
+fn timing_capture_competes_with_exact_capture_at_saturation() {
+    let (sender, _receiver) = mpsc::sync_channel(super::CAPTURE_QUEUE_CAPACITY);
+    let queue = CaptureQueue::with_sender(sender);
+    for index in 1..super::CAPTURE_QUEUE_CAPACITY {
+        queue
+            .try_submit(job(&format!("exact-{index}"), b"exact"))
+            .expect("exact capture within remaining capacity");
+    }
+    queue
+        .try_submit(job_with_class(
+            "timing",
+            tau_proto::ProviderDebugCaptureClass::ProviderAttemptTiming,
+            b"timing",
+        ))
+        .expect("timing capture consumes final FIFO slot");
+    let rejected = queue
+        .try_submit(job("later-exact", b"later exact"))
+        .expect_err("later exact capture must drop without blocking");
+    assert!(matches!(rejected, mpsc::TrySendError::Full(_)));
 }
 
 /// Proves one transport failure does not stop later accepted captures.

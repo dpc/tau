@@ -144,6 +144,12 @@ impl AttemptCaptureCorrelation {
             attempt_id: self.diagnostic.as_ref().map(|d| d.id),
         }
     }
+
+    /// Return the closed repair reason selected by the transport owner.
+    #[must_use]
+    pub(crate) fn repair_reason(&self) -> &'static str {
+        self.repair_reason
+    }
 }
 
 /// Immutable final correlation facts for one failed finite attempt.

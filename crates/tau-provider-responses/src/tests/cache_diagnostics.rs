@@ -1,4 +1,5 @@
 use tau_provider::cache_diagnostic::CacheDiagnostics;
+use tau_provider::debug_capture_writer::ProviderDebugCaptureClass;
 
 use super::*;
 use crate::cache_diagnostic::CacheAttempt;
@@ -69,6 +70,9 @@ fn captured_attempt(
     let sink_canceled = canceled.clone();
     let sink = Arc::new(
         move |capture: tau_provider::debug_capture_writer::ProviderDebugCapture| {
+            if capture.class() == ProviderDebugCaptureClass::ProviderAttemptTiming {
+                return;
+            }
             let value = serde_json::from_slice::<Value>(capture.json()).expect("exact JSON");
             sink_exact.lock().expect("exact sink").push(value);
             if cancel_at_request {
@@ -322,6 +326,9 @@ fn cache_diagnostics_pre_dispatch_exits_have_identity_without_dispatch() {
         let sink_exact = exact.clone();
         let sink = Arc::new(
             move |capture: tau_provider::debug_capture_writer::ProviderDebugCapture| {
+                if capture.class() == ProviderDebugCaptureClass::ProviderAttemptTiming {
+                    return;
+                }
                 sink_exact
                     .lock()
                     .expect("exact sink")

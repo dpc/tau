@@ -26,6 +26,7 @@ fn exact<T>(run: impl FnOnce() -> T) -> (T, Vec<Value>) {
             .take()
             .expect("exact sink")
             .into_iter()
+            .filter(|capture| capture.class() != ProviderDebugCaptureClass::ProviderAttemptTiming)
             .map(|capture| serde_json::from_slice(capture.json()).expect("exact JSON"))
             .collect()
     });

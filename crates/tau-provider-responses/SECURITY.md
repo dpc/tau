@@ -16,8 +16,10 @@ send. It stores a bounded successful-response event snapshot after validation,
 or bounded metadata for non-cancellation failures. WebSocket connection and
 upgrade failures therefore have no request artifact; cancellation has no error
 artifact; cancellation after request send can leave the already-submitted
-request artifact. Disabled capture and standalone compaction construct and
-submit no capture metadata.
+request artifact. Disabled capture constructs and submits no capture metadata.
+Eligible ordinary and standalone-compaction attempts additionally submit one
+closed scalar `provider-attempt-timing` record under the shared provider security
+boundary; it contains no raw event or provider prose.
 
 Each private `.json.zst` artifact has a strict 1 MiB uncompressed serialization
 ceiling; successful responses separately retain at most 512 KiB and 4,096 raw

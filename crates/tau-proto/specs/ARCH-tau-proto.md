@@ -261,6 +261,10 @@ selection and never parses or decompresses the payload.
 The closed `cache_diagnostic` capture class adds only private scalar observations
 under this same opaque, best-effort transport. It creates no event, journal or
 canonical accounting fields.
+The closed `provider_attempt_timing` class similarly carries one bounded scalar
+record per eligible finite attempt. The provider owns its schema and metric
+definitions; the harness still treats the compressed body as opaque and supplies
+only authenticated attribution, path selection, admission, and retention.
 Operation attribution is allowed only for `cache_diagnostic`, not exact/raw
 classes. Its strictly validated lowercase-hex identity is private and has no
 prompt, routing or terminal authority; generic Debug redacts it.

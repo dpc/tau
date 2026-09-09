@@ -1191,6 +1191,7 @@ impl WsConn {
                     if execution.response_mode == ResponseMode::LocalSummary {
                         crate::local_compaction::validate_event(decoded.value())?;
                     }
+                    observe_associated_timing_milestone(private_trace, decoded.value());
                     let mut observed_update = |state: &StreamState| {
                         if state.has_timed_semantic_output()
                             && let Some(trace) = private_trace.as_mut()
@@ -1212,8 +1213,12 @@ impl WsConn {
                         diagnostics.set_outcome(Outcome::ResponseResourceLimit);
                     }
                     let application = application?;
+                    observe_accepted_timing_milestones(private_trace, decoded.value());
                     diagnostics.record_disposition(application.disposition);
                     if application.terminal {
+                        if let Some(trace) = private_trace.as_mut() {
+                            trace.terminal();
+                        }
                         diagnostics.set_outcome(Outcome::Completed);
                         return Ok(state);
                     }
@@ -1270,6 +1275,58 @@ impl WsConn {
     /// Carries transport bytes into the immediately following repair attempt.
     pub(super) fn carry_response_bytes(&mut self, bytes: u64) {
         self.carried_response_bytes = bytes;
+    }
+}
+
+/// Record cheap first-seen milestones from the event already decoded by the
+/// synchronous response owner.
+fn observe_associated_timing_milestone(
+    private_trace: &mut Option<private_trace::AttemptTrace>,
+    event: &serde_json::Value,
+) {
+    let Some(trace) = private_trace.as_mut() else {
+        return;
+    };
+    let event_type = event["type"].as_str().unwrap_or("");
+    if event_type.starts_with("response.") {
+        trace.associated_event();
+    }
+}
+
+/// Record accepted first-seen milestones only after parser application
+/// succeeds.
+fn observe_accepted_timing_milestones(
+    private_trace: &mut Option<private_trace::AttemptTrace>,
+    event: &serde_json::Value,
+) {
+    let Some(trace) = private_trace.as_mut() else {
+        return;
+    };
+    let event_type = event["type"].as_str().unwrap_or("");
+    match event_type {
+        "response.output_text.delta"
+            if event["delta"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()) =>
+        {
+            trace.text_delta();
+        }
+        "response.reasoning_summary_text.delta"
+            if event["delta"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()) =>
+        {
+            trace.reasoning_delta();
+        }
+        "response.output_item.done"
+            if matches!(
+                event["item"]["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            ) =>
+        {
+            trace.actionable_item();
+        }
+        _ => {}
     }
 }
 

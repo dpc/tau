@@ -18,7 +18,7 @@ pub enum Backend {
 
 impl Backend {
     /// Return the fixed trace spelling.
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::ChatCompletions => "chat_completions",
             Self::PublicResponses => "public_responses",
@@ -40,7 +40,7 @@ pub enum Transport {
 
 impl Transport {
     /// Return the fixed trace spelling.
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::HttpSse => "http_sse",
             Self::Websocket => "websocket",
@@ -124,6 +124,52 @@ pub struct AttemptTrace {
     first_semantic_seen: bool,
     /// Whether the terminal trace was already emitted.
     emitted: bool,
+    /// Whether the identity-free TRACE record was selected.
+    trace_enabled: bool,
+    /// Response-relative observations for the current final dispatch.
+    final_dispatch: FinalDispatchTiming,
+}
+
+/// Fixed first-seen observations reset whenever transparent repair dispatches.
+#[derive(Debug)]
+struct FinalDispatchTiming {
+    /// Final dispatch origin for response-relative milestones.
+    started_at: Option<Instant>,
+    /// First owner-dequeued input after the final dispatch.
+    first_input_us: Option<u64>,
+    /// Size of the first owner-dequeued input after the final dispatch.
+    first_input_bytes: u64,
+    /// First semantic qualification after the final dispatch.
+    first_semantic_us: Option<u64>,
+    /// Closed connection acquisition result for the final dispatch.
+    connection_state: &'static str,
+    /// First response-associated event after the final dispatch.
+    first_associated_event_us: Option<u64>,
+    /// First nonempty text delta after the final dispatch.
+    first_text_delta_us: Option<u64>,
+    /// First nonempty reasoning delta after the final dispatch.
+    first_reasoning_delta_us: Option<u64>,
+    /// First completed actionable item after the final dispatch.
+    first_actionable_item_us: Option<u64>,
+    /// Terminal event after the final dispatch.
+    terminal_us: Option<u64>,
+}
+
+impl Default for FinalDispatchTiming {
+    fn default() -> Self {
+        Self {
+            started_at: None,
+            first_input_us: None,
+            first_input_bytes: 0,
+            first_semantic_us: None,
+            connection_state: "unknown",
+            first_associated_event_us: None,
+            first_text_delta_us: None,
+            first_reasoning_delta_us: None,
+            first_actionable_item_us: None,
+            terminal_us: None,
+        }
+    }
 }
 
 impl AttemptTrace {
@@ -132,18 +178,29 @@ impl AttemptTrace {
     #[must_use]
     pub fn selected(backend: Backend, transport: Transport) -> Option<Self> {
         tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE)
-            .then(|| Self::new(backend, transport))
+            .then(|| Self::new(backend, transport, true))
+    }
+
+    /// Select observation state for either TRACE output or eligible capture.
+    #[must_use]
+    pub fn selected_for_capture(
+        backend: Backend,
+        transport: Transport,
+        capture_enabled: bool,
+    ) -> Option<Self> {
+        let trace_enabled = tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE);
+        (trace_enabled || capture_enabled).then(|| Self::new(backend, transport, trace_enabled))
     }
 
     /// Lazily derive transport only after the dedicated target is enabled.
     #[must_use]
     pub fn selected_with(backend: Backend, transport: impl FnOnce() -> Transport) -> Option<Self> {
         tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE)
-            .then(|| Self::new(backend, transport()))
+            .then(|| Self::new(backend, transport(), true))
     }
 
     /// Start enabled-only observation state.
-    fn new(backend: Backend, transport: Transport) -> Self {
+    fn new(backend: Backend, transport: Transport, trace_enabled: bool) -> Self {
         let now = Instant::now();
         Self {
             backend,
@@ -168,6 +225,8 @@ impl AttemptTrace {
             first_input_seen: false,
             first_semantic_seen: false,
             emitted: false,
+            trace_enabled,
+            final_dispatch: FinalDispatchTiming::default(),
         }
     }
 
@@ -230,6 +289,17 @@ impl AttemptTrace {
     /// the caller cannot observe.
     pub fn record_dispatch(&mut self) {
         self.dispatch_count = self.dispatch_count.saturating_add(1);
+        let connection_state = self.final_dispatch.connection_state;
+        self.final_dispatch = FinalDispatchTiming {
+            started_at: Some(Instant::now()),
+            connection_state,
+            ..FinalDispatchTiming::default()
+        };
+    }
+
+    /// Record whether the final dispatch reused or opened a connection.
+    pub fn connection_state(&mut self, state: &'static str) {
+        self.final_dispatch.connection_state = state;
     }
 
     /// Measure an enqueue or direct socket-send operation owned by the caller.
@@ -251,12 +321,16 @@ impl AttemptTrace {
 
     /// Record the first decoded body chunk or WebSocket frame only.
     pub fn first_input(&mut self, bytes: usize) {
-        if self.first_input_seen {
-            return;
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        if !self.first_input_seen {
+            self.first_input_seen = true;
+            self.first_input_us = micros(self.started_at.elapsed());
+            self.first_input_bytes = bytes;
         }
-        self.first_input_seen = true;
-        self.first_input_us = micros(self.started_at.elapsed());
-        self.first_input_bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        if self.final_dispatch.first_input_us.is_none() {
+            self.final_dispatch.first_input_us = Some(self.since_dispatch());
+            self.final_dispatch.first_input_bytes = bytes;
+        }
     }
 
     /// Measure one semantic decoder invocation and its bounded qualification
@@ -275,16 +349,57 @@ impl AttemptTrace {
             self.first_semantic_seen = true;
             self.semantic_qualification_us = micros(self.started_at.elapsed());
         }
+        if qualifies && self.final_dispatch.first_semantic_us.is_none() {
+            self.final_dispatch.first_semantic_us = Some(self.since_dispatch());
+        }
     }
 
     /// Record semantic qualification at a backend callback that does not own
     /// decoder timing.
     pub fn semantic_qualified(&mut self) {
-        if self.first_semantic_seen {
-            return;
+        if !self.first_semantic_seen {
+            self.first_semantic_seen = true;
+            self.semantic_qualification_us = micros(self.started_at.elapsed());
         }
-        self.first_semantic_seen = true;
-        self.semantic_qualification_us = micros(self.started_at.elapsed());
+        if self.final_dispatch.first_semantic_us.is_none() {
+            self.final_dispatch.first_semantic_us = Some(self.since_dispatch());
+        }
+    }
+
+    /// Record the first decoded event proven to concern the final dispatch.
+    pub fn associated_event(&mut self) {
+        let value = self.since_dispatch();
+        self.final_dispatch
+            .first_associated_event_us
+            .get_or_insert(value);
+    }
+
+    /// Record the first accepted nonempty text delta.
+    pub fn text_delta(&mut self) {
+        let value = self.since_dispatch();
+        self.final_dispatch.first_text_delta_us.get_or_insert(value);
+    }
+
+    /// Record the first accepted nonempty reasoning delta.
+    pub fn reasoning_delta(&mut self) {
+        let value = self.since_dispatch();
+        self.final_dispatch
+            .first_reasoning_delta_us
+            .get_or_insert(value);
+    }
+
+    /// Record the first completed item that can unblock local action.
+    pub fn actionable_item(&mut self) {
+        let value = self.since_dispatch();
+        self.final_dispatch
+            .first_actionable_item_us
+            .get_or_insert(value);
+    }
+
+    /// Record provider terminal recognition before adapter finalization.
+    pub fn terminal(&mut self) {
+        let value = self.since_dispatch();
+        self.final_dispatch.terminal_us.get_or_insert(value);
     }
 
     /// Close and emit one finite attempt.
@@ -292,23 +407,35 @@ impl AttemptTrace {
         self.emit(outcome);
     }
 
+    /// Close one finite attempt and return its bounded scalar projection.
+    pub fn finish_with_timing(mut self, outcome: Outcome) -> AttemptTiming {
+        let timing = self.finish_values(outcome);
+        self.emit_timing(&timing, outcome);
+        timing
+    }
+
     /// Emit the fixed-cardinality scalar schema.
     fn emit(&mut self, outcome: Outcome) {
         if self.emitted {
             return;
         }
-        self.emitted = true;
-        self.connect_upgrade_closed();
-        self.enqueue_closed();
-        let total_us = micros(self.started_at.elapsed());
+        let timing = self.finish_values(outcome);
+        self.emit_timing(&timing, outcome);
+    }
+
+    /// Emit the existing identity-free TRACE projection from frozen values.
+    fn emit_timing(&self, timing: &AttemptTiming, outcome: Outcome) {
+        if !self.trace_enabled {
+            return;
+        }
         let stage_accounted_us = [
-            self.lowering_us,
-            self.serialization_us,
-            self.capture_us,
-            self.pool_wait_us,
-            self.connect_upgrade_us,
-            self.enqueue_us,
-            self.decode_us,
+            timing.lowering_us,
+            timing.serialization_us,
+            timing.capture_us,
+            timing.pool_wait_us,
+            timing.connect_upgrade_us,
+            timing.enqueue_us,
+            timing.decode_us,
         ]
         .into_iter()
         .fold(0_u64, u64::saturating_add);
@@ -316,27 +443,78 @@ impl AttemptTrace {
             target: LOG_TARGET,
             backend = self.backend.as_str(),
             transport = self.transport.as_str(),
-            lowering_us = self.lowering_us,
-            serialization_us = self.serialization_us,
-            capture_us = self.capture_us,
-            pool_wait_us = self.pool_wait_us,
-            connect_upgrade_us = self.connect_upgrade_us,
-            enqueue_us = self.enqueue_us,
+            lowering_us = timing.lowering_us,
+            serialization_us = timing.serialization_us,
+            capture_us = timing.capture_us,
+            pool_wait_us = timing.pool_wait_us,
+            connect_upgrade_us = timing.connect_upgrade_us,
+            enqueue_us = timing.enqueue_us,
             first_input_us = self.first_input_us,
-            decode_us = self.decode_us,
+            decode_us = timing.decode_us,
             first_semantic_us = self.semantic_qualification_us,
-            request_bytes_total = self.request_bytes_total,
+            request_bytes_total = timing.request_bytes_total,
             first_input_bytes = self.first_input_bytes,
-            dispatch_count = self.dispatch_count,
-            decode_count = self.decode_count,
+            dispatch_count = timing.dispatch_count,
+            decode_count = timing.decode_count,
             first_input_seen = self.first_input_seen,
             first_semantic_seen = self.first_semantic_seen,
             stage_accounted_us,
-            unattributed_us = total_us.saturating_sub(stage_accounted_us),
-            total_us,
+            unattributed_us = timing.total_us.saturating_sub(stage_accounted_us),
+            total_us = timing.total_us,
             outcome = outcome.as_str(),
             "provider backend stage observation"
         );
+    }
+
+    /// Freeze all durations once without logging or allocating.
+    fn finish_values(&mut self, outcome: Outcome) -> AttemptTiming {
+        if !self.emitted {
+            self.emitted = true;
+            self.connect_upgrade_closed();
+            self.enqueue_closed();
+        }
+        let total_us = micros(self.started_at.elapsed());
+        AttemptTiming {
+            backend: self.backend.as_str(),
+            transport: self.transport.as_str(),
+            outcome: outcome.as_str(),
+            dispatch_origin: match self.transport {
+                Transport::Websocket => "ws_enqueue",
+                Transport::HttpSse | Transport::HttpUnary => "http_send_start",
+            },
+            total_us,
+            prepare_us: self.lowering_us.saturating_add(self.serialization_us),
+            lowering_us: self.lowering_us,
+            serialization_us: self.serialization_us,
+            capture_us: self.capture_us,
+            pool_wait_us: self.pool_wait_us,
+            connect_upgrade_us: self.connect_upgrade_us,
+            enqueue_us: self.enqueue_us,
+            decode_us: self.decode_us,
+            dispatch_to_first_input_us: self.final_dispatch.first_input_us,
+            dispatch_to_first_associated_event_us: self.final_dispatch.first_associated_event_us,
+            dispatch_to_first_text_delta_us: self.final_dispatch.first_text_delta_us,
+            dispatch_to_first_reasoning_delta_us: self.final_dispatch.first_reasoning_delta_us,
+            dispatch_to_first_actionable_item_us: self.final_dispatch.first_actionable_item_us,
+            dispatch_to_first_semantic_us: self.final_dispatch.first_semantic_us,
+            dispatch_to_terminal_us: self.final_dispatch.terminal_us,
+            terminal_to_return_us: self
+                .final_dispatch
+                .terminal_us
+                .map(|terminal| self.since_dispatch().saturating_sub(terminal)),
+            request_bytes_total: self.request_bytes_total,
+            first_input_bytes: self.final_dispatch.first_input_bytes,
+            dispatch_count: self.dispatch_count,
+            decode_count: self.decode_count,
+            connection_state: self.final_dispatch.connection_state,
+        }
+    }
+
+    /// Measure from the current final-dispatch boundary.
+    fn since_dispatch(&self) -> u64 {
+        self.final_dispatch
+            .started_at
+            .map_or(0, |started| micros(started.elapsed()))
     }
 }
 
@@ -345,6 +523,63 @@ impl Drop for AttemptTrace {
     fn drop(&mut self) {
         self.emit(Outcome::Failed);
     }
+}
+
+/// Fixed-cardinality scalar timing projection for one finite attempt.
+#[derive(Clone, Copy, Debug)]
+pub struct AttemptTiming {
+    /// Closed adapter backend.
+    pub backend: &'static str,
+    /// Closed transport.
+    pub transport: &'static str,
+    /// Closed attempt outcome.
+    pub outcome: &'static str,
+    /// Exact local dispatch origin used by response-relative fields.
+    pub dispatch_origin: &'static str,
+    /// Adapter attempt entry to return.
+    pub total_us: u64,
+    /// Lowering plus serialization, without claiming exhaustive exclusivity.
+    pub prepare_us: u64,
+    /// Request lowering time.
+    pub lowering_us: u64,
+    /// Request serialization time.
+    pub serialization_us: u64,
+    /// Existing request-capture construction/admission time.
+    pub capture_us: u64,
+    /// Pool acquisition wait time.
+    pub pool_wait_us: u64,
+    /// Combined fresh connection and protocol upgrade time.
+    pub connect_upgrade_us: u64,
+    /// Local enqueue or direct-send time.
+    pub enqueue_us: u64,
+    /// Aggregate decoder time excluding callbacks where supported.
+    pub decode_us: u64,
+    /// Final dispatch to first owner-dequeued body chunk or message.
+    pub dispatch_to_first_input_us: Option<u64>,
+    /// Final dispatch to first response-associated decoded event.
+    pub dispatch_to_first_associated_event_us: Option<u64>,
+    /// Final dispatch to first nonempty text delta.
+    pub dispatch_to_first_text_delta_us: Option<u64>,
+    /// Final dispatch to first nonempty reasoning delta.
+    pub dispatch_to_first_reasoning_delta_us: Option<u64>,
+    /// Final dispatch to first completed actionable item.
+    pub dispatch_to_first_actionable_item_us: Option<u64>,
+    /// Final dispatch to first existing semantic qualification.
+    pub dispatch_to_first_semantic_us: Option<u64>,
+    /// Final dispatch to provider terminal recognition.
+    pub dispatch_to_terminal_us: Option<u64>,
+    /// Provider terminal recognition to adapter return.
+    pub terminal_to_return_us: Option<u64>,
+    /// Existing serialized request byte total.
+    pub request_bytes_total: u64,
+    /// First owner-dequeued input size.
+    pub first_input_bytes: u64,
+    /// Number of actual wire dispatches.
+    pub dispatch_count: u32,
+    /// Number of measured decoder invocations.
+    pub decode_count: u32,
+    /// Closed final connection acquisition state.
+    pub connection_state: &'static str,
 }
 
 /// Read the enabled-only observation clock at a call site.

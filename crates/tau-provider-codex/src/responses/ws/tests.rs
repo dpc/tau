@@ -29,6 +29,30 @@ use test_server::{ServerScript, TestWsServer};
 use super::super::{BorrowedContextItem, build_ws_envelope};
 use super::*;
 
+/// A decoded event may establish association before application, but rejected
+/// text/reasoning/actionable content must not become an accepted milestone.
+#[test]
+fn rejected_decoded_event_does_not_record_accepted_timing_milestone() {
+    let event = serde_json::json!({
+        "type": "response.output_text.delta",
+        "output_index": 4096,
+        "delta": "rejected",
+    });
+    let mut trace = private_trace::AttemptTrace::selected_for_capture(
+        private_trace::Backend::Codex,
+        private_trace::Transport::Websocket,
+        true,
+    );
+    trace.as_mut().expect("trace").record_dispatch();
+    observe_associated_timing_milestone(&mut trace, &event);
+    let timing = trace
+        .take()
+        .expect("trace")
+        .finish_with_timing(private_trace::Outcome::Failed);
+    assert!(timing.dispatch_to_first_associated_event_us.is_some());
+    assert_eq!(timing.dispatch_to_first_text_delta_us, None);
+}
+
 fn outbound_error(result: Result<WsConn, LlmError>) -> tau_provider::OutboundError {
     let error = match result {
         Ok(_) => panic!("expected outbound failure"),

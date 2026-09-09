@@ -1146,6 +1146,9 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         if let Some(dispatch) = &mut dispatch {
             dispatch.connection_state = "reused";
         }
+        if let Some(trace) = private_trace.as_mut() {
+            trace.connection_state("reused");
+        }
         match conn.run_response(
             self.config,
             self.agent_prompt_id,
@@ -1250,6 +1253,9 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             .map(path_crate_attempt_failure::AttemptCaptureCorrelation::next_dispatch);
         if let Some(dispatch) = &mut dispatch {
             dispatch.connection_state = if emit_dispatched { "new" } else { "replaced" };
+        }
+        if let Some(trace) = private_trace.as_mut() {
+            trace.connection_state(if emit_dispatched { "new" } else { "replaced" });
         }
         conn.carry_response_bytes(carried_response_bytes);
         let mut stream = recording_stream(self.record_config);

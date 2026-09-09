@@ -145,7 +145,8 @@ attribution for any other capture class. Both forms are canonical and share
 managed diagnostic retention.
 
 The recognized current classes include
-`responses-attempt-failure.json.zst` and `cache-diagnostic.json.zst`. They use the same eligibility, path
+`responses-attempt-failure.json.zst`, `cache-diagnostic.json.zst`, and
+`provider-attempt-timing.json.zst`. They use the same eligibility, path
 validation, compression, best-effort failure behavior, and
 `diagnostic_retention` cleanup as request/response captures; it has no
 separate retention knob.

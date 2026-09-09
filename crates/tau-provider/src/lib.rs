@@ -11,6 +11,8 @@ pub mod local_summary_compaction;
 pub mod outbound_network;
 #[doc(hidden)]
 pub mod private_attempt_trace;
+#[doc(hidden)]
+pub mod provider_attempt_timing;
 pub mod repetition_guard;
 pub mod retry_policy;
 

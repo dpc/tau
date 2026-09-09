@@ -27,7 +27,7 @@ use tau_proto::{
 use tau_provider::cache_diagnostic::CacheDiagnostics;
 use tau_provider::{
     debug_capture_writer as path_tau_provider_debug_capture_writer,
-    private_attempt_trace as private_trace,
+    private_attempt_trace as private_trace, provider_attempt_timing as attempt_timing,
 };
 
 pub const LOG_TARGET: &str = "provider-codex";
@@ -1001,9 +1001,10 @@ impl CodexRuntime {
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> AttemptOutcome {
-        let mut private_trace = private_trace::AttemptTrace::selected(
+        let mut private_trace = private_trace::AttemptTrace::selected_for_capture(
             private_trace::Backend::Codex,
             private_trace::Transport::Websocket,
+            request.debug_provider_requests,
         );
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Inference, logical_attempt);
         let metadata_enabled = self
@@ -1058,7 +1059,41 @@ impl CodexRuntime {
                 Err(error) if error.retry_decision().is_some() => private_trace::Outcome::Retryable,
                 Err(_) => private_trace::Outcome::Failed,
             };
-            trace.finish(trace_outcome);
+            let timing = trace.finish_with_timing(trace_outcome);
+            if request.debug_provider_requests
+                && let Ok(agent_prompt_id) = tau_proto::AgentPromptId::parse(agent_prompt_id)
+            {
+                let snapshot = attempt.snapshot();
+                let timing_usage = result.as_ref().ok().and_then(|result| result.state.usage());
+                attempt_timing::submit(
+                    attempt_timing::CaptureMetadata {
+                        session_id: request.session_id,
+                        agent_prompt_id: &agent_prompt_id,
+                        model: &config.wire().model_id,
+                        profile: Some(config.wire().profile_namespace.as_str()),
+                        operation: "inference",
+                        logical_attempt: Some(logical_attempt.get()),
+                        attempt_id: snapshot.attempt_id.map(|id| id.to_hex()),
+                        final_wire_dispatch_index: (snapshot.wire_dispatches() > 0)
+                            .then_some(snapshot.wire_dispatches()),
+                        repair_reason: attempt.correlation().repair_reason(),
+                        facts: attempt_timing::AttemptFacts {
+                            tool_enabled: Some(!request.tools.is_empty()),
+                            response_bytes_received: result
+                                .as_ref()
+                                .ok()
+                                .map(|result| result.state.response_bytes_received()),
+                            usage: timing_usage
+                                .as_ref()
+                                .map(attempt_timing::ResponseUsage::from_provider),
+                            response_mode: Some(attempt_timing::ResponseMode::Ordinary),
+                            backend_reached: Some(backend_reached),
+                            ..attempt_timing::AttemptFacts::default()
+                        },
+                    },
+                    timing,
+                );
+            }
         }
         if canceled {
             return AttemptOutcome::Canceled { progress };
@@ -1237,6 +1272,11 @@ impl CodexRuntime {
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Compact, logical_attempt);
         attempt.correlation().diagnostic = diagnostic.clone();
         let mut evidence = cache_diagnostic::CompactEvidence::default();
+        let mut private_trace = private_trace::AttemptTrace::selected_for_capture(
+            private_trace::Backend::Codex,
+            private_trace::Transport::Websocket,
+            request.debug_provider_requests,
+        );
         let outcome = self.compact_observed(
             agent_prompt_id,
             config,
@@ -1244,15 +1284,68 @@ impl CodexRuntime {
             abort,
             &mut attempt,
             (metadata_enabled && diagnostic.is_some()).then_some(&mut evidence),
+            &mut private_trace,
         );
         if let Some(diagnostic) = diagnostic {
             diagnostic.finish_compact(&outcome, evidence, attempt.snapshot(), config.wire());
+        }
+        if let Some(trace) = private_trace.take() {
+            let trace_outcome = match &outcome {
+                CompactOutcome::Finished { .. } => private_trace::Outcome::Completed,
+                CompactOutcome::Canceled { .. } => private_trace::Outcome::Canceled,
+                CompactOutcome::Retry { .. } => private_trace::Outcome::Retryable,
+                CompactOutcome::Terminal { .. } | CompactOutcome::RouteUnavailable { .. } => {
+                    private_trace::Outcome::Failed
+                }
+            };
+            let timing = trace.finish_with_timing(trace_outcome);
+            if request.debug_provider_requests
+                && let Ok(agent_prompt_id) = tau_proto::AgentPromptId::parse(agent_prompt_id)
+            {
+                let snapshot = attempt.snapshot();
+                attempt_timing::submit(
+                    attempt_timing::CaptureMetadata {
+                        session_id: request.session_id,
+                        agent_prompt_id: &agent_prompt_id,
+                        model: &config.wire().model_id,
+                        profile: Some(config.wire().profile_namespace.as_str()),
+                        operation: "compact",
+                        logical_attempt: Some(logical_attempt.get()),
+                        attempt_id: snapshot.attempt_id.map(|id| id.to_hex()),
+                        final_wire_dispatch_index: (snapshot.wire_dispatches() > 0)
+                            .then_some(snapshot.wire_dispatches()),
+                        repair_reason: attempt.correlation().repair_reason(),
+                        facts: attempt_timing::AttemptFacts {
+                            response_mode: Some(attempt_timing::ResponseMode::Compact),
+                            backend_reached: Some(match &outcome {
+                                CompactOutcome::Finished { .. } => true,
+                                CompactOutcome::Canceled { backend_reached }
+                                | CompactOutcome::Retry {
+                                    backend_reached, ..
+                                }
+                                | CompactOutcome::Terminal {
+                                    backend_reached, ..
+                                }
+                                | CompactOutcome::RouteUnavailable {
+                                    backend_reached, ..
+                                } => *backend_reached,
+                            }),
+                            ..attempt_timing::AttemptFacts::default()
+                        },
+                    },
+                    timing,
+                );
+            }
         }
         outcome
     }
 
     /// Preserve native compact execution while observing its final finite
     /// outcome.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "attempt timing follows the existing compact lifecycle inputs"
+    )]
     fn compact_observed(
         &self,
         agent_prompt_id: &str,
@@ -1261,6 +1354,7 @@ impl CodexRuntime {
         abort: &mut impl TurnAbort,
         attempt: &mut ProviderAttemptContext,
         evidence: Option<&mut cache_diagnostic::CompactEvidence>,
+        private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> CompactOutcome {
         let identity = config.inference_identity();
         let probe = match self.acquire_compact_probe(identity, abort) {
@@ -1309,10 +1403,6 @@ impl CodexRuntime {
             };
         }
         let mut backend_reached = false;
-        let mut private_trace = private_trace::AttemptTrace::selected(
-            private_trace::Backend::Codex,
-            private_trace::Transport::Websocket,
-        );
         let compact_result = self.stream(
             agent_prompt_id,
             config.wire(),
@@ -1325,7 +1415,7 @@ impl CodexRuntime {
                     backend_reached = true;
                 }
             },
-            &mut private_trace,
+            private_trace,
         );
         if let Some(evidence) = evidence {
             evidence.observe(config.wire(), &compact_result);
@@ -1339,9 +1429,6 @@ impl CodexRuntime {
                 (dispatch.state, usage)
             }
             Err(common::LlmError::Canceled) => {
-                if let Some(trace) = private_trace.take() {
-                    trace.finish(private_trace::Outcome::Canceled);
-                }
                 return CompactOutcome::Canceled { backend_reached };
             }
             Err(error) => {
@@ -1353,9 +1440,6 @@ impl CodexRuntime {
                     } else {
                         self.mark_compact_route_unavailable(identity)
                     };
-                    if let Some(trace) = private_trace.take() {
-                        trace.finish(private_trace::Outcome::Failed);
-                    }
                     return CompactOutcome::RouteUnavailable {
                         error: CodexError(error),
                         newly_downgraded,
@@ -1386,21 +1470,10 @@ impl CodexRuntime {
                         backend_reached,
                     },
                 };
-                if let Some(trace) = private_trace.take() {
-                    let class = if matches!(outcome, CompactOutcome::Retry { .. }) {
-                        private_trace::Outcome::Retryable
-                    } else {
-                        private_trace::Outcome::Failed
-                    };
-                    trace.finish(class);
-                }
                 return outcome;
             }
         };
         let Some(compaction_item) = state.into_single_compaction_item() else {
-            if let Some(trace) = private_trace.take() {
-                trace.finish(private_trace::Outcome::Failed);
-            }
             return CompactOutcome::Terminal {
                 error: CodexError(common::LlmError::InvalidResponse(
                     "compaction response did not contain exactly one canonical compaction item"
@@ -1411,14 +1484,8 @@ impl CodexRuntime {
         };
         let output = vec![tau_proto::ContextItem::Compaction(compaction_item)];
         if abort.is_aborted() {
-            if let Some(trace) = private_trace.take() {
-                trace.finish(private_trace::Outcome::Canceled);
-            }
             CompactOutcome::Canceled { backend_reached }
         } else {
-            if let Some(trace) = private_trace.take() {
-                trace.finish(private_trace::Outcome::Completed);
-            }
             CompactOutcome::Finished {
                 output_items: output,
                 usage,

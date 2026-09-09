@@ -854,13 +854,17 @@ fn pre_dispatch_cancellation_produces_no_dispatch_observations() {
         listener.accept(),
         Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock
     ));
-    assert!(TEST_DEBUG_CAPTURES.with(|captures| {
+    let captures = TEST_DEBUG_CAPTURES.with(|captures| {
         captures
             .borrow_mut()
             .take()
             .expect("test capture sink installed")
-            .is_empty()
-    }));
+    });
+    assert_eq!(captures.len(), 1);
+    assert_eq!(
+        captures[0].class(),
+        ProviderDebugCaptureClass::ProviderAttemptTiming
+    );
     let trace =
         String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
     assert!(trace.contains("outcome=\"canceled\""), "{trace}");
@@ -926,7 +930,8 @@ fn attempt_path_finalizes_correlated_http_capture_once() {
             .borrow()
             .as_ref()
             .expect("test capture sink installed")
-            .is_empty()
+            .iter()
+            .all(|capture| capture.class() == ProviderDebugCaptureClass::ProviderAttemptTiming)
     }));
 
     let server = ScriptedTcpServer::spawn(|mut socket| {
@@ -956,9 +961,14 @@ fn attempt_path_finalizes_correlated_http_capture_once() {
             .take()
             .expect("test capture sink installed")
     });
-    assert_eq!(captures.len(), 2);
+    let timing_count = captures
+        .iter()
+        .filter(|capture| capture.class() == ProviderDebugCaptureClass::ProviderAttemptTiming)
+        .count();
+    assert_eq!(timing_count, 2);
     let metadata = captures
         .iter()
+        .filter(|capture| capture.class() != ProviderDebugCaptureClass::ProviderAttemptTiming)
         .map(|capture| {
             serde_json::from_slice::<serde_json::Value>(capture.json()).expect("capture JSON")
         })
@@ -1016,10 +1026,20 @@ fn attempt_path_continues_after_raw_event_capture_becomes_ineligible() {
             .take()
             .expect("test capture sink installed")
     });
-    assert_eq!(captures.len(), 1);
+    assert_eq!(captures.len(), 2);
     assert_eq!(
-        captures[0].class(),
-        ProviderDebugCaptureClass::HttpSseRequest
+        captures
+            .iter()
+            .filter(|capture| capture.class() == ProviderDebugCaptureClass::HttpSseRequest)
+            .count(),
+        1
+    );
+    assert_eq!(
+        captures
+            .iter()
+            .filter(|capture| capture.class() == ProviderDebugCaptureClass::ProviderAttemptTiming)
+            .count(),
+        1
     );
 }
 
@@ -1178,6 +1198,7 @@ fn raw_event_capture_ineligibility_is_isolated_across_cancel_and_retry() {
     assert_eq!(
         captures
             .iter()
+            .filter(|capture| capture.class() != ProviderDebugCaptureClass::ProviderAttemptTiming)
             .map(|capture| capture.class())
             .collect::<Vec<_>>(),
         vec![
@@ -1189,6 +1210,7 @@ fn raw_event_capture_ineligibility_is_isolated_across_cancel_and_retry() {
     );
     let attempts = captures
         .iter()
+        .filter(|capture| capture.class() != ProviderDebugCaptureClass::ProviderAttemptTiming)
         .map(|capture| {
             serde_json::from_slice::<serde_json::Value>(capture.json())
                 .expect("capture JSON")["logical_attempt"]

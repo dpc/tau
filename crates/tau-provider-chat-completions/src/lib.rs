@@ -35,7 +35,7 @@ use tau_provider::retry_policy::{
 use tau_provider::{
     StreamRepetitionGuard, StreamRepetitionKey,
     debug_capture_writer as path_tau_provider_debug_capture_writer,
-    private_attempt_trace as private_trace,
+    private_attempt_trace as private_trace, provider_attempt_timing as attempt_timing,
 };
 use tokio::runtime as path_tokio_runtime;
 
@@ -1037,9 +1037,10 @@ pub fn run_attempt_with_diagnostics(
         provider_attempt,
     )
     .map(Arc::new);
-    let mut private_trace = private_trace::AttemptTrace::selected(
+    let mut private_trace = private_trace::AttemptTrace::selected_for_capture(
         private_trace::Backend::ChatCompletions,
         private_trace::Transport::HttpSse,
+        debug_provider_requests,
     );
     let attempt = ProviderAttemptContext::new(prompt.operation, provider_attempt);
     debug_assert_eq!(attempt.operation, prompt.operation);
@@ -1068,18 +1069,59 @@ pub fn run_attempt_with_diagnostics(
             cache.as_ref(),
         )
     };
-    if let Some(trace) = private_trace.take() {
-        let outcome = match &result {
-            Ok(_) => private_trace::Outcome::Completed,
-            Err(LlmError::Canceled) => private_trace::Outcome::Canceled,
-            Err(error) if error.retry_decision().is_some() => private_trace::Outcome::Retryable,
-            Err(_) => private_trace::Outcome::Failed,
-        };
-        trace.finish(outcome);
-    }
+    let trace_outcome = match &result {
+        Ok(_) => private_trace::Outcome::Completed,
+        Err(LlmError::Canceled) => private_trace::Outcome::Canceled,
+        Err(error) if error.retry_decision().is_some() => private_trace::Outcome::Retryable,
+        Err(_) => private_trace::Outcome::Failed,
+    };
     let outcome = finish_attempt_with_facts(result, attempt.progress.get(), attempt.facts());
-    if let Some(cache) = cache {
+    if let Some(cache) = &cache {
         cache.finish(&outcome);
+    }
+    if let Some(trace) = private_trace.take() {
+        let timing = trace.finish_with_timing(trace_outcome);
+        if debug_provider_requests {
+            attempt_timing::submit_with(
+                attempt_timing::CaptureMetadata {
+                    session_id: &prompt.session_id,
+                    agent_prompt_id: &prompt.agent_prompt_id,
+                    model: model.id.as_str(),
+                    profile: None,
+                    operation: match prompt.operation {
+                        tau_proto::PromptOperation::Inference => "inference",
+                        tau_proto::PromptOperation::StandaloneCompaction => "compact",
+                    },
+                    logical_attempt: Some(u64::from(provider_attempt.get())),
+                    attempt_id: cache.as_ref().map(|cache| cache.id().to_hex()),
+                    final_wire_dispatch_index: (timing.dispatch_count > 0)
+                        .then_some(u64::from(timing.dispatch_count)),
+                    repair_reason: "none",
+                    facts: attempt_timing::AttemptFacts {
+                        max_output_tokens: Some(config.max_output_tokens),
+                        tool_enabled: Some(!prompt.tools.is_empty()),
+                        usage: match &outcome {
+                            AttemptOutcome::Completed(success) => success
+                                .usage
+                                .as_ref()
+                                .map(attempt_timing::ResponseUsage::from_provider),
+                            _ => None,
+                        },
+                        response_mode: Some(match prompt.operation {
+                            tau_proto::PromptOperation::Inference => {
+                                attempt_timing::ResponseMode::Ordinary
+                            }
+                            tau_proto::PromptOperation::StandaloneCompaction => {
+                                attempt_timing::ResponseMode::LocalSummary
+                            }
+                        }),
+                        ..attempt_timing::AttemptFacts::default()
+                    },
+                },
+                timing,
+                submit_provider_capture,
+            );
+        }
     }
     outcome
 }
@@ -2034,7 +2076,13 @@ async fn chat_completions_stream_async(
                     tau_provider::OutboundPhase::Body,
                 )?;
                 let outcome = parsed?;
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.associated_event();
+                }
                 if outcome.done {
+                    if let Some(trace) = private_trace.as_mut() {
+                        trace.terminal();
+                    }
                     return Ok((state, raw_events));
                 }
             }

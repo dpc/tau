@@ -98,6 +98,49 @@ fn disabled_target_selects_no_attempt_state() {
     });
 }
 
+/// Capture selection may retain the existing fixed scalar state without
+/// enabling the identity-free TRACE sink or allocating per-event storage.
+#[test]
+fn capture_selection_uses_small_fixed_state_without_trace_output() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut trace =
+            AttemptTrace::selected_for_capture(Backend::Codex, Transport::Websocket, true)
+                .expect("capture selects state");
+        let state_bytes = std::mem::size_of::<AttemptTrace>();
+        assert!(
+            state_bytes <= 384,
+            "attempt timing state unexpectedly grew to {state_bytes} bytes"
+        );
+        trace.record_dispatch();
+        trace.first_input(0);
+        trace.terminal();
+        let timing = trace.finish_with_timing(Outcome::Completed);
+        assert!(timing.dispatch_to_first_input_us.is_some());
+        assert!(timing.dispatch_to_terminal_us.is_some());
+        assert_eq!(timing.dispatch_count, 1);
+    });
+}
+
+/// Transparent repair must keep legacy TRACE first-input state while the timing
+/// capture reports final-dispatch coverage and bytes consistently.
+#[test]
+fn repair_resets_final_dispatch_input_without_rewriting_legacy_first_input() {
+    let mut trace = AttemptTrace::selected_for_capture(Backend::Codex, Transport::Websocket, true)
+        .expect("capture selects state");
+    trace.record_dispatch();
+    trace.first_input(41);
+    trace.semantic_qualified();
+    trace.record_dispatch();
+    let timing = trace.finish_with_timing(Outcome::Failed);
+    assert_eq!(timing.dispatch_count, 2);
+    assert_eq!(timing.dispatch_to_first_input_us, None);
+    assert_eq!(timing.first_input_bytes, 0);
+    assert_eq!(timing.dispatch_to_first_semantic_us, None);
+}
+
 /// The production callsite exposes one exact fixed scalar/class schema and no
 /// field capable of acquiring a prompt, identifier, endpoint, or raw error.
 #[test]

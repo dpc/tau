@@ -24,6 +24,21 @@ record is at most 256 KiB; identity strings are at most 128 UTF-8 bytes.
 The harness still authenticates typed attribution and writes opaque bytes under
 existing private paths and diagnostic retention, without interpreting the schema.
 
+The `provider-attempt-timing` class is a second bounded scalar exception selected
+only where the existing durable exact request/response capture policy permits it.
+Each record is capped at 8 KiB before shared FIFO admission. Its closed schema
+permits typed prompt/session and private attempt correlation, provider
+backend/transport/model/profile labels, fixed operation/outcome/reuse/repair
+classes, monotonic durations, bounded counters, response-local token usage, and
+small workload booleans or limits. It cannot accept arbitrary JSON, arrays,
+provider events or prose, request/response payloads, endpoints, headers,
+credentials, account data, or error bodies. It uses the existing authenticated
+writer, owner-private path, best-effort loss behavior, and diagnostic retention;
+its extra FIFO job can increase loss of other captures under saturation.
+Revisit this boundary with focused security and privacy review before adding a
+field or classifier, loosening a type or identifier bound, increasing the 8 KiB
+limit, changing selection/attribution, or separating admission/retention.
+
 Provider startup captures one immutable `Arc<OutboundNetworkPolicy>`. The
 policy reads lowercase proxy variables before their uppercase forms, selects
 `HTTP_PROXY`/`http_proxy` for HTTP and WS, selects

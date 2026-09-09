@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use tau_provider::debug_capture_writer::ProviderDebugCaptureClass;
 use tokio::runtime as path_tokio_runtime;
 use tungstenite::Message;
 use tungstenite::handshake::server::Request as WebSocketRequest;
@@ -239,15 +240,17 @@ fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
     );
 
     let captures = captures.lock().expect("capture lock");
+    assert_eq!(captures.len(), 5, "three eligible attempts add timing");
     assert_eq!(
-        captures.len(),
-        2,
-        "disabled and canceled attempts add nothing"
+        captures
+            .iter()
+            .filter(|capture| capture.class() == ProviderDebugCaptureClass::ProviderAttemptTiming)
+            .count(),
+        3
     );
-    assert!(captures.iter().all(|capture| capture.class()
-        == tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse));
     let values = captures
         .iter()
+        .filter(|capture| capture.class() == ProviderDebugCaptureClass::HttpSseResponse)
         .map(|capture| serde_json::from_slice::<Value>(capture.json()).expect("failure capture"))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -272,14 +275,18 @@ fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
 #[test]
 fn public_attempt_applies_debug_capture_policy_to_successful_streams() {
     let enabled = successful_public_sse_captures(true, tau_proto::PromptOperation::Inference);
-    assert_eq!(enabled.len(), 2);
+    assert_eq!(enabled.len(), 3);
     assert_eq!(
         enabled[0].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
+        ProviderDebugCaptureClass::HttpSseRequest
     );
     assert_eq!(
         enabled[1].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+        ProviderDebugCaptureClass::HttpSseResponse
+    );
+    assert_eq!(
+        enabled[2].class(),
+        ProviderDebugCaptureClass::ProviderAttemptTiming
     );
     assert!(
         successful_public_sse_captures(false, tau_proto::PromptOperation::Inference).is_empty()
@@ -287,7 +294,7 @@ fn public_attempt_applies_debug_capture_policy_to_successful_streams() {
     assert_eq!(
         successful_public_sse_captures(true, tau_proto::PromptOperation::StandaloneCompaction)
             .len(),
-        2
+        3
     );
 }
 
@@ -2255,14 +2262,14 @@ fn http_sse_attempt_posts_responses_and_completes() {
                 == r#"{"type":"reasoning","id":"rs_sse","encrypted_content":"SEALED-SSE","summary":[]}"#
     ));
     let captures = captures.lock().expect("capture lock");
-    assert_eq!(captures.len(), 2);
+    assert_eq!(captures.len(), 3);
     assert_eq!(
         captures[0].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
+        ProviderDebugCaptureClass::HttpSseRequest
     );
     assert_eq!(
         captures[1].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+        ProviderDebugCaptureClass::HttpSseResponse
     );
     let request: Value = serde_json::from_slice(captures[0].json()).expect("request capture");
     assert_eq!(request["body"]["stream"], true);
@@ -3013,17 +3020,17 @@ fn websocket_attempt_uses_response_create_protocol() {
                 == r#"{"type":"reasoning","id":"rs_ws","summary":[{"type":"summary_text","text":"brief"}]}"#
     ));
     let captures = captures.lock().expect("capture lock");
-    assert_eq!(captures.len(), 2);
+    assert_eq!(captures.len(), 3);
     assert_eq!(
         captures[0].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
+        ProviderDebugCaptureClass::WebsocketRequest
     );
     let request: Value = serde_json::from_slice(captures[0].json()).expect("request capture");
     assert_eq!(request["body"]["type"], "response.create");
     assert!(request["body"].get("stream").is_none());
     assert_eq!(
         captures[1].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
+        ProviderDebugCaptureClass::WebsocketResponse
     );
 }
 
@@ -3233,12 +3240,12 @@ fn websocket_auth_rejected_upgrade_is_retryable() {
     let captures = captures.lock().expect("capture lock");
     assert_eq!(
         captures.len(),
-        1,
+        2,
         "upgrade failure sends no response.create"
     );
     assert_eq!(
         captures[0].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
+        ProviderDebugCaptureClass::WebsocketResponse
     );
     let error: Value = serde_json::from_slice(captures[0].json()).expect("error capture");
     assert_eq!(error["error"]["body"], "[image data omitted]");
@@ -3473,10 +3480,14 @@ fn websocket_stalled_peer_cancels_without_close_wait() {
         });
     assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(captures.len(), 1, "cancellation adds no response artifact");
+    assert_eq!(
+        captures.len(),
+        2,
+        "cancellation adds only its timing artifact"
+    );
     assert_eq!(
         captures[0].class(),
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
+        ProviderDebugCaptureClass::WebsocketRequest
     );
 }
 

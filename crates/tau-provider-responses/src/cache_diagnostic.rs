@@ -70,6 +70,11 @@ impl CacheAttempt {
         self.dispatched.load(Ordering::Relaxed).then_some(1)
     }
 
+    /// Return the owner-supplied finite attempt when available.
+    pub(super) fn provider_attempt(&self) -> Option<tau_proto::ProviderAttempt> {
+        self.provider_attempt
+    }
+
     /// Observe the already-parsed terminal usage before canonical
     /// normalization.
     pub(super) fn record_usage(&self, usage: Option<&Value>) {

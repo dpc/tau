@@ -477,6 +477,7 @@ pub(super) async fn stream(
                     }
                 };
                 if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+                    trace.associated_event();
                     trace.decoded(started, qualifying_progress);
                 }
                 on_update(AttemptUpdate::Progress(state.progress_view()));
@@ -484,6 +485,9 @@ pub(super) async fn stream(
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }
                 if state.terminal.is_some() {
+                    if let Some(trace) = private_trace.as_mut() {
+                        trace.terminal();
+                    }
                     return Ok(state);
                 }
             }

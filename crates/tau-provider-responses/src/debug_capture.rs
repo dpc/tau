@@ -8,7 +8,10 @@ use std::{cell::RefCell, thread_local};
 
 use serde::Serialize;
 use serde_json::Value;
-use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
+use tau_provider::{
+    debug_capture_writer as path_tau_provider_debug_capture_writer,
+    provider_attempt_timing as attempt_timing,
+};
 
 use super::{
     AttemptConfig, AttemptModel, AttemptProgress, Error, ProviderTokenUsage, RequestBody, State,
@@ -79,6 +82,50 @@ struct Events {
 }
 
 impl DebugCapture {
+    /// Return whether the existing durable-session exact-capture policy
+    /// selected this attempt.
+    pub(super) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Submit one lean timing record through the same selected capture sink.
+    pub(super) fn submit_timing(
+        &self,
+        prompt: &tau_proto::AgentPromptCreated,
+        model: &AttemptModel,
+        timing: tau_provider::private_attempt_trace::AttemptTiming,
+        facts: attempt_timing::AttemptFacts,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        attempt_timing::submit_with(
+            attempt_timing::CaptureMetadata {
+                session_id: &prompt.session_id,
+                agent_prompt_id: &prompt.agent_prompt_id,
+                model: model.id.as_str(),
+                profile: None,
+                operation: match prompt.operation {
+                    tau_proto::PromptOperation::Inference => "inference",
+                    tau_proto::PromptOperation::StandaloneCompaction => "compact",
+                },
+                logical_attempt: self
+                    .cache
+                    .as_ref()
+                    .and_then(|cache| cache.provider_attempt())
+                    .map(tau_proto::ProviderAttempt::get)
+                    .map(u64::from),
+                attempt_id: self.cache.as_ref().map(|cache| cache.id.to_hex()),
+                final_wire_dispatch_index: (timing.dispatch_count > 0)
+                    .then_some(u64::from(timing.dispatch_count)),
+                repair_reason: "none",
+                facts,
+            },
+            timing,
+            |capture| (self.sink)(capture),
+        );
+    }
+
     /// Construct capture state for one attempt under the extension's policy.
     pub(super) fn new(enabled: bool) -> Self {
         #[cfg(test)]

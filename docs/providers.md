@@ -30,6 +30,65 @@ and does not alter prompts, provider traffic, retries or accounting. Other
 adapters and per-item attribution are not yet supported. See
 [Private runtime metadata](agent-cache.md#private-runtime-metadata).
 
+## Provider attempt timing diagnostics
+
+Eligible durable prompts produce one bounded scalar timing record for each
+finite Codex, public Responses, or Chat Completions attempt. The record uses the
+same default exact-capture selection, authenticated best-effort worker, private
+session directory, and diagnostic retention as request and response captures:
+
+```text
+<session>/debug/provider-requests/<provider-instance>/
+  <timestamp>-<agent-prompt-id>-provider-attempt-timing.json.zst
+```
+
+`tau.provider_attempt_timing` schema version 1 and metric-definition version 1
+measure provider-process monotonic microseconds. They do not measure remote
+request acceptance, inference start, individual token timing, server routing or
+queue time, network-only latency, or canonical harness publication. A missing
+record or nullable milestone means it was not observed; it never means zero.
+True zero values remain zero.
+
+The common fields are:
+
+- `attempt_total`: adapter attempt entry through the timing snapshot taken after
+  outcome and existing diagnostic finalization, immediately before constructing
+  this timing record; it excludes its own JSON construction, queue submission,
+  and the final return instructions;
+- `prepare`: lowering plus serialization, without claiming a complete exclusive
+  subtotal;
+- `pool_wait`, `connect_upgrade`, `enqueue_or_send`, and `decode_total`: totals
+  around existing adapter-owned boundaries;
+- `final_dispatch_to_first_owner_dequeued_input`: first body chunk or WebSocket
+  message dequeued by the current owner, including local buffering;
+- `final_dispatch_to_first_associated_event`: first decoded event the adapter can
+  associate with the final dispatch;
+- optional first text, reasoning, and actionable-item milestones where the
+  adapter already has a cheap classifier;
+- `final_dispatch_to_first_semantic`: existing provider-stream semantic
+  qualification;
+- `final_dispatch_to_terminal` and `terminal_to_return`: provider terminal
+  recognition and remaining work through that same pre-timing-capture snapshot.
+
+Transparent repair replaces the response-relative origin with the final wire
+dispatch while preserving dispatch count, connection state, and repair reason.
+The record is capped at 8 KiB before shared queue admission. Queue saturation,
+worker failure, process exit, and retention cleanup may omit it, and the extra
+record competes with exact captures under the existing FIFO admission policy.
+No reader waits after terminal, so queued Codex idle-tail frames are outside
+coverage.
+
+For direct owner-private inspection:
+
+```console
+zstdcat -- *-provider-attempt-timing.json.zst |
+  jq -c '{provider,attempt,timings_us,counts,coverage,facts}'
+```
+
+Model, profile, prompt, attempt, usage, and workload fields remain private.
+Compare like model, transport, operation, settings, reuse state, and workload;
+keep repaired, failed, and canceled attempts separate.
+
 Tau keeps each backend's provider-visible request meaning stable whenever only
 local prompt correlation changes or a newest conversation turn is appended.
 System/developer authority, ordered history, full tool definitions and schemas,

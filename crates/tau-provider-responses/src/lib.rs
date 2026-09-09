@@ -28,7 +28,7 @@ use tau_provider::cache_diagnostic::CacheDiagnostics;
 use tau_provider::retry_policy::{RetryClass, RetryDecision, classify_error_code};
 use tau_provider::{
     StreamRepetition, StreamRepetitionGuard, StreamRepetitionKey,
-    private_attempt_trace as private_trace,
+    private_attempt_trace as private_trace, provider_attempt_timing as attempt_timing,
 };
 use tokio::runtime as path_tokio_runtime;
 
@@ -765,26 +765,45 @@ fn run_attempt_with_capture_and_updates(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
-    let mut private_trace =
-        private_trace::AttemptTrace::selected_with(private_trace::Backend::PublicResponses, || {
-            match config.transport {
-                Transport::Sse => private_trace::Transport::HttpSse,
-                Transport::Websocket => private_trace::Transport::Websocket,
-            }
-        });
+    let trace_transport = match config.transport {
+        Transport::Sse => private_trace::Transport::HttpSse,
+        Transport::Websocket => private_trace::Transport::Websocket,
+    };
+    let mut private_trace = private_trace::AttemptTrace::selected_for_capture(
+        private_trace::Backend::PublicResponses,
+        trace_transport,
+        debug_capture.enabled(),
+    );
     let initial = AttemptProgress {
         output_items: Vec::new(),
         response_bytes_received: 0,
         has_timed_semantic_output: false,
     };
     if is_canceled() {
-        finish_private_trace(&mut private_trace, private_trace::Outcome::Canceled);
+        finish_attempt_timing(
+            &mut private_trace,
+            &debug_capture,
+            prompt,
+            config,
+            model,
+            private_trace::Outcome::Canceled,
+            None,
+        );
         return AttemptOutcome::Canceled { progress: initial };
     }
     let body = match build_request(prompt, config, model) {
         Ok(body) => body,
         Err(error) => {
             debug_capture.submit_error(prompt, config, model, &error, &initial);
+            finish_attempt_timing(
+                &mut private_trace,
+                &debug_capture,
+                prompt,
+                config,
+                model,
+                private_trace::Outcome::Failed,
+                None,
+            );
             return terminal(error, initial);
         }
     };
@@ -798,6 +817,15 @@ fn run_attempt_with_capture_and_updates(
         Ok(runtime) => runtime,
         Err(_) => {
             debug_capture.submit_error(prompt, config, model, &Error::StreamFailure, &initial);
+            finish_attempt_timing(
+                &mut private_trace,
+                &debug_capture,
+                prompt,
+                config,
+                model,
+                private_trace::Outcome::Failed,
+                None,
+            );
             return terminal(Error::StreamFailure, initial);
         }
     };
@@ -812,7 +840,7 @@ fn run_attempt_with_capture_and_updates(
         network,
         &mut private_trace,
     ));
-    match result {
+    let outcome = match result {
         Ok(mut state) if state.terminal.is_some() => {
             let stop_reason = match state.terminal.expect("guarded terminal state") {
                 TerminalKind::MaxOutputTokens => ProviderStopReason::Length,
@@ -828,7 +856,6 @@ fn run_attempt_with_capture_and_updates(
             };
             if state.has_incomplete_reasoning() {
                 let progress = state.progress();
-                finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
                 debug_capture.submit_error(
                     prompt,
                     config,
@@ -839,11 +866,9 @@ fn run_attempt_with_capture_and_updates(
                 terminal(Error::UnsupportedOutput, progress)
             } else if !state.has_output_items() && stop_reason != ProviderStopReason::Length {
                 let progress = state.progress();
-                finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
                 debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
                 terminal(Error::EmptyResponse, progress)
             } else {
-                finish_private_trace(&mut private_trace, private_trace::Outcome::Completed);
                 state
                     .debug_capture
                     .submit_response(prompt, config, model, &state, stop_reason);
@@ -861,38 +886,71 @@ fn run_attempt_with_capture_and_updates(
             }
         }
         Ok(state) => {
-            finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
             let progress = state.progress();
             debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
             terminal(Error::EmptyResponse, progress)
         }
-        Err((Error::Canceled, progress)) => {
-            finish_private_trace(&mut private_trace, private_trace::Outcome::Canceled);
-            AttemptOutcome::Canceled { progress }
-        }
+        Err((Error::Canceled, progress)) => AttemptOutcome::Canceled { progress },
         Err((error, progress)) => {
             debug_capture.submit_error(prompt, config, model, &error, &progress);
             match error.retry() {
-                Some(decision) => {
-                    finish_private_trace(&mut private_trace, private_trace::Outcome::Retryable);
-                    AttemptOutcome::Retryable { decision, progress }
-                }
-                None => {
-                    finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
-                    terminal(error, progress)
-                }
+                Some(decision) => AttemptOutcome::Retryable { decision, progress },
+                None => terminal(error, progress),
             }
         }
-    }
+    };
+    let trace_outcome = match &outcome {
+        AttemptOutcome::Completed(_) => private_trace::Outcome::Completed,
+        AttemptOutcome::Canceled { .. } => private_trace::Outcome::Canceled,
+        AttemptOutcome::Retryable { .. } => private_trace::Outcome::Retryable,
+        AttemptOutcome::Terminal(_) => private_trace::Outcome::Failed,
+    };
+    let usage = match &outcome {
+        AttemptOutcome::Completed(success) => success.usage.as_ref(),
+        _ => None,
+    };
+    finish_attempt_timing(
+        &mut private_trace,
+        &debug_capture,
+        prompt,
+        config,
+        model,
+        trace_outcome,
+        usage,
+    );
+    outcome
 }
 
-/// Finish enabled private tracing without introducing work on the plain path.
-fn finish_private_trace(
+/// Finish the shared scalar observation and submit it under existing capture
+/// selection.
+fn finish_attempt_timing(
     trace: &mut Option<private_trace::AttemptTrace>,
+    debug_capture: &DebugCapture,
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
     outcome: private_trace::Outcome,
+    usage: Option<&ProviderTokenUsage>,
 ) {
     if let Some(trace) = trace.take() {
-        trace.finish(outcome);
+        let timing = trace.finish_with_timing(outcome);
+        debug_capture.submit_timing(
+            prompt,
+            model,
+            timing,
+            attempt_timing::AttemptFacts {
+                max_output_tokens: Some(config.max_output_tokens),
+                tool_enabled: Some(!prompt.tools.is_empty()),
+                usage: usage.map(attempt_timing::ResponseUsage::from_provider),
+                response_mode: Some(match prompt.operation {
+                    tau_proto::PromptOperation::Inference => attempt_timing::ResponseMode::Ordinary,
+                    tau_proto::PromptOperation::StandaloneCompaction => {
+                        attempt_timing::ResponseMode::LocalSummary
+                    }
+                }),
+                ..attempt_timing::AttemptFacts::default()
+            },
+        );
     }
 }
 
@@ -2075,11 +2133,17 @@ fn process_active_sse_lines(
         if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
             if data == "[DONE]" {
                 state.terminalize(TerminalKind::Completed)?;
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.terminal();
+                }
                 return Ok(SseLineControl::Break);
             }
             let qualifying_progress = state.apply_event(data)?;
-            if qualifying_progress && let Some(trace) = private_trace.as_mut() {
-                trace.semantic_qualified();
+            if let Some(trace) = private_trace.as_mut() {
+                trace.associated_event();
+                if qualifying_progress {
+                    trace.semantic_qualified();
+                }
             }
             let callback_started = private_trace::started(private_trace);
             on_update(AttemptUpdate::Progress(state.progress_view()));
@@ -2090,6 +2154,9 @@ fn process_active_sse_lines(
                 deadlines.renew_for_qualifying_progress(now());
             }
             if state.terminal.is_some() {
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.terminal();
+                }
                 return Ok(SseLineControl::Break);
             }
         }

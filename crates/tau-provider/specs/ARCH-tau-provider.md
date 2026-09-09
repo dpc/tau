@@ -26,6 +26,16 @@ share the ordinary non-preemptive extension IPC writer: a terminal queued after
 an already-started capture frame waits for that frame, with no capture-specific
 terminal gate, priority scheduler, or second stream.
 
+Eligible exact-capture attempts may also retain one
+`tau.provider_attempt_timing` schema-v1 scalar record, capped at 8 KiB before
+the same FIFO admission. The shared carrier reuses already-owned monotonic stage
+observations and adds only fixed first-seen milestones; it retains no event list,
+payload, provider prose, endpoint, or credential. Backend adapters supply their
+existing prompt, model, attempt, workload, outcome, and nullable coverage facts.
+The record creates no canonical timing, usage, event, journal, scheduler, reader,
+writer, or retention authority. Its extra FIFO job can increase best-effort loss
+of other captures under saturation.
+
 Scalar `cache-diagnostic` captures additionally reserve a full 256-KiB record
 through transport completion, capped at 64 reservations / 16 MiB including
 in-flight serialized data. Admission allocates a process-local sequence before

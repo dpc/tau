@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tau_provider::cache_diagnostic::CacheDiagnostics;
-use tau_provider::local_summary_compaction;
+use tau_provider::{local_summary_compaction, provider_attempt_timing as attempt_timing};
 
 use crate::cache_diagnostic::{CacheAttempt, CompactEvidence};
 use crate::common::{LlmError, OutputItemAccumulator};
@@ -28,14 +28,39 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
+        let mut trace = private_trace::AttemptTrace::selected_for_capture(
+            private_trace::Backend::Codex,
+            private_trace::Transport::Websocket,
+            request.debug_provider_requests,
+        );
         if abort.is_aborted() {
-            return CompactOutcome::Canceled {
+            let outcome = CompactOutcome::Canceled {
                 backend_reached: false,
             };
+            finish_local_timing(
+                &mut trace,
+                agent_prompt_id,
+                logical_attempt,
+                config,
+                request,
+                None,
+                &outcome,
+            );
+            return outcome;
         }
         let mut context = request.context.clone();
         if let Err(error) = local_summary_compaction::replace_trailing_trigger(&mut context) {
-            return invalid_output(error, false);
+            let outcome = invalid_output(error, false);
+            finish_local_timing(
+                &mut trace,
+                agent_prompt_id,
+                logical_attempt,
+                config,
+                request,
+                None,
+                &outcome,
+            );
+            return outcome;
         }
         let summary_request = Prompt {
             system_prompt: request.system_prompt,
@@ -53,10 +78,20 @@ impl CodexRuntime {
         // Start a fresh chain with the exact ordinary prefix, not an anchor
         // representing the native attempt or a discarded summary.
         if let Err(error) = self.ws_pool.invalidate(config.wire(), request) {
-            return CompactOutcome::Terminal {
+            let outcome = CompactOutcome::Terminal {
                 error: CodexError(error.into_llm_error()),
                 backend_reached: false,
             };
+            finish_local_timing(
+                &mut trace,
+                agent_prompt_id,
+                logical_attempt,
+                config,
+                request,
+                None,
+                &outcome,
+            );
+            return outcome;
         }
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Compact, logical_attempt);
         let metadata_enabled = self
@@ -76,10 +111,6 @@ impl CodexRuntime {
         .map(Arc::new);
         attempt.correlation().diagnostic = diagnostic.clone();
         let mut backend_reached = false;
-        let mut trace = private_trace::AttemptTrace::selected(
-            private_trace::Backend::Codex,
-            private_trace::Transport::Websocket,
-        );
         let result = self.stream(
             agent_prompt_id,
             config.wire(),
@@ -121,15 +152,91 @@ impl CodexRuntime {
         if let Some(diagnostic) = diagnostic {
             diagnostic.finish_compact(&outcome, evidence, attempt.snapshot(), config.wire());
         }
-        if let Some(trace) = trace {
-            trace.finish(match &outcome {
-                CompactOutcome::Finished { .. } => private_trace::Outcome::Completed,
-                CompactOutcome::Canceled { .. } => private_trace::Outcome::Canceled,
-                _ => private_trace::Outcome::Failed,
-            });
-        }
+        finish_local_timing(
+            &mut trace,
+            agent_prompt_id,
+            logical_attempt,
+            config,
+            request,
+            Some(&mut attempt),
+            &outcome,
+        );
         outcome
     }
+}
+
+/// Finalize one local-summary timing record without changing compaction
+/// outcome.
+fn finish_local_timing(
+    trace: &mut Option<private_trace::AttemptTrace>,
+    agent_prompt_id: &str,
+    logical_attempt: LogicalAttempt,
+    config: &ResolvedConfig,
+    request: &Prompt<'_>,
+    mut attempt: Option<&mut ProviderAttemptContext>,
+    outcome: &CompactOutcome,
+) {
+    let Some(trace) = trace.take() else {
+        return;
+    };
+    let trace_outcome = match outcome {
+        CompactOutcome::Finished { .. } => private_trace::Outcome::Completed,
+        CompactOutcome::Canceled { .. } => private_trace::Outcome::Canceled,
+        CompactOutcome::Retry { .. } => private_trace::Outcome::Retryable,
+        CompactOutcome::Terminal { .. } | CompactOutcome::RouteUnavailable { .. } => {
+            private_trace::Outcome::Failed
+        }
+    };
+    let timing = trace.finish_with_timing(trace_outcome);
+    if !request.debug_provider_requests {
+        return;
+    }
+    let Ok(agent_prompt_id) = tau_proto::AgentPromptId::parse(agent_prompt_id) else {
+        return;
+    };
+    let snapshot = attempt.as_ref().map(|attempt| attempt.snapshot());
+    let repair_reason = attempt
+        .as_mut()
+        .map_or("none", |attempt| attempt.correlation().repair_reason());
+    attempt_timing::submit(
+        attempt_timing::CaptureMetadata {
+            session_id: request.session_id,
+            agent_prompt_id: &agent_prompt_id,
+            model: &config.wire().model_id,
+            profile: Some(config.wire().profile_namespace.as_str()),
+            operation: "compact",
+            logical_attempt: Some(logical_attempt.get()),
+            attempt_id: snapshot.and_then(|snapshot| snapshot.attempt_id.map(|id| id.to_hex())),
+            final_wire_dispatch_index: snapshot
+                .filter(|snapshot| snapshot.wire_dispatches() > 0)
+                .map(|snapshot| snapshot.wire_dispatches()),
+            repair_reason,
+            facts: attempt_timing::AttemptFacts {
+                usage: match outcome {
+                    CompactOutcome::Finished { usage, .. } => usage
+                        .as_ref()
+                        .map(attempt_timing::ResponseUsage::from_provider),
+                    _ => None,
+                },
+                response_mode: Some(attempt_timing::ResponseMode::LocalSummary),
+                backend_reached: Some(match outcome {
+                    CompactOutcome::Finished { .. } => true,
+                    CompactOutcome::Canceled { backend_reached }
+                    | CompactOutcome::Retry {
+                        backend_reached, ..
+                    }
+                    | CompactOutcome::Terminal {
+                        backend_reached, ..
+                    }
+                    | CompactOutcome::RouteUnavailable {
+                        backend_reached, ..
+                    } => *backend_reached,
+                }),
+                ..attempt_timing::AttemptFacts::default()
+            },
+        },
+        timing,
+    );
 }
 
 /// Reject raw tool/unknown slots too, including incomplete calls that ordinary
