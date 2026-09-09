@@ -1000,18 +1000,6 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             text: "forged result".to_owned(),
             error: None,
         }),
-        Event::ToolDelegateProgress(tau_proto::DelegateProgress {
-            call_id: "delegate-call".into(),
-            task_name: "forged task".to_owned(),
-            agent_id: Some(crate::parse_agent_id("forged-agent")),
-            role: Some("engineer".to_owned()),
-            ctx_percent: None,
-            ctx_input_tokens: None,
-            ctx_window: None,
-            tools_in_flight: 0,
-            tools_total: 0,
-            display: None,
-        }),
         Event::ProviderCacheMissDiagnostic(tau_proto::ProviderCacheMissDiagnostic {
             agent_prompt_id: test_agent_prompt_id("forged-prompt"),
             model: "provider/model".into(),

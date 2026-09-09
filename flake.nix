@@ -312,9 +312,12 @@
                      ${nextestReporterArgs} \
                      -E 'package(dpc-tau-e2e-tests) & (binary(deterministic_provider) | binary(cancellation_liveness))'
                  if test "$(uname -s)" = Linux; then
-                   # The provider-builtin retry gate runs its exact Cargo-built
-                   # executable against a fixture-owned loopback HTTP/SSE server.
-                   export TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/$CARGO_PROFILE/tau-ext-provider-builtin"
+                    # The provider-builtin retry gate runs its exact Cargo-built
+                    # executable against a fixture-owned loopback HTTP/SSE server.
+                    cargo build --locked --profile "$CARGO_PROFILE" \
+                      -p dpc-tau-ext-provider-builtin \
+                      --bin tau-ext-provider-builtin
+                    export TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/$CARGO_PROFILE/tau-ext-provider-builtin"
                    # The provider's documented additive-CA input accepts only
                    # certificate PEM blocks. Nix's source bundle also carries
                    # NSS trust labels, so derive the narrow fixture input here.

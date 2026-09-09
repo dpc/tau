@@ -147,7 +147,6 @@ fn curated_provider_vcr_replay_only_lane() {
             originator: &originator,
             session_id: &session_id,
             agent_id: &agent_id,
-            share_user_cache_key: false,
             debug_provider_requests: false,
         };
         let request_projection = serde_json::json!({

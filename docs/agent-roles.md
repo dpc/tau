@@ -21,7 +21,6 @@ configuration. `--profile focused,review` applies only `profiles.focused` then
   `{ reserve: 25000 }`
 - `compactions`: named harness-scheduled standalone policies; each selects a
   `threshold` or `reserve` boundary plus an optional lifecycle/status condition
-- `compaction`: legacy shorthand normalized into both domains above
 
 For `effort`, use `increase:<decimal>` or `decrease:<decimal>` with a positive
 magnitude. Relative effort keeps the exact signed millionth result even outside
@@ -48,7 +47,7 @@ A role can also set:
 - `enable_tool_groups`: tool groups added after role group disables
 - `disable_tools`: internal tools removed after role group changes
 - `enable_tools`: internal tools added last
-- `required_skills` / `requiredSkills`: exact skill names that must be
+- `required_skills`: exact skill names that must be
   discoverable and model-loadable before the role is available
 
 System prompt templates receive `agent_id` when Tau dispatches a prompt for a
@@ -145,7 +144,7 @@ agents:
 ```
 
 The same global fragment path is available to one-shot harness config overrides,
-for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", priority:
+for example `--harness-config 'agents.prompt_fragments=[{ name: "run.policy", priority:
 65, text: "Follow the run policy." }]'`.
 
 ## Provider and model aliases
@@ -236,7 +235,7 @@ can select a role it creates or enables.
 Its selected default supersedes the base setting, while a later
 `--harness-config agents.default_role=...` override supersedes the profile. Set
 `agents.default_role: null` in a profile to clear a base default and fall back
-to configured role order. The `defaultRole` alias is also accepted. Extension
+to configured role order. Extension
 config maps merge recursively; arrays, scalars, nested nulls, and type
 mismatches replace, while top-level `config: null` remains absent/no-op.
 Profiles do not expose per-instance outer extension fields or unrelated harness
@@ -297,10 +296,10 @@ agents:
 
 Tau supplies a built-in `default` policy at `before_inference` with
 `threshold: context_limit_safe`. Additional named policies augment it rather
-than shadowing it. Set `compactions.default.enable: false` to opt out; legacy
-`compaction: disabled` remains a replace-all opt-out. `context_limit_safe`
+than shadowing it. Set `compactions.default.enable: false` to opt out.
+`context_limit_safe`
 resolves the adapter-published safe scheduling threshold;
-`provider_default` remains a compatibility spelling for the same value.
+`provider_default` selects the model's published standalone threshold.
 An explicit `reserve: N` resolves against the selected provider-qualified
 model as `input_token_limit - N`; `threshold` and `reserve` are mutually
 exclusive. The input limit is `min(context_window, max_input_tokens)` when the
@@ -357,8 +356,7 @@ agents:
 ```
 
 Group values are defaults and role values override them with normal role
-layering; `null` clears an inherited value. Camel-case
-`interSessionReceiver`/`interSessionAutoStart` aliases are also accepted.
+layering; `null` clears an inherited value.
 Auto-start requires receiver capability. Multiple groups and multiple
 auto-start roles are valid.
 
@@ -390,11 +388,12 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
             order: 20,
             description: "Balanced coding engineer",
             model: "chatgpt/gpt-5.3-codex",
-            compaction: { reserve: 25000 },
+            inference_compaction: { reserve: 25000 },
+            compactions: { default: { reserve: 25000 } },
             tools: ["read", "grep"],
             enable_tool_groups: ["calendar", "email"],
             disable_tools: ["email_trash"],
-            requiredSkills: ["project-review-process"],
+            required_skills: ["project-review-process"],
           },
           "engineer-senior": {
             order: 30,
@@ -421,7 +420,7 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
 }
 ```
 
-Missing provider/model fields use `agents` defaults first, then group defaults, then provider-published fallback knobs for the role's resolved model. `required_skills` from `agents`, groups, and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:workdir`, or disable a group and keep one named tool. When the successor fields are omitted, `inference_compaction` uses the provider default and the built-in named `compactions.default` policy uses the model's published standalone threshold. Legacy `compaction` input sets both domains at its source layer, but later successor fields can override them independently. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+Missing provider/model fields use `agents` defaults first, then group defaults, then provider-published fallback knobs for the role's resolved model. `required_skills` from `agents`, groups, and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:workdir`, or disable a group and keep one named tool. When the successor fields are omitted, `inference_compaction` uses the provider default and the built-in named `compactions.default` policy uses the model's published standalone threshold. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
 Global harness policy is configured under `tool_policy`. Set `default_shell_tool_style` to `codex`, `edit`, or `replace` to choose the apply-patch, line-coordinate, or exact-text implementation. Missing, null, or whitespace-only values select exact-text `replace` except for ChatGPT/Codex models, which select `apply_patch`. Both non-Codex implementations are provider-visible as `edit`; their internal/configuration names remain distinct, so a role that enables both fails prompt construction with a duplicate visible name. Rules under `tool_policy.rules` are keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:workdir`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:read:image`, `shell:exec:shell_command`, `shell:workdir`, and `shell:lock`; image-producing tools remain independently gated by the exact provider route modalities. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 

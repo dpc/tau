@@ -48,10 +48,6 @@ pub struct PromptPayload<'a> {
     /// provenance, retry policy, and provider lifecycle events, but it must not
     /// affect prompt-cache routing.
     pub originator: &'a PromptOriginator,
-    /// Legacy request flag for callers that once requested the user's cache
-    /// bucket explicitly. Prompt-cache routing is now stable per agent, so this
-    /// no longer changes the wire `prompt_cache_key`.
-    pub share_user_cache_key: bool,
     /// Harness session this prompt belongs to. Used for debug paths and
     /// tracing; the Responses WebSocket pool keys upstream sockets by the
     /// prompt-cache UUID instead.

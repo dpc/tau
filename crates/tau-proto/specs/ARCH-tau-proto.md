@@ -1,5 +1,10 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 5.0 removes the obsolete `tool.delegate_progress` event schema.
+Major-skew admission rejects 4.x peers before they can send a formerly valid
+event to a decoder that no longer accepts it. Harness and peer integration must
+therefore coordinate rebuilds or updates before activation.
+
 Protocol 4.2 adds opt-in declaration inspection without changing ordinary
 startup. Hello's additive support field gates an explicit Configure purpose;
 runtime remains the omitted default. The terminal `inspection_complete` message

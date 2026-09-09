@@ -125,14 +125,17 @@ Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bin
 `core-shell` discovers and publishes project/user instructions and skills:
 
 - `AGENTS.md` and `AGENTS.*.md` from `$HOME/.config/agents/`,
-  `$HOME/.config/agents.local/`, legacy `$HOME/.agents/`, then legacy
-  `$HOME/.agents.local/`; both XDG and legacy user files are stacked when present
+  `$HOME/.config/agents.local/`, `$HOME/.agents/`, then
+  `$HOME/.agents.local/`; all supported user files are stacked when present.
+  Other coding harnesses may use the latter two locations; Tau supports them
+  for interoperability but prefers the XDG roots
 - `AGENTS.md` and `AGENTS.*.md` in current-working-directory ancestors, plus each
   ancestor's matching `.agents.local/AGENTS.md` and `.agents.local/AGENTS.*.md`
 - skills under project `.agents/skills` and `.agents.local/skills`, followed by
-  `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`, legacy
-  `$HOME/.agents/skills`, and legacy `$HOME/.agents.local/skills`
-- duplicate user-skill names from XDG skill roots beat legacy user roots before
+  `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`,
+  `$HOME/.agents/skills`, and `$HOME/.agents.local/skills`
+- duplicate user-skill names from XDG skill roots beat the supported alternate
+  user roots before
   modified-time collision resolution
 
 `tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and

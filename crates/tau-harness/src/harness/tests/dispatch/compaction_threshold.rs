@@ -223,52 +223,6 @@ fn invalid_reserve_blocks_activation_before_eligible_sibling_schedules() {
     )));
     h.shutdown().expect("shutdown");
 }
-
-/// The legacy fallback reserve is still an explicit role boundary and must not
-/// be mislabeled as provider-default authority in durable evidence.
-#[test]
-fn legacy_reserve_fallback_records_role_threshold_source() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
-    let cid = ensure_test_user_agent(&mut h);
-    establish_exact_provider_usage(&mut h, &cid, 90);
-    let info = h
-        .provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model");
-    info.context_window = tau_proto::TokenCount::new(100);
-    info.supports_standalone_compaction = true;
-    let role = h
-        .config
-        .available_roles
-        .get_mut(&h.config.selected_role)
-        .expect("selected role");
-    role.compactions.clear();
-    role.compaction = Some(path_tau_config_settings::RoleCompaction::Reserve(10));
-    role.inference_compaction = None;
-
-    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true));
-    let evidence = event_log_events(&h)
-        .into_iter()
-        .find_map(|event| match event {
-            Event::AgentStandaloneCompactionStarted(started) => match started.trigger {
-                tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence { evidence } => {
-                    Some(evidence)
-                }
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("automatic evidence");
-    assert_eq!(
-        evidence.threshold_source,
-        tau_proto::CompactionThresholdSource::RoleThreshold
-    );
-    h.shutdown().expect("shutdown");
-}
-
 /// Cold-restored usage must validate reserves against the separate legal input
 /// limit before a valid sibling can schedule standalone work.
 #[test]

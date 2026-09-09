@@ -90,18 +90,9 @@ paths. First-non-whitespace `:` command mode is intrinsic to the terminal and
 takes precedence over every configured completion rule, so user config cannot
 shadow command routing or inject unrelated candidates into command arguments.
 
-## Alias normalization
-
-Legacy camelCase keys are accepted for compatibility, but aliases are normalized
-per source layer before merging. A source that sets both a legacy alias and the
-canonical key is invalid and must report both names. The same canonicalization
-applies to YAML files and `--harness-config`, including YAML map values on the
-right-hand side.
-
-When adding or renaming a harness config field, update all alias handling paths
-(file-layer normalization, CLI override canonicalization, serde aliases where
-needed for direct patch parsing) and add regression coverage for both file and
-CLI override forms.
+Harness configuration files and dotted `--harness-config` overrides use the
+documented snake_case schema. Unknown spellings fail validation rather than
+being normalized across source layers.
 
 `session_retention`, `agent_retention`, and `diagnostic_retention` are
 independent nullable startup-cleanup policies. Values use a positive ASCII
@@ -162,9 +153,7 @@ separate retention knob.
 `tool_policy.rules` is a keyed layered map. Rule names may contain dots (for
 example `builtin.chatgpt-shell`), so dotted CLI overrides cannot naturally refer
 to such rule keys; use whole-map override values for those rules unless an
-escaping scheme is added. Rule aliases such as `enabled` must normalize inside
-each keyed rule before source layers merge, otherwise a higher-precedence alias
-can collide with a lower-precedence canonical key instead of overriding it.
+escaping scheme is added. Each keyed rule uses the canonical `enable` field.
 
 `tool_policy.default_shell_tool_style` selects the `codex` apply-patch, `edit`
 line-coordinate, or `replace` exact-text implementation before rules and role
@@ -182,7 +171,7 @@ array replacement:
 - Role sources retain their normal order (built-ins, files/drop-ins, selected
   profile stack, then ordered `--harness-config` layers) within each scope. After
   collecting them, `agents` defaults (`enable`, `visible`, `model`, `effort`, `verbosity`,
-  `thinking_summary`, `service_tier`, `compaction`, `inference_compaction`, and
+  `thinking_summary`, `service_tier`, `inference_compaction`, and
   named `compactions`) apply to every role,
   then role-group defaults, then per-role overrides. `agents.enable` defaults
   to true, as does `agents.visible`. A narrow role patch
@@ -207,10 +196,8 @@ array replacement:
   `when: null` resets to `before_inference` with any status,
   `when.statuses: null` clears the restriction, and a nonempty status list
   replaces it. Empty status lists and new rules without either boundary are invalid.
-  Legacy config `compaction` is a replace-all edit that normalizes into
-  `inference_compaction` plus `compactions.default`. The legacy interactive CLI
-  threshold command is intentionally different: it updates `default` while
-  preserving named siblings.
+  The interactive CLI threshold command updates `inference_compaction` and the
+  named `default` policy while preserving named siblings.
 - Patch fields distinguish absent, explicit `null`, and concrete values. `null`
   clears nullable/scalar fields; replacement lists can be cleared with `[]`.
 - `tools` is a nullable replacement list: `tools: null` clears an inherited
@@ -288,8 +275,7 @@ extension's initial readiness deadline as specified by
 
 `ExtensionEntry::tool_prefix` is presence-aware: absence inherits, explicit
 null clears, and a validated segmented ASCII string sets the immutable
-per-instance structural tool prefix. `toolPrefix` is normalized as a legacy
-camel-case alias in file and CLI layers. It is independent of the argv-wrapper
+per-instance structural tool prefix. It is independent of the argv-wrapper
 `prefix`. See
 [SPEC-extension-tool-prefixes](../../../specs/SPEC-extension-tool-prefixes.md).
 

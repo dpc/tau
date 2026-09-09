@@ -214,7 +214,7 @@ impl VcrFixture {
                 concat!(
                     "agents:\n",
                     "  default_role: vcr-e2e\n",
-                    "  idTemplate: main\n",
+                    "  id_template: main\n",
                     "  role_groups:\n",
                     "    e2e:\n",
                     "      roles:\n",

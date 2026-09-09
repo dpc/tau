@@ -105,8 +105,7 @@ rule name. Tag patterns are exact or terminal-prefix forms like `shell:*`. Rule
 names may contain dots, so CLI overrides should use a whole-map value, for
 example `tool_policy={{{{rules: {{{{builtin.chatgpt-shell: {{{{enable: false}}}}}}}}}}}}`.
 
-Agent-global, role-group, and role `required_skills` (camelCase alias
-`requiredSkills`) list exact skill names that must be discoverable and
+Agent-global, role-group, and role `required_skills` list exact skill names that must be discoverable and
 model-loadable before a role is available. Agent, group, and role requirements
 are additive and de-duplicated. Missing,
 hidden, or unreadable required skills emit a mandatory `harness.config_error`

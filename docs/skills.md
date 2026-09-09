@@ -13,10 +13,10 @@ Tau scans skills in priority order:
 1. Existing project `.agents/skills` and `.agents.local/skills` directories from the working directory's ancestors, broadest ancestor first and current directory last.
 2. `~/.config/agents/skills`
 3. `~/.config/agents.local/skills`
-4. Legacy `~/.agents/skills`
-5. Legacy `~/.agents.local/skills`
+4. `~/.agents/skills`
+5. `~/.agents.local/skills`
 
-When multiple skills use the same name, Tau keeps the candidate with the newest available modification time and reports the conflict as a collision. Skills with readable timestamps beat skills without timestamps. If timestamps are equal or unavailable, the earlier discovered candidate stays selected. User XDG skill roots (`~/.config/agents*`) explicitly beat legacy user skill roots (`~/.agents*`) before modified time is considered. Built-in skills use the harness binary build time as their timestamp, falling back to the executable file mtime when build metadata is unavailable.
+When multiple skills use the same name, Tau keeps the candidate with the newest available modification time and reports the conflict as a collision. Skills with readable timestamps beat skills without timestamps. If timestamps are equal or unavailable, the earlier discovered candidate stays selected. User XDG skill roots (`~/.config/agents*`) explicitly beat the supported alternate roots (`~/.agents*`) before modified time is considered. Other coding harnesses may store skills in these alternate locations; Tau supports them for interoperability but prefers the XDG locations. Built-in skills use the harness binary build time as their timestamp, falling back to the executable file mtime when build metadata is unavailable.
 
 Discovery is best-effort and bounded. Tau reads only the bounded frontmatter
 prefix needed for metadata, not the whole skill body, and skips a skill with a

@@ -75,7 +75,7 @@ prompts, answers, identifiers, and collections remain size-validated inputs.
 The separately maintained `tau-ext-swarm` project owns its detailed
 architecture and security documentation.
 
-The optional `std-pim` and legacy `std-email` configured instances are trusted
+The optional `std-pim` and alternate `std-email` configured instances are trusted
 same-user local executables supplied by the separately maintained
 `tau-ext-pim` project. That project owns their detailed provider, credential,
 storage, approval, and network security boundaries. Until the standalone

@@ -1062,11 +1062,6 @@ impl Harness {
         } else {
             tau_proto::ToolChoice::Auto
         };
-        // Legacy cache-sharing hint for older provider implementations. The
-        // first-party ChatGPT/Codex provider now derives cache keys only from
-        // base URL and target agent id, so prompt originator and this flag do
-        // not split cache buckets.
-        let share_user_cache_key = is_non_tool_ext_query;
         // Walk the agent's *own* branch, not whatever tree.head
         // currently points at. With multiple side agents
         // running concurrently their tree mutations interleave, so
@@ -1384,7 +1379,6 @@ impl Harness {
             model_params: prompt_params,
             tool_choice,
             originator,
-            share_user_cache_key,
             ctx_id,
             compaction,
             operation,

@@ -3225,7 +3225,6 @@ fn ui_observer_replays_requested_durable_facts_but_not_transient_progress() {
             originator: Default::default(),
             compaction: None,
 
-            share_user_cache_key: false,
             ctx_id: None,
             operation: tau_proto::PromptOperation::Inference,
         }),

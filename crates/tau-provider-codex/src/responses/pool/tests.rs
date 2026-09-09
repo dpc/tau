@@ -94,8 +94,8 @@ fn context_after_response(
 #[test]
 fn keys_distinguish_agents_under_same_account() {
     let cfg = make_config("https://chatgpt.com/backend-api", Some("acc"));
-    let a = pool_key_for(&cfg, "agent-a", tau_proto::PromptOriginator::User, false);
-    let b = pool_key_for(&cfg, "agent-b", tau_proto::PromptOriginator::User, false);
+    let a = pool_key_for(&cfg, "agent-a", tau_proto::PromptOriginator::User);
+    let b = pool_key_for(&cfg, "agent-b", tau_proto::PromptOriginator::User);
     assert_ne!(a, b);
 }
 
@@ -103,20 +103,19 @@ fn keys_distinguish_agents_under_same_account() {
 fn keys_ignore_prompt_originator_buckets() {
     // Upgrade headers are fixed for the socket lifetime, so the pool must
     // follow the prompt-cache UUID exactly. Since the cache key is stable
-    // per agent, originator changes and the legacy share-user flag must not
-    // split sockets.
+    // per agent, originator changes must not split sockets.
     let cfg = make_config("https://chatgpt.com/backend-api", Some("acc"));
-    let user = pool_key_for(&cfg, "agent", tau_proto::PromptOriginator::User, false);
+    let user = pool_key_for(&cfg, "agent", tau_proto::PromptOriginator::User);
     let ext = tau_proto::PromptOriginator::Extension {
         name: tau_proto::ExtensionName::parse("__harness__")
             .expect("test extension name must satisfy the identifier grammar"),
         query_id: "delegate-1".into(),
     };
-    let default_ext = pool_key_for(&cfg, "agent", ext.clone(), false);
-    let shared_ext = pool_key_for(&cfg, "agent", ext, true);
+    let first_ext = pool_key_for(&cfg, "agent", ext.clone());
+    let second_ext = pool_key_for(&cfg, "agent", ext);
 
-    assert_eq!(user, default_ext);
-    assert_eq!(user, shared_ext);
+    assert_eq!(user, first_ext);
+    assert_eq!(user, second_ext);
 }
 
 #[test]
@@ -125,13 +124,11 @@ fn keys_distinguish_accounts_under_same_thread_id() {
         &make_config("https://chatgpt.com/backend-api", Some("acc-1")),
         "agent",
         tau_proto::PromptOriginator::User,
-        false,
     );
     let b = pool_key_for(
         &make_config("https://chatgpt.com/backend-api", Some("acc-2")),
         "agent",
         tau_proto::PromptOriginator::User,
-        false,
     );
     assert_ne!(a, b);
 }
@@ -148,8 +145,8 @@ fn keys_distinguish_profiles_with_identical_socket_realm() {
         profile_namespace: tau_proto::ProviderName::new("work-chatgpt"),
         ..first.clone()
     };
-    let first_key = pool_key_for(&first, "agent", tau_proto::PromptOriginator::User, false);
-    let second_key = pool_key_for(&second, "agent", tau_proto::PromptOriginator::User, false);
+    let first_key = pool_key_for(&first, "agent", tau_proto::PromptOriginator::User);
+    let second_key = pool_key_for(&second, "agent", tau_proto::PromptOriginator::User);
 
     assert_ne!(first_key, second_key);
     let hash = |key: &PoolKey| {
@@ -215,7 +212,6 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
             agent_id: &agent_id,
-            share_user_cache_key: false,
             debug_provider_requests: false,
         };
         run_turn_through_pool(
@@ -269,7 +265,6 @@ fn local_websocket_usage_window_contract_returns_typed_retry() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let mut pool = WsPool::new();
@@ -361,12 +356,7 @@ fn shared_pool_serializes_same_key_turns() {
 #[test]
 fn shared_pool_checkout_wait_aborts_when_canceled() {
     let config = make_config("https://chatgpt.com/backend-api", Some("acc"));
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     pool.inner
         .lock()
@@ -431,7 +421,6 @@ fn failed_fresh_connect_releases_pool_reservation() {
         &config,
         "agent-connect-failure",
         tau_proto::PromptOriginator::User,
-        false,
     );
     let mut abort = NeverAbort;
     assert!(
@@ -498,7 +487,6 @@ fn canceled_fresh_connect_releases_pool_reservation_at_every_boundary() {
         &config,
         "agent-connect-cancel",
         tau_proto::PromptOriginator::User,
-        false,
     );
 
     reserve(&pool, &key, &config);
@@ -522,7 +510,6 @@ fn canceled_fresh_connect_releases_pool_reservation_at_every_boundary() {
         &live_config,
         "agent-post-connect-cancel",
         tau_proto::PromptOriginator::User,
-        false,
     );
     reserve(&pool, &live_key, &live_config);
     let mut abort = ToggleAbort(false);
@@ -554,12 +541,7 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
         Some("acc"),
     ));
     let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     pool.inner
         .lock()
         .expect("pool lock")
@@ -585,7 +567,6 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
                 originator: &originator,
                 session_id: &session_id,
                 agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-                share_user_cache_key: false,
                 debug_provider_requests: true,
             };
             let mut abort = crate::NeverAbort;
@@ -645,12 +626,7 @@ fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
         Some("acc"),
     ));
     let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     let canceled = Arc::new(AtomicBool::new(false));
     let waker = Arc::new(Mutex::new(None));
     let (registered_tx, registered_rx) = std_mpsc::channel();
@@ -675,7 +651,6 @@ fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
                 originator: &originator,
                 session_id: &session_id,
                 agent_id: &agent_id,
-                share_user_cache_key: false,
                 debug_provider_requests: false,
             };
             let mut abort = AtomicAbort {
@@ -722,12 +697,7 @@ fn invalidate_all_discards_late_reserved_socket_release() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "invalidate-session", "sp-warm");
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     let TryCheckout::Reserved(Some(conn)) = pool
         .try_checkout(&key, &config.api_key)
         .expect("reserve warm socket")
@@ -795,12 +765,7 @@ fn stale_prewarm_owner_generation_cannot_mutate_current_owner() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "stale-owner", "sp-warm");
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     let TryCheckout::Reserved(Some(conn)) = pool
         .try_checkout(&key, &config.api_key)
         .expect("reserve warm socket")
@@ -859,12 +824,7 @@ fn cancel_between_staged_release_and_finish_discards_socket() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "cancel-release", "sp-warm");
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     let TryCheckout::Reserved(Some(conn)) = pool
         .try_checkout(&key, &config.api_key)
         .expect("reserve warm socket")
@@ -898,12 +858,7 @@ fn staged_socket_is_not_checkoutable_before_guard_unregisters() {
     ));
     let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     run_shared_turn(&pool, &config, "publish-order", "sp-warm");
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     let TryCheckout::Reserved(Some(conn)) = pool
         .try_checkout(&key, &config.api_key)
         .expect("reserve warm socket")
@@ -959,12 +914,7 @@ fn staged_socket_is_not_checkoutable_before_guard_unregisters() {
 fn prewarm_reservation_drop_cleans_up_early_exit() {
     let config = make_config("https://example.invalid/backend-api", Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     assert!(matches!(
         pool.try_checkout(&key, &config.api_key)
             .expect("reserve prewarm"),
@@ -1008,7 +958,6 @@ fn shared_prewarm_socket_is_reused_by_real_turn() {
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let mut abort = NeverAbort;
@@ -1042,7 +991,6 @@ fn shared_prewarm_connect_failure_releases_reservation() {
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let key = PoolKey::for_request(&config, &request);
@@ -1082,7 +1030,6 @@ fn already_canceled_cached_prewarm_sends_no_request() {
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let key = PoolKey::for_request(&config, &request);
@@ -1117,12 +1064,7 @@ fn staged_prewarm_reservation_drop_removes_socket() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "staged-drop", "sp-warm");
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     let TryCheckout::Reserved(Some(conn)) = pool
         .try_checkout(&key, &config.api_key)
         .expect("reserve warm socket")
@@ -1238,12 +1180,7 @@ fn pool_reopens_aged_out_connections_on_checkout() {
     assert_eq!(server.lock_state().upgrade_count, 1);
 
     // Forcibly age the cached connection past the threshold.
-    let key = pool_key_for(
-        &config,
-        "test-agent",
-        tau_proto::PromptOriginator::User,
-        false,
-    );
+    let key = pool_key_for(&config, "test-agent", tau_proto::PromptOriginator::User);
     if let Some(conn) = pool.conns.get_mut(&key) {
         conn.opened_at =
             path_std_time::Instant::now() - MAX_CONNECTION_AGE - Duration::from_secs(1);
@@ -1286,7 +1223,6 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1503,7 +1439,6 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let expected = request.prompt_cache_key(&config.base_url, config.mode);
@@ -1554,7 +1489,6 @@ fn prewarm_chains_exact_prefix_on_same_socket() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     run_turn_through_pool(
@@ -1578,7 +1512,6 @@ fn prewarm_chains_exact_prefix_on_same_socket() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     run_prewarm_through_pool(&mut pool, &config, "session-prewarm", &prewarm).expect("prewarm ok");
@@ -1648,7 +1581,6 @@ fn prewarm_fingerprint_divergence_discards_chain_anchor() {
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     run_prewarm_through_pool(&mut pool, &config, session_id.as_str(), &prewarm)
@@ -1732,7 +1664,6 @@ fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     run_turn_through_pool(
@@ -1782,7 +1713,6 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1843,7 +1773,6 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let state1 = run_turn_through_pool(
@@ -1875,7 +1804,6 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     run_turn_through_pool(
@@ -1967,7 +1895,6 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let mut abort = NeverAbort;
@@ -1998,7 +1925,6 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let mut abort = NeverAbort;
@@ -2331,7 +2257,6 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let mut forwarded_responses = 0;
@@ -2710,7 +2635,6 @@ fn pool_key_for(
     config: &ResponsesConfig,
     agent: &str,
     originator: tau_proto::PromptOriginator,
-    share_user_cache_key: bool,
 ) -> PoolKey {
     let session_id =
         tau_proto::SessionId::parse("test-session").expect("known-safe SessionId must be valid");
@@ -2726,7 +2650,6 @@ fn pool_key_for(
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key,
         debug_provider_requests: false,
     };
     PoolKey::for_request(config, &request)
@@ -2773,7 +2696,6 @@ fn run_context_turn(
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     run_turn_through_pool(
@@ -2808,7 +2730,6 @@ fn run_turn_for_agent(
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     run_turn_through_pool(pool, config, session, "sp-test", &request, on_update).expect("turn ok");
@@ -2858,7 +2779,6 @@ fn run_shared_turn_with_abort(
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let mut on_update = |_: crate::StreamUpdate<'_>| {};
@@ -2916,7 +2836,6 @@ fn pool_key_separates_responses_modes() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 

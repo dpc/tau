@@ -1022,7 +1022,6 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
         model_params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
         originator: PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,

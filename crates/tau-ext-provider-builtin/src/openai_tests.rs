@@ -477,7 +477,6 @@ pub(super) fn prompt() -> tau_proto::AgentPromptCreated {
         model_params: Default::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
         originator: tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,
@@ -497,7 +496,6 @@ fn prewarm() -> tau_proto::AgentPromptPrewarmRequested {
         model_params: prompt.model_params,
         tool_choice: prompt.tool_choice,
         originator: prompt.originator,
-        share_user_cache_key: prompt.share_user_cache_key,
     }
 }
 

@@ -1396,18 +1396,6 @@ fn representative_events() -> Vec<Event> {
             tool_type: ToolType::Function,
             display: None,
         }),
-        Event::ToolDelegateProgress(DelegateProgress {
-            call_id: "delegate-call".into(),
-            task_name: "review".to_owned(),
-            agent_id: Some(agent_id("delegate_1")),
-            role: Some("reviewer".to_owned()),
-            ctx_percent: Some(10),
-            ctx_input_tokens: Some(100),
-            ctx_window: Some(1000),
-            tools_in_flight: 0,
-            tools_total: 1,
-            display: None,
-        }),
         Event::ActionSchemaDeclared(ActionSchemaDeclared {
             schema: action_schema_fixture(),
         }),
@@ -1736,7 +1724,6 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
             ctx_id: None,
             compaction: None,
-            share_user_cache_key: false,
             operation: PromptOperation::Inference,
         }),
         Event::AgentPromptStarted(AgentPromptStarted {
@@ -1768,7 +1755,6 @@ fn representative_events() -> Vec<Event> {
             model_params: ModelParams::default(),
             tool_choice: ToolChoice::Auto,
             originator: PromptOriginator::User,
-            share_user_cache_key: false,
         }),
         Event::AgentUserMessageInjected(AgentUserMessageInjected {
             inference_activation: false,
@@ -2997,7 +2983,6 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::SessionReplayComplete(_)
                 | Event::ToolProgressReported(_)
                 | Event::ToolProgress(_)
-                | Event::ToolDelegateProgress(_)
                 | Event::ToolError(_)
                 | Event::ActionSchemaDeclared(_)
                 | Event::ActionSchemaPublished(_)
@@ -3155,7 +3140,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "tool.cancel_request",
         "tool.cancelled",
         "tool.cancelled_reported",
-        "tool.delegate_progress",
         "tool.error",
         "tool.error_reported",
         "tool.progress",
@@ -4333,7 +4317,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 4, "minor": 2})
+        serde_json::json!({"major": 5, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4425,7 +4409,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 4, "minor": 2})
+        serde_json::json!({"major": 5, "minor": 0})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -6122,47 +6106,6 @@ fn start_agent_request_role_is_optional() {
     }))
     .expect("deserialize start-agent request");
     assert_eq!(parsed.role, None);
-}
-
-/// Legacy `DelegateProgress` metadata remains readable for old persisted
-/// protocol samples. First-party sub-agent UI now uses generic watch/stat
-/// events, but the legacy agent-id wire shape still validates through the
-/// protocol newtype.
-#[test]
-fn delegate_progress_optional_metadata_and_agent_id_wire_contract() {
-    let parsed: DelegateProgress = serde_json::from_value(serde_json::json!({
-        "call_id": "call-1",
-        "task_name": "audit",
-        "tools_in_flight": 0,
-        "tools_total": 0
-    }))
-    .expect("deserialize progress without optional metadata");
-    assert_eq!(parsed.role, None);
-    assert_eq!(parsed.agent_id, None);
-
-    let with_metadata: DelegateProgress = serde_json::from_value(serde_json::json!({
-        "call_id": "call-1",
-        "task_name": "audit",
-        "agent_id": "agent-1",
-        "role": "rush",
-        "tools_in_flight": 0,
-        "tools_total": 0
-    }))
-    .expect("deserialize progress with role and valid agent id");
-    assert_eq!(with_metadata.role.as_deref(), Some("rush"));
-    assert_eq!(with_metadata.agent_id.as_deref(), Some("agent-1"));
-
-    let round_tripped = serde_json::to_value(&with_metadata).expect("serialize progress");
-    assert_eq!(round_tripped["agent_id"], "agent-1");
-
-    serde_json::from_value::<DelegateProgress>(serde_json::json!({
-        "call_id": "call-1",
-        "task_name": "audit",
-        "agent_id": "bad.name",
-        "tools_in_flight": 0,
-        "tools_total": 0
-    }))
-    .expect_err("invalid agent id should fail to deserialize");
 }
 
 /// `Verbosity::next_in` mirrors `NativeReasoningEffort::next_in`. Even though

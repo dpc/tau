@@ -215,7 +215,6 @@ fn responses_event_snapshot() -> Vec<Event> {
         originator: &prompt.originator,
         session_id: &prompt.session_id,
         agent_id: &prompt.agent_id,
-        share_user_cache_key: prompt.share_user_cache_key,
         debug_provider_requests: false,
     };
     let mut state = tau_provider_codex::test_stream_state();

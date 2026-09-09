@@ -717,8 +717,8 @@ pub enum ShowTools {
     /// Render compact per-call chips.
     #[serde(rename = "compact")]
     Compact,
-    /// Render full tool call input/output. Also accepts legacy `on`.
-    #[serde(rename = "full", alias = "on")]
+    /// Render full tool call input/output.
+    #[serde(rename = "full")]
     #[default]
     Full,
 }
@@ -736,8 +736,7 @@ impl ShowTools {
         }
     }
 
-    /// Parses a config/state string. Accepts legacy `on` as
-    /// [`ShowTools::Full`].
+    /// Parses a config/state string.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -745,7 +744,7 @@ impl ShowTools {
             "summarize-turn" => Some(Self::SummarizeTurn),
             "summarize-prompt" => Some(Self::SummarizePrompt),
             "compact" => Some(Self::Compact),
-            "full" | "on" => Some(Self::Full),
+            "full" => Some(Self::Full),
             _ => None,
         }
     }
@@ -1001,13 +1000,10 @@ pub struct NotificationDeliveryPolicy {
 #[serde(deny_unknown_fields)]
 struct NotificationDeliveryPolicyWire {
     /// Idle delay in integer milliseconds.
-    #[serde(alias = "idleMs")]
     idle_ms: u64,
     /// Wait-any delay in integer milliseconds.
-    #[serde(alias = "waitAnyMs")]
     wait_any_ms: u64,
     /// Exact-tool-wait delay in integer milliseconds.
-    #[serde(alias = "waitToolMs")]
     wait_tool_ms: u64,
 }
 
@@ -1185,28 +1181,20 @@ pub struct HarnessSettings {
 #[serde(deny_unknown_fields)]
 struct HarnessSettingsWire {
     /// Optional whole-session directory retention.
-    #[serde(alias = "sessionRetention")]
     session_retention: Option<RetentionDuration>,
     /// Optional unreferenced durable-agent retention.
-    #[serde(alias = "agentRetention")]
     agent_retention: Option<RetentionDuration>,
     /// Optional non-authoritative session diagnostic retention.
-    #[serde(alias = "diagnosticRetention")]
     diagnostic_retention: Option<RetentionDuration>,
     /// Whether to show Tau's onboarding notice to the initial UI.
-    #[serde(alias = "showIntroductionNotice")]
     show_introduction_notice: bool,
     /// Lowest effective activating-input wait timeout in whole minutes.
-    #[serde(alias = "waitTimeoutMinimumMinutes")]
     wait_timeout_minimum_minutes: u64,
     /// Highest effective activating-input wait timeout in whole minutes.
-    #[serde(alias = "waitTimeoutMaximumMinutes")]
     wait_timeout_maximum_minutes: u64,
     /// Largest provider retry attempt hidden from watching agents.
-    #[serde(alias = "agentWatchRetryNotificationThreshold")]
     agent_watch_retry_notification_threshold: u32,
     /// Bounded runtime-only prompt-injected notification delivery delays.
-    #[serde(alias = "notificationDelivery")]
     notification_delivery: NotificationDeliveryPolicies,
     /// Disabled-by-default bounded Provider cache refresh policy.
     #[serde(default)]
@@ -1216,7 +1204,7 @@ struct HarnessSettingsWire {
     tau_state_access: TauStateAccess,
     /// Configured extension entries.
     extensions: HashMap<String, ExtensionEntry>,
-    #[serde(default, alias = "customPrompts")]
+    #[serde(default)]
     /// User-defined prompt text keyed by prompt identifier.
     custom_prompts: BTreeMap<String, String>,
     #[serde(default)]
@@ -1244,11 +1232,7 @@ struct AgentsSettings {
     ///
     /// Omission keeps the built-in enabled baseline. Explicit `null` clears
     /// this patch and leaves the role's default behavior in effect.
-    #[serde(
-        default = "agent_enable_default",
-        alias = "enabled",
-        deserialize_with = "present_option"
-    )]
+    #[serde(default = "agent_enable_default", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
     /// Whether roles default to appearing in the built-in delegate-role
     /// catalog.
@@ -1257,15 +1241,15 @@ struct AgentsSettings {
     /// and leaves the role's default presentation behavior in effect.
     #[serde(default = "agent_visible_default", deserialize_with = "present_option")]
     visible: Option<Option<bool>>,
-    #[serde(default, alias = "defaultRole")]
+    #[serde(default)]
     default_role: Option<String>,
-    #[serde(alias = "idTemplate")]
+
     id_template: String,
-    #[serde(default, alias = "displayNameTemplate")]
+    #[serde(default)]
     display_name_template: Option<String>,
-    #[serde(default, alias = "promptFragments")]
+    #[serde(default)]
     prompt_fragments: Vec<RolePromptFragment>,
-    #[serde(default, alias = "requiredSkills")]
+    #[serde(default)]
     required_skills: Vec<tau_proto::SkillName>,
     /// Provider settings that default every role before group and role patches.
     #[serde(default, deserialize_with = "present_option")]
@@ -1274,31 +1258,21 @@ struct AgentsSettings {
     effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(default, deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
-    #[serde(
-        default,
-        alias = "thinkingSummary",
-        deserialize_with = "present_option"
-    )]
+    #[serde(default, deserialize_with = "present_option")]
     thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
-    #[serde(default, alias = "serviceTier", deserialize_with = "present_option")]
+    #[serde(default, deserialize_with = "present_option")]
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(default, deserialize_with = "present_option")]
-    compaction: Option<Option<RoleCompaction>>,
-    #[serde(
-        default,
-        alias = "inferenceCompaction",
-        deserialize_with = "present_option"
-    )]
     inference_compaction: Option<Option<RoleCompaction>>,
     #[serde(default)]
     compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Agent-global alert patches applied before group and role settings.
-    #[serde(default, alias = "contextSizeAlerts")]
+    #[serde(default)]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
-    #[serde(default, alias = "roleGroups")]
+    #[serde(default)]
     role_groups: RawRoleGroups,
     /// Logical web capability defaults applied to every role.
-    #[serde(default, alias = "webTools")]
+    #[serde(default)]
     web_tools: RawWebToolsPolicy,
 }
 
@@ -1407,9 +1381,7 @@ where
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolPolicyRule {
-    /// Whether this rule participates in evaluation. Defaults to true;
-    /// `enabled` is accepted as an alias for config ergonomics.
-    #[serde(alias = "enabled")]
+    /// Whether this rule participates in evaluation. Defaults to true.
     pub enable: bool,
     /// Priority used before rule name for deterministic evaluation order.
     pub priority: i32,
@@ -1600,22 +1572,19 @@ struct HarnessProfile {
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfileAgentOverrides {
     /// Startup role patch applied after base files and before CLI overrides.
-    #[serde(default, alias = "defaultRole", deserialize_with = "present_option")]
+    #[serde(default, deserialize_with = "present_option")]
     default_role: Option<Option<String>>,
     /// Default enablement patch applied to every role.
-    #[serde(alias = "enabled", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
     /// Default built-in delegate-role catalog visibility applied to every role.
     #[serde(deserialize_with = "present_option")]
     visible: Option<Option<bool>>,
     /// Role groups and their member role patches.
-    #[serde(alias = "roleGroups")]
     role_groups: RawRoleGroups,
     /// Global prompt fragments applied to every role.
-    #[serde(alias = "promptFragments")]
     prompt_fragments: Vec<RolePromptFragment>,
     /// Global required skills applied to every role.
-    #[serde(alias = "requiredSkills")]
     required_skills: Vec<tau_proto::SkillName>,
     /// Default model patch.
     #[serde(default, deserialize_with = "present_option")]
@@ -1627,33 +1596,21 @@ struct HarnessProfileAgentOverrides {
     #[serde(default, deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
     /// Default thinking-summary patch.
-    #[serde(
-        default,
-        alias = "thinkingSummary",
-        deserialize_with = "present_option"
-    )]
+    #[serde(default, deserialize_with = "present_option")]
     thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
     /// Default service-tier patch.
-    #[serde(default, alias = "serviceTier", deserialize_with = "present_option")]
-    service_tier: Option<Option<tau_proto::ServiceTier>>,
-    /// Default compaction patch.
     #[serde(default, deserialize_with = "present_option")]
-    compaction: Option<Option<RoleCompaction>>,
+    service_tier: Option<Option<tau_proto::ServiceTier>>,
     /// Default provider-inline compaction patch.
-    #[serde(
-        default,
-        alias = "inferenceCompaction",
-        deserialize_with = "present_option"
-    )]
+    #[serde(default, deserialize_with = "present_option")]
     inference_compaction: Option<Option<RoleCompaction>>,
     /// Default named standalone compaction patches.
     #[serde(default)]
     compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Global named context-size alert patches.
-    #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
     /// Logical web capability policy patch.
-    #[serde(default, alias = "webTools")]
+    #[serde(default)]
     web_tools: Option<RawWebToolsPolicy>,
 }
 
@@ -1670,7 +1627,6 @@ impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
             verbosity: profile.verbosity,
             thinking_summary: profile.thinking_summary,
             service_tier: profile.service_tier,
-            compaction: profile.compaction,
             inference_compaction: profile.inference_compaction,
             compactions: profile.compactions,
             context_size_alerts: profile.context_size_alerts,
@@ -1684,7 +1640,6 @@ impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfileExtension {
     /// Whether the named base extension should run.
-    #[serde(alias = "enabled")]
     enable: Option<bool>,
     /// Arbitrary extension-owned configuration patch.
     config: Option<serde_json::Value>,
@@ -1715,17 +1670,17 @@ struct HarnessDefaultProfile {
 struct HarnessAgentRoleOverrides {
     /// Agent-global role enablement patch replayed before group and role
     /// patches.
-    #[serde(alias = "enabled", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
     /// Agent-global built-in delegate-role catalog visibility patch replayed
     /// before group and role patches.
     #[serde(deserialize_with = "present_option")]
     visible: Option<Option<bool>>,
-    #[serde(alias = "roleGroups")]
+
     role_groups: RawRoleGroups,
-    #[serde(alias = "promptFragments")]
+
     prompt_fragments: Vec<RolePromptFragment>,
-    #[serde(alias = "requiredSkills")]
+
     required_skills: Vec<tau_proto::SkillName>,
     #[serde(default, deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
@@ -1733,30 +1688,19 @@ struct HarnessAgentRoleOverrides {
     effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(default, deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
-    #[serde(
-        default,
-        alias = "thinkingSummary",
-        deserialize_with = "present_option"
-    )]
+    #[serde(default, deserialize_with = "present_option")]
     thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
-    #[serde(default, alias = "serviceTier", deserialize_with = "present_option")]
+    #[serde(default, deserialize_with = "present_option")]
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(default, deserialize_with = "present_option")]
-    compaction: Option<Option<RoleCompaction>>,
-    #[serde(
-        default,
-        alias = "inferenceCompaction",
-        deserialize_with = "present_option"
-    )]
     inference_compaction: Option<Option<RoleCompaction>>,
     #[serde(default)]
     compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Agent-global alert patches replayed through domain-specific role
     /// merging.
-    #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
     /// Agent-global logical web capability policy patch.
-    #[serde(default, alias = "webTools")]
+    #[serde(default)]
     web_tools: Option<RawWebToolsPolicy>,
 }
 
@@ -1771,7 +1715,6 @@ impl AgentsSettings {
             verbosity: self.verbosity,
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
-            compaction: self.compaction,
             inference_compaction: self.inference_compaction,
             compactions: self.compactions.clone(),
             web_tools: Some(self.web_tools.clone()),
@@ -1791,7 +1734,6 @@ impl HarnessAgentRoleOverrides {
             verbosity: self.verbosity,
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
-            compaction: self.compaction,
             inference_compaction: self.inference_compaction,
             compactions: self.compactions.clone(),
             web_tools: self.web_tools.clone(),
@@ -1853,17 +1795,15 @@ type RawRoleGroups = IndexMap<String, RawRoleGroup>;
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawRoleGroup {
-    // `enabled` was a mistaken old spelling. Keep it as a little bandaid for
-    // reading old config during migration.
-    #[serde(alias = "enabled", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     visible: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     order: Option<Option<i64>>,
-    #[serde(alias = "interSessionReceiver", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     inter_session_receiver: Option<Option<bool>>,
-    #[serde(alias = "interSessionAutoStart", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     inter_session_auto_start: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     description: Option<Option<String>>,
@@ -1873,40 +1813,36 @@ struct RawRoleGroup {
     effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
-    #[serde(alias = "thinkingSummary", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
-    #[serde(alias = "serviceTier", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
-    compaction: Option<Option<RoleCompaction>>,
-    #[serde(alias = "inferenceCompaction", deserialize_with = "present_option")]
     inference_compaction: Option<Option<RoleCompaction>>,
     compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Group-default alert patches applied to every member role.
-    #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
-    #[serde(alias = "promptFragments")]
+
     prompt_fragments: Option<Vec<RolePromptFragment>>,
-    #[serde(alias = "promptOverride", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     prompt_override: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
     tools: Option<Option<Vec<ToolName>>>,
-    #[serde(alias = "disableToolTags")]
+
     disable_tool_tags: Option<Vec<ToolTagPattern>>,
-    #[serde(alias = "enableToolTags")]
+
     enable_tool_tags: Option<Vec<ToolTagPattern>>,
-    #[serde(alias = "disableToolGroups")]
+
     disable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
-    #[serde(alias = "enableToolGroups")]
+
     enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
-    #[serde(alias = "disableTools")]
+
     disable_tools: Option<Vec<ToolName>>,
-    #[serde(alias = "enableTools")]
+
     enable_tools: Option<Vec<ToolName>>,
-    #[serde(alias = "requiredSkills")]
+
     required_skills: Option<Vec<tau_proto::SkillName>>,
     /// Group-default logical web capability policy patch.
-    #[serde(alias = "webTools")]
     web_tools: Option<RawWebToolsPolicy>,
     roles: IndexMap<String, AgentRolePatch>,
 }
@@ -2111,15 +2047,15 @@ fn agent_visible_default() -> Option<Option<bool>> {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct AgentRolePatch {
-    #[serde(alias = "enabled", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     visible: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     order: Option<Option<i64>>,
-    #[serde(alias = "interSessionReceiver", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     inter_session_receiver: Option<Option<bool>>,
-    #[serde(alias = "interSessionAutoStart", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     inter_session_auto_start: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     description: Option<Option<String>>,
@@ -2129,58 +2065,37 @@ struct AgentRolePatch {
     effort: Option<Option<ConfiguredReasoningIntent>>,
     #[serde(deserialize_with = "present_option")]
     verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
-    #[serde(alias = "thinkingSummary", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
-    #[serde(alias = "serviceTier", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
-    compaction: Option<Option<RoleCompaction>>,
-    #[serde(alias = "inferenceCompaction", deserialize_with = "present_option")]
     inference_compaction: Option<Option<RoleCompaction>>,
     compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Role-specific alert patches applied after group defaults.
-    #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
-    #[serde(alias = "promptFragments")]
+
     prompt_fragments: Option<Vec<RolePromptFragment>>,
-    #[serde(alias = "promptOverride", deserialize_with = "present_option")]
+    #[serde(deserialize_with = "present_option")]
     prompt_override: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
     tools: Option<Option<Vec<ToolName>>>,
-    #[serde(alias = "disableToolTags")]
+
     disable_tool_tags: Option<Vec<ToolTagPattern>>,
-    #[serde(alias = "enableToolTags")]
+
     enable_tool_tags: Option<Vec<ToolTagPattern>>,
-    #[serde(alias = "disableToolGroups")]
+
     disable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
-    #[serde(alias = "enableToolGroups")]
+
     enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
-    #[serde(alias = "disableTools")]
+
     disable_tools: Option<Vec<ToolName>>,
-    #[serde(alias = "enableTools")]
+
     enable_tools: Option<Vec<ToolName>>,
-    #[serde(alias = "requiredSkills")]
+
     required_skills: Option<Vec<tau_proto::SkillName>>,
     /// Logical web capability policy patch.
-    #[serde(alias = "webTools")]
     web_tools: Option<RawWebToolsPolicy>,
-}
-
-impl AgentRolePatch {
-    /// Rejects a source that mixes the legacy compound setting with either
-    /// successor setting, whose meaning would otherwise be order-dependent.
-    fn validate_compaction_input(&self, path: &str) -> Result<(), SettingsError> {
-        if self.compaction.is_some()
-            && (self.inference_compaction.is_some() || !self.compactions.is_empty())
-        {
-            return Err(SettingsError::Config(config::ConfigError::Message(
-                format!(
-                    "{path}: legacy `compaction` cannot be combined with `inference_compaction` or `compactions` in one source layer"
-                ),
-            )));
-        }
-        Ok(())
-    }
 }
 
 impl RawRoleGroup {
@@ -2197,7 +2112,6 @@ impl RawRoleGroup {
             verbosity: self.verbosity,
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
-            compaction: self.compaction,
             inference_compaction: self.inference_compaction,
             compactions: self.compactions.clone(),
             context_size_alerts: self.context_size_alerts.clone(),
@@ -2626,7 +2540,7 @@ pub struct ExtensionEntry {
     ///
     /// The outer option preserves layering presence: an absent value inherits,
     /// explicit `null` clears, and a string sets the prefix.
-    #[serde(default, alias = "toolPrefix", deserialize_with = "present_option")]
+    #[serde(default, deserialize_with = "present_option")]
     pub tool_prefix: Option<Option<tau_proto::ToolNamePrefix>>,
 
     /// argv of the extension itself. `command[0]` is the executable;
@@ -2923,11 +2837,6 @@ pub struct AgentRole {
     /// Provider service tier preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none", alias = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
-    /// Automatic provider-side compaction policy for this role. Missing values
-    /// inherit from lower-precedence role settings; effective roles default to
-    /// [`RoleCompaction::ProviderDefault`].
-    #[serde(skip_serializing, default)]
-    pub compaction: Option<RoleCompaction>,
     /// Singular provider-inline and reactive-overflow compaction policy.
     #[serde(skip_serializing_if = "Option::is_none", alias = "inferenceCompaction")]
     pub inference_compaction: Option<RoleCompaction>,
@@ -3065,9 +2974,7 @@ impl<'de> Deserialize<'de> for RoleCompaction {
         }
 
         match Wire::deserialize(deserializer)? {
-            Wire::Name(name) if matches!(name.as_str(), "provider_default" | "providerDefault") => {
-                Ok(Self::ProviderDefault)
-            }
+            Wire::Name(name) if name == "provider_default" => Ok(Self::ProviderDefault),
             Wire::Name(name) if name == "disabled" => Ok(Self::Disabled),
             Wire::Name(name) => Err(D::Error::custom(format!(
                 "unknown compaction policy `{name}`"
@@ -3096,7 +3003,6 @@ pub enum ContextPolicyPoint {
     #[default]
     BeforeInference,
     /// After the durable outer-turn finish has committed.
-    #[serde(alias = "outerTurnFinished")]
     OuterTurnFinished,
 }
 
@@ -3237,13 +3143,7 @@ impl CompactionPolicyThresholdScalarWire {
             Self::Tokens(0) => Err(E::custom("compaction policy threshold must be positive")),
             Self::Tokens(tokens) => Ok(CompactionPolicyThreshold::Tokens(tokens)),
             Self::Name(name)
-                if matches!(
-                    name.as_str(),
-                    "context_limit_safe"
-                        | "contextLimitSafe"
-                        | "provider_default"
-                        | "providerDefault"
-                ) =>
+                if matches!(name.as_str(), "context_limit_safe" | "provider_default") =>
             {
                 Ok(CompactionPolicyThreshold::ProviderDefault)
             }
@@ -3654,36 +3554,6 @@ fn apply_context_size_alert_patches(
 }
 
 impl AgentRole {
-    /// Normalizes one legacy singular policy into its standalone and inference
-    /// successors while retaining the legacy field for compatibility callers.
-    fn apply_legacy_compaction(&mut self, legacy: Option<RoleCompaction>) {
-        self.compaction = legacy;
-        let normalized = legacy.unwrap_or(RoleCompaction::ProviderDefault);
-        self.inference_compaction = Some(normalized);
-        self.compactions.clear();
-        if normalized != RoleCompaction::Disabled {
-            self.compactions.insert(
-                "default".to_owned(),
-                CompactionPolicy {
-                    threshold: match normalized {
-                        RoleCompaction::ProviderDefault => {
-                            CompactionPolicyThreshold::ProviderDefault
-                        }
-                        RoleCompaction::Disabled => unreachable!("disabled policy is not inserted"),
-                        RoleCompaction::Threshold(tokens) => {
-                            CompactionPolicyThreshold::Tokens(tokens)
-                        }
-                        RoleCompaction::Reserve(tokens) => {
-                            CompactionPolicyThreshold::Reserve(tokens)
-                        }
-                    },
-                    enable: true,
-                    when: ContextPolicyWhen::default(),
-                },
-            );
-        }
-    }
-
     fn apply_patch(&mut self, patch: &AgentRolePatch) {
         if let Some(enable) = patch.enable {
             self.enable = enable;
@@ -3729,9 +3599,6 @@ impl AgentRole {
         }
         if let Some(service_tier) = patch.service_tier {
             self.service_tier = service_tier;
-        }
-        if let Some(legacy_compaction) = patch.compaction {
-            self.apply_legacy_compaction(legacy_compaction);
         }
         if let Some(compaction) = patch.inference_compaction {
             self.inference_compaction = Some(compaction.unwrap_or(RoleCompaction::ProviderDefault));
@@ -4438,10 +4305,6 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
         agents: profile.agents.into(),
     }));
     role_layers.extend(harness_role_cli_override_layers(harness_config_overrides)?);
-    for layer in &role_layers {
-        validate_role_layer_compaction_inputs(layer)?;
-    }
-
     let mut effective_agent_defaults = AgentRole {
         enable: Some(true),
         visible: Some(true),
@@ -4542,198 +4405,6 @@ where
     current.clone()
 }
 
-fn validate_role_layer_compaction_inputs(
-    layer: &HarnessRoleOverrides,
-) -> Result<(), SettingsError> {
-    layer
-        .agents
-        .role_defaults()
-        .validate_compaction_input("agents")?;
-    for (group_name, group) in &layer.agents.role_groups {
-        group
-            .defaults()
-            .validate_compaction_input(&format!("agents.role_groups.{group_name}"))?;
-        for (role_name, patch) in &group.roles {
-            patch.validate_compaction_input(&format!(
-                "agents.role_groups.{group_name}.roles.{role_name}"
-            ))?;
-        }
-    }
-    Ok(())
-}
-
-// Legacy harness aliases are accepted for user compatibility, but every alias
-// must be handled in all three places that can see user-authored keys:
-// serde aliases on patch structs, JSON layer normalization below, and dotted
-// `--harness-config` key canonicalization. Keep the regression tests for the
-// file-layer and CLI alias tables in sync when adding or renaming fields.
-fn normalize_alias_key(
-    map: &mut serde_json::Map<String, serde_json::Value>,
-    alias: &str,
-    canonical: &str,
-    source: &str,
-    path: &str,
-) -> Result<(), SettingsError> {
-    if map.contains_key(alias) && map.contains_key(canonical) {
-        return Err(SettingsError::Config(config::ConfigError::Message(
-            format!(
-                "{source}: both legacy key `{path}.{alias}` and canonical key `{path}.{canonical}` are set"
-            ),
-        )));
-    }
-    if let Some(value) = map.remove(alias) {
-        map.entry(canonical.to_owned()).or_insert(value);
-    }
-    Ok(())
-}
-
-fn normalize_role_config_keys(
-    value: &mut serde_json::Value,
-    source: &str,
-    path: &str,
-) -> Result<(), SettingsError> {
-    let serde_json::Value::Object(map) = value else {
-        return Ok(());
-    };
-    normalize_alias_key(map, "enabled", "enable", source, path)?;
-    normalize_alias_key(
-        map,
-        "interSessionReceiver",
-        "inter_session_receiver",
-        source,
-        path,
-    )?;
-    normalize_alias_key(
-        map,
-        "interSessionAutoStart",
-        "inter_session_auto_start",
-        source,
-        path,
-    )?;
-    normalize_alias_key(map, "thinkingSummary", "thinking_summary", source, path)?;
-    normalize_alias_key(map, "serviceTier", "service_tier", source, path)?;
-    normalize_alias_key(
-        map,
-        "inferenceCompaction",
-        "inference_compaction",
-        source,
-        path,
-    )?;
-    normalize_alias_key(map, "promptFragments", "prompt_fragments", source, path)?;
-    normalize_alias_key(map, "promptOverride", "prompt_override", source, path)?;
-    normalize_alias_key(map, "disableToolTags", "disable_tool_tags", source, path)?;
-    normalize_alias_key(map, "enableToolTags", "enable_tool_tags", source, path)?;
-    normalize_alias_key(
-        map,
-        "disableToolGroups",
-        "disable_tool_groups",
-        source,
-        path,
-    )?;
-    normalize_alias_key(map, "enableToolGroups", "enable_tool_groups", source, path)?;
-    normalize_alias_key(map, "disableTools", "disable_tools", source, path)?;
-    normalize_alias_key(map, "enableTools", "enable_tools", source, path)?;
-    normalize_alias_key(map, "requiredSkills", "required_skills", source, path)?;
-    normalize_alias_key(map, "webTools", "web_tools", source, path)?;
-    if let Some(web_tools) = map.get_mut("web_tools") {
-        normalize_web_tools_keys(web_tools, source, &format!("{path}.web_tools"))?;
-    }
-    normalize_alias_key(
-        map,
-        "contextSizeAlerts",
-        "context_size_alerts",
-        source,
-        path,
-    )?;
-    normalize_context_policy_value(map.get_mut("when"));
-    if let Some(serde_json::Value::Object(policies)) = map.get_mut("compactions") {
-        for policy in policies.values_mut() {
-            if let serde_json::Value::Object(policy) = policy {
-                normalize_context_policy_value(policy.get_mut("when"));
-            }
-        }
-    }
-    if let Some(serde_json::Value::Object(alerts)) = map.get_mut("context_size_alerts") {
-        for alert in alerts.values_mut() {
-            if let serde_json::Value::Object(alert) = alert {
-                normalize_context_policy_value(alert.get_mut("when"));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Normalize nested logical-web aliases while rejecting duplicate spellings.
-fn normalize_web_tools_keys(
-    value: &mut serde_json::Value,
-    source: &str,
-    path: &str,
-) -> Result<(), SettingsError> {
-    let serde_json::Value::Object(map) = value else {
-        return Ok(());
-    };
-    normalize_alias_key(map, "allowedDomains", "allowed_domains", source, path)?;
-    for logical in ["search", "fetch"] {
-        let Some(serde_json::Value::Object(logical_map)) = map.get_mut(logical) else {
-            continue;
-        };
-        let Some(serde_json::Value::Object(candidates)) = logical_map.get_mut("candidates") else {
-            continue;
-        };
-        for (candidate_name, candidate) in candidates {
-            if let serde_json::Value::Object(candidate_map) = candidate {
-                normalize_alias_key(
-                    candidate_map,
-                    "contextSize",
-                    "context_size",
-                    source,
-                    &format!("{path}.{logical}.candidates.{candidate_name}"),
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Canonicalizes the one supported camel-case lifecycle value before layering.
-fn normalize_context_policy_value(value: Option<&mut serde_json::Value>) {
-    let Some(serde_json::Value::Object(when)) = value else {
-        return;
-    };
-    if when.get("at") == Some(&serde_json::Value::String("outerTurnFinished".to_owned())) {
-        when.insert(
-            "at".to_owned(),
-            serde_json::Value::String("outer_turn_finished".to_owned()),
-        );
-    }
-}
-
-fn normalize_tool_policy_config_keys(
-    value: &mut serde_json::Value,
-    source: &str,
-    path: &str,
-) -> Result<(), SettingsError> {
-    let serde_json::Value::Object(policy) = value else {
-        return Ok(());
-    };
-    let Some(serde_json::Value::Object(rules)) = policy.get_mut("rules") else {
-        return Ok(());
-    };
-    for (rule_name, rule) in rules {
-        let serde_json::Value::Object(rule_map) = rule else {
-            continue;
-        };
-        normalize_alias_key(
-            rule_map,
-            "enabled",
-            "enable",
-            source,
-            &format!("{path}.rules.{rule_name}"),
-        )?;
-    }
-    Ok(())
-}
-
 fn normalize_harness_config_value(
     value: &mut serde_json::Value,
     source: &str,
@@ -4741,175 +4412,7 @@ fn normalize_harness_config_value(
     let serde_json::Value::Object(map) = value else {
         return Ok(());
     };
-    normalize_alias_key(map, "sessionRetention", "session_retention", source, "root")?;
-    normalize_alias_key(map, "agentRetention", "agent_retention", source, "root")?;
-    normalize_alias_key(
-        map,
-        "diagnosticRetention",
-        "diagnostic_retention",
-        source,
-        "root",
-    )?;
-    validate_retention_config_values(map, source)?;
-    normalize_alias_key(map, "customPrompts", "custom_prompts", source, "root")?;
-    normalize_alias_key(map, "toolPolicy", "tool_policy", source, "root")?;
-    normalize_alias_key(
-        map,
-        "showIntroductionNotice",
-        "show_introduction_notice",
-        source,
-        "root",
-    )?;
-    normalize_alias_key(
-        map,
-        "waitTimeoutMinimumMinutes",
-        "wait_timeout_minimum_minutes",
-        source,
-        "root",
-    )?;
-    normalize_alias_key(
-        map,
-        "waitTimeoutMaximumMinutes",
-        "wait_timeout_maximum_minutes",
-        source,
-        "root",
-    )?;
-    normalize_alias_key(
-        map,
-        "agentWatchRetryNotificationThreshold",
-        "agent_watch_retry_notification_threshold",
-        source,
-        "root",
-    )?;
-    normalize_alias_key(
-        map,
-        "notificationDelivery",
-        "notification_delivery",
-        source,
-        "root",
-    )?;
-    if let Some(serde_json::Value::Object(classes)) = map.get_mut("notification_delivery") {
-        for (class, policy) in classes {
-            if let serde_json::Value::Object(policy) = policy {
-                let path = format!("notification_delivery.{class}");
-                normalize_alias_key(policy, "idleMs", "idle_ms", source, &path)?;
-                normalize_alias_key(policy, "waitAnyMs", "wait_any_ms", source, &path)?;
-                normalize_alias_key(policy, "waitToolMs", "wait_tool_ms", source, &path)?;
-            }
-        }
-    }
-    if let Some(serde_json::Value::Object(extensions)) = map.get_mut("extensions") {
-        for (extension_name, extension) in extensions {
-            if let serde_json::Value::Object(extension) = extension {
-                normalize_alias_key(
-                    extension,
-                    "toolPrefix",
-                    "tool_prefix",
-                    source,
-                    &format!("extensions.{extension_name}"),
-                )?;
-            }
-        }
-    }
-    if let Some(serde_json::Value::Object(profiles)) = map.get_mut("profiles") {
-        for (profile_name, profile) in profiles {
-            normalize_harness_config_value(
-                profile,
-                &format!("{source}, configuration profile `{profile_name}`"),
-            )?;
-        }
-    }
-    if let Some(tool_policy) = map.get_mut("tool_policy") {
-        normalize_tool_policy_config_keys(tool_policy, source, "tool_policy")?;
-    }
-    if let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") {
-        normalize_alias_key(agents, "enabled", "enable", source, "agents")?;
-        normalize_alias_key(agents, "defaultRole", "default_role", source, "agents")?;
-        normalize_alias_key(agents, "idTemplate", "id_template", source, "agents")?;
-        normalize_alias_key(
-            agents,
-            "displayNameTemplate",
-            "display_name_template",
-            source,
-            "agents",
-        )?;
-        normalize_alias_key(
-            agents,
-            "promptFragments",
-            "prompt_fragments",
-            source,
-            "agents",
-        )?;
-        normalize_alias_key(
-            agents,
-            "requiredSkills",
-            "required_skills",
-            source,
-            "agents",
-        )?;
-        normalize_alias_key(
-            agents,
-            "contextSizeAlerts",
-            "context_size_alerts",
-            source,
-            "agents",
-        )?;
-        normalize_alias_key(
-            agents,
-            "inferenceCompaction",
-            "inference_compaction",
-            source,
-            "agents",
-        )?;
-        if let Some(serde_json::Value::Object(policies)) = agents.get_mut("compactions") {
-            for policy in policies.values_mut() {
-                if let serde_json::Value::Object(policy) = policy {
-                    normalize_context_policy_value(policy.get_mut("when"));
-                }
-            }
-        }
-        if let Some(serde_json::Value::Object(alerts)) = agents.get_mut("context_size_alerts") {
-            for alert in alerts.values_mut() {
-                if let serde_json::Value::Object(alert) = alert {
-                    normalize_context_policy_value(alert.get_mut("when"));
-                }
-            }
-        }
-        normalize_alias_key(
-            agents,
-            "thinkingSummary",
-            "thinking_summary",
-            source,
-            "agents",
-        )?;
-        normalize_alias_key(agents, "serviceTier", "service_tier", source, "agents")?;
-        normalize_alias_key(agents, "webTools", "web_tools", source, "agents")?;
-        if let Some(web_tools) = agents.get_mut("web_tools") {
-            normalize_web_tools_keys(web_tools, source, "agents.web_tools")?;
-        }
-        normalize_alias_key(agents, "roleGroups", "role_groups", source, "agents")?;
-    }
-    let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") else {
-        return Ok(());
-    };
-    if let Some(serde_json::Value::Object(role_groups)) = agents.get_mut("role_groups") {
-        for (group_name, group) in role_groups {
-            let group_path = format!("agents.role_groups.{group_name}");
-            normalize_role_config_keys(group, source, &group_path)?;
-            if let serde_json::Value::Object(group_map) = group
-                && let Some(serde_json::Value::Object(roles)) = group_map.get_mut("roles")
-            {
-                for (role_name, role) in roles {
-                    normalize_role_config_keys(
-                        role,
-                        source,
-                        &format!("{group_path}.roles.{role_name}"),
-                    )?;
-                }
-            }
-        }
-    }
-    Ok(())
+    validate_retention_config_values(map, source)
 }
 
 fn validate_retention_config_values(
@@ -5179,149 +4682,7 @@ fn nested_harness_override_value(key: &str, value: serde_json::Value) -> serde_j
 fn normalized_harness_config_overrides(
     overrides: &[HarnessConfigCliOverride],
 ) -> Result<Vec<HarnessConfigCliOverride>, SettingsError> {
-    let mut normalized = Vec::with_capacity(overrides.len());
-    let mut seen = HashMap::<String, String>::new();
-    for override_ in overrides {
-        let key = normalize_harness_config_override_key(&override_.key);
-        if let Some(previous) = seen.get(&key)
-            && previous != &override_.key
-        {
-            return Err(SettingsError::InvalidHarnessConfigCliOverride(format!(
-                "conflicting CLI override keys `{previous}` and `{}` both normalize to `{key}`",
-                override_.key
-            )));
-        }
-        seen.entry(key.clone())
-            .or_insert_with(|| override_.key.clone());
-        normalized.push(HarnessConfigCliOverride {
-            key,
-            raw_value: override_.raw_value.clone(),
-        });
-    }
-    Ok(normalized)
-}
-
-fn normalize_harness_config_override_key(key: &str) -> String {
-    let mut parts: Vec<&str> = key.split('.').collect();
-    if parts.is_empty() {
-        return key.to_owned();
-    }
-
-    parts[0] = canonical_top_level_key(parts[0]);
-    if parts[0] == "extensions" && parts.len() > 2 && parts[2] == "toolPrefix" {
-        parts[2] = "tool_prefix";
-    }
-    if parts[0] == "notification_delivery" && parts.len() > 2 {
-        parts[2] = match parts[2] {
-            "idleMs" => "idle_ms",
-            "waitAnyMs" => "wait_any_ms",
-            "waitToolMs" => "wait_tool_ms",
-            key => key,
-        };
-    }
-    if parts[0] == "agents" && parts.len() > 1 {
-        parts[1] = canonical_agents_key(parts[1]);
-        if parts[1] == "web_tools" {
-            canonicalize_web_override_parts(&mut parts, 2);
-        }
-        if parts[1] == "role_groups" && parts.len() > 3 {
-            if parts[3] == "roles" {
-                if parts.len() > 5 {
-                    parts[5] = canonical_role_key(parts[5]);
-                    if parts[5] == "web_tools" {
-                        canonicalize_web_override_parts(&mut parts, 6);
-                    }
-                }
-            } else {
-                parts[3] = canonical_role_key(parts[3]);
-                if parts[3] == "web_tools" {
-                    canonicalize_web_override_parts(&mut parts, 4);
-                }
-            }
-        }
-    }
-    if parts[0] == "tool_policy" && parts.len() > 3 && parts[1] == "rules" {
-        parts[3] = canonical_tool_policy_rule_key(parts[3]);
-    }
-    parts.join(".")
-}
-
-/// Canonicalize aliases below one `web_tools` CLI override segment.
-fn canonicalize_web_override_parts(parts: &mut [&str], start: usize) {
-    if parts.len() > start && parts[start] == "allowedDomains" {
-        parts[start] = "allowed_domains";
-    }
-    if parts.len() > start + 3
-        && matches!(parts[start], "search" | "fetch")
-        && parts[start + 1] == "candidates"
-        && parts[start + 3] == "contextSize"
-    {
-        parts[start + 3] = "context_size";
-    }
-}
-
-fn canonical_top_level_key(key: &str) -> &str {
-    match key {
-        "customPrompts" => "custom_prompts",
-        "toolPolicy" => "tool_policy",
-        "showIntroductionNotice" => "show_introduction_notice",
-        "waitTimeoutMinimumMinutes" => "wait_timeout_minimum_minutes",
-        "waitTimeoutMaximumMinutes" => "wait_timeout_maximum_minutes",
-        "agentWatchRetryNotificationThreshold" => "agent_watch_retry_notification_threshold",
-        "notificationDelivery" => "notification_delivery",
-        "sessionRetention" => "session_retention",
-        "agentRetention" => "agent_retention",
-        "diagnosticRetention" => "diagnostic_retention",
-        _ => key,
-    }
-}
-
-fn canonical_agents_key(key: &str) -> &str {
-    match key {
-        "enabled" => "enable",
-        "defaultRole" => "default_role",
-        "idTemplate" => "id_template",
-        "displayNameTemplate" => "display_name_template",
-        "roleGroups" => "role_groups",
-        "promptFragments" => "prompt_fragments",
-        "requiredSkills" => "required_skills",
-        "contextSizeAlerts" => "context_size_alerts",
-        "webTools" => "web_tools",
-        "thinkingSummary" => "thinking_summary",
-        "serviceTier" => "service_tier",
-        "inferenceCompaction" => "inference_compaction",
-        _ => key,
-    }
-}
-
-fn canonical_role_key(key: &str) -> &str {
-    match key {
-        "enabled" => "enable",
-        "interSessionReceiver" => "inter_session_receiver",
-        "interSessionAutoStart" => "inter_session_auto_start",
-        "thinkingSummary" => "thinking_summary",
-        "serviceTier" => "service_tier",
-        "inferenceCompaction" => "inference_compaction",
-        "promptFragments" => "prompt_fragments",
-        "promptOverride" => "prompt_override",
-        "enableToolGroups" => "enable_tool_groups",
-        "disableToolGroups" => "disable_tool_groups",
-        "enableToolTags" => "enable_tool_tags",
-        "disableToolTags" => "disable_tool_tags",
-        "enableTools" => "enable_tools",
-        "disableTools" => "disable_tools",
-        "requiredSkills" => "required_skills",
-        "contextSizeAlerts" => "context_size_alerts",
-        "webTools" => "web_tools",
-        _ => key,
-    }
-}
-
-fn canonical_tool_policy_rule_key(key: &str) -> &str {
-    match key {
-        "enabled" => "enable",
-        _ => key,
-    }
+    Ok(overrides.to_vec())
 }
 
 /// Stacks an embedded built-in YAML string underneath the user's files.

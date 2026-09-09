@@ -156,7 +156,6 @@ fn unique_prompt_handoff_moves_constituent_allocations() {
         model_params: tau_proto::ModelParams::default(),
         tool_choice: Default::default(),
         originator: tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,

@@ -398,7 +398,6 @@ impl Harness {
                     }
                     None => path_tau_config_settings::RoleCompaction::ProviderDefault,
                 };
-                next_role.compaction = Some(inference);
                 next_role.inference_compaction = Some(inference);
                 let threshold = match inference {
                     path_tau_config_settings::RoleCompaction::Threshold(tokens) => {
@@ -411,7 +410,7 @@ impl Harness {
                         path_tau_config_settings::CompactionPolicyThreshold::Reserve(tokens)
                     }
                     path_tau_config_settings::RoleCompaction::Disabled => {
-                        unreachable!("legacy UI command never selects disabled")
+                        unreachable!("threshold UI command never selects disabled")
                     }
                 };
                 next_role

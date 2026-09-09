@@ -223,18 +223,19 @@ a policy that enables both implementations together.
 working-directory and user roots, parses skill frontmatter through `tau-skills`,
 canonicalizes file paths, and publishes complete atomic source snapshots. User
 AGENTS.md roots are scanned before project roots in this order:
-`$HOME/.config/agents`, `$HOME/.config/agents.local`, legacy `$HOME/.agents`,
-and legacy `$HOME/.agents.local`. All readable, non-empty files from those roots
-are stacked; the XDG roots do not suppress legacy roots. AGENTS.md roots and
+`$HOME/.config/agents`, `$HOME/.config/agents.local`, `$HOME/.agents`,
+and `$HOME/.agents.local`. All readable, non-empty files from those roots are
+stacked. The latter two are supported for interoperability with other coding
+harnesses, while Tau prefers the XDG roots. AGENTS.md roots and
 candidates are trusted prompt input, and discovery follows symlinks in both user
 and project roots.
 
 Project skill roots stay first and are discovered from ancestor
 `.agents/skills` and `.agents.local/skills` directories. User skill roots follow
-as `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`, legacy
-`$HOME/.agents/skills`, and legacy `$HOME/.agents.local/skills`. The shell
-extension marks XDG user skill roots with higher source precedence than legacy
-user skill roots so duplicate user skill names prefer XDG before modified time.
+as `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`,
+`$HOME/.agents/skills`, and `$HOME/.agents.local/skills`. The shell extension
+marks XDG user skill roots with higher source precedence than the supported
+alternate roots so duplicate user skill names prefer XDG before modified time.
 Skill roots, nested skill directories, root-level Markdown skill files, and
 directory-level `SKILL.md` files are followed through symlinks; `tau-skills`
 tracks canonical directories during traversal so symlink cycles stop at the first

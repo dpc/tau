@@ -76,12 +76,10 @@
 # next role group. Group-level fields are defaults for every role in `roles`.
 # Per-role `order` sorts roles within a group before role name; unordered roles
 # sort after ordered roles by name.
-# `description` is shown in `:role ...` completions. `compaction` controls
-# provider-side automatic compaction: omit it or set `provider_default` for the
-# provider's model-specific default, `disabled` to turn it off, or `{ threshold:
-# 200000 }` for an explicit used-context threshold. `{ reserve: 25000 }` instead
-# derives the threshold from the selected model as `context_window - reserve`.
-# `threshold` and `reserve` are mutually exclusive.
+# `description` is shown in `:role ...` completions.
+# `inference_compaction` controls provider-inline and reactive-overflow
+# compaction. Named `compactions` policies control harness-scheduled standalone
+# compaction. Both accept provider defaults or explicit threshold/reserve forms.
 # `context_size_alerts` entries inherit field-by-field from `agents` through the
 # role group to each role, so a specific role can set `enable: false`.
 # Per-role `prompt_fragments` add instructions only for that role.
@@ -90,8 +88,8 @@
 # `{{#if (tool_available capabilities.tools "web_search")}}Use web search.{{/if}}`
 # `extension_enabled` tests final startup intent and `extension_active` tests
 # current Ready state. Valid absent names are false; malformed inputs are errors.
-# customize internal tool availability for the role. `required_skills` /
-# `requiredSkills` declares exact skills that must be model-loadable or the role
+# customize internal tool availability for the role. `required_skills` declares
+# exact skills that must be model-loadable or the role
 # is disabled with a configuration notice.
 #   role_groups:
 #     engineer:
@@ -107,7 +105,9 @@
 #           order: 20
 #           description: Balanced coding engineer.
 #           model: chatgpt/gpt-5.6-sol
-#           compaction: { reserve: 25000 }
+#           inference_compaction: { reserve: 25000 }
+#           compactions:
+#             default: { reserve: 25000 }
 #           tools: [read, grep]
 #           disable_tools: [shell]
 #           required_skills: [project-review-process]
@@ -130,11 +130,6 @@
 #     enable: false
 #   test-dummy:
 #     enable: true
-#   std-slack:
-#     config:
-#       # Opt in to the legacy `[agent-id] ` prefix on agent-authored posts.
-#       prefix_agent_id: false
-#
 #   # Install tau-ext-swarm separately and make it available through PATH.
 #   # Publish this Tau session to one identity-pinned Tau Swarm server.
 #   # Starting the extension does not expose its tools. Opt selected roles into

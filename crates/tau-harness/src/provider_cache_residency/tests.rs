@@ -191,7 +191,6 @@ pub(crate) fn prompt(provider: &str, id: &str) -> AgentPromptCreated {
         model_params: Default::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
         originator: tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,
@@ -212,7 +211,6 @@ fn streaming_prefix_hash_matches_contiguous_serialization() {
         prompt.model_params,
         prompt.tool_choice,
         &prompt.originator,
-        prompt.share_user_cache_key,
     ))
     .expect("serialize prefix");
     let expected = blake3::keyed_hash(&key, &expected_bytes);

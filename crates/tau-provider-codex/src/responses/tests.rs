@@ -333,7 +333,6 @@ fn gpt_5_6_lowers_typed_image_inside_function_output() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -439,7 +438,6 @@ fn unaudited_responses_route_omits_typed_image() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -639,7 +637,6 @@ fn build_request_includes_prompt_cache_key_when_supported() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -719,7 +716,6 @@ fn debug_request_producer_submits_typed_compressed_capture_job() {
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: true,
     };
     let body = serde_json::json!({"input": [{"role": "user"}]});
@@ -815,7 +811,6 @@ fn build_request_includes_service_tier_when_configured() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -857,7 +852,6 @@ fn build_request_maps_disabled_effort_to_openai_none() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -940,7 +934,6 @@ fn build_request_omits_prompt_cache_key_without_seed() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -971,7 +964,6 @@ fn build_request_first_turn_replays_full_history_without_chain() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1026,7 +1018,6 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1099,7 +1090,6 @@ fn build_request_full_replay_preserves_raw_function_call_arguments() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1158,7 +1148,6 @@ fn build_request_full_replay_preserves_responses_tool_call_envelope() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1208,7 +1197,6 @@ fn build_request_inference_deferred_placement_sends_exact_suffix_and_previous_re
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1389,7 +1377,6 @@ fn response_anchor_large_prefix_work_is_bounded_to_hash_depth_and_suffix_lowerin
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::parse("large-prefix").expect("session id"),
         agent_id: &tau_proto::AgentId::parse("large-prefix-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let anchor =
@@ -1451,7 +1438,6 @@ fn build_request_compaction_response_anchor_falls_back_to_full_replay() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let anchor = response_anchor_from_context(request.context, "resp_compacted")
@@ -1486,7 +1472,6 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1537,7 +1522,6 @@ fn websocket_vcr_replays_recorded_causal_mismatch_full_request() {
         session_id: &tau_proto::SessionId::parse("vcr-causal-full")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let agent_prompt_id = "prompt-causal-full";
@@ -1597,7 +1581,6 @@ fn websocket_vcr_replays_recorded_compatible_chained_request() {
         session_id: &tau_proto::SessionId::parse("vcr-compatible-chain")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let anchor =
@@ -1666,7 +1649,6 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1711,7 +1693,6 @@ fn build_request_prompt_cache_key_ignores_originator() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let ext_request = PromptPayload {
@@ -1726,7 +1707,6 @@ fn build_request_prompt_cache_key_ignores_originator() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -1738,50 +1718,6 @@ fn build_request_prompt_cache_key_ignores_originator() {
     assert!(user_body["prompt_cache_key"].is_string());
     assert!(ext_body["prompt_cache_key"].is_string());
     assert_eq!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);
-}
-
-/// The legacy `share_user_cache_key` flag should no longer be needed to make an
-/// extension-originated prompt use the stable per-agent cache key. Keeping this
-/// no-op avoids letting the flag reintroduce a provenance-derived bucket split.
-#[test]
-fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
-    let config = ResponsesConfig {
-        profile_namespace: tau_proto::ProviderName::new("chatgpt"),
-        mode: ResponsesMode::Standard,
-        supports_prompt_cache_key: true,
-        ..chain_test_config()
-    };
-    let ext = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::parse("std-notifications")
-            .expect("test extension name must satisfy the identifier grammar"),
-        query_id: "idle-0".into(),
-    };
-    let shared_request = PromptPayload {
-        system_prompt: "sys",
-        context: context(&[]),
-        hosted_tools: &[],
-        tools: &[],
-        params: tau_proto::ModelParams::default(),
-        tool_choice: tau_proto::ToolChoice::Auto,
-        compaction: None,
-        originator: &ext,
-        share_user_cache_key: true,
-        session_id: &tau_proto::SessionId::parse("test-session")
-            .expect("known-safe SessionId must be valid"),
-        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        debug_provider_requests: false,
-    };
-    let body =
-        serde_json::to_value(build_request(&config, &shared_request, None)).expect("serialize");
-    let default_request = PromptPayload {
-        share_user_cache_key: false,
-        debug_provider_requests: false,
-        ..shared_request
-    };
-    let default_body =
-        serde_json::to_value(build_request(&config, &default_request, None)).expect("serialize");
-    assert!(body["prompt_cache_key"].is_string());
-    assert_eq!(body["prompt_cache_key"], default_body["prompt_cache_key"]);
 }
 
 #[test]
@@ -1826,7 +1762,6 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -1841,7 +1776,6 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &ext,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -1887,7 +1821,6 @@ fn build_request_lite_chain_omits_owned_developer_prefix() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -1938,7 +1871,6 @@ fn build_compact_request_uses_lite_schema() {
             compact_threshold: Some(tau_proto::TokenCount::new(10)),
         }),
         originator: &tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -2008,7 +1940,6 @@ fn build_compact_request_uses_standard_schema() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -2046,7 +1977,6 @@ fn build_compact_request_preserves_previous_response_id() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -2117,7 +2047,6 @@ fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
@@ -2677,7 +2606,6 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -2729,7 +2657,6 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -2795,7 +2722,6 @@ fn full_ws_compaction_measurement_matches_exact_fresh_wire_envelope() {
         originator: &originator,
         session_id: &session_id,
         agent_id: &agent_id,
-        share_user_cache_key: false,
         compaction: None,
         debug_provider_requests: false,
     };
@@ -2882,7 +2808,6 @@ fn standard_responses_advertise_parallel_tool_call_emission() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -3192,7 +3117,6 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -3272,7 +3196,6 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -3340,7 +3263,6 @@ fn basic_prompt_payload() -> PromptPayload<'static> {
         originator: &tau_proto::PromptOriginator::User,
         session_id,
         agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     }
 }
@@ -3695,7 +3617,6 @@ fn request_for_items(items: &[ContextItem]) -> PromptPayload<'static> {
         originator: &tau_proto::PromptOriginator::User,
         session_id,
         agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     }
 }
@@ -3725,7 +3646,6 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -3767,7 +3687,6 @@ fn build_request_omits_phase_when_unsupported() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -3815,7 +3734,6 @@ fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -3911,7 +3829,6 @@ fn build_request_emits_include_when_encrypted_reasoning_supported() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -3939,7 +3856,6 @@ fn build_request_omits_include_when_encrypted_reasoning_unsupported() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -3984,7 +3900,6 @@ fn build_request_replays_reasoning_item_as_top_level_input() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -4258,7 +4173,6 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -4313,7 +4227,6 @@ fn build_request_preserves_existing_provider_tool_call_id_prefixes() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -4358,7 +4271,6 @@ fn build_request_replays_cancelled_tool_result_with_header() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -4460,7 +4372,6 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -4744,7 +4655,6 @@ fn ws_envelope_adds_type_and_drops_stream() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 
@@ -4786,7 +4696,6 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
         session_id: &tau_proto::SessionId::parse("test-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
 

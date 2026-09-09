@@ -1073,7 +1073,6 @@ fn run_scripted_local_summary_attempt_with_updates(
         model_params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::None,
         originator: tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::StandaloneCompaction,

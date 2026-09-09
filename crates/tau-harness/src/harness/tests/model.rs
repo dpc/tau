@@ -2682,7 +2682,7 @@ fn selected_role_missing_required_skill_fails_startup() {
             custom:
               roles:
                 reviewer:
-                  requiredSkills: [missing-review-skill]
+                  required_skills: [missing-review-skill]
         "#,
     )
     .expect("write harness config");

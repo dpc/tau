@@ -15,6 +15,11 @@ Implementation-only changes do not bump it. Boundary changes bump the minor
 revision only when best-effort continuation is deliberate; when in doubt, they
 bump the major revision and reset the minor revision to zero.
 
+Protocol 5.0 removes the obsolete `tool.delegate_progress` event schema. Major
+skew rejection prevents a 4.x peer from sending that formerly valid event to a
+decoder that no longer accepts it. Extensions and UI clients must be rebuilt or
+updated with the harness before activation.
+
 Protocol 4.2 deliberately permits ordinary minor-skew continuation: declaration
 inspection support is an additive Hello field and runtime-default Configure
 purpose is omitted. Only a collector that first verifies explicit support sends

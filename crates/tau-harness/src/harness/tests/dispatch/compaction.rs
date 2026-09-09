@@ -1090,10 +1090,10 @@ fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
     h.shutdown().expect("shutdown");
 }
 
-/// The legacy CLI threshold remains a compound edit: it updates inline/reactive
+/// The CLI threshold is a compound edit: it updates inline/reactive
 /// policy and the named default without erasing siblings or default selectors.
 #[test]
-fn legacy_role_threshold_update_preserves_named_compaction_siblings() {
+fn role_threshold_update_preserves_named_compaction_siblings() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     let role_name = h.config.selected_role.clone();
@@ -6519,7 +6519,7 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
         .available_roles
         .get_mut(&selected_role)
         .expect("selected role")
-        .compaction = Some(path_tau_config_settings::RoleCompaction::Threshold(1200));
+        .inference_compaction = Some(path_tau_config_settings::RoleCompaction::Threshold(1200));
 
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
@@ -7198,8 +7198,11 @@ fn reactive_context_overflow_eligibility_fails_closed() {
             !matches!(case, Case::Unsupported | Case::ForgedDisposition);
         if matches!(case, Case::Disabled) {
             let role = h.config.selected_role.clone();
-            h.config.available_roles.entry(role).or_default().compaction =
-                Some(path_tau_config_settings::RoleCompaction::Disabled);
+            h.config
+                .available_roles
+                .entry(role)
+                .or_default()
+                .inference_compaction = Some(path_tau_config_settings::RoleCompaction::Disabled);
         }
         let cid = ensure_test_user_agent(&mut h);
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))

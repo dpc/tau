@@ -1183,7 +1183,7 @@ impl Harness {
             .config
             .available_roles
             .get(&self.role_name_for_agent_id(cid))
-            .and_then(|role| role.inference_compaction.or(role.compaction))
+            .and_then(|role| role.inference_compaction)
             .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         let (compaction_threshold, compaction_policy) = match role_compaction {
             path_tau_config_settings::RoleCompaction::Threshold(value) => (
@@ -1377,7 +1377,7 @@ impl Harness {
             .config
             .available_roles
             .get(&role_name)
-            .and_then(|role| role.inference_compaction.or(role.compaction))
+            .and_then(|role| role.inference_compaction)
             == Some(path_tau_config_settings::RoleCompaction::Disabled)
         {
             return ProviderTerminalPlan::Other;
@@ -1526,7 +1526,7 @@ impl Harness {
                 .config
                 .available_roles
                 .get(&self.role_name_for_agent_id(&cid))
-                .and_then(|role| role.inference_compaction.or(role.compaction))
+                .and_then(|role| role.inference_compaction)
                 != Some(path_tau_config_settings::RoleCompaction::Disabled);
             let branch_matches = checkpoint.activation_cut.is_some()
                 && self

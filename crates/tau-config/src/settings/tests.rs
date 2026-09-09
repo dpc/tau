@@ -189,62 +189,6 @@ profiles:
     ));
     assert!(candidates.windows(2).all(|pair| pair[0].0 < pair[1].0));
 }
-
-/// File and dotted CLI camel-case aliases normalize before duplicate detection
-/// and preserve explicit nested values.
-#[test]
-fn web_tools_camel_case_aliases_work_in_files_and_cli_paths() {
-    assert_eq!(
-        normalize_harness_config_override_key(
-            "agents.roleGroups.engineer.roles.engineer.webTools.search.candidates.native.contextSize"
-        ),
-        "agents.role_groups.engineer.roles.engineer.web_tools.search.candidates.native.context_size"
-    );
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        r#"
-agents:
-  roleGroups:
-    engineer:
-      roles:
-        engineer:
-          webTools:
-            allowedDomains: [example.com]
-            search:
-              candidates:
-                native:
-                  contextSize: low
-"#,
-    )
-    .expect("write aliases");
-    let cli = [HarnessConfigCliOverride::from_str(
-        "agents.roleGroups.engineer.roles.engineer.webTools.search.candidates.native.contextSize=high",
-    )
-    .expect("CLI alias")];
-    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
-        &dirs_with_config(td.path()),
-        None,
-        &[],
-        &cli,
-    )
-    .expect("load aliases");
-    let native = settings.roles["engineer"]
-        .web_tools
-        .search()
-        .candidates()
-        .find(|(name, _)| *name == "native")
-        .expect("native")
-        .1;
-    assert!(matches!(
-        native,
-        WebToolCandidate::ModelProvider {
-            context_size: Some(tau_proto::WebSearchContextSize::High),
-            ..
-        }
-    ));
-}
-
 /// Provider and model aliases resolve independently after agent/group/role
 /// replay, including exact model suffixes that themselves contain slashes.
 #[test]
@@ -520,48 +464,6 @@ fn provider_cache_refresh_defaults_disabled() {
         }
     );
 }
-
-/// The onboarding welcome is enabled by default and accepts both canonical and
-/// normalized camel-case file keys while rejecting ambiguous duplicate
-/// spellings.
-#[test]
-fn introduction_notice_default_override_and_alias_normalization() {
-    assert!(HarnessSettings::built_in().show_introduction_notice);
-
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "showIntroductionNotice: false\n",
-    )
-    .expect("write alias");
-    let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("load alias override");
-    assert!(!settings.show_introduction_notice);
-
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "show_introduction_notice: true\nshowIntroductionNotice: false\n",
-    )
-    .expect("write conflicting keys");
-    let error = load_harness_settings_in(&dirs_with_config(td.path()))
-        .expect_err("duplicate canonical and alias keys must fail");
-    let message = error.to_string();
-    assert!(message.contains("show_introduction_notice"));
-    assert!(message.contains("showIntroductionNotice"));
-
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "show_introduction_notice: true\n",
-    )
-    .expect("restore canonical key");
-    let overrides =
-        [HarnessConfigCliOverride::from_str("showIntroductionNotice=false").expect("CLI alias")];
-    let settings =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
-            .expect("load CLI alias override");
-    assert!(!settings.show_introduction_notice);
-}
-
 /// Sparse drop-ins merge cache-refresh fields without resetting the idle bound.
 #[test]
 fn provider_cache_refresh_merges_recursively() {
@@ -852,6 +754,103 @@ fn dirs_with_config(dir: &std::path::Path) -> TauDirs {
         config_dir: Some(dir.to_path_buf()),
         state_dir: None,
     }
+}
+
+/// Removed harness spellings must fail in both YAML files and dotted CLI
+/// overrides so no input path silently preserves the retired compatibility.
+#[test]
+fn removed_harness_config_spellings_are_rejected() {
+    let cases = [
+        ("sessionRetention", "1d"),
+        ("agentRetention", "1d"),
+        ("diagnosticRetention", "1d"),
+        ("customPrompts", "{}"),
+        ("toolPolicy", "{}"),
+        ("showIntroductionNotice", "false"),
+        ("waitTimeoutMinimumMinutes", "1"),
+        ("waitTimeoutMaximumMinutes", "2"),
+        ("agentWatchRetryNotificationThreshold", "2"),
+        ("notificationDelivery", "{}"),
+        ("notification_delivery.idle.idleMs", "1"),
+        ("notification_delivery.idle.waitAnyMs", "1"),
+        ("notification_delivery.idle.waitToolMs", "1"),
+        ("extensions.core-shell.toolPrefix", "work"),
+        ("extensions.core-shell.enabled", "false"),
+        ("agents.enabled", "false"),
+        ("agents.defaultRole", "engineer"),
+        ("agents.idTemplate", "agent-{{ sequence }}"),
+        ("agents.displayNameTemplate", "Agent"),
+        ("agents.promptFragments", "[]"),
+        ("agents.requiredSkills", "[]"),
+        ("agents.thinkingSummary", "auto"),
+        ("agents.serviceTier", "fast"),
+        ("agents.inferenceCompaction", "provider_default"),
+        ("agents.contextSizeAlerts", "{}"),
+        ("agents.roleGroups", "{}"),
+        ("agents.webTools", "{}"),
+        ("agents.role_groups.engineer.enabled", "true"),
+        ("agents.role_groups.engineer.interSessionReceiver", "false"),
+        ("agents.role_groups.engineer.interSessionAutoStart", "false"),
+        ("agents.role_groups.engineer.thinkingSummary", "auto"),
+        ("agents.role_groups.engineer.serviceTier", "fast"),
+        (
+            "agents.role_groups.engineer.inferenceCompaction",
+            "provider_default",
+        ),
+        ("agents.role_groups.engineer.contextSizeAlerts", "{}"),
+        ("agents.role_groups.engineer.promptFragments", "[]"),
+        ("agents.role_groups.engineer.promptOverride", "null"),
+        ("agents.role_groups.engineer.disableToolTags", "[]"),
+        ("agents.role_groups.engineer.enableToolTags", "[]"),
+        ("agents.role_groups.engineer.disableToolGroups", "[]"),
+        ("agents.role_groups.engineer.enableToolGroups", "[]"),
+        ("agents.role_groups.engineer.disableTools", "[]"),
+        ("agents.role_groups.engineer.enableTools", "[]"),
+        ("agents.role_groups.engineer.requiredSkills", "[]"),
+        ("agents.role_groups.engineer.webTools", "{}"),
+        ("agents.web_tools.allowedDomains", "[]"),
+        (
+            "agents.web_tools.search.candidates.native.contextSize",
+            "high",
+        ),
+        ("tool_policy.rules.test.enabled", "false"),
+        ("agents.compaction", "disabled"),
+        ("agents.inference_compaction", "providerDefault"),
+        ("agents.compactions.default.threshold", "contextLimitSafe"),
+        ("agents.compactions.default.when.at", "outerTurnFinished"),
+    ];
+
+    for (key, raw_value) in cases {
+        let value = serde_yaml_ng::from_str(raw_value).expect("parse test value");
+        let nested = nested_harness_override_value(key, value);
+        let yaml = serde_yaml_ng::to_string(&nested).expect("serialize test config");
+        let file_dir = TempDir::new().expect("tempdir");
+        std::fs::write(file_dir.path().join("harness.yaml"), yaml).expect("write test config");
+        assert!(
+            load_harness_settings_in(&dirs_with_config(file_dir.path())).is_err(),
+            "file spelling unexpectedly accepted: {key}"
+        );
+
+        let cli_dir = TempDir::new().expect("tempdir");
+        let override_ = HarnessConfigCliOverride::from_str(&format!("{key}={raw_value}"))
+            .expect("parse CLI override");
+        assert!(
+            load_harness_settings_with_cli_overrides_in(
+                &dirs_with_config(cli_dir.path()),
+                &[],
+                &[override_],
+            )
+            .is_err(),
+            "CLI spelling unexpectedly accepted: {key}"
+        );
+    }
+}
+
+/// The retired `show_tools: on` state value must require migration to `full`.
+#[test]
+fn cli_state_rejects_removed_show_tools_on_value() {
+    serde_json::from_value::<CliSettings>(serde_json::json!({ "show_tools": "on" }))
+        .expect_err("removed show_tools value must fail");
 }
 
 fn profile_selection(value: &str) -> ProfileSelection {
@@ -1252,48 +1251,6 @@ fn notification_delivery_rejects_reordered_delays() {
         "notification delivery delays must satisfy idle_ms <= wait_any_ms <= wait_tool_ms"
     );
 }
-
-/// File-layer aliases normalize before merging with the canonical built-in
-/// policy, including aliases nested below one notification class.
-#[test]
-fn notification_delivery_file_aliases_override_built_in_policy() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "notificationDelivery:\n  user_prompt:\n    idleMs: 1\n    waitAnyMs: 2\n    waitToolMs: 3\n",
-    )
-    .expect("write aliased policy");
-    let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("load aliased policy");
-    assert_eq!(
-        settings.notification_delivery.user_prompt.idle(),
-        Duration::from_millis(1)
-    );
-    assert_eq!(
-        settings.notification_delivery.user_prompt.wait_any(),
-        Duration::from_millis(2)
-    );
-    assert_eq!(
-        settings.notification_delivery.user_prompt.wait_tool(),
-        Duration::from_millis(3)
-    );
-}
-
-/// Same-layer canonical and alias keys fail with source context rather than
-/// producing ambiguous layered precedence.
-#[test]
-fn notification_delivery_rejects_alias_conflicts() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "notificationDelivery: {}\nnotification_delivery: {}\n",
-    )
-    .expect("write conflicting policy");
-    let error = load_harness_settings_in(&dirs_with_config(td.path()))
-        .expect_err("conflicting aliases must fail");
-    assert!(error.to_string().contains("both legacy key"));
-}
-
 /// Ensures an inverted activating-input wait range fails configuration loading
 /// instead of creating contradictory silent-clamping behavior.
 #[test]
@@ -1479,58 +1436,6 @@ fn tool_policy_shell_style_drop_in_resets_lower_value() {
 
     assert_eq!(settings.tool_policy.default_shell_tool_style, None);
 }
-
-/// Ensures the `toolPolicy` and nested `enabled` aliases are normalized before
-/// config layers merge with built-in canonical fields.
-#[test]
-fn user_config_can_disable_builtin_tool_policy_rule_with_enabled_alias() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"
-toolPolicy:
-  rules:
-    builtin.chatgpt-shell:
-      enabled: false
-"#,
-    )
-    .expect("write harness config");
-
-    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-
-    assert!(!settings.tool_policy.rules["builtin.chatgpt-shell"].enable);
-}
-
-/// Ensures same-source `enabled`/`enable` conflicts in policy rules are
-/// rejected with path context instead of relying on serde duplicate-field
-/// errors.
-#[test]
-fn tool_policy_rule_rejects_enabled_enable_alias_conflict() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"
-tool_policy:
-  rules:
-    builtin.chatgpt-shell:
-      enabled: false
-      enable: true
-"#,
-    )
-    .expect("write harness config");
-
-    let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflicting aliases");
-
-    assert!(
-        error.to_string().contains("enabled")
-            && error.to_string().contains("enable")
-            && error.to_string().contains("builtin.chatgpt-shell"),
-        "unexpected error: {error}"
-    );
-}
-
 /// Ensures higher-precedence user config can disable a built-in keyed policy
 /// rule without restating the rule's tag predicates or operations.
 #[test]
@@ -1814,497 +1719,6 @@ fn cli_state_defaults_missing_show_messages_to_all_full() {
     assert!(!loaded.show_internal_prompts);
     assert!(loaded.show_prompt_scroll_indicator);
 }
-
-/// Ensures legacy `show_tools: on` config remains accepted as the full display
-/// mode.
-#[test]
-fn cli_state_loads_legacy_show_tools_on_as_full() {
-    let td = TempDir::new().expect("tempdir");
-    let dirs = TauDirs {
-        config_dir: None,
-        state_dir: Some(td.path().to_path_buf()),
-    };
-    std::fs::write(td.path().join("cli.json"), r#"{"show_tools":"on"}"#).expect("write");
-
-    let loaded = CliState::load(&dirs);
-    assert_eq!(loaded.show_tools, crate::settings::ShowTools::Full);
-}
-
-/// Ensures canonical keys from higher-precedence drop-ins are not overwritten
-/// by lower-precedence legacy aliases during alias normalization.
-#[test]
-fn harness_canonical_drop_in_wins_over_legacy_alias() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(dir.join("harness.yaml"), "agents:\n  defaultRole: legacy\n")
-        .expect("write base");
-    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
-    std::fs::write(
-        dir.join("harness.d").join("10-role.yaml"),
-        "agents:\n  default_role: canonical\n",
-    )
-    .expect("write dropin");
-
-    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-
-    assert_eq!(settings.default_role.as_deref(), Some("canonical"));
-}
-
-/// Ensures canonical CLI overrides are not overwritten by lower-precedence
-/// legacy aliases during alias normalization.
-#[test]
-fn harness_canonical_cli_override_wins_over_legacy_alias() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(dir.join("harness.yaml"), "agents:\n  defaultRole: legacy\n")
-        .expect("write base");
-    let override_ =
-        HarnessConfigCliOverride::from_str("agents.default_role=cli").expect("override");
-
-    let settings =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &[override_])
-            .expect("load");
-
-    assert_eq!(settings.default_role.as_deref(), Some("cli"));
-}
-
-/// Ensures a single source cannot specify both nested agent legacy and
-/// canonical keys.
-#[test]
-fn harness_rejects_same_layer_agents_alias_conflict() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        "agents:\n  defaultRole: legacy\n  default_role: canonical\n",
-    )
-    .expect("write");
-
-    let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflicting aliases");
-
-    assert!(
-        error.to_string().contains("defaultRole") && error.to_string().contains("default_role"),
-        "unexpected error: {error}"
-    );
-}
-
-/// Ensures nested alias/canonical conflicts in one source produce explicit
-/// config errors.
-#[test]
-fn harness_rejects_same_layer_nested_alias_conflict() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"
-        agents:
-          idTemplate: legacy-{{random_alphanumeric 4}}
-          id_template: canonical-{{random_alphanumeric 4}}
-        "#,
-    )
-    .expect("write");
-
-    let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflicting aliases");
-
-    assert!(
-        error.to_string().contains("idTemplate") && error.to_string().contains("id_template"),
-        "unexpected error: {error}"
-    );
-}
-
-/// Every retention camelCase alias conflicts with its canonical spelling in the
-/// same source layer instead of silently selecting one value.
-#[test]
-fn harness_rejects_same_layer_retention_alias_conflicts() {
-    for (legacy, canonical) in [
-        ("sessionRetention", "session_retention"),
-        ("agentRetention", "agent_retention"),
-        ("diagnosticRetention", "diagnostic_retention"),
-    ] {
-        let mut map = serde_json::Map::new();
-        map.insert(legacy.to_owned(), serde_json::json!("1d"));
-        map.insert(canonical.to_owned(), serde_json::json!("2d"));
-        let mut value = serde_json::Value::Object(map);
-        let error =
-            normalize_harness_config_value(&mut value, "test").expect_err("conflict must fail");
-        let rendered = error.to_string();
-        assert!(rendered.contains(legacy), "{rendered}");
-        assert!(rendered.contains(canonical), "{rendered}");
-    }
-}
-
-/// Ensures every maintained file-layer legacy alias normalizes to its canonical
-/// key.
-#[test]
-fn harness_file_alias_table_normalizes_all_legacy_keys() {
-    let mut value = serde_json::json!({
-        "customPrompts": [],
-        "toolPolicy": {
-            "rules": {
-                "builtin.chatgpt-shell": {
-                    "enabled": false,
-                }
-            }
-        },
-        "agents": {
-            "defaultRole": "manager",
-            "idTemplate": "agent-{{random_alphanumeric 4}}",
-            "displayNameTemplate": "Agent {{n}}",
-            "promptFragments": [],
-            "requiredSkills": [],
-            "contextSizeAlerts": {},
-            "roleGroups": {
-                "engineer": {
-                    "enabled": true,
-                    "thinkingSummary": "auto",
-                    "serviceTier": "default",
-                    "promptFragments": [],
-                    "promptOverride": "built-in",
-                    "disableToolTags": [],
-                    "enableToolTags": [],
-                    "disableToolGroups": [],
-                    "enableToolGroups": [],
-                    "disableTools": [],
-                    "enableTools": [],
-                    "requiredSkills": [],
-                    "contextSizeAlerts": {},
-                    "roles": {
-                        "engineer": {
-                            "enabled": true,
-                            "thinkingSummary": "auto",
-                            "serviceTier": "default",
-                            "promptFragments": [],
-                            "promptOverride": "built-in",
-                            "disableToolTags": [],
-                            "enableToolTags": [],
-                            "disableToolGroups": [],
-                            "enableToolGroups": [],
-                            "disableTools": [],
-                            "enableTools": [],
-                            "requiredSkills": [],
-                            "contextSizeAlerts": {},
-                        }
-                    }
-                }
-            }
-        }
-    });
-    let root = value.as_object_mut().expect("root map");
-    root.insert(
-        "sessionRetention".to_owned(),
-        serde_json::Value::String("1d".to_owned()),
-    );
-    root.insert(
-        "agentRetention".to_owned(),
-        serde_json::Value::String("2d".to_owned()),
-    );
-    root.insert(
-        "diagnosticRetention".to_owned(),
-        serde_json::Value::String("3d".to_owned()),
-    );
-    root.insert(
-        "waitTimeoutMinimumMinutes".to_owned(),
-        serde_json::Value::from(5),
-    );
-    root.insert(
-        "waitTimeoutMaximumMinutes".to_owned(),
-        serde_json::Value::from(1_440),
-    );
-    root.insert(
-        "agentWatchRetryNotificationThreshold".to_owned(),
-        serde_json::Value::from(5),
-    );
-    for pointer in [
-        "/agents/roleGroups/engineer",
-        "/agents/roleGroups/engineer/roles/engineer",
-    ] {
-        let map = value
-            .pointer_mut(pointer)
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("role map");
-        map.insert(
-            "interSessionReceiver".to_owned(),
-            serde_json::Value::Bool(true),
-        );
-        map.insert(
-            "interSessionAutoStart".to_owned(),
-            serde_json::Value::Bool(true),
-        );
-    }
-    let agents = value
-        .pointer_mut("/agents")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("agents map");
-    agents.insert("enabled".to_owned(), serde_json::Value::Bool(true));
-    agents.insert(
-        "thinkingSummary".to_owned(),
-        serde_json::Value::String("auto".to_owned()),
-    );
-    agents.insert(
-        "serviceTier".to_owned(),
-        serde_json::Value::String("default".to_owned()),
-    );
-
-    normalize_harness_config_value(&mut value, "test").expect("normalize");
-
-    assert!(value.get("custom_prompts").is_some());
-    assert_eq!(value["session_retention"], serde_json::json!("1d"));
-    assert_eq!(value["agent_retention"], serde_json::json!("2d"));
-    assert_eq!(value["diagnostic_retention"], serde_json::json!("3d"));
-    assert_eq!(value["wait_timeout_minimum_minutes"], serde_json::json!(5));
-    assert_eq!(
-        value["wait_timeout_maximum_minutes"],
-        serde_json::json!(1440)
-    );
-    assert_eq!(
-        value["agent_watch_retry_notification_threshold"],
-        serde_json::json!(5)
-    );
-    assert!(value.get("tool_policy").is_some());
-    assert!(
-        value
-            .pointer("/tool_policy/rules/builtin.chatgpt-shell/enable")
-            .is_some()
-    );
-    assert!(value.pointer("/agents/enable").is_some());
-    assert!(value.pointer("/agents/default_role").is_some());
-    assert!(value.pointer("/agents/id_template").is_some());
-    assert!(value.pointer("/agents/display_name_template").is_some());
-    assert!(value.pointer("/agents/prompt_fragments").is_some());
-    assert!(value.pointer("/agents/required_skills").is_some());
-    assert!(value.pointer("/agents/context_size_alerts").is_some());
-    assert!(value.pointer("/agents/thinking_summary").is_some());
-    assert!(value.pointer("/agents/service_tier").is_some());
-    let group = value
-        .pointer("/agents/role_groups/engineer")
-        .expect("group");
-    for key in [
-        "enable",
-        "inter_session_receiver",
-        "inter_session_auto_start",
-        "thinking_summary",
-        "service_tier",
-        "prompt_fragments",
-        "prompt_override",
-        "disable_tool_tags",
-        "enable_tool_tags",
-        "disable_tool_groups",
-        "enable_tool_groups",
-        "disable_tools",
-        "enable_tools",
-        "required_skills",
-        "context_size_alerts",
-    ] {
-        assert!(group.get(key).is_some(), "missing group key {key}");
-        assert!(
-            group.pointer(&format!("/roles/engineer/{key}")).is_some(),
-            "missing role key {key}"
-        );
-    }
-}
-
-/// Ensures every maintained CLI override legacy alias normalizes to its
-/// canonical path.
-#[test]
-fn harness_cli_alias_table_normalizes_all_legacy_keys() {
-    let cases = [
-        ("customPrompts", "custom_prompts"),
-        ("sessionRetention", "session_retention"),
-        ("agentRetention", "agent_retention"),
-        ("diagnosticRetention", "diagnostic_retention"),
-        ("toolPolicy", "tool_policy"),
-        ("waitTimeoutMinimumMinutes", "wait_timeout_minimum_minutes"),
-        ("waitTimeoutMaximumMinutes", "wait_timeout_maximum_minutes"),
-        (
-            "agentWatchRetryNotificationThreshold",
-            "agent_watch_retry_notification_threshold",
-        ),
-        ("agents.enabled", "agents.enable"),
-        ("extensions.work.toolPrefix", "extensions.work.tool_prefix"),
-        ("agents.defaultRole", "agents.default_role"),
-        ("agents.promptFragments", "agents.prompt_fragments"),
-        ("agents.requiredSkills", "agents.required_skills"),
-        ("agents.thinkingSummary", "agents.thinking_summary"),
-        ("agents.serviceTier", "agents.service_tier"),
-        (
-            "agents.contextSizeAlerts.compact-soon.enable",
-            "agents.context_size_alerts.compact-soon.enable",
-        ),
-        ("agents.idTemplate", "agents.id_template"),
-        ("agents.displayNameTemplate", "agents.display_name_template"),
-        (
-            "toolPolicy.rules.local.enabled",
-            "tool_policy.rules.local.enable",
-        ),
-        (
-            "agents.roleGroups.engineer.enabled",
-            "agents.role_groups.engineer.enable",
-        ),
-        (
-            "agents.roleGroups.engineer.contextSizeAlerts.compact-soon.enable",
-            "agents.role_groups.engineer.context_size_alerts.compact-soon.enable",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.contextSizeAlerts.compact-soon.enable",
-            "agents.role_groups.engineer.roles.engineer.context_size_alerts.compact-soon.enable",
-        ),
-        (
-            "agents.roleGroups.engineer.interSessionReceiver",
-            "agents.role_groups.engineer.inter_session_receiver",
-        ),
-        (
-            "agents.roleGroups.engineer.interSessionAutoStart",
-            "agents.role_groups.engineer.inter_session_auto_start",
-        ),
-        (
-            "agents.roleGroups.engineer.thinkingSummary",
-            "agents.role_groups.engineer.thinking_summary",
-        ),
-        (
-            "agents.roleGroups.engineer.serviceTier",
-            "agents.role_groups.engineer.service_tier",
-        ),
-        (
-            "agents.roleGroups.engineer.promptFragments",
-            "agents.role_groups.engineer.prompt_fragments",
-        ),
-        (
-            "agents.roleGroups.engineer.promptOverride",
-            "agents.role_groups.engineer.prompt_override",
-        ),
-        (
-            "agents.roleGroups.engineer.disableToolTags",
-            "agents.role_groups.engineer.disable_tool_tags",
-        ),
-        (
-            "agents.roleGroups.engineer.enableToolTags",
-            "agents.role_groups.engineer.enable_tool_tags",
-        ),
-        (
-            "agents.roleGroups.engineer.enableToolGroups",
-            "agents.role_groups.engineer.enable_tool_groups",
-        ),
-        (
-            "agents.roleGroups.engineer.disableToolGroups",
-            "agents.role_groups.engineer.disable_tool_groups",
-        ),
-        (
-            "agents.roleGroups.engineer.enableTools",
-            "agents.role_groups.engineer.enable_tools",
-        ),
-        (
-            "agents.roleGroups.engineer.disableTools",
-            "agents.role_groups.engineer.disable_tools",
-        ),
-        (
-            "agents.roleGroups.engineer.requiredSkills",
-            "agents.role_groups.engineer.required_skills",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.enabled",
-            "agents.role_groups.engineer.roles.engineer.enable",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.interSessionReceiver",
-            "agents.role_groups.engineer.roles.engineer.inter_session_receiver",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.interSessionAutoStart",
-            "agents.role_groups.engineer.roles.engineer.inter_session_auto_start",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.thinkingSummary",
-            "agents.role_groups.engineer.roles.engineer.thinking_summary",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.serviceTier",
-            "agents.role_groups.engineer.roles.engineer.service_tier",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.promptFragments",
-            "agents.role_groups.engineer.roles.engineer.prompt_fragments",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.promptOverride",
-            "agents.role_groups.engineer.roles.engineer.prompt_override",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.disableToolTags",
-            "agents.role_groups.engineer.roles.engineer.disable_tool_tags",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.enableToolTags",
-            "agents.role_groups.engineer.roles.engineer.enable_tool_tags",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.enableToolGroups",
-            "agents.role_groups.engineer.roles.engineer.enable_tool_groups",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.disableToolGroups",
-            "agents.role_groups.engineer.roles.engineer.disable_tool_groups",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.enableTools",
-            "agents.role_groups.engineer.roles.engineer.enable_tools",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.disableTools",
-            "agents.role_groups.engineer.roles.engineer.disable_tools",
-        ),
-        (
-            "agents.roleGroups.engineer.roles.engineer.requiredSkills",
-            "agents.role_groups.engineer.roles.engineer.required_skills",
-        ),
-        (
-            "notificationDelivery.user_prompt.idleMs",
-            "notification_delivery.user_prompt.idle_ms",
-        ),
-        (
-            "notificationDelivery.status.waitAnyMs",
-            "notification_delivery.status.wait_any_ms",
-        ),
-        (
-            "notificationDelivery.agent_message.waitToolMs",
-            "notification_delivery.agent_message.wait_tool_ms",
-        ),
-    ];
-
-    for (legacy, canonical) in cases {
-        assert_eq!(normalize_harness_config_override_key(legacy), canonical);
-    }
-}
-
-/// Ensures role-level `enabled`/`enable` conflicts are rejected with path
-/// context.
-#[test]
-fn harness_rejects_same_layer_role_alias_conflict() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"
-        agents:
-          role_groups:
-                engineer:
-                  roles:
-                    engineer:
-                      enabled: false
-                      enable: true
-        "#,
-    )
-    .expect("write");
-
-    let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflicting aliases");
-
-    assert!(
-        error.to_string().contains("enabled")
-            && error.to_string().contains("enable")
-            && error.to_string().contains("engineer"),
-        "unexpected error: {error}"
-    );
-}
-
 #[cfg(unix)]
 /// Ensures unreadable drop-in directory discovery errors are reported instead
 /// of skipped.
@@ -2498,64 +1912,6 @@ fn harness_settings_accept_agent_id_template_in_user_config() {
         Some("{{role_group}} {{task_name}}")
     );
 }
-
-/// Ensures legacy camelCase keys in higher-precedence config override built-in
-/// snake_case keys.
-#[test]
-fn harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins() {
-    // Built-in defaults now use snake_case. Legacy user layers still need to
-    // override them instead of becoming duplicate alias fields after layering.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"{
-            agents: {
-                defaultRole: "manager",
-                idTemplate: "legacy-{{random_alphanumeric 4}}",
-                roleGroups: {
-                    engineer: {
-                        promptFragments: [{ name: "legacy.group", priority: 80, text: "group" }],
-                        roles: {
-                            "engineer": {
-                                enableTools: ["web_search"],
-                                promptFragments: [{ name: "legacy.role", priority: 90, text: "role" }],
-                            },
-                        },
-                    },
-                },
-            },
-        }"#,
-    )
-    .expect("write");
-
-    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(settings.default_role.as_deref(), Some("manager"));
-    assert_eq!(
-        settings.agent_id_template,
-        "legacy-{{random_alphanumeric 4}}"
-    );
-    let engineer = settings.roles.get("engineer").expect("engineer role");
-    assert!(
-        engineer
-            .enable_tools
-            .iter()
-            .any(|tool| tool.as_str() == "web_search")
-    );
-    assert!(
-        engineer
-            .prompt_fragments
-            .iter()
-            .any(|fragment| fragment.name.as_str() == "legacy.group")
-    );
-    assert!(
-        engineer
-            .prompt_fragments
-            .iter()
-            .any(|fragment| fragment.name.as_str() == "legacy.role")
-    );
-}
-
 /// Ensures CLI config overrides parse as YAML and layer after config files.
 #[test]
 fn harness_config_cli_overrides_are_applied_last_and_typed() {
@@ -2596,7 +1952,7 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
             .expect("override"),
         HarnessConfigCliOverride::from_str("extensions.core-shell.command=[\"tau\", \"ext\"]")
             .expect("override"),
-        HarnessConfigCliOverride::from_str("extensions.core-shell.toolPrefix=work")
+        HarnessConfigCliOverride::from_str("extensions.core-shell.tool_prefix=work")
             .expect("override"),
     ];
 
@@ -2712,149 +2068,6 @@ fn harness_config_cli_overrides_reject_bad_key_value() {
     assert!(HarnessConfigCliOverride::from_str("missing-equals").is_err());
     assert!(HarnessConfigCliOverride::from_str("=value").is_err());
 }
-
-/// Ensures CLI overrides using legacy role aliases still target canonical role
-/// fields.
-#[test]
-fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.engineer.enabled=false",
-    )
-    .expect("override")];
-
-    let settings =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
-            .expect("load");
-
-    assert!(!settings.roles.contains_key("engineer"));
-}
-
-/// Ensures CLI overrides using legacy nested `agents.roleGroups` aliases still
-/// target canonical role settings.
-#[test]
-fn harness_config_cli_overrides_normalize_legacy_agents_role_aliases() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.roleGroups.engineer.roles.engineer.effort=0.25",
-    )
-    .expect("override")];
-
-    let settings =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
-            .expect("load");
-
-    assert_eq!(
-        settings.roles["engineer"].effort,
-        Some(tau_proto::NativeReasoningEffort::Low.into())
-    );
-}
-
-/// Ensures CLI overrides reject alias/canonical conflicts within the same
-/// synthetic layer.
-#[test]
-fn harness_config_cli_overrides_reject_alias_conflicts() {
-    let td = TempDir::new().expect("tempdir");
-    let overrides = [
-        HarnessConfigCliOverride::from_str("agents.defaultRole=manager").expect("legacy override"),
-        HarnessConfigCliOverride::from_str("agents.default_role=engineer")
-            .expect("canonical override"),
-    ];
-
-    let error =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
-            .expect_err("conflicting overrides");
-
-    assert!(
-        error.to_string().contains("defaultRole") && error.to_string().contains("default_role"),
-        "unexpected error: {error}"
-    );
-}
-
-/// Ensures YAML map-valued CLI overrides normalize aliases inside the supplied
-/// value.
-#[test]
-fn harness_config_cli_overrides_normalize_map_value_aliases() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.engineer={enabled: false}",
-    )
-    .expect("override")];
-
-    let settings =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
-            .expect("load");
-
-    assert!(!settings.roles.contains_key("engineer"));
-}
-
-/// Ensures YAML map-valued CLI overrides reject alias/canonical conflicts
-/// inside the value.
-#[test]
-fn harness_config_cli_overrides_reject_map_value_alias_conflicts() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.engineer={enabled: false, enable: true}",
-    )
-    .expect("override")];
-
-    let error =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
-            .expect_err("conflicting map aliases");
-
-    assert!(
-        error.to_string().contains("enabled")
-            && error.to_string().contains("enable")
-            && error.to_string().contains("engineer"),
-        "unexpected error: {error}"
-    );
-}
-
-/// Ensures map-valued CLI overrides can address dotted tool-policy rule names
-/// and normalize `enabled` inside the supplied map.
-#[test]
-fn harness_config_cli_map_override_disables_tool_policy_with_enabled_alias() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    let overrides = [HarnessConfigCliOverride::from_str(
-        r#"tool_policy={rules: {builtin.chatgpt-shell: {enabled: false}}}"#,
-    )
-    .expect("override")];
-
-    let settings =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
-            .expect("load");
-
-    assert!(!settings.tool_policy.rules["builtin.chatgpt-shell"].enable);
-}
-
-/// Ensures dotted CLI overrides normalize tool policy rule aliases before
-/// duplicate detection, matching file-layer and whole-map override behavior.
-#[test]
-fn harness_config_cli_overrides_reject_tool_policy_rule_alias_conflicts() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    let overrides = [
-        HarnessConfigCliOverride::from_str("tool_policy.rules.local.enabled=false")
-            .expect("legacy override"),
-        HarnessConfigCliOverride::from_str("tool_policy.rules.local.enable=true")
-            .expect("canonical override"),
-    ];
-
-    let error =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
-            .expect_err("conflicting tool policy aliases");
-
-    assert!(
-        error.to_string().contains("enabled") && error.to_string().contains("enable"),
-        "unexpected error: {error}"
-    );
-}
-
 /// Ensures role tool allow/deny lists load into effective role settings.
 #[test]
 fn harness_settings_load_role_tool_lists() {
@@ -2869,12 +2082,12 @@ fn harness_settings_load_role_tool_lists() {
                     roles: {
                         engineer: {
                             tools: ["read", "grep"],
-                            disableToolTags: ["shell:*"],
-                            enableToolTags: ["shell:cd"],
-                            disableToolGroups: ["shell"],
-                            enableToolGroups: ["search"],
-                            disableTools: ["grep"],
-                            enableTools: ["web_search"],
+                            disable_tool_tags: ["shell:*"],
+                            enable_tool_tags: ["shell:cd"],
+                            disable_tool_groups: ["shell"],
+                            enable_tool_groups: ["search"],
+                            disable_tools: ["grep"],
+                            enable_tools: ["web_search"],
                         },
                     },
                 },
@@ -2931,7 +2144,7 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
                   enable: false
                   description: Base description
                   model: openai/gpt-5
-                  compaction: disabled
+                  inference_compaction: disabled
                   prompt_override: built-in
                   tools: [read]
                   enable_tools: [grep]
@@ -2951,7 +2164,7 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
                   enable: null
                   description: null
                   model: null
-                  compaction: null
+                  inference_compaction: null
                   prompt_override: null
                   tools: null
                   enable_tools: []
@@ -2966,7 +2179,10 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     assert_eq!(reviewer.enable, None);
     assert_eq!(reviewer.description, None);
     assert_eq!(reviewer.model, None);
-    assert_eq!(reviewer.compaction, None);
+    assert_eq!(
+        reviewer.inference_compaction,
+        Some(RoleCompaction::ProviderDefault)
+    );
     assert_eq!(reviewer.prompt_override, None);
     assert_eq!(reviewer.tools, None);
     assert!(reviewer.enable_tools.is_empty());
@@ -3043,7 +2259,7 @@ fn harness_role_group_defaults_apply_to_existing_roles_when_adding_role() {
     );
 }
 
-/// Ensures required role skills are parsed from snake_case and camelCase,
+/// Ensures required role skills are parsed from snake_case and camel case,
 /// inherited from role groups, and de-duplicated so duplicate group/role
 /// requirements do not produce noisy repeated diagnostics later.
 #[test]
@@ -3060,7 +2276,7 @@ fn harness_role_required_skills_are_additive_and_deduped() {
               required_skills: [group-skill, shared-skill]
               roles:
                 reviewer:
-                  requiredSkills: [role-skill, shared-skill]
+                  required_skills: [role-skill, shared-skill]
                 implementer: {}
         "#,
     )
@@ -3132,46 +2348,6 @@ fn harness_role_required_skills_accumulate_across_layers() {
         ]
     );
 }
-
-/// Ensures role-specific compaction settings load and merge correctly.
-#[test]
-fn harness_settings_load_role_compaction() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"{
-            agents: {
-                role_groups: {
-                engineer: {
-                    compaction: { threshold: 70000 },
-                    roles: {
-                        engineer: { compaction: { threshold: 80000 } },
-                        reviewer: {},
-                        disabled: { compaction: "disabled" },
-                    },
-                },
-            },
-            },
-        }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(
-        s.roles["engineer"].compaction,
-        Some(RoleCompaction::Threshold(80000))
-    );
-    assert_eq!(
-        s.roles["reviewer"].compaction,
-        Some(RoleCompaction::Threshold(70000))
-    );
-    assert_eq!(
-        s.roles["disabled"].compaction,
-        Some(RoleCompaction::Disabled)
-    );
-}
-
 /// Ensures named context-size alerts merge field-by-field from agent globals
 /// through group defaults and role overrides, including default enablement and
 /// the default compaction reminder.
@@ -3225,49 +2401,6 @@ fn harness_settings_merge_named_context_size_alerts() {
         DEFAULT_CONTEXT_SIZE_ALERT_MESSAGE
     );
 }
-
-/// Ensures legacy and canonical alert-map spellings normalize before file-layer
-/// merging, so a drop-in can disable an inherited camel-case role alert.
-#[test]
-fn harness_settings_merge_context_size_alert_alias_across_layers() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"
-        agents:
-          roleGroups:
-            custom:
-              roles:
-                reviewer:
-                  contextSizeAlerts:
-                    compact-soon:
-                      threshold: 160000
-        "#,
-    )
-    .expect("write base");
-    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
-    std::fs::write(
-        dir.join("harness.d/10-disable.yaml"),
-        r#"
-        agents:
-          role_groups:
-            custom:
-              roles:
-                reviewer:
-                  context_size_alerts:
-                    compact-soon:
-                      enable: false
-        "#,
-    )
-    .expect("write drop-in");
-
-    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let alert = &settings.roles["reviewer"].context_size_alerts["compact-soon"];
-    assert_eq!(alert.threshold.get(), 160_000);
-    assert!(!alert.enable);
-}
-
 /// Ensures a newly declared named alert cannot omit the threshold that defines
 /// when it fires, even when the entry only attempts to disable itself.
 #[test]
@@ -3590,25 +2723,25 @@ fn harness_settings_rejects_unknown_top_level_fields() {
 fn harness_settings_rejects_root_agent_role_settings() {
     let file_cases = [
         ("default_role", r#"{ default_role: stale }"#),
-        ("defaultRole", r#"{ defaultRole: stale }"#),
+        ("default_role", r#"{ default_role: stale }"#),
         (
             "role_groups",
             r#"{ role_groups: { stale: { roles: { stale: {} } } } }"#,
         ),
         (
-            "roleGroups",
-            r#"{ roleGroups: { stale: { roles: { stale: {} } } } }"#,
+            "role_groups",
+            r#"{ role_groups: { stale: { roles: { stale: {} } } } }"#,
         ),
         (
             "prompt_fragments",
             r#"{ prompt_fragments: [{ name: stale, priority: 1, text: stale }] }"#,
         ),
         (
-            "promptFragments",
-            r#"{ promptFragments: [{ name: stale, priority: 1, text: stale }] }"#,
+            "prompt_fragments",
+            r#"{ prompt_fragments: [{ name: stale, priority: 1, text: stale }] }"#,
         ),
         ("required_skills", r#"{ required_skills: [stale] }"#),
-        ("requiredSkills", r#"{ requiredSkills: [stale] }"#),
+        ("required_skills", r#"{ required_skills: [stale] }"#),
     ];
     for (key, yaml) in file_cases {
         let td = TempDir::new().expect("tempdir");
@@ -3625,13 +2758,13 @@ fn harness_settings_rejects_root_agent_role_settings() {
 
     let cli_cases = [
         "default_role=stale",
-        "defaultRole=stale",
+        "default_role=stale",
         "role_groups={stale: {roles: {stale: {}}}}",
-        "roleGroups={stale: {roles: {stale: {}}}}",
+        "role_groups={stale: {roles: {stale: {}}}}",
         "prompt_fragments=[{ name: stale, priority: 1, text: stale }]",
-        "promptFragments=[{ name: stale, priority: 1, text: stale }]",
+        "prompt_fragments=[{ name: stale, priority: 1, text: stale }]",
         "required_skills=[stale]",
-        "requiredSkills=[stale]",
+        "required_skills=[stale]",
     ];
     for override_text in cli_cases {
         let td = TempDir::new().expect("tempdir");
@@ -4005,9 +3138,9 @@ fn harness_agent_provider_defaults_apply_to_all_roles() {
           model: openai/global-model
           effort: 0.5
           verbosity: high
-          thinkingSummary: concise
-          serviceTier: flex
-          compaction: { threshold: 123456 }
+          thinking_summary: concise
+          service_tier: flex
+          inference_compaction: { threshold: 123456 }
           role_groups:
             custom:
               roles:
@@ -4033,7 +3166,7 @@ fn harness_agent_provider_defaults_apply_to_all_roles() {
     );
     assert_eq!(inherited.service_tier, Some(tau_proto::ServiceTier::Flex));
     assert_eq!(
-        inherited.compaction,
+        inherited.inference_compaction,
         Some(RoleCompaction::Threshold(123_456))
     );
 }
@@ -4797,7 +3930,7 @@ agents:
 profiles:
   focused:
     agents:
-      defaultRole: first-profile-role
+      default_role: first-profile-role
 "#,
     )
     .expect("write base profile");
@@ -5104,9 +4237,9 @@ fn harness_config_cli_provider_defaults_apply_to_all_roles() {
     .expect("write harness");
     let overrides = [
         HarnessConfigCliOverride::from_str("agents.model=openai/cli-model").expect("model"),
-        HarnessConfigCliOverride::from_str("agents.thinkingSummary=detailed")
+        HarnessConfigCliOverride::from_str("agents.thinking_summary=detailed")
             .expect("thinking summary"),
-        HarnessConfigCliOverride::from_str("agents.serviceTier=fast").expect("service tier"),
+        HarnessConfigCliOverride::from_str("agents.service_tier=fast").expect("service tier"),
     ];
 
     let settings =
@@ -5154,7 +4287,7 @@ fn harness_config_cli_global_prompt_fragments_apply_to_all_roles() {
         &dirs_with_config(dir),
         &[],
         &[HarnessConfigCliOverride::from_str(
-            "agents.promptFragments=[{ name: \"global.cli\", priority: 64, text: \"Follow the run policy.\" }]",
+            "agents.prompt_fragments=[{ name: \"global.cli\", priority: 64, text: \"Follow the run policy.\" }]",
         )
         .expect("parse override")],
     )
@@ -5819,64 +4952,6 @@ fn inter_session_configuration_rejects_removed_peer_entrypoint_schema() {
         );
     }
 }
-
-/// Canonical and camel-case spellings cannot both set the same receiver
-/// capability in one source layer.
-#[test]
-fn inter_session_configuration_rejects_alias_conflicts() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        r#"
-agents:
-  role_groups:
-    manager:
-      interSessionReceiver: true
-      inter_session_receiver: false
-"#,
-    )
-    .expect("write conflict");
-
-    let error =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("reject alias conflict");
-
-    assert!(
-        error.to_string().contains("interSessionReceiver")
-            && error.to_string().contains("inter_session_receiver"),
-        "unexpected error: {error}"
-    );
-}
-
-/// Dotted CLI overrides use the same alias normalization, group inheritance,
-/// and per-role override behavior as file layers.
-#[test]
-fn inter_session_configuration_layers_cli_aliases() {
-    let td = TempDir::new().expect("tempdir");
-    let overrides = [
-        HarnessConfigCliOverride::from_str("agents.roleGroups.engineer.interSessionReceiver=true")
-            .expect("receiver override"),
-        HarnessConfigCliOverride::from_str("agents.roleGroups.engineer.interSessionAutoStart=true")
-            .expect("auto-start override"),
-        HarnessConfigCliOverride::from_str(
-            "agents.roleGroups.engineer.roles.engineer-senior.interSessionAutoStart=false",
-        )
-        .expect("role override"),
-    ];
-
-    let settings =
-        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
-            .expect("load aliases");
-
-    assert_eq!(
-        settings.roles["engineer-senior"].inter_session_receiver,
-        Some(true)
-    );
-    assert_eq!(
-        settings.roles["engineer-senior"].inter_session_auto_start,
-        Some(false)
-    );
-}
-
 /// Ensures missing optional user config files fall back to the built-in layers.
 #[test]
 fn missing_user_files_load_the_built_in_baseline() {
@@ -6074,69 +5149,6 @@ fn harness_config_cli_can_disable_agents_and_reenable_one_role() {
     assert_eq!(settings.roles.len(), 1);
     assert_eq!(settings.roles["engineer"].enable, Some(true));
 }
-
-/// Ensures legacy `enabled` role fields continue to disable roles in old config
-/// files.
-#[test]
-fn harness_role_enabled_alias_is_kept_for_old_config() {
-    // `enabled` was a mistaken old spelling. Keep accepting it as a little
-    // bandaid so existing configs keep loading while users migrate to `enable`.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"{
-            agents: {
-                role_groups: {
-                legacy: {
-                    enabled: false,
-                    roles: {
-                        old_on: { enabled: true },
-                        old_off: {},
-                    },
-                },
-            },
-            },
-        }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.roles["old_on"].enable, Some(true));
-    assert!(!s.roles.contains_key("old_off"));
-    assert_eq!(
-        s.role_groups
-            .iter()
-            .find(|group| group.name == "legacy")
-            .map(|group| group.roles.as_slice()),
-        Some(&["old_on".to_owned()][..])
-    );
-}
-
-/// Regression guard: legacy `enabled` disables built-in roles after alias
-/// normalization.
-#[test]
-fn harness_legacy_enabled_alias_overrides_built_in_enable() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"
-        agents:
-          role_groups:
-            engineer:
-              roles:
-                engineer:
-                  enabled: false
-        "#,
-    )
-    .expect("write");
-
-    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-
-    assert!(!settings.roles.contains_key("engineer"));
-}
-
 /// Regression guard: role filtering happens after all layers so later enables
 /// win.
 #[test]
@@ -6400,7 +5412,7 @@ fn harness_extension_tool_prefix_layers_and_clears() {
     let dir = td.path();
     std::fs::write(
         dir.join("harness.yaml"),
-        "extensions:\n  work:\n    command: [demo]\n    toolPrefix: team_ops\n",
+        "extensions:\n  work:\n    command: [demo]\n    tool_prefix: team_ops\n",
     )
     .expect("write base");
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load base");
@@ -6581,23 +5593,6 @@ compactions:
         ContextPolicyWhen::default()
     );
 }
-
-/// The clear context-limit spelling and compatibility spelling must resolve to
-/// one adapter-owned threshold and serialize canonically.
-#[test]
-fn context_limit_safe_aliases_provider_default_canonically() {
-    let safe: CompactionPolicyThreshold =
-        serde_yaml_ng::from_str("context_limit_safe").expect("safe spelling");
-    let compatibility: CompactionPolicyThreshold =
-        serde_yaml_ng::from_str("provider_default").expect("compatibility spelling");
-    assert_eq!(safe, CompactionPolicyThreshold::ProviderDefault);
-    assert_eq!(safe, compatibility);
-    assert_eq!(
-        serde_yaml_ng::to_string(&safe).expect("serialize"),
-        "provider_default\n"
-    );
-}
-
 /// Reserve-based role policy input must retain its distinct boundary form
 /// through the public serde surface.
 #[test]
@@ -6739,48 +5734,6 @@ fn context_size_alert_threshold_serializes_as_numeric_scalar() {
         serde_json::json!(100)
     );
 }
-
-/// Ensures legacy compaction replaces inherited named rules and seeds both the
-/// standalone and provider-inline successors during layered role resolution.
-#[test]
-fn legacy_compaction_normalizes_both_successors_and_replaces_named_rules() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"
-agents:
-  compactions:
-    eager:
-      threshold: 160000
-      when:
-        at: outer_turn_finished
-        statuses: [done]
-  role_groups:
-    custom:
-      roles:
-        reviewer:
-          compaction: { threshold: 80000 }
-"#,
-    )
-    .expect("write config");
-    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load settings");
-    let reviewer = &settings.roles["reviewer"];
-    assert_eq!(
-        reviewer.inference_compaction,
-        Some(RoleCompaction::Threshold(80_000))
-    );
-    assert_eq!(reviewer.compactions.len(), 1);
-    assert_eq!(
-        reviewer.compactions["default"].threshold,
-        CompactionPolicyThreshold::Tokens(80_000)
-    );
-    assert_eq!(
-        reviewer.compactions["default"].when,
-        ContextPolicyWhen::default()
-    );
-}
-
 /// Ensures a role can inherit one named rule's timing and reset only its status
 /// matcher without accidentally resetting the threshold or lifecycle point.
 #[test]
@@ -6822,163 +5775,6 @@ agents:
         }
     );
 }
-
-/// Ensures same-source legacy and successor settings fail instead of selecting
-/// an arbitrary merge order.
-#[test]
-fn compaction_rejects_ambiguous_legacy_and_successor_settings() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "agents:\n  compaction: disabled\n  inference_compaction: disabled\n",
-    )
-    .expect("write config");
-    let error = load_harness_settings_in(&dirs_with_config(td.path()))
-        .expect_err("ambiguous source must fail");
-    assert!(error.to_string().contains("cannot be combined"));
-}
-
-/// Explicit successor null restores provider-default instead of exposing the
-/// lower legacy field to runtime fallback.
-#[test]
-fn inference_compaction_null_overrides_lower_legacy_policy() {
-    let mut role = AgentRole::default();
-    role.apply_legacy_compaction(Some(RoleCompaction::Disabled));
-    role.apply_patch(&AgentRolePatch {
-        inference_compaction: Some(None),
-        ..AgentRolePatch::default()
-    });
-    assert_eq!(
-        role.inference_compaction,
-        Some(RoleCompaction::ProviderDefault)
-    );
-}
-
-/// Effective serialization is canonical: legacy input becomes successor fields
-/// and can round-trip without triggering same-layer ambiguity.
-#[test]
-fn legacy_compaction_effective_serialization_is_canonical_and_round_trips() {
-    let mut role = AgentRole::default();
-    role.apply_legacy_compaction(Some(RoleCompaction::Threshold(80_000)));
-    let yaml = serde_yaml_ng::to_string(&role).expect("serialize effective role");
-    assert!(!yaml.lines().any(|line| line.starts_with("compaction:")));
-    assert!(yaml.contains("inference_compaction:"));
-    assert!(yaml.contains("compactions:"));
-    let reparsed: AgentRole = serde_yaml_ng::from_str(&yaml).expect("round-trip role");
-    assert_eq!(reparsed.inference_compaction, role.inference_compaction);
-    assert_eq!(reparsed.compactions, role.compactions);
-}
-
-/// The new singular field follows the established direct-serde camelCase alias.
-#[test]
-fn inference_compaction_accepts_camel_case_alias() {
-    let role: AgentRole =
-        serde_yaml_ng::from_str("inferenceCompaction: disabled\n").expect("camel alias");
-    assert_eq!(role.inference_compaction, Some(RoleCompaction::Disabled));
-}
-
-/// File normalization rejects duplicate canonical/camel spellings and dotted
-/// CLI normalization selects the canonical successor key.
-#[test]
-fn inference_compaction_alias_normalization_is_consistent() {
-    assert_eq!(
-        normalize_harness_config_override_key(
-            "agents.role_groups.demo.roles.worker.inferenceCompaction"
-        ),
-        "agents.role_groups.demo.roles.worker.inference_compaction"
-    );
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "agents:\n  inference_compaction: disabled\n  inferenceCompaction: provider_default\n",
-    )
-    .expect("write duplicates");
-    let error = load_harness_settings_in(&dirs_with_config(td.path()))
-        .expect_err("duplicate aliases must fail");
-    let error = error.to_string();
-    assert!(
-        error.contains("both legacy key") || error.contains("duplicate field"),
-        "unexpected error: {error}"
-    );
-}
-
-/// Legacy disabled removes inherited named rules, while legacy null restores
-/// the default rule and provider-default inference policy.
-#[test]
-fn legacy_disabled_and_null_have_replace_all_semantics() {
-    let mut role = AgentRole::default();
-    role.compactions.insert(
-        "eager".to_owned(),
-        CompactionPolicy {
-            threshold: CompactionPolicyThreshold::Tokens(20_000),
-            enable: true,
-            when: ContextPolicyWhen::default(),
-        },
-    );
-    role.apply_legacy_compaction(Some(RoleCompaction::Disabled));
-    assert!(role.compactions.is_empty());
-    assert_eq!(role.inference_compaction, Some(RoleCompaction::Disabled));
-    role.apply_legacy_compaction(None);
-    assert_eq!(
-        role.inference_compaction,
-        Some(RoleCompaction::ProviderDefault)
-    );
-    assert_eq!(
-        role.compactions["default"].threshold,
-        CompactionPolicyThreshold::ProviderDefault
-    );
-}
-
-/// Legacy values retain replace-all semantics when they arrive from a later
-/// profile source, including explicit null restoring both shipped defaults.
-#[test]
-fn legacy_compaction_replace_all_crosses_profile_source_boundaries() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        r#"
-agents:
-  compactions:
-    inherited:
-      threshold: 40000
-profiles:
-  disabled:
-    agents:
-      compaction: disabled
-  reset:
-    agents:
-      compaction: null
-"#,
-    )
-    .expect("write layered config");
-
-    let disabled = profile_selection("disabled");
-    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
-        &dirs_with_config(td.path()),
-        Some(&disabled),
-        &[],
-        &[],
-    )
-    .expect("load disabled profile");
-    assert!(settings.roles.values().all(|role| {
-        role.inference_compaction == Some(RoleCompaction::Disabled) && role.compactions.is_empty()
-    }));
-
-    let reset = profile_selection("reset");
-    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
-        &dirs_with_config(td.path()),
-        Some(&reset),
-        &[],
-        &[],
-    )
-    .expect("load reset profile");
-    assert!(settings.roles.values().all(|role| {
-        role.inference_compaction == Some(RoleCompaction::ProviderDefault)
-            && role.compactions.len() == 1
-            && role.compactions["default"].threshold == CompactionPolicyThreshold::ProviderDefault
-    }));
-}
-
 /// Successor fields layer independently across sources: null clears the lower
 /// legacy inference setting, while named fields merge and nested selector
 /// fields reset or replace independently.
@@ -7012,7 +5808,7 @@ agents:
 profiles:
   selected:
     agents:
-      inferenceCompaction: null
+      inference_compaction: null
       compactions:
         eager:
           enable: true
@@ -7029,7 +5825,7 @@ profiles:
         camel:
           threshold: 70000
           when:
-            at: outerTurnFinished
+            at: outer_turn_finished
 "#,
     )
     .expect("write layered config");
@@ -7073,111 +5869,6 @@ profiles:
         );
     }
 }
-
-/// Global camel-case aliases obey the same source precedence for profile,
-/// dotted CLI, and whole-map CLI layers instead of surviving beside canonical
-/// keys.
-#[test]
-fn compaction_aliases_normalize_at_each_global_source_boundary() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        r#"
-agents:
-  inference_compaction: disabled
-profiles:
-  selected:
-    agents:
-      inferenceCompaction: { threshold: 40000 }
-"#,
-    )
-    .expect("write layered config");
-    let selected = profile_selection("selected");
-    let dotted =
-        [
-            HarnessConfigCliOverride::from_str("agents.inferenceCompaction=provider_default")
-                .expect("dotted override"),
-        ];
-    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
-        &dirs_with_config(td.path()),
-        Some(&selected),
-        &[],
-        &dotted,
-    )
-    .expect("load dotted override");
-    assert!(
-        settings
-            .roles
-            .values()
-            .all(|role| { role.inference_compaction == Some(RoleCompaction::ProviderDefault) })
-    );
-
-    let map =
-        [
-            HarnessConfigCliOverride::from_str("agents={inferenceCompaction: {threshold: 60000}}")
-                .expect("map override"),
-        ];
-    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
-        &dirs_with_config(td.path()),
-        Some(&selected),
-        &[],
-        &map,
-    )
-    .expect("load map override");
-    assert!(
-        settings
-            .roles
-            .values()
-            .all(|role| { role.inference_compaction == Some(RoleCompaction::Threshold(60_000)) })
-    );
-}
-
-/// Group and role camel-case aliases override lower canonical spellings at the
-/// same logical scope after profile layering.
-#[test]
-fn compaction_aliases_normalize_at_group_and_role_source_boundaries() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        r#"
-agents:
-  role_groups:
-    custom:
-      inference_compaction: disabled
-      roles:
-        grouped: {}
-        worker:
-          inference_compaction: disabled
-profiles:
-  selected:
-    agents:
-      role_groups:
-        custom:
-          inferenceCompaction: { threshold: 50000 }
-          roles:
-            worker:
-              inferenceCompaction: { threshold: 70000 }
-"#,
-    )
-    .expect("write layered config");
-    let selected = profile_selection("selected");
-    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
-        &dirs_with_config(td.path()),
-        Some(&selected),
-        &[],
-        &[],
-    )
-    .expect("load selected profile");
-    assert_eq!(
-        settings.roles["grouped"].inference_compaction,
-        Some(RoleCompaction::Threshold(50_000))
-    );
-    assert_eq!(
-        settings.roles["worker"].inference_compaction,
-        Some(RoleCompaction::Threshold(70_000))
-    );
-}
-
 /// Disabling a rule does not make an incomplete, source-introduced named entry
 /// valid because a later layer may re-enable it.
 #[test]

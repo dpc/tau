@@ -58,7 +58,6 @@ fn prompt_created(agent_id: &str, prompt_id: &str, ctx_id: &str) -> AgentPromptC
         model_params: tau_proto::ModelParams::default(),
         tool_choice: Default::default(),
         originator: PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: Some(ctx_id.to_owned()),
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,

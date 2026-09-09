@@ -1102,7 +1102,7 @@ impl Harness {
             .config
             .available_roles
             .get(&role_name)
-            .and_then(|role| role.inference_compaction.or(role.compaction))
+            .and_then(|role| role.inference_compaction)
             .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         match role_compaction {
             path_tau_config_settings::RoleCompaction::ProviderDefault => {
@@ -1625,24 +1625,7 @@ impl Harness {
         let threshold = role
             .and_then(|role| {
                 if role.compactions.is_empty() {
-                    if point != path_tau_config_settings::ContextPolicyPoint::BeforeInference {
-                        return None;
-                    }
-                    return match role
-                        .compaction
-                        .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
-                    {
-                        path_tau_config_settings::RoleCompaction::ProviderDefault => {
-                            info.standalone_compaction_threshold
-                        }
-                        path_tau_config_settings::RoleCompaction::Threshold(threshold) => {
-                            Some(tau_proto::TokenCount::new(threshold))
-                        }
-                        path_tau_config_settings::RoleCompaction::Reserve(reserve) => {
-                            compaction_threshold_from_reserve(&model, Some(info), reserve).ok()
-                        }
-                        path_tau_config_settings::RoleCompaction::Disabled => None,
-                    };
+                    return None;
                 }
                 role.compactions
                     .values()
@@ -1712,14 +1695,6 @@ impl Harness {
                 })
                 .collect();
             tau_proto::CompactionThresholdSource::NamedPolicies { names }
-        } else if matches!(
-            role.and_then(|role| role.compaction),
-            Some(
-                path_tau_config_settings::RoleCompaction::Threshold(_)
-                    | path_tau_config_settings::RoleCompaction::Reserve(_)
-            )
-        ) {
-            tau_proto::CompactionThresholdSource::RoleThreshold
         } else {
             tau_proto::CompactionThresholdSource::ProviderDefault
         };

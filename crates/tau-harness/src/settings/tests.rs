@@ -508,7 +508,7 @@ fn std_slack_uses_external_executable_without_component_suffix() {
     assert!(slack.suffix.is_empty());
     assert!(!slack.enable);
     assert_eq!(slack.role.as_deref(), Some("tool"));
-    assert_eq!(slack.config, serde_json::json!({"prefix_agent_id": false}));
+    assert_eq!(slack.config, serde_json::json!({}));
 }
 
 /// Ensures the disabled standard Telegram instance launches the separately
@@ -1184,10 +1184,7 @@ fn built_in_extensions_json5_disables_slack_agent_id_prefix() {
         .find(|def| def.name == "std-slack")
         .expect("std-slack built-in extension");
 
-    assert_eq!(
-        extension.config,
-        serde_json::json!({"prefix_agent_id": false})
-    );
+    assert_eq!(extension.config, serde_json::json!({}));
 }
 
 /// Ensures the external Swarm bridge remains inert and optional until an

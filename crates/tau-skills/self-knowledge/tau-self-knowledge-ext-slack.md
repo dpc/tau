@@ -90,10 +90,9 @@ reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
 extension/session authority and effective tool policy.
 
-Replies and proactive sends contain only the agent-supplied message by default.
-Set `prefix_agent_id: true` to opt into the legacy `[agent-id] message` format.
-This presentation setting does not change message limits, retry budget, Tau-issued
-reply authority, routing, threads, authorization, or configuration freeze.
+Replies and proactive sends contain the agent-supplied message unchanged.
+Message limits, retry budget, Tau-issued reply authority, routing, threads,
+authorization, and configuration freeze are independent of message contents.
 Agent-authored text may use ordinary mrkdwn but raw `<@`, `<!`, and `<#` Slack
 native controls are rejected. Bridge help/control/error output is escaped,
 bounded, and sent with mrkdwn/link expansion disabled.

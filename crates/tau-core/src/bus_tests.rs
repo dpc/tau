@@ -389,7 +389,6 @@ fn lazy_event_broadcast_skips_payload_without_candidate() {
             model_params: Default::default(),
             tool_choice: Default::default(),
             originator: Default::default(),
-            share_user_cache_key: false,
             ctx_id: None,
             compaction: None,
             operation: tau_proto::PromptOperation::Inference,

@@ -333,7 +333,7 @@ impl Harness {
         use tau_config::settings::{CompactionPolicyThreshold, RoleCompaction};
 
         let inference_policy = role
-            .and_then(|role| role.inference_compaction.or(role.compaction))
+            .and_then(|role| role.inference_compaction)
             .unwrap_or(RoleCompaction::ProviderDefault);
         let inline = model_info.is_some_and(|info| info.supports_compaction);
         let standalone = model_info.is_some_and(|info| {

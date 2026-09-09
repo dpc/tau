@@ -55,7 +55,6 @@ fn compact_finalizer_emits_merged_attempt_observation_once() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &originator,
-        share_user_cache_key: false,
         session_id: &session_id,
         agent_id: &agent_id,
         debug_provider_requests: true,

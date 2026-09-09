@@ -1641,7 +1641,7 @@ impl Harness {
         let reason_text = reasons.join("; ");
         format!(
             "role `{role_name}` disabled: required skill(s) unavailable: {reason_text}; \
-             install/fix the required skill(s) or remove them from `required_skills`/`requiredSkills`"
+             install/fix the required skill(s) or remove them from `required_skills`"
         )
     }
 

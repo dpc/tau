@@ -157,7 +157,7 @@ proactive-send, or catch-up authority.
 
 ## PIM
 
-The separately maintained `std-pim` instance and legacy `std-email` alias are
+The separately maintained `std-pim` instance and alternate `std-email` name are
 disabled by default. Tau does not bundle their source or executable. Install
 `tau-ext-pim`, ensure it is available through `PATH`, and enable only one
 instance name. Both names launch the same executable through Tau's normal
@@ -248,8 +248,6 @@ extensions:
     enable: true
     require: false
     tool_prefix: work
-    config:
-      prefix_agent_id: false
   custom-tool:
     command: ["/usr/local/bin/custom-tau-extension"]
     cwd: /srv/project
@@ -267,9 +265,7 @@ the replacement command still needs those trailing component arguments.
 but not to actions, tags, schemas, or prose. Changing it requires restarting the
 extension. Exact role policy uses the final prefixed names.
 
-Extension-specific settings remain under `config`. For example, std-slack's
-`prefix_agent_id` defaults to `false`; set it to `true` only when Slack posts
-should retain the legacy `[agent-id] ` presentation.
+Extension-specific settings remain under `config`.
 
 The separately maintained `std-slack` instance is disabled by default. Tau does
 not bundle its source or executable. Install the Tau flake's `tau-ext-slack`

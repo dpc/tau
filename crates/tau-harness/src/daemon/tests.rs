@@ -333,7 +333,6 @@ fn daemon_trace_correlation_requires_created_agent_and_binds_once() {
             model_params: tau_proto::ModelParams::default(),
             tool_choice: Default::default(),
             originator: tau_proto::PromptOriginator::User,
-            share_user_cache_key: false,
             ctx_id: Some("prompt-1".to_owned()),
             compaction: None,
             operation: tau_proto::PromptOperation::Inference,

@@ -1664,7 +1664,6 @@ impl PromptFixture {
             tool_choice: tau_proto::ToolChoice::default(),
             compaction: None,
             originator: &self.originator,
-            share_user_cache_key: false,
             session_id: &self.session_id,
             agent_id: &self.agent_id,
             debug_provider_requests: false,

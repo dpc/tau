@@ -57,7 +57,6 @@ fn compatibility_request_snapshot(mode: ResponsesMode) -> serde_json::Value {
         session_id: &tau_proto::SessionId::parse("compat-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("compat-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     serde_json::to_value(build_request(&config, &request, None))
@@ -124,7 +123,6 @@ fn compatibility_compact_request_snapshot(mode: ResponsesMode) -> serde_json::Va
         session_id: &tau_proto::SessionId::parse("compat-session")
             .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("compat-agent").expect("agent id"),
-        share_user_cache_key: false,
         debug_provider_requests: false,
     };
     build_compact_request(&config, &request).expect("build compatibility compact request")

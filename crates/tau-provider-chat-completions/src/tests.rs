@@ -1647,7 +1647,6 @@ fn prompt() -> tau_proto::AgentPromptCreated {
         model_params: tau_proto::ModelParams::default(),
         tool_choice: ToolChoice::Auto,
         originator: tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,
@@ -1765,11 +1764,10 @@ fn chat_request_keeps_stable_lowering_for_local_changes() {
     let mut irrelevant = created.clone();
     irrelevant.agent_prompt_id = "ap-next".parse().expect("prompt id");
     irrelevant.session_id = "session-next".parse().expect("session id");
-    irrelevant.share_user_cache_key = true;
     assert_eq!(
         serde_json::to_vec(&build_request(&config, model, &irrelevant)).expect("serialize"),
         stable_bytes,
-        "correlation and legacy cache-sharing fields must not perturb provider bytes"
+        "correlation fields must not perturb provider bytes"
     );
 
     let mut next_turn = created.clone();

@@ -1187,7 +1187,6 @@ fn run_production_credential_scenario_with(
                     model_params: Default::default(),
                     tool_choice: Default::default(),
                     originator: tau_proto::PromptOriginator::User,
-                    share_user_cache_key: false,
                 }),
             ))
             .expect("write prewarm");
@@ -3873,7 +3872,6 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
         model_params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
         originator: tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,

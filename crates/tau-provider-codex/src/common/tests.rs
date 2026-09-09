@@ -446,7 +446,7 @@ fn provider_stream_idle_timeout_is_retryable() {
     assert_eq!(error.failure_kind(), None);
 }
 
-fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> String {
+fn cache_key(originator: &PromptOriginator) -> String {
     let context = tau_proto::PromptContext::default();
     let session_id =
         tau_proto::SessionId::parse("test-session").expect("known-safe SessionId must be valid");
@@ -460,7 +460,6 @@ fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> Strin
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator,
-        share_user_cache_key,
         session_id: &session_id,
         agent_id: &agent_id,
         debug_provider_requests: false,
@@ -537,8 +536,8 @@ fn prompt_cache_key_ignores_originator_bucket() {
             .expect("test extension name must satisfy the identifier grammar"),
         query_id: "delegate-1".into(),
     };
-    let user_key = cache_key(&PromptOriginator::User, false);
-    let ext_key = cache_key(&ext, false);
+    let user_key = cache_key(&PromptOriginator::User);
+    let ext_key = cache_key(&ext);
     assert_eq!(user_key, ext_key);
     assert!(uuid::Uuid::parse_str(&ext_key).is_ok());
 }
@@ -557,21 +556,7 @@ fn prompt_cache_key_ignores_extension_identity_and_query_id() {
             .expect("test extension name must satisfy the identifier grammar"),
         query_id: "q-2".into(),
     };
-    assert_eq!(cache_key(&delegate, false), cache_key(&websearch, false));
-}
-
-/// The legacy share-user flag no longer changes cache routing because the key
-/// is already stable per agent rather than per prompt originator.
-#[test]
-fn prompt_cache_key_ignores_share_user_bucket_flag() {
-    let ext = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::parse("std-notifications")
-            .expect("test extension name must satisfy the identifier grammar"),
-        query_id: "idle-0".into(),
-    };
-    let ext_shared_key = cache_key(&ext, true);
-    let ext_default_key = cache_key(&ext, false);
-    assert_eq!(ext_shared_key, ext_default_key);
+    assert_eq!(cache_key(&delegate), cache_key(&websearch));
 }
 
 /// The incident's exact stream code is a typed terminal failure even though

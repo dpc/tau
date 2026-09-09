@@ -262,7 +262,6 @@ impl<C: CacheClock, J: CacheJitter> ProviderCacheResidency<C, J> {
                 prompt.model_params,
                 prompt.tool_choice,
                 &prompt.originator,
-                prompt.share_user_cache_key,
             ),
         )
         .is_err()
@@ -294,7 +293,6 @@ impl<C: CacheClock, J: CacheJitter> ProviderCacheResidency<C, J> {
                     model_params: prompt.model_params,
                     tool_choice: prompt.tool_choice,
                     originator: prompt.originator.clone(),
-                    share_user_cache_key: prompt.share_user_cache_key,
                 },
                 model,
             },

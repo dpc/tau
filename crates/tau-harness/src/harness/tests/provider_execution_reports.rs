@@ -631,7 +631,6 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
             model_params: read.model_params,
             tool_choice: read.tool_choice,
             originator: read.originator.clone(),
-            share_user_cache_key: read.share_user_cache_key,
         }
     );
     assert!(

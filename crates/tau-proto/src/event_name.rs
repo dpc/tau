@@ -248,9 +248,6 @@ impl EventName {
     pub const TOOL_CANCELLED_REPORTED: Self =
         Self::from_static(EventCategory::Tool, "cancelled_reported");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
-    pub const TOOL_DELEGATE_PROGRESS: Self =
-        Self::from_static(EventCategory::Tool, "delegate_progress");
-
     /// Peer-authored complete Action schema snapshot.
     pub const ACTION_SCHEMA_DECLARED: Self =
         Self::from_static(EventCategory::Action, "schema_declared");

@@ -8260,7 +8260,6 @@ fn persisted_full_prompt_record_is_explicitly_unsupported() {
         model_params: Default::default(),
         tool_choice: Default::default(),
         originator: PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,

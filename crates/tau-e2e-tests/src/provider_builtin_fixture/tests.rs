@@ -48,7 +48,7 @@ fn harness_configuration_preserves_exact_script_pairings() {
             concat!(
                 "agents:\n",
                 "  default_role: {role}\n",
-                "  idTemplate: main\n",
+                "  id_template: main\n",
                 "  role_groups:\n",
                 "    e2e:\n",
                 "      roles:\n",

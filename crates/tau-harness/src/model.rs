@@ -399,11 +399,8 @@ pub(crate) fn role_infos(
                     disable_tools: role
                         .map(|role| role.disable_tools.clone())
                         .unwrap_or_default(),
-                    inference_compaction: role.and_then(|role| {
-                        role.inference_compaction
-                            .or(role.compaction)
-                            .map(format_role_compaction)
-                    }),
+                    inference_compaction: role
+                        .and_then(|role| role.inference_compaction.map(format_role_compaction)),
                     compactions: role
                         .map(|role| {
                             role.compactions
@@ -578,7 +575,7 @@ pub(crate) fn compaction_reserve_configuration_error(
     model: &ModelId,
     info: Option<&ProviderModelInfo>,
 ) -> Option<String> {
-    if let Some(RoleCompaction::Reserve(reserve)) = role.inference_compaction.or(role.compaction)
+    if let Some(RoleCompaction::Reserve(reserve)) = role.inference_compaction
         && let Err(error) = compaction_threshold_from_reserve(model, info, reserve)
     {
         return Some(format!(

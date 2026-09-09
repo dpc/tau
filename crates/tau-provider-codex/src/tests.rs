@@ -1598,7 +1598,6 @@ fn test_prompt_payload<'a>(
         originator: &tau_proto::PromptOriginator::User,
         session_id,
         agent_id,
-        share_user_cache_key: false,
         debug_provider_requests: false,
     }
 }

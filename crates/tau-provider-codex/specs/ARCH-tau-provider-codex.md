@@ -220,10 +220,9 @@ the key: a target agent must stay on the same provider cache bucket whether a tu
 from direct user input, extension-originated work, a manager relay, or an agent-to-agent
 message.
 
-The deprecated `share_user_cache_key` prompt flag is a no-op for first-party
-cache-bucket selection. Any future cache-sharing behavior should be explicit
-agent metadata (for example, a reviewed `share_cache_from` design) rather than
-inferring cache identity from prompt provenance.
+Any future cache-sharing behavior should be explicit agent metadata (for
+example, a reviewed `share_cache_from` design) rather than inferring cache
+identity from prompt provenance.
 
 WebSocket pool keys follow the same identity as request `prompt_cache_key` values
 so upstream thread/session headers and request bodies target the same cache bucket.

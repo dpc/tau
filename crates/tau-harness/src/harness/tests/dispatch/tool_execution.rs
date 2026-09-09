@@ -4804,12 +4804,6 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
                 .all(|tool| { !matches!(tool.name.as_str(), "web_search" | "web_fetch") }),
         "non-tool side query must expose neither hosted nor ordinary logical web tools",
     );
-    assert!(
-        side_prompt.share_user_cache_key,
-        "idle-summary side conv keeps setting the legacy cache-sharing hint for \
-         older providers; first-party ChatGPT/Codex ignores it and uses the \
-         target agent cache bucket",
-    );
 }
 
 /// Counterpart to `non_tool_start_agent_request_starts_fresh_agent_branch`.
@@ -4935,12 +4929,6 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         tau_proto::ToolChoice::Auto,
         "delegated sub-agent must keep tool access (ToolChoice::Auto)",
     );
-    assert!(
-        !prompt.share_user_cache_key,
-        "delegate sub-agents leave the legacy cache-sharing hint unset; \
-         first-party ChatGPT/Codex still uses the target agent cache bucket",
-    );
-
     h.shutdown().expect("shutdown");
 }
 

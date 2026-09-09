@@ -387,9 +387,10 @@ fn per_agent_discovery_excludes_session_collision_diagnostics() {
 }
 
 /// Ensures user instruction roots still load before project instructions, while
-/// preferring the XDG user directories over legacy `~/.agents` roots.
+/// preferring the XDG user directories over supported alternate `~/.agents`
+/// roots.
 #[test]
-fn user_agents_roots_prefer_config_agents_before_legacy_home_agents() {
+fn user_agents_roots_prefer_config_agents_before_alternate_home_agents() {
     let tempdir = TempDir::new().expect("tempdir");
     let home = tempdir.path().join("home");
     let repo = tempdir.path().join("repo");
@@ -401,16 +402,20 @@ fn user_agents_roots_prefer_config_agents_before_legacy_home_agents() {
 
     let config_agents = home.join(".config").join("agents").join("AGENTS.md");
     let config_local_agents = home.join(".config").join("agents.local").join("AGENTS.md");
-    let legacy_agents = home.join(".agents").join("AGENTS.md");
-    let legacy_local_agents = home.join(".agents.local").join("AGENTS.md");
+    let alternate_agents = home.join(".agents").join("AGENTS.md");
+    let alternate_local_agents = home.join(".agents.local").join("AGENTS.md");
     let repo_agents = repo.join("AGENTS.md");
     let pkg_agents = repo.join("pkg").join("AGENTS.md");
     fs::write(&config_agents, "# Home config\n- preferred personal rule\n")
         .expect("write config home");
     fs::write(&config_local_agents, "# Home config local\n").expect("write config local home");
-    fs::write(&legacy_agents, "# Home legacy\n- legacy personal rule\n")
-        .expect("write legacy home");
-    fs::write(&legacy_local_agents, "# Home legacy local\n").expect("write legacy local home");
+    fs::write(
+        &alternate_agents,
+        "# Home alternate\n- alternate personal rule\n",
+    )
+    .expect("write alternate home");
+    fs::write(&alternate_local_agents, "# Home alternate local\n")
+        .expect("write alternate local home");
     fs::write(&repo_agents, "# Repo\n- repo rule\n").expect("write repo");
     fs::write(&pkg_agents, "# Package\n- package rule\n").expect("write pkg");
 
@@ -427,10 +432,12 @@ fn user_agents_roots_prefer_config_agents_before_legacy_home_agents() {
             config_local_agents
                 .canonicalize()
                 .expect("canonical config local home"),
-            legacy_agents.canonicalize().expect("canonical legacy home"),
-            legacy_local_agents
+            alternate_agents
                 .canonicalize()
-                .expect("canonical legacy local home"),
+                .expect("canonical alternate home"),
+            alternate_local_agents
+                .canonicalize()
+                .expect("canonical alternate local home"),
             repo_agents.canonicalize().expect("canonical repo"),
             pkg_agents.canonicalize().expect("canonical pkg"),
         ]
@@ -438,7 +445,8 @@ fn user_agents_roots_prefer_config_agents_before_legacy_home_agents() {
 }
 
 /// Ensures user skill roots keep project roots first, then assign XDG user
-/// roots higher collision precedence than legacy `~/.agents` roots.
+/// roots higher collision precedence than supported alternate `~/.agents`
+/// roots.
 #[test]
 fn session_skill_dirs_include_config_agents() {
     let temp = TempDir::new().expect("tempdir");

@@ -5192,9 +5192,6 @@ impl Harness {
             Event::ToolCancelled(cancelled) | Event::ToolCancelledReported(cancelled) => {
                 self.tool_call_targets_ephemeral_agent(&cancelled.call_id)
             }
-            Event::ToolDelegateProgress(progress) => {
-                self.tool_call_targets_ephemeral_agent(&progress.call_id)
-            }
             _ => false,
         }
     }

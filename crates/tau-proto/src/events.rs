@@ -1881,48 +1881,6 @@ pub struct ToolProgress {
     pub display: Option<ToolUseState>,
 }
 
-/// Legacy live snapshot of a sub-agent spawned by the old `agent_start` path.
-///
-/// First-party harness code no longer emits this event; generic
-/// [`AgentWatchesUpdated`] and [`AgentStatsUpdated`] events carry current watch
-/// relationships and per-agent operational stats instead. The type remains only
-/// as legacy protocol surface for old logs/tests. Transient — not folded into
-/// any durable semantic log.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DelegateProgress {
-    /// The original parent `agent_start` call — the tool block under
-    /// which this update should appear.
-    pub call_id: ToolCallId,
-    /// Display name the parent agent provided for the sub-task.
-    pub task_name: String,
-    /// Agent id assigned to the delegated sub-agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<AgentId>,
-    /// Role used by the delegated sub-agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    /// Most recent percent-of-context-window the sub-agent reported,
-    /// when its model's window size is known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctx_percent: Option<u8>,
-    /// Most recent input-token count the sub-agent reported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctx_input_tokens: Option<u64>,
-    /// Sub-agent's effective legal model input limit, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctx_window: Option<u64>,
-    /// Number of tool calls currently in flight in the sub-agent.
-    pub tools_in_flight: u32,
-    /// Cumulative number of tool calls the sub-agent has started
-    /// during this delegation (including completed and in-flight).
-    pub tools_total: u32,
-    /// Generic UI state for the running delegate block. The harness fills this
-    /// in from the fields above so the renderer can paint the progress without
-    /// delegate-specific parsing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolUseState>,
-}
-
 /// Broadcast intent to request cancellation of a running tool call.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancelRequest {
@@ -5301,12 +5259,6 @@ pub struct AgentPromptCreated {
     /// for backward compatibility with old persisted events.
     #[serde(default)]
     pub originator: PromptOriginator,
-    /// Legacy cache-sharing hint kept for compatibility with persisted events
-    /// and older provider implementations. First-party ChatGPT/Codex cache
-    /// routing is now stable per target agent and ignores this flag; prompt
-    /// originator/provenance must not split provider cache buckets.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub share_user_cache_key: bool,
     /// Echo of [`UiPromptSubmitted::ctx_id`] when this prompt was
     /// initiated by a UI submission. Tool-result follow-up
     /// `AgentPromptCreated` events for the same chain do not
@@ -5828,10 +5780,6 @@ pub struct AgentPromptPrewarmRequested {
     /// field for cache-bucket selection.
     #[serde(default)]
     pub originator: PromptOriginator,
-    /// Legacy cache-sharing hint mirrored from the first real prompt. Kept for
-    /// compatibility; first-party ChatGPT/Codex ignores it for cache routing.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub share_user_cache_key: bool,
 }
 
 /// Harness-authored directed request for one bounded cache-refresh attempt.
@@ -6828,9 +6776,6 @@ pub enum Event {
     /// Harness-authored canonical foreground cancellation.
     #[serde(rename = "tool.cancelled")]
     ToolCancelled(ToolCancelled),
-    #[serde(rename = "tool.delegate_progress")]
-    ToolDelegateProgress(DelegateProgress),
-
     // Extension-provided UI actions
     /// Peer-authored complete Action schema snapshot.
     #[serde(rename = "action.schema_declared")]
@@ -7342,7 +7287,6 @@ impl Event {
             Self::ToolCancelRequest(_) => EventName::TOOL_CANCEL_REQUEST,
             Self::ToolCancelledReported(_) => EventName::TOOL_CANCELLED_REPORTED,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
-            Self::ToolDelegateProgress(_) => EventName::TOOL_DELEGATE_PROGRESS,
             _ => return None,
         }
         .into()
@@ -7656,7 +7600,6 @@ impl Event {
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgressReported(_)
                 | Self::ToolProgress(_)
-                | Self::ToolDelegateProgress(_)
                 | Self::ToolError(_)
                 | Self::ActionSchemaDeclared(_)
                 | Self::ActionSchemaPublished(_)

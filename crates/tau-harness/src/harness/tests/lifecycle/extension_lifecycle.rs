@@ -7629,11 +7629,11 @@ fn hello_protocol_version_admission_matrix_is_explicit() {
     }
 }
 
-/// Local-summary continuation requires protocol major 4 independently of later
-/// additive minor revisions such as declaration inspection.
+/// Current protocol admission remains major-incompatible with protocol-three
+/// peers after the protocol-five obsolete-event removal.
 #[test]
 fn local_summary_continuation_rejects_protocol_three_peers() {
-    assert_eq!(tau_proto::PROTOCOL_VERSION.major, 4);
+    assert_eq!(tau_proto::PROTOCOL_VERSION.major, 5);
     for client_kind in [
         tau_proto::ClientKind::Provider,
         tau_proto::ClientKind::Tool,
@@ -7652,9 +7652,8 @@ fn local_summary_continuation_rejects_protocol_three_peers() {
     }
 }
 
-/// A protocol 4.0 configured extension remains admitted by a newer minor
-/// harness, receives Configure first, and produces only the ordinary minor-skew
-/// warning.
+/// A same-major configured extension remains admitted across minor skew,
+/// receives Configure first, and produces only the ordinary skew warning.
 #[test]
 fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
     let td = TempDir::new().expect("tempdir");
@@ -7670,7 +7669,7 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
         &crate::test_connection_id("configured-minor-skew"),
         TestMessage::Hello(tau_proto::Hello {
             declaration_inspection: false,
-            protocol_version: tau_proto::ProtocolVersion::new(4, 0),
+            protocol_version: tau_proto::ProtocolVersion::new(5, 1),
             client_name: crate::test_extension_name("hello-minor-skew-peer"),
             client_kind: tau_proto::ClientKind::Tool,
             expected_session_id: None,
@@ -7700,7 +7699,7 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
         notice.message,
         format!(
             "`configured-minor-skew`, minor protocol mismatch {} vs harness {}",
-            tau_proto::ProtocolVersion::new(4, 0),
+            tau_proto::ProtocolVersion::new(5, 1),
             tau_proto::PROTOCOL_VERSION,
         )
     );

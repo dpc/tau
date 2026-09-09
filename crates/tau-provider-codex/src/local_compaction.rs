@@ -46,7 +46,6 @@ impl CodexRuntime {
             tool_choice: tau_proto::ToolChoice::None,
             compaction: None,
             originator: request.originator,
-            share_user_cache_key: request.share_user_cache_key,
             session_id: request.session_id,
             agent_id: request.agent_id,
             debug_provider_requests: request.debug_provider_requests,
