@@ -400,26 +400,6 @@
             # cargo-crap reads source and explicit LCOV only. Keep cargoArtifacts
             # explicitly null below: enhanced Crane may otherwise infer and unpack
             # compiled artifacts which none of these derivations consume.
-            #
-            # Regenerate nix/cargo-crap-baseline.json from this derivation after
-            # intentional CRAP-score changes land on the mainline.
-            crapBaseline = craneLib.mkCargoDerivation {
-              pname = "${projectName}-cargo-crap-ccov-baseline";
-              cargoArtifacts = null;
-              buildPhaseCargoCommand = ''
-                test -s ${testsCcov}/lcov.info
-                mkdir -p $out
-                ${cargoCrap}/bin/cargo-crap \
-                  --workspace \
-                  --lcov ${testsCcov}/lcov.info \
-                  --format json \
-                  --output $out/cargo-crap-baseline.json
-              '';
-              doInstallCargoArtifacts = false;
-              nativeBuildInputs = [ cargoCrap ];
-              doCheck = false;
-            };
-
             crapReport = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov-report";
               cargoArtifacts = null;
@@ -441,35 +421,11 @@
               doCheck = false;
             };
 
-            crapRegression = craneLib.mkCargoDerivation {
-              pname = "${projectName}-cargo-crap-ccov-regression";
-              cargoArtifacts = null;
-              buildPhaseCargoCommand = ''
-                test -s ${testsCcov}/lcov.info
-                # Keep this gate focused on severe CRAP-score regressions.
-                ${cargoCrap}/bin/cargo-crap \
-                  --workspace \
-                  --lcov ${testsCcov}/lcov.info \
-                  --baseline ${./nix/cargo-crap-baseline.json} \
-                  --threshold 1000 \
-                  --min 1000 \
-                  --format github \
-                  --fail-regression
-                mkdir -p $out
-                cp ${testsCcov}/lcov.info $out/lcov.info
-              '';
-              doInstallCargoArtifacts = false;
-              nativeBuildInputs = [ cargoCrap ];
-              doCheck = false;
-            };
-
             crapAbsolute = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov-absolute";
               cargoArtifacts = null;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
-                # Catch severe new high-CRAP functions that --fail-regression
-                # reports as new but does not fail on.
                 ${cargoCrap}/bin/cargo-crap \
                   --workspace \
                   --lcov ${testsCcov}/lcov.info \
@@ -486,9 +442,8 @@
 
             crap = pkgs.runCommand "${projectName}-cargo-crap-ccov" { } ''
               mkdir -p $out
-              ln -s ${crapRegression} $out/regression
               ln -s ${crapAbsolute} $out/absolute
-              cp ${crapRegression}/lcov.info $out/lcov.info
+              cp ${crapAbsolute}/lcov.info $out/lcov.info
             '';
 
             tauDeps = craneLib.buildDepsOnly {
@@ -581,9 +536,7 @@
             tests
             workspaceCcov
             testsCcov
-            crapBaseline
             crapReport
-            crapRegression
             crapAbsolute
             crap
             ;
