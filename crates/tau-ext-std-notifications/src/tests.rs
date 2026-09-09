@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, Once};
 use tau_proto::{
     AgentPromptSubmitted, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage,
     HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, MessageItem,
-    ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem, ToolResult,
+    ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem, ToolRequest,
+    ToolResult,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -177,7 +178,7 @@ fn malformed_protocol_input_returns_error() {
     );
 }
 
-/// Startup must keep the legacy exact subscription set without broadening to a
+/// Startup must keep the exact subscription set without broadening to a
 /// prefix selector, because notifications are visible side effects and replay
 /// catch-up volume is a security/resource boundary.
 #[test]
@@ -219,6 +220,7 @@ fn startup_uses_exact_notification_subscriptions() {
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_START_ACCEPTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_REQUEST),
         tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
         tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_ERROR),
         tau_proto::EventSelector::Exact(tau_proto::EventName::PROVIDER_TOOL_RESULT),
@@ -471,6 +473,21 @@ fn tool_background_placeholder(
         provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
         display: None,
+        originator,
+    }
+}
+
+fn tool_request_for_agent(
+    agent_id: &str,
+    call_id: &str,
+    originator: tau_proto::PromptOriginator,
+) -> ToolRequest {
+    ToolRequest {
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new("shell"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: tau_proto::CborValue::Null,
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         originator,
     }
 }
@@ -1090,9 +1107,9 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
     );
 }
 
-/// A final response that arrives while a user-originated background tool is
-/// still active should defer the completion sound until that background result
-/// lands. This avoids announcing completion while side work is still running.
+/// A tool request must provide enough explicit ownership to defer a final
+/// response even when the fixture omits the provider tool-call response. This
+/// preserves notification ordering without inferring an owner from turn state.
 #[test]
 fn final_response_waits_for_background_tools_before_end_sound() {
     let mut input = Vec::new();
@@ -1115,6 +1132,13 @@ fn final_response_waits_for_background_tools_before_end_sound() {
             tau_proto::PromptOriginator::User,
         ))
         .expect("write");
+    writer
+        .write_event(&Event::ToolRequest(tool_request_for_agent(
+            "main",
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write tool request");
     writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
             "call-bg",
@@ -1188,6 +1212,13 @@ fn new_prompt_does_not_forget_previous_background_tool() {
             ))
             .expect("write");
         if spid == "sp-0" {
+            writer
+                .write_event(&Event::ToolRequest(tool_request_for_agent(
+                    "main",
+                    "call-bg",
+                    tau_proto::PromptOriginator::User,
+                )))
+                .expect("write tool request");
             writer
                 .write_event(&Event::ToolResult(tool_background_placeholder(
                     "call-bg",
@@ -1338,6 +1369,13 @@ fn final_response_without_background_completion_does_not_emit_end_sound() {
         ))
         .expect("write");
     writer
+        .write_event(&Event::ToolRequest(tool_request_for_agent(
+            "main",
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write tool request");
+    writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
             "call-bg",
             tau_proto::PromptOriginator::User,
@@ -1473,6 +1511,13 @@ fn empty_deferred_response_emits_only_after_final_blocker() {
         ))
         .expect("write prompt");
     writer
+        .write_event(&Event::ToolRequest(tool_request_for_agent(
+            "main",
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write tool request");
+    writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
             "call-bg",
             tau_proto::PromptOriginator::User,
@@ -1527,6 +1572,13 @@ fn terminating_deferred_prompt_preserves_blocker_without_late_end() {
         ))
         .expect("write prompt");
     writer
+        .write_event(&Event::ToolRequest(tool_request_for_agent(
+            "main",
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write tool request");
+    writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
             "call-bg",
             tau_proto::PromptOriginator::User,
@@ -1578,6 +1630,13 @@ fn reordered_started_id_preserves_deferred_final_and_current_ids() {
         ))
         .expect("write prompt");
     writer
+        .write_event(&Event::ToolRequest(tool_request_for_agent(
+            "main",
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write tool request");
+    writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
             "call-bg",
             tau_proto::PromptOriginator::User,
@@ -1615,10 +1674,10 @@ fn reordered_started_id_preserves_deferred_final_and_current_ids() {
     assert_eq!(values, vec![VALUE_AGENT_START, VALUE_AGENT_END]);
 }
 
-/// A deferred final reached without a visible submit remains W=false: it must
-/// not become the unique-waiting-agent fallback owner for an unrelated blocker.
+/// A deferred final reached without a visible submit must not make an unrelated
+/// unowned placeholder block its eventual completion.
 #[test]
-fn idle_prior_deferred_final_does_not_join_unique_waiting_fallback() {
+fn idle_prior_deferred_final_ignores_unowned_placeholder() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -1678,6 +1737,53 @@ fn idle_prior_deferred_final_does_not_join_unique_waiting_fallback() {
     assert!(reader.read_event().expect("read eof").is_none());
 }
 
+/// A sole agent awaiting a response must not acquire an unrelated background
+/// placeholder merely because no other agent is waiting.
+#[test]
+fn unique_waiting_agent_does_not_own_unattributed_placeholder() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            "ordinary request",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write prompt");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-unowned",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write unowned placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write final");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-unowned",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write unowned terminal");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut reader = EventReader::new(Cursor::new(run_with_idle_output(
+        input,
+        Duration::from_secs(3600),
+    )));
+    drain_lifecycle(&mut reader);
+    let mut values = Vec::new();
+    while let Some(Event::Osc1337SetUserVar(osc)) = reader.read_event().expect("read") {
+        values.push(osc.value);
+    }
+    assert_eq!(values, vec![VALUE_AGENT_START, VALUE_AGENT_END]);
+}
+
 /// Clean EOF during a deferred final must drop unfinished turn state without
 /// draining a completion hook, independently of explicit-disconnect behavior.
 #[test]
@@ -1693,6 +1799,13 @@ fn clean_eof_during_deferred_final_does_not_emit_end() {
             tau_proto::PromptOriginator::User,
         ))
         .expect("write prompt");
+    writer
+        .write_event(&Event::ToolRequest(tool_request_for_agent(
+            "main",
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write tool request");
     writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
             "call-bg",
@@ -1774,6 +1887,13 @@ fn completed_phases_retain_prompt_ids_for_termination_mismatch() {
             tau_proto::PromptOriginator::User,
         ))
         .expect("write deferred prompt");
+    writer
+        .write_event(&Event::ToolRequest(tool_request_for_agent(
+            "deferred",
+            "call-deferred",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write deferred tool request");
     writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
             "call-deferred",

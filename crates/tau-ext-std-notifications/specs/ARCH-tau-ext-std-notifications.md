@@ -20,6 +20,9 @@ each other's hooks or mix template data.
 
 Provider prompt-start events cancel idle state only through a known prompt-to-
 agent mapping. Missing ownership never clears every agent's timer.
+Background tool blockers are attributed only through explicit tool-call ownership
+from `tool.request` or the preceding provider tool-call response. An unowned
+placeholder never attaches to whichever agent happens to be waiting.
 `agent.prompt_terminated` consumes that prompt's notification state without
 emitting completion hooks. Background tool blockers remain until their matching
 terminal background event so a terminated prompt cannot create a false

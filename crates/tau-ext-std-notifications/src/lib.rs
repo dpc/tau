@@ -638,7 +638,7 @@ impl TauExtension for StdNotificationsExtension {
     }
 }
 
-fn subscribed_events() -> [tau_proto::EventName; 21] {
+fn subscribed_events() -> [tau_proto::EventName; 22] {
     [
         tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
         tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
@@ -656,6 +656,7 @@ fn subscribed_events() -> [tau_proto::EventName; 21] {
         // Immediate-then-periodic coalesced typing pings from the UI bump the idle
         // deadline so the desktop notification doesn't fire mid-sentence.
         tau_proto::EventName::UI_PROMPT_DRAFT,
+        tau_proto::EventName::TOOL_REQUEST,
         tau_proto::EventName::TOOL_RESULT,
         tau_proto::EventName::TOOL_ERROR,
         tau_proto::EventName::PROVIDER_TOOL_RESULT,
@@ -1076,6 +1077,7 @@ impl NotificationLoop {
             Event::ProviderResponseFinished(finished) => {
                 self.handle_provider_response_finished(finished, handle)?;
             }
+            Event::ToolRequest(request) => self.handle_tool_request(request),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 self.handle_tool_result(result);
             }
@@ -1304,11 +1306,18 @@ impl NotificationLoop {
         }
     }
 
+    fn handle_tool_request(&mut self, request: tau_proto::ToolRequest) {
+        if request.originator.is_user() {
+            self.tool_call_agents
+                .insert(request.call_id, request.agent_id);
+        }
+    }
+
     fn handle_tool_result(&mut self, result: tau_proto::ToolResult) {
         if result.originator.is_user()
             && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
         {
-            let Some(agent_id) = self.agent_for_tool_result(&result.call_id) else {
+            let Some(agent_id) = self.tool_call_agents.get(&result.call_id).cloned() else {
                 tracing::warn!(
                     target: LOG_TARGET,
                     "background tool placeholder has no known owning agent; ignoring for notifications",
@@ -1327,22 +1336,6 @@ impl NotificationLoop {
         } else if result.originator.is_user() {
             self.tool_call_agents.remove(&result.call_id);
         }
-    }
-
-    fn agent_for_tool_result(&self, call_id: &tau_proto::ToolCallId) -> Option<tau_proto::AgentId> {
-        self.tool_call_agents.get(call_id).cloned().or_else(|| {
-            // Prefer the provider tool-call owner index. The
-            // single-waiting-agent fallback keeps legacy/fixture
-            // streams working when they emit a background
-            // placeholder without the preceding tool-call response.
-            let mut waiting_agents = self
-                .agent_turns
-                .iter()
-                .filter(|(_, turn)| turn.is_waiting_for_final_response())
-                .map(|(agent_id, _)| agent_id.clone());
-            let agent_id = waiting_agents.next()?;
-            waiting_agents.next().is_none().then_some(agent_id)
-        })
     }
 
     fn handle_background_tool_finished(
