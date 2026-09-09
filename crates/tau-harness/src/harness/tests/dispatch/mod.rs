@@ -505,7 +505,7 @@ fn seed_prior_user_message(state_dir: &Path, text: &str) {
 fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_proto::UnixMicros) {
     seed_main_agent_loaded(state_dir);
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event_at(
             "main",
@@ -531,7 +531,7 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
 fn seed_inference_activation_event(state_dir: &Path, event: Event) {
     seed_main_agent_loaded(state_dir);
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event_at(
             "main",
@@ -557,7 +557,8 @@ fn append_seed_agent_event(store: &mut tau_core::AgentStore, event: Event) {
 
 fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens: u64) {
     seed_main_agent_loaded(state_dir);
-    let mut store = tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    let mut store =
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -616,7 +617,7 @@ fn seed_main_agent_loaded(state_dir: &Path) {
 
 fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
     let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
     store
         .record_session_meta(session_id)
         .expect("seed canonical session manifest");
@@ -635,7 +636,7 @@ fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
         )
         .expect("seed session membership");
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     if !agent_store.agent_is_known_for_routing(agent_id) {
         agent_store
             .append_agent_event_at(
@@ -753,7 +754,7 @@ fn seed_background_placeholder_for_agent(
     seed_agent_loaded(state_dir, "s1", agent_id);
     let parsed_agent_id = tau_proto::AgentId::parse(agent_id).expect("agent id");
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
             agent_id,
@@ -833,7 +834,7 @@ fn seed_background_placeholder_for_agent(
 
 fn seed_background_result(state_dir: &Path, call_id: &str, tool_name: &str, output: &str) {
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
             "main",
@@ -853,7 +854,7 @@ fn seed_background_result(state_dir: &Path, call_id: &str, tool_name: &str, outp
 
 fn seed_background_error(state_dir: &Path, call_id: &str, tool_name: &str, message: &str) {
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
             "main",

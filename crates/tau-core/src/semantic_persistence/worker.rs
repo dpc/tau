@@ -666,7 +666,7 @@ fn process_command(
             }
             let _ = reply.send(Ok(()));
         }
-        #[cfg(any(test, feature = "test-legacy-writer"))]
+        #[cfg(any(test, feature = "test-persistence"))]
         WorkerCommand::DurabilityBarrier { reply } => {
             *_durability_barrier = Some(reply);
         }

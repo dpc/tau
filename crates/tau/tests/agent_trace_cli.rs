@@ -68,7 +68,7 @@ fn cli_traces_running_agent_without_invalidating_writer() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agents_dir = temp.path().join("agents");
     let agent_id = AgentId::parse("agent-running").expect("agent id");
-    let mut store = AgentStore::open_lazy(&agents_dir).expect("store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("store");
     start_agent(&mut store, &agent_id, AgentCreator::User, None);
 
     let output = trace(temp.path(), &agents_dir, &agent_id);
@@ -96,7 +96,7 @@ fn cli_traces_completed_loaded_descendant_without_disrupting_parent() {
     let parent = AgentId::parse("agent-parent").expect("parent id");
     let child = AgentId::parse("agent-completed-child").expect("child id");
     let session_id = tau_proto::SessionId::parse("trace-cli-session").expect("session id");
-    let mut store = AgentStore::open_lazy(&agents_dir).expect("store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("store");
     start_agent(&mut store, &parent, AgentCreator::User, None);
     start_agent(
         &mut store,

@@ -1189,7 +1189,8 @@ fn cold_restore_classifies_legacy_extension_worker_without_creator_as_unavailabl
     let sp = td.path().join("state");
     let agent_id = tau_proto::AgentId::parse("legacy-extension-worker").expect("agent id");
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-    let mut session_store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    let mut session_store =
+        tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
     session_store
         .record_session_meta("s1")
         .expect("session metadata");
@@ -1206,7 +1207,8 @@ fn cold_restore_classifies_legacy_extension_worker_without_creator_as_unavailabl
             }),
         )
         .expect("membership");
-    let mut agent_store = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+    let mut agent_store =
+        tau_core::AgentStore::open_fixture(sp.join("agents")).expect("agent store");
     for event in [
         Event::AgentStarted(tau_proto::AgentStarted {
             agent_id: agent_id.clone(),

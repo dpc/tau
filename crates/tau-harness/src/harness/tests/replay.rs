@@ -1315,7 +1315,8 @@ fn live_route_only_message_fact_uses_agent_journal() {
         )
         .expect("remove membership");
     h.session_runtime.agent_store =
-        AgentStore::open(td.path().join("isolated-agent-store")).expect("empty agent store");
+        AgentStore::open_fixture(td.path().join("isolated-agent-store"))
+            .expect("empty agent store");
     assert!(
         !h.session_runtime
             .agent_store
@@ -1762,7 +1763,7 @@ fn successful_tool_result(call_id: &str) -> ToolResult {
 
 fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_ids: &[&str]) {
     let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
     store
         .append_session_event(
             "s1",
@@ -1780,7 +1781,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
         )
         .expect("seed session membership");
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
             "main",
@@ -1860,8 +1861,8 @@ fn restore_rejects_membership_without_committed_agent_creation() {
     for journal_kind in ["missing", "empty", "creationless"] {
         let td = TempDir::new().expect("tempdir");
         let state_dir = td.path().join(journal_kind);
-        let mut store =
-            tau_core::SessionStore::open(state_dir.join("sessions")).expect("session store");
+        let mut store = tau_core::SessionStore::open_fixture(state_dir.join("sessions"))
+            .expect("session store");
         store
             .append_session_event(
                 "s1",
@@ -1964,7 +1965,7 @@ fn seed_restored_tool_round_for_agent(
     completed_call_ids: &[&str],
 ) {
     let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
     store
         .append_session_event(
             session_id,
@@ -1982,7 +1983,7 @@ fn seed_restored_tool_round_for_agent(
         )
         .expect("seed session membership");
     let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+        tau_core::AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
             agent_id,
@@ -2073,7 +2074,8 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     seed_restored_tool_round(&sp, &["interrupted-call"], &[]);
-    let mut agent_store = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+    let mut agent_store =
+        tau_core::AgentStore::open_fixture(sp.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
             "main",
@@ -2197,7 +2199,8 @@ fn resume_drops_partial_plural_wait_and_preserves_completed_member() {
         &["plural-done"],
     );
     {
-        let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+        let mut store =
+            tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
         let records = store.agent_events("main").expect("agent records");
         let response = records
             .iter()
@@ -2708,7 +2711,8 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let agent_id = tau_proto::AgentId::parse("loaded-later").expect("agent id");
-    let mut agent_store = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+    let mut agent_store =
+        tau_core::AgentStore::open_fixture(sp.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
             agent_id.as_str(),
@@ -3025,7 +3029,7 @@ fn replay_complete_boundaries_report_agent_log_errors() {
     let sp = td.path().join("state");
     let agent_id = tau_proto::AgentId::parse("corrupt-agent").expect("agent id");
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
     store
         .append_session_event(
             "s1",
@@ -3981,7 +3985,8 @@ fn replay_emits_current_metadata_snapshot_and_selected_mutation_history() {
     let sp = td.path().join("state");
     {
         let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        let mut sessions =
+            tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
         sessions
             .append_session_event(
                 "s1",
@@ -3998,7 +4003,8 @@ fn replay_emits_current_metadata_snapshot_and_selected_mutation_history() {
                 }),
             )
             .expect("seed session membership");
-        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+        let mut agents =
+            tau_core::AgentStore::open_fixture(sp.join("agents")).expect("agent store");
         agents
             .append_agent_event(
                 "agent-replay-meta",

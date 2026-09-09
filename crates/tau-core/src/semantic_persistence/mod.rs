@@ -13,7 +13,7 @@ mod worker;
 
 pub use capacity::PersistenceCapacity;
 pub use identity::{PersistenceGeneration, PersistenceLease, StreamIdentity};
-#[cfg(any(test, feature = "test-legacy-writer"))]
+#[cfg(any(test, feature = "test-persistence"))]
 pub use owner::DurabilityBarrierOutcome;
 pub use owner::{
     PersistenceAdmissionError, PersistenceCapacityLimit, PersistenceCapacityPressure,

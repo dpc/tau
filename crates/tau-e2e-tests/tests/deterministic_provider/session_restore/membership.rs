@@ -157,7 +157,7 @@ fn seed_unloaded_worker(
         return Err("seeded unloaded worker identity collided with a live agent".into());
     }
 
-    let mut agents = tau_core::AgentStore::open(state_root.join("agents"))?;
+    let mut agents = tau_core::AgentStore::open_fixture(state_root.join("agents"))?;
     if agents.agent_exists(agent_id.as_str()) {
         return Err("seeded unloaded worker already had a durable journal".into());
     }
@@ -180,7 +180,7 @@ fn seed_unloaded_worker(
     }
     drop(agents);
 
-    let mut sessions = tau_core::SessionStore::open(state_root.join("sessions"))?;
+    let mut sessions = tau_core::SessionStore::open_fixture(state_root.join("sessions"))?;
     sessions.append_session_event(
         session_id.as_str(),
         None,
@@ -231,7 +231,7 @@ fn assert_seeded_unloaded_worker(
         return Err("seeded worker immutable creation fact changed".into());
     }
 
-    let mut sessions = tau_core::SessionStore::open(state_root.join("sessions"))?;
+    let mut sessions = tau_core::SessionStore::open_fixture(state_root.join("sessions"))?;
     let events = sessions.session_events(session_id.as_str())?;
     let membership = events
         .iter()

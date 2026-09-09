@@ -36,7 +36,7 @@ fn compact_toon_frames_zero_calls() {
 fn prepare_fixture() -> (tempfile::TempDir, PreparedAgentTrace) {
     let root = tempfile::tempdir().expect("state root");
     let agent_id = AgentId::parse("agent-stage").expect("agent id");
-    let mut store = AgentStore::open_lazy(root.path()).expect("store");
+    let mut store = AgentStore::open_fixture(root.path()).expect("store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -126,7 +126,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         declaration,
         item_index: 3,
     };
-    let mut store = AgentStore::open_lazy(root.path()).expect("store");
+    let mut store = AgentStore::open_fixture(root.path()).expect("store");
     let append = |store: &mut AgentStore, id, event, at| -> Result<(), tau_core::AgentStoreError> {
         store
             .append_agent_event_at_with_observation_id(

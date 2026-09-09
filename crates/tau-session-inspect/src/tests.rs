@@ -125,7 +125,7 @@ fn create_trace_agent(
     timestamp: u64,
 ) {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
-    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(agents_dir).expect("agent store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -147,7 +147,7 @@ fn create_trace_agent(
 
 fn append_trace_prompt(agents_dir: &std::path::Path, agent_id: &str, text: &str, timestamp: u64) {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
-    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(agents_dir).expect("agent store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -177,7 +177,7 @@ fn append_trace_prompt_lifecycle(
     timestamp: u64,
 ) {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
-    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(agents_dir).expect("agent store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -232,7 +232,7 @@ fn append_trace_compaction_prompt(
     timestamp: u64,
 ) {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
-    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(agents_dir).expect("agent store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -293,7 +293,7 @@ fn append_trace_compaction_correction(
     let prompt_id = tau_proto::AgentPromptId::parse("prompt-compaction").expect("prompt id");
     let model: tau_proto::ModelId = "provider/model".into();
     let rates = tau_proto::ESTIMATED_API_COST_FALLBACK;
-    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(agents_dir).expect("agent store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -444,7 +444,7 @@ fn try_append_trace_provider_terminal(
     cost_picodollars: Option<u64>,
 ) -> Result<tau_core::AgentAppendOutcome, tau_core::AgentStoreError> {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
-    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(agents_dir).expect("agent store");
     store.append_agent_event_at(
         agent_id.as_str(),
         None,
@@ -492,7 +492,7 @@ fn append_background_tool_calls(
     calls: &[(&str, &str, &str)],
 ) {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
-    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(agents_dir).expect("agent store");
     let declaration = store
         .append_agent_event(
             agent_id.as_str(),
@@ -1684,7 +1684,7 @@ fn agent_trace_rejects_missing_journal_without_mutating_source_tree() {
 fn agent_trace_exports_active_writer_without_disrupting_later_writes() {
     let temp = tempfile::tempdir().expect("tempdir");
     let active_id = AgentId::parse("agent-active").expect("agent id");
-    let mut active_store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    let mut active_store = tau_core::AgentStore::open_fixture(temp.path()).expect("agent store");
     active_store
         .append_agent_event(
             active_id.as_str(),
@@ -1730,7 +1730,7 @@ fn agent_trace_exports_active_writer_without_disrupting_later_writes() {
 fn agent_trace_uses_complete_eof_over_malformed_checkpoint_without_mutation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-complete-eof").expect("agent id");
-    let mut store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(temp.path()).expect("agent store");
     store
         .append_agent_event(
             agent_id.as_str(),
@@ -1829,7 +1829,7 @@ fn agent_trace_rejects_torn_suffix_without_mutating_source_tree() {
 fn session_list_isolates_invalid_session_journals() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp_dir.path().join("sessions");
-    let mut store = SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("session store");
     for (session_id, agent_id) in [("healthy", "agent-good"), ("invalid", "agent-bad")] {
         store
             .append_session_event(
@@ -1895,7 +1895,7 @@ fn session_list_isolates_invalid_session_journals() {
 fn session_show_ignores_incompatible_unrelated_session_journal() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp_dir.path().join("sessions");
-    let mut store = SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("session store");
     store
         .append_session_event(
             "target",

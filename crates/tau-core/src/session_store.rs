@@ -19,10 +19,12 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(test, feature = "test-persistence"))]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -30,7 +32,7 @@ pub use retention::SessionRetentionReferences;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, Event, SessionId, UnixMicros};
 
-use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
+use crate::record_log::MAX_RECORD_BYTES;
 use crate::semantic_persistence::{RetentionCharge, StagedFrame};
 use crate::session::{PersistedEventSource, SessionMeta};
 use crate::{
@@ -47,12 +49,6 @@ pub enum SessionPersistenceMode {
     Durable,
     /// Keep session events in memory only and never create session files.
     Ephemeral,
-}
-
-#[derive(Clone, Copy)]
-enum SessionLockPolicy {
-    Create,
-    Existing,
 }
 
 impl SessionPersistenceMode {
@@ -414,8 +410,9 @@ impl SessionMembership {
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
-    /// Compatibility writer state, structurally absent from managed stores.
-    legacy_io: Option<LegacySessionIo>,
+    /// Whether test fixture appends prepare missing managed streams on demand.
+    #[cfg(any(test, feature = "test-persistence"))]
+    fixture_auto_prepare: bool,
     sessions: HashMap<SessionId, SessionMembership>,
     /// Ordinary replay records retained by a wholly ephemeral session.
     ephemeral_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
@@ -434,17 +431,6 @@ pub struct SessionStore {
     session_leases: HashMap<SessionId, PersistenceLease>,
     /// Restore-stream generation capabilities.
     restore_leases: HashMap<SessionId, PersistenceLease>,
-}
-
-/// Mutable compatibility writer retained only by explicit legacy constructors.
-#[derive(Debug)]
-struct LegacySessionIo {
-    /// Failure-atomic append and per-journal poison state.
-    framed_appends: FramedAppendState,
-    /// Store-root boundary re-covered after the first successful branch lock.
-    pending_root_boundary: Option<PathBuf>,
-    /// Lazily acquired per-session flocks.
-    locks: HashMap<SessionId, File>,
 }
 
 /// Complete accepted ordinary/restore projection for one managed session.
@@ -466,26 +452,58 @@ struct ManagedSessionProjection {
 }
 
 impl SessionStore {
+    #[cfg(any(test, feature = "test-persistence"))]
+    fn wait_for_fixture_durability(&self) -> Result<(), SessionStoreError> {
+        if !self.fixture_auto_prepare {
+            return Ok(());
+        }
+        let owner = self
+            .persistence_owner
+            .as_ref()
+            .expect("managed fixture retains its persistence owner");
+        if owner.wait_for_latest_durability_for_test(Duration::from_secs(2))
+            == crate::DurabilityBarrierOutcome::Durable
+        {
+            Ok(())
+        } else {
+            Err(SessionStoreError::Persistence(
+                PersistenceAdmissionError::Lifecycle(
+                    "managed fixture persistence did not become durable".to_owned(),
+                ),
+            ))
+        }
+    }
+
+    #[cfg(any(test, feature = "test-persistence"))]
+    fn complete_fixture_session_streams(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionStoreError> {
+        let directory = self.session_dir(session_id);
+        if !directory.join("meta.json").exists() {
+            return Ok(());
+        }
+        for path in [
+            directory.join("events.cbor"),
+            directory.join("restore-events.cbor"),
+        ] {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|source| SessionStoreError::Open { path, source })?;
+        }
+        Ok(())
+    }
+
     fn require_mutation_authority(&self) -> Result<(), SessionStoreError> {
-        if self.mode.is_durable() && self.persistence_owner.is_none() && self.legacy_io.is_none() {
+        if self.mode.is_durable() && self.persistence_owner.is_none() {
             return Err(SessionStoreError::Persistence(
                 PersistenceAdmissionError::Unavailable,
             ));
         }
         Ok(())
     }
-    fn legacy_io(&self) -> &LegacySessionIo {
-        self.legacy_io
-            .as_ref()
-            .expect("legacy mutation is unreachable in a managed store")
-    }
-
-    fn legacy_io_mut(&mut self) -> &mut LegacySessionIo {
-        self.legacy_io
-            .as_mut()
-            .expect("legacy mutation is unreachable in a managed store")
-    }
-
     /// Opens the session store and eagerly loads existing session logs.
     pub fn open(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         let sessions_dir = sessions_dir.into();
@@ -512,17 +530,16 @@ impl SessionStore {
     }
 
     /// Opens the session store without loading existing session logs.
-    #[cfg(not(any(test, feature = "test-legacy-writer")))]
     pub fn open_lazy(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         Ok(Self::read_only(sessions_dir))
     }
 
-    #[cfg_attr(all(feature = "test-legacy-writer", not(test)), allow(dead_code))]
     fn read_only(sessions_dir: impl Into<PathBuf>) -> Self {
         let sessions_dir = sessions_dir.into();
         Self {
             sessions_dir,
-            legacy_io: None,
+            #[cfg(any(test, feature = "test-persistence"))]
+            fixture_auto_prepare: false,
             sessions: HashMap::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_membership_overlay: HashMap::new(),
@@ -535,44 +552,36 @@ impl SessionStore {
         }
     }
 
-    /// Opens the compatibility fixture writer when the explicit test feature is
-    /// active.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
-    pub fn open_lazy(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
-        Self::open_legacy_writer(sessions_dir)
-    }
-
-    /// Opens the test-only foreground compatibility writer.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    /// Opens a managed fixture writer when test persistence support is active.
+    #[cfg(any(test, feature = "test-persistence"))]
     #[doc(hidden)]
-    pub fn open_legacy_writer(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
+    pub fn open_fixture(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
+        let owner = Arc::new(
+            SemanticPersistenceOwner::new(Default::default())
+                .map_err(SessionStoreError::Persistence)?,
+        );
         let sessions_dir = sessions_dir.into();
-        let created_directories = missing_directories(&sessions_dir);
-        fs::create_dir_all(&sessions_dir).map_err(|source| {
-            SessionStoreError::CreateParentDirectory {
+        let mut store = Self::open_managed(sessions_dir.clone(), owner)?;
+        for entry in fs::read_dir(&sessions_dir).map_err(|source| SessionStoreError::Read {
+            path: sessions_dir.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| SessionStoreError::Read {
                 path: sessions_dir.clone(),
                 source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() || !path.join("events.cbor").exists() {
+                continue;
             }
-        })?;
-        let mut framed_appends = FramedAppendState::default();
-        framed_appends.note_created_directories(created_directories);
-        Ok(Self {
-            sessions_dir: sessions_dir.clone(),
-            legacy_io: Some(LegacySessionIo {
-                framed_appends,
-                pending_root_boundary: Some(sessions_dir.clone()),
-                locks: HashMap::new(),
-            }),
-            sessions: HashMap::new(),
-            ephemeral_events: HashMap::new(),
-            ephemeral_membership_overlay: HashMap::new(),
-            restore_events: HashMap::new(),
-            mode: SessionPersistenceMode::Durable,
-            persistence_owner: None,
-            managed: HashMap::new(),
-            session_leases: HashMap::new(),
-            restore_leases: HashMap::new(),
-        })
+            let session_id = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| SessionStoreError::InvalidSessionDir { path: path.clone() })?;
+            store.load_session_if_needed(session_id)?;
+        }
+        store.fixture_auto_prepare = true;
+        Ok(store)
     }
 
     /// Opens an in-memory session store that never reads or writes session
@@ -583,7 +592,8 @@ impl SessionStore {
     pub fn open_ephemeral(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         Ok(Self {
             sessions_dir: sessions_dir.into(),
-            legacy_io: None,
+            #[cfg(any(test, feature = "test-persistence"))]
+            fixture_auto_prepare: false,
             sessions: HashMap::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_membership_overlay: HashMap::new(),
@@ -607,7 +617,8 @@ impl SessionStore {
             .map_err(SessionStoreError::Persistence)?;
         Ok(Self {
             sessions_dir,
-            legacy_io: None,
+            #[cfg(any(test, feature = "test-persistence"))]
+            fixture_auto_prepare: false,
             sessions: HashMap::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_membership_overlay: HashMap::new(),
@@ -774,136 +785,6 @@ impl SessionStore {
         Ok(())
     }
 
-    fn ensure_locked(
-        &mut self,
-        session_id: &SessionId,
-        policy: SessionLockPolicy,
-    ) -> Result<bool, SessionStoreError> {
-        if self.mode.is_ephemeral() {
-            return match policy {
-                SessionLockPolicy::Create => Ok(false),
-                SessionLockPolicy::Existing => Err(SessionStoreError::SessionNotFound {
-                    session_id: session_id.clone(),
-                }),
-            };
-        }
-        if self.legacy_io().locks.contains_key(session_id) {
-            return Ok(false);
-        }
-        let session_dir = self.session_dir(session_id);
-        if matches!(policy, SessionLockPolicy::Create) {
-            let created_directories = missing_directories(&session_dir);
-            fs::create_dir_all(&session_dir).map_err(|source| {
-                SessionStoreError::CreateParentDirectory {
-                    path: session_dir.clone(),
-                    source,
-                }
-            })?;
-            self.legacy_io
-                .as_mut()
-                .expect("legacy writer exists")
-                .framed_appends
-                .note_created_directories(created_directories);
-        }
-        let lock_path = session_dir.join("lock");
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).truncate(false);
-        if matches!(policy, SessionLockPolicy::Create) {
-            options.create(true);
-        }
-        let mut file = match options.open(&lock_path) {
-            Ok(file) => file,
-            Err(source)
-                if matches!(policy, SessionLockPolicy::Existing)
-                    && source.kind() == io::ErrorKind::NotFound =>
-            {
-                return Err(SessionStoreError::SessionNotFound {
-                    session_id: session_id.clone(),
-                });
-            }
-            Err(source) => {
-                return Err(SessionStoreError::Open {
-                    path: lock_path,
-                    source,
-                });
-            }
-        };
-        if matches!(policy, SessionLockPolicy::Create) {
-            let restore_path = session_dir.join("restore-events.cbor");
-            let mut restore_options = OpenOptions::new();
-            restore_options.create(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                restore_options.mode(0o600);
-            }
-            restore_options
-                .open(&restore_path)
-                .map_err(|source| SessionStoreError::Write {
-                    path: restore_path,
-                    source,
-                })?;
-        }
-        if FileExt::try_lock_exclusive(&file).is_err() {
-            let mut holder = String::new();
-            let _ = file.read_to_string(&mut holder);
-            return Err(SessionStoreError::Locked {
-                path: lock_path,
-                holder,
-            });
-        }
-        match policy {
-            SessionLockPolicy::Create => {
-                if let Some(root) = self.legacy_io_mut().pending_root_boundary.take() {
-                    self.legacy_io
-                        .as_mut()
-                        .expect("legacy writer exists")
-                        .framed_appends
-                        .note_directory_boundary_chain(&root);
-                }
-                self.legacy_io
-                    .as_mut()
-                    .expect("legacy writer exists")
-                    .framed_appends
-                    .note_directory_boundary(&session_dir);
-            }
-            SessionLockPolicy::Existing => {
-                let meta_path = session_dir.join("meta.json");
-                match read_meta(&meta_path) {
-                    Ok(_) => {}
-                    Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                        return Err(SessionStoreError::SessionNotFound {
-                            session_id: session_id.clone(),
-                        });
-                    }
-                    Err(source) => {
-                        return Err(SessionStoreError::Read {
-                            path: meta_path,
-                            source,
-                        });
-                    }
-                }
-            }
-        }
-        file.set_len(0).map_err(|source| SessionStoreError::Write {
-            path: lock_path.clone(),
-            source,
-        })?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|source| SessionStoreError::Write {
-                path: lock_path.clone(),
-                source,
-            })?;
-        writeln!(&mut file, "pid={} start={}", std::process::id(), unix_now()).map_err(
-            |source| SessionStoreError::Write {
-                path: lock_path,
-                source,
-            },
-        )?;
-        self.legacy_io_mut().locks.insert(session_id.clone(), file);
-        Ok(true)
-    }
-
     /// Appends one session membership or fallback event.
     ///
     /// # Errors
@@ -977,37 +858,18 @@ impl SessionStore {
         if retain_membership_overlay {
             validate_ephemeral_membership_overlay_event(session_id, &event)?;
         }
-        if write_to_disk && self.persistence_owner.is_some() {
-            return self.append_managed_session_event(sid, source, event, recorded_at);
-        }
-        let session_dir = self.session_dir(&sid);
-        let journal_path = session_dir.join("events.cbor");
-        if write_to_disk {
-            if self.ensure_locked(&sid, SessionLockPolicy::Create)? {
-                self.sessions.remove(&sid);
-            }
-            ensure_meta(&session_dir.join("meta.json"))?;
-            self.load_locked_session(sid.clone())?;
-            self.legacy_io
-                .as_mut()
-                .expect("legacy writer exists")
-                .framed_appends
-                .ensure_appendable(&journal_path)
-                .map_err(|source| SessionStoreError::Write {
-                    path: journal_path.clone(),
-                    source,
-                })?;
-        } else {
-            self.load_session_if_needed(session_id)?;
+        #[cfg(any(test, feature = "test-persistence"))]
+        if write_to_disk && self.fixture_auto_prepare && !self.session_leases.contains_key(&sid) {
+            self.complete_fixture_session_streams(&sid)?;
+            self.prepare_session(session_id, SessionPreparationMode::CreateOrResume)?;
         }
         if write_to_disk {
-            fs::create_dir_all(&session_dir).map_err(|source| {
-                SessionStoreError::CreateParentDirectory {
-                    path: session_dir.clone(),
-                    source,
-                }
-            })?;
+            let outcome = self.append_managed_session_event(sid, source, event, recorded_at)?;
+            #[cfg(any(test, feature = "test-persistence"))]
+            self.wait_for_fixture_durability()?;
+            return Ok(outcome);
         }
+        self.load_session_if_needed(session_id)?;
         let tree = self
             .sessions
             .entry(sid.clone())
@@ -1036,17 +898,7 @@ impl SessionStore {
             candidate.push(record.clone());
             validate_ephemeral_membership_overlay(session_id, &candidate)?;
         }
-        if write_to_disk {
-            append_cbor_record(
-                &mut self
-                    .legacy_io
-                    .as_mut()
-                    .expect("legacy writer exists")
-                    .framed_appends,
-                &journal_path,
-                &record,
-            )?;
-        } else if retain_in_memory {
+        if retain_in_memory {
             self.ephemeral_events
                 .entry(sid.clone())
                 .or_default()
@@ -1058,15 +910,8 @@ impl SessionStore {
                 .push(record);
         }
         tree.apply_event(&event);
-        if write_to_disk || retain_in_memory {
+        if retain_in_memory {
             tree.advance_next_event_seq();
-        }
-        // The manifest's activity hint follows a durable session-journal
-        // append, but does not participate in that journal's commit. Do
-        // not let a best-effort hint refresh make the caller retry an
-        // already-persisted sequence and create a duplicate record.
-        if write_to_disk {
-            let _ = touch_meta(&session_dir.join("meta.json"));
         }
         Ok(AppendOutcome {
             seq,
@@ -1243,53 +1088,14 @@ impl SessionStore {
             });
             return Ok(());
         }
-        if self.persistence_owner.is_some() {
-            return self.append_managed_restore_event(sid, source, event, recorded_at);
+        #[cfg(any(test, feature = "test-persistence"))]
+        if self.fixture_auto_prepare && !self.restore_leases.contains_key(&sid) {
+            self.complete_fixture_session_streams(&sid)?;
+            self.prepare_session(session_id, SessionPreparationMode::CreateOrResume)?;
         }
-        let path = self.session_dir(&sid).join("restore-events.cbor");
-        self.legacy_io
-            .as_mut()
-            .expect("legacy writer exists")
-            .framed_appends
-            .ensure_appendable(&path)
-            .map_err(|source| SessionStoreError::Write {
-                path: path.clone(),
-                source,
-            })?;
-        let _ = self.lock_and_load_session(session_id)?;
-        let mut expected_seq = PersistedSessionEventSeq::new(0);
-        let recovered = self
-            .legacy_io
-            .as_mut()
-            .expect("legacy writer exists")
-            .framed_appends
-            .recover(&path, |record: &PersistedSessionEvent| {
-                if record.seq != expected_seq || validate_restore_event(&record.event).is_err() {
-                    return false;
-                }
-                expected_seq = expected_seq.next();
-                true
-            })
-            .map_err(|source| SessionStoreError::Read {
-                path: path.clone(),
-                source,
-            })?;
-        let events = recovered.records;
-        let seq = PersistedSessionEventSeq::new(events.len() as u64);
-        append_cbor_record(
-            &mut self
-                .legacy_io
-                .as_mut()
-                .expect("legacy writer exists")
-                .framed_appends,
-            &path,
-            &PersistedSessionEvent {
-                seq,
-                source,
-                event,
-                recorded_at,
-            },
-        )?;
+        self.append_managed_restore_event(sid, source, event, recorded_at)?;
+        #[cfg(any(test, feature = "test-persistence"))]
+        self.wait_for_fixture_durability()?;
         Ok(())
     }
 
@@ -1396,28 +1202,19 @@ impl SessionStore {
     pub fn lock_and_recover_session_restore_events(
         &mut self,
         session_id: &str,
-    ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+    ) -> Result<&[PersistedSessionEvent], SessionStoreError> {
         self.require_mutation_authority()?;
         let sid = validate_session_id(session_id)?;
-        if let Some(projection) = self.managed.get(&sid) {
-            return Ok(projection.restore_events.clone());
+        if self.persistence_owner.is_some() {
+            if !self.managed.contains_key(&sid) {
+                self.prepare_session(session_id, SessionPreparationMode::Resume)?;
+            }
+            return Ok(self
+                .managed
+                .get(&sid)
+                .map_or(&[], |projection| projection.restore_events.as_slice()));
         }
-        let _ = self.lock_and_load_session(session_id)?;
-        let path = self.session_dir(&sid).join("restore-events.cbor");
-        let mut expected_seq = PersistedSessionEventSeq::new(0);
-        self.legacy_io
-            .as_mut()
-            .expect("legacy writer exists")
-            .framed_appends
-            .recover(&path, |record: &PersistedSessionEvent| {
-                if record.seq != expected_seq || validate_restore_event(&record.event).is_err() {
-                    return false;
-                }
-                expected_seq = expected_seq.next();
-                true
-            })
-            .map(|recovered| recovered.records)
-            .map_err(|source| SessionStoreError::Read { path, source })
+        Ok(self.restore_events.get(&sid).map_or(&[], Vec::as_slice))
     }
 
     /// Returns the storage root for session event containers.
@@ -1452,60 +1249,21 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<Option<&SessionMembership>, SessionStoreError> {
         self.require_mutation_authority()?;
-        let session_id = validate_session_id(session_id)?;
-        if self.managed.contains_key(&session_id) {
+        let sid = validate_session_id(session_id)?;
+        if self.persistence_owner.is_some() {
+            if !self.managed.contains_key(&sid) {
+                let status =
+                    self.prepare_session(session_id, SessionPreparationMode::CreateOrResume)?;
+                if status == crate::SessionPreparationStatus::Created {
+                    return Ok(None);
+                }
+            }
             return Ok(self
                 .managed
-                .get(&session_id)
+                .get(&sid)
                 .map(|projection| &projection.membership));
         }
-        if self.ensure_locked(&session_id, SessionLockPolicy::Create)? {
-            self.sessions.remove(&session_id);
-        }
-        self.load_locked_session(session_id)
-    }
-
-    /// Loads membership after the caller has selected and retained the
-    /// appropriate creating or existing-only lock policy.
-    fn load_locked_session(
-        &mut self,
-        session_id: SessionId,
-    ) -> Result<Option<&SessionMembership>, SessionStoreError> {
-        if self.mode.is_durable() && !self.sessions.contains_key(&session_id) {
-            let path = self.session_dir(&session_id).join("events.cbor");
-            let overlay = self.ephemeral_membership_overlay.get(&session_id);
-            if path.exists() || overlay.is_some_and(|events| !events.is_empty()) {
-                let mut expected_seq = PersistedSessionEventSeq::new(0);
-                let recovered = self
-                    .legacy_io
-                    .as_mut()
-                    .expect("legacy writer exists")
-                    .framed_appends
-                    .recover(&path, |record: &PersistedSessionEvent| {
-                        if record.seq != expected_seq
-                            || validate_session_event(session_id.as_str(), &record.event).is_err()
-                        {
-                            return false;
-                        }
-                        expected_seq = expected_seq.next();
-                        true
-                    })
-                    .map_err(|source| SessionStoreError::Read {
-                        path: path.clone(),
-                        source,
-                    })?;
-                let events = recovered.records;
-                let mut membership =
-                    SessionMembership::try_from_events(session_id.clone(), &events)?;
-                if let Some(overlay) = overlay {
-                    membership.apply_ephemeral_membership_overlay(overlay)?;
-                }
-                self.sessions.insert(session_id.clone(), membership);
-            }
-        } else if self.mode.is_ephemeral() {
-            self.load_session_if_needed(session_id.as_str())?;
-        }
-        Ok(self.sessions.get(&session_id))
+        Ok(self.sessions.get(&sid))
     }
 
     /// Locks and loads an already-persisted session without creating a missing
@@ -1519,17 +1277,17 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<Option<&SessionMembership>, SessionStoreError> {
         self.require_mutation_authority()?;
-        let session_id = validate_session_id(session_id)?;
-        if self.managed.contains_key(&session_id) {
+        let sid = validate_session_id(session_id)?;
+        if self.persistence_owner.is_some() {
+            if !self.managed.contains_key(&sid) {
+                self.prepare_session(session_id, SessionPreparationMode::Resume)?;
+            }
             return Ok(self
                 .managed
-                .get(&session_id)
+                .get(&sid)
                 .map(|projection| &projection.membership));
         }
-        if self.ensure_locked(&session_id, SessionLockPolicy::Existing)? {
-            self.sessions.remove(&session_id);
-        }
-        self.load_locked_session(session_id)
+        Ok(self.sessions.get(&sid))
     }
 
     /// Returns one already-loaded session membership view.
@@ -1547,6 +1305,17 @@ impl SessionStore {
     /// Returns all loaded session membership views.
     #[must_use]
     pub fn sessions(&self) -> Vec<&SessionMembership> {
+        #[cfg(any(test, feature = "test-persistence"))]
+        if self.fixture_auto_prepare {
+            return self
+                .managed
+                .values()
+                .map(|projection| &projection.membership)
+                .chain(self.sessions.iter().filter_map(|(session_id, membership)| {
+                    (!self.managed.contains_key(session_id)).then_some(membership)
+                }))
+                .collect();
+        }
         if self.persistence_owner.is_some() {
             self.managed
                 .values()
@@ -1565,6 +1334,11 @@ impl SessionStore {
         }
         let session_id = validate_session_id(session_id)?;
         if self.persistence_owner.is_some() {
+            #[cfg(any(test, feature = "test-persistence"))]
+            if self.fixture_auto_prepare && !self.session_leases.contains_key(&session_id) {
+                self.complete_fixture_session_streams(&session_id)?;
+                self.prepare_session(session_id.as_str(), SessionPreparationMode::CreateOrResume)?;
+            }
             return self.record_managed_activity(&session_id);
         }
         let _ = self.lock_and_load_session(session_id.as_str())?;
@@ -1883,27 +1657,6 @@ fn write_meta_with(
     })
 }
 
-/// Validate canonical existence or commit it before the first journal append.
-fn ensure_meta(path: &Path) -> Result<(), SessionStoreError> {
-    match read_meta(path) {
-        Ok(_) => Ok(()),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            let now = unix_now();
-            write_meta(
-                path,
-                &SessionMeta {
-                    created_at: now,
-                    last_touched: now,
-                },
-            )
-        }
-        Err(source) => Err(SessionStoreError::Read {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
 fn touch_meta(path: &Path) -> Result<(), SessionStoreError> {
     let now = unix_now();
     let mut meta = read_meta(path).map_err(|source| SessionStoreError::Read {
@@ -1914,46 +1667,7 @@ fn touch_meta(path: &Path) -> Result<(), SessionStoreError> {
     write_meta(path, &meta)
 }
 
-fn append_cbor_record<T: Serialize>(
-    framed_appends: &mut FramedAppendState,
-    path: &Path,
-    record: &T,
-) -> Result<(), SessionStoreError> {
-    let appendable_path =
-        framed_appends
-            .ensure_appendable(path)
-            .map_err(|source| SessionStoreError::Write {
-                path: path.to_path_buf(),
-                source,
-            })?;
-    let mut encoded = Vec::new();
-    ciborium::into_writer(record, &mut encoded).map_err(|source| SessionStoreError::Encode {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let record_length = encoded.len() as u64;
-    validate_record_length(path, record_length)?;
-    let newly_created = !path.exists();
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|source| SessionStoreError::Open {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if newly_created {
-        framed_appends.note_created_journal(path, &file);
-    }
-    framed_appends
-        .append_prevalidated(appendable_path, &mut file, &encoded)
-        .map(|_| ())
-        .map_err(|source| SessionStoreError::Write {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
+#[cfg(test)]
 fn validate_record_length(path: &Path, record_length: u64) -> Result<(), SessionStoreError> {
     if MAX_RECORD_BYTES < record_length {
         Err(SessionStoreError::RecordTooLarge {

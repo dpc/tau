@@ -33,7 +33,7 @@ fn exact_timestamp_cutoff_is_expired() {
 
 fn write_old_agent(state: &std::path::Path, name: &str) -> AgentId {
     let agent_id = AgentId::parse(name).expect("agent id");
-    let mut store = AgentStore::open_lazy(state.join("agents")).expect("agent store");
+    let mut store = AgentStore::open_fixture(state.join("agents")).expect("agent store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -82,7 +82,8 @@ fn ever_loaded_session_reference_protects_unloaded_agent() {
     let temp = TempDir::new().expect("temp state");
     let agent_id = write_old_agent(temp.path(), "referenced-agent");
     let session_id = SessionId::parse("session").expect("session id");
-    let mut sessions = SessionStore::open(temp.path().join("sessions")).expect("session store");
+    let mut sessions =
+        SessionStore::open_fixture(temp.path().join("sessions")).expect("session store");
     sessions
         .append_session_event(
             session_id.as_str(),
@@ -308,7 +309,8 @@ fn candidate_rescan_catches_reference_added_after_coarse_scan() {
             if !inserted {
                 inserted = true;
                 let session_id = SessionId::parse("late-owner").expect("session id");
-                let mut sessions = SessionStore::open(&sessions_dir).expect("session store");
+                let mut sessions =
+                    SessionStore::open_fixture(&sessions_dir).expect("session store");
                 sessions
                     .append_session_event(
                         session_id.as_str(),
@@ -761,7 +763,8 @@ fn unreadable_session_manifest_aborts_agent_deletion() {
     let temp = TempDir::new().expect("temp state");
     write_old_agent(temp.path(), "possibly-referenced");
     let session_id = SessionId::parse("session").expect("session id");
-    let mut sessions = SessionStore::open(temp.path().join("sessions")).expect("session store");
+    let mut sessions =
+        SessionStore::open_fixture(temp.path().join("sessions")).expect("session store");
     sessions
         .append_session_event(
             session_id.as_str(),

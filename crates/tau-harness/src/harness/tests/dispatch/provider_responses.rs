@@ -1931,7 +1931,8 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
                 "ap-v1-stale-before-restart"
             }
         });
-        let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+        let mut store =
+            tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
         append_seed_agent_event(
             &mut store,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {

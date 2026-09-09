@@ -750,7 +750,6 @@ fn dedup_map_rebuilds_on_session_restore() {
         drop(h);
         wait_for_session_unlock(&sp, "s1");
     }
-
     // New harness pointing at the same state dir + session id —
     // simulates daemon restart / session resume. The default conv
     // starts with `result_dedup` empty and `head=Some(N)` from the

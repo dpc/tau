@@ -27,7 +27,7 @@ impl DurableSnapshot {
         state_root: &Path,
         session_id: &SessionId,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut sessions = SessionStore::open(state_root.join("sessions"))?;
+        let mut sessions = SessionStore::open_fixture(state_root.join("sessions"))?;
         let membership = sessions
             .load_session(session_id.as_str())?
             .ok_or_else(|| format!("missing durable session `{session_id}`"))?;

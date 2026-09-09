@@ -4067,7 +4067,8 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
     let sp = td.path().join("state");
     {
         let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        let mut sessions =
+            tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
         sessions
             .record_session_meta("s1")
             .expect("seed canonical session manifest");
@@ -4091,7 +4092,8 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
         }
         drop(sessions);
 
-        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+        let mut agents =
+            tau_core::AgentStore::open_fixture(sp.join("agents")).expect("agent store");
         for agent_id in ["engineer_default", "worker_steered"] {
             agents
                 .append_agent_event(

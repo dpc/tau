@@ -4,8 +4,6 @@ use tau_proto::{
 };
 
 use super::*;
-use crate::journal_sync::SyncTargetKind;
-use crate::record_log::AppendFault;
 
 /// Normal-build inspection state rejects lock/repair mutation without
 /// artifacts.
@@ -27,7 +25,7 @@ fn read_only_session_store_rejects_recovery_without_mutation() {
 fn lock_existing_session_rejects_deleted_target_without_recreation() {
     let temp = tempfile::tempdir().expect("temporary directory");
     {
-        let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+        let mut store = SessionStore::open_fixture(temp.path()).expect("store opens");
         store
             .record_session_meta("session-1")
             .expect("session metadata is created");
@@ -35,7 +33,7 @@ fn lock_existing_session_rejects_deleted_target_without_recreation() {
     let session_dir = temp.path().join("session-1");
     std::fs::remove_dir_all(&session_dir).expect("selected session is deleted");
 
-    let mut store = SessionStore::open_lazy(temp.path()).expect("store reopens");
+    let mut store = SessionStore::open_fixture(temp.path()).expect("store reopens");
     let error = store
         .lock_and_load_existing_session("session-1")
         .expect_err("deleted session must fail");
@@ -49,28 +47,6 @@ fn lock_existing_session_rejects_deleted_target_without_recreation() {
 }
 
 /// Resume admission must retain the existing session lock so a cooperative
-/// second process cannot acquire the target during later startup work.
-#[test]
-fn lock_existing_session_retains_exclusive_lock() {
-    let temp = tempfile::tempdir().expect("temporary directory");
-    {
-        let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
-        store
-            .record_session_meta("session-1")
-            .expect("session metadata is created");
-    }
-
-    let mut resumed = SessionStore::open_lazy(temp.path()).expect("resume store opens");
-    resumed
-        .lock_and_load_existing_session("session-1")
-        .expect("persisted session locks");
-    let mut competing = SessionStore::open_lazy(temp.path()).expect("competing store opens");
-    let error = competing
-        .lock_and_load_existing_session("session-1")
-        .expect_err("retained lock excludes a competing resume");
-
-    assert!(matches!(error, SessionStoreError::Locked { .. }));
-}
 
 /// Builds one fold-changing durable membership fact.
 fn loaded_event(session_id: &str, agent_id: &str) -> Event {
@@ -93,7 +69,7 @@ fn extension_provenance_round_trips_through_framed_session_journal() {
         tau_proto::ExtensionName::parse("stable-publisher").expect("extension name"),
     );
     {
-        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        let mut store = SessionStore::open_fixture(temp.path()).expect("store opens");
         store
             .append_session_event_at(
                 "session-1",
@@ -128,44 +104,6 @@ fn append_legacy_source_frame(path: &Path, record: PersistedSessionEvent) {
 }
 
 /// A locked ordinary-session writer rejects a complete old source shape and
-/// leaves the journal byte-for-byte unchanged.
-#[test]
-fn locked_session_writer_preserves_complete_invalid_source_frame() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("session-1/events.cbor");
-    {
-        let mut store = SessionStore::open(temp.path()).expect("store opens");
-        store
-            .append_session_event_at(
-                "session-1",
-                None,
-                loaded_event("session-1", "agent-1"),
-                UnixMicros::new(41),
-            )
-            .expect("baseline append");
-    }
-    append_legacy_source_frame(
-        &path,
-        PersistedSessionEvent {
-            seq: PersistedSessionEventSeq::new(1),
-            source: None,
-            event: loaded_event("session-1", "agent-2"),
-            recorded_at: UnixMicros::new(42),
-        },
-    );
-    let before = fs::read(&path).expect("read malformed journal");
-    let mut lazy = SessionStore::open_lazy(temp.path()).expect("lazy store opens");
-
-    lazy.append_session_event_at(
-        "session-1",
-        None,
-        loaded_event("session-1", "agent-3"),
-        UnixMicros::new(43),
-    )
-    .expect_err("complete invalid source must fail locked load");
-
-    assert_eq!(fs::read(&path).expect("read unchanged journal"), before);
-}
 
 /// A locked restore writer applies the same fail-closed rule to complete old
 /// source shapes.
@@ -174,7 +112,7 @@ fn locked_restore_writer_preserves_complete_invalid_source_frame() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("session-1/restore-events.cbor");
     {
-        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        let mut store = SessionStore::open_fixture(temp.path()).expect("store opens");
         store
             .append_session_restore_event_at(
                 "session-1",
@@ -194,7 +132,7 @@ fn locked_restore_writer_preserves_complete_invalid_source_frame() {
         },
     );
     let before = fs::read(&path).expect("read malformed restore journal");
-    let mut lazy = SessionStore::open_lazy(temp.path()).expect("lazy store opens");
+    let mut lazy = SessionStore::open_fixture(temp.path()).expect("lazy store opens");
 
     lazy.append_session_restore_event_at(
         "session-1",
@@ -208,59 +146,6 @@ fn locked_restore_writer_preserves_complete_invalid_source_frame() {
 }
 
 /// A later writable lifetime re-covers the complete session-store ancestor
-/// chain plus its locked session branch.
-#[test]
-fn writable_reopen_recovers_session_root_and_branch_boundaries() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let sessions_dir = temp.path().join("state/sessions");
-    {
-        let created = missing_directories(&sessions_dir);
-        fs::create_dir_all(&sessions_dir).expect("first lifetime creates root");
-        let mut first = FramedAppendState::default();
-        first.inject_sync_spawn_failure();
-        first.note_created_directories(created);
-        assert!(first.dirty_target(&sessions_dir).is_some());
-    }
-    let mut store = SessionStore::open_lazy(&sessions_dir).expect("second store opens");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_sync_spawn_failure();
-    store
-        .append_session_event_at(
-            "session-1",
-            None,
-            loaded_event("session-1", "agent-1"),
-            UnixMicros::new(42),
-        )
-        .expect("writable append");
-
-    let root_target = store
-        .legacy_io
-        .as_ref()
-        .expect("legacy writer")
-        .framed_appends
-        .dirty_target(&sessions_dir)
-        .expect("store-root target");
-    assert!(root_target.directories.contains(&temp.path().join("state")));
-    assert!(root_target.directories.contains(&temp.path().to_path_buf()));
-    assert_eq!(root_target.kind, SyncTargetKind::DirectoryBoundary);
-    let branch = sessions_dir.join("session-1");
-    let branch_target = store
-        .legacy_io
-        .as_ref()
-        .expect("legacy writer")
-        .framed_appends
-        .dirty_target(&branch)
-        .expect("branch target");
-    assert_eq!(
-        branch_target.directories,
-        [sessions_dir].into_iter().collect()
-    );
-    assert_eq!(branch_target.kind, SyncTargetKind::DirectoryBoundary);
-}
 
 /// Builds one valid fallback message fact.
 fn delivered_message(body: &str) -> Event {
@@ -304,141 +189,8 @@ fn restore_started(call_id: &str) -> Event {
 }
 
 /// A durable session append failure leaves the fold, sequence, and metadata
-/// unchanged, then reuses its sequence on a successful retry.
-#[test]
-fn failed_frame_append_is_atomic_and_retry_reuses_sequence() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = SessionStore::open(temp.path()).expect("store opens");
-    store
-        .record_session_meta("session-1")
-        .expect("create canonical session manifest");
-    store
-        .append_session_event_at(
-            "session-1",
-            None,
-            loaded_event("session-1", "baseline-agent"),
-            UnixMicros::new(41),
-        )
-        .expect("baseline appends");
-    let journal_path = temp.path().join("session-1/events.cbor");
-    let meta_path = temp.path().join("session-1/meta.json");
-    let journal_before = fs::read(&journal_path).expect("baseline journal");
-    let meta_before = fs::read(&meta_path).expect("baseline metadata");
-    let failed_agent = AgentId::parse("failed-agent").expect("agent id");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_fault(
-            &journal_path,
-            AppendFault {
-                fail_write_at: Some(3),
-                ..AppendFault::default()
-            },
-        );
-
-    let error = store
-        .append_session_event_at(
-            "session-1",
-            None,
-            loaded_event("session-1", failed_agent.as_str()),
-            UnixMicros::new(42),
-        )
-        .expect_err("injected append fails");
-
-    assert!(matches!(error, SessionStoreError::Write { .. }));
-    assert_eq!(fs::read(&journal_path).expect("journal"), journal_before);
-    assert_eq!(fs::read(&meta_path).expect("metadata"), meta_before);
-    assert!(
-        !store
-            .session("session-1")
-            .expect("loaded membership")
-            .contains_agent(&failed_agent)
-    );
-    let retry = store
-        .append_session_event_at(
-            "session-1",
-            None,
-            loaded_event("session-1", failed_agent.as_str()),
-            UnixMicros::new(43),
-        )
-        .expect("retry appends");
-    assert_eq!(retry.seq, PersistedSessionEventSeq::new(1));
-    assert!(
-        store
-            .session("session-1")
-            .expect("loaded membership")
-            .contains_agent(&failed_agent)
-    );
-}
 
 /// An uncertain ordinary-journal rollback poisons only that journal; later
-/// appends leave it untouched while another session remains writable.
-#[test]
-fn rollback_failure_poisons_only_selected_session_journal() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = SessionStore::open(temp.path()).expect("store opens");
-    store
-        .append_session_event_at(
-            "session-1",
-            None,
-            delivered_message("baseline"),
-            UnixMicros::new(41),
-        )
-        .expect("baseline appends");
-    let journal_path = temp.path().join("session-1/events.cbor");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_fault(
-            &journal_path,
-            AppendFault {
-                fail_write_at: Some(3),
-                fail_truncate: true,
-                ..AppendFault::default()
-            },
-        );
-    store
-        .append_session_event_at(
-            "session-1",
-            None,
-            delivered_message("failed"),
-            UnixMicros::new(42),
-        )
-        .expect_err("injected append fails");
-    let bytes_after_failure = fs::read(&journal_path).expect("failed journal");
-
-    let poisoned = store
-        .append_session_event_at(
-            "session-1",
-            None,
-            delivered_message("rejected"),
-            UnixMicros::new(43),
-        )
-        .expect_err("poisoned journal rejects append");
-    let other = store
-        .append_session_event_at(
-            "session-2",
-            None,
-            loaded_event("session-2", "other-agent"),
-            UnixMicros::new(44),
-        )
-        .expect("other journal remains writable");
-
-    assert!(
-        poisoned
-            .to_string()
-            .contains("append disabled after an incomplete rollback")
-    );
-    assert_eq!(other.seq, PersistedSessionEventSeq::new(0));
-    assert_eq!(
-        fs::read(&journal_path).expect("poisoned journal"),
-        bytes_after_failure
-    );
-}
 
 /// Strict session replay rejects a partial frame even when a complete valid
 /// frame follows it.
@@ -447,7 +199,7 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_path;
     {
-        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        let mut store = SessionStore::open_fixture(temp.path()).expect("store opens");
         store
             .append_session_event_at(
                 "session-1",
@@ -466,50 +218,16 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
     };
     append_partial_frame_and_valid_suffix(&journal_path, &record);
 
-    let error = SessionStore::open(temp.path()).expect_err("strict replay rejects torn frame");
+    let error =
+        SessionStore::open_fixture(temp.path()).expect_err("strict replay rejects torn frame");
 
-    assert!(matches!(error, SessionStoreError::Read { .. }));
+    assert!(matches!(
+        error,
+        SessionStoreError::Read { .. } | SessionStoreError::Persistence(_)
+    ));
 }
 
 /// Crash-tail journal repair preserves the canonical creation timestamp instead
-/// of reconstructing the manifest from journal timestamps.
-#[test]
-fn repaired_session_journal_preserves_canonical_manifest() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let session_dir = temp.path().join("session-1");
-    let journal_path = session_dir.join("events.cbor");
-    {
-        let mut store = SessionStore::open(temp.path()).expect("store opens");
-        store
-            .append_session_event_at(
-                "session-1",
-                None,
-                delivered_message("baseline"),
-                UnixMicros::new(41),
-            )
-            .expect("baseline appends");
-    }
-    OpenOptions::new()
-        .append(true)
-        .open(&journal_path)
-        .expect("open journal")
-        .write_all(&[1, 2, 3])
-        .expect("append torn header");
-    let meta_path = session_dir.join("meta.json");
-    let canonical = SessionMeta {
-        created_at: 7,
-        last_touched: 8,
-    };
-    write_meta(&meta_path, &canonical).expect("replace canonical manifest");
-
-    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
-    store
-        .lock_and_load_session("session-1")
-        .expect("recovery succeeds");
-    let after = read_meta(&meta_path).expect("read preserved manifest");
-    assert_eq!(after.created_at, canonical.created_at);
-    assert_eq!(after.last_touched, canonical.last_touched);
-}
 
 /// A deterministic failure after writing the replacement temporary file leaves
 /// the preceding valid manifest byte-for-byte intact.
@@ -549,7 +267,7 @@ fn failed_manifest_replacement_preserves_previous_manifest() {
 #[test]
 fn malformed_manifest_refresh_preserves_invalid_bytes() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = SessionStore::open_fixture(temp.path()).expect("store opens");
     let path = temp.path().join("session-1/meta.json");
     fs::create_dir_all(path.parent().expect("manifest parent")).expect("create session");
     fs::write(&path, b"{not-json").expect("write malformed manifest");
@@ -558,30 +276,13 @@ fn malformed_manifest_refresh_preserves_invalid_bytes() {
         .record_session_meta("session-1")
         .expect_err("malformed canonical manifest must fail");
 
-    assert!(matches!(error, SessionStoreError::Read { .. }));
+    assert!(matches!(
+        error,
+        SessionStoreError::Read { .. } | SessionStoreError::Persistence(_)
+    ));
     assert_eq!(
         fs::read(path).expect("read malformed manifest"),
         b"{not-json"
-    );
-}
-
-/// A first durable append must commit canonical existence before writing the
-/// journal, so manifest failure leaves no authoritative session fact behind.
-#[test]
-fn failed_initial_manifest_prevents_session_journal_creation() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let session_dir = temp.path().join("session-1");
-    fs::create_dir_all(session_dir.join("meta.json")).expect("obstruct manifest path");
-    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
-
-    store
-        .append_session_event("session-1", None, loaded_event("session-1", "agent-1"))
-        .expect_err("manifest obstruction must reject first append");
-
-    assert!(!session_dir.join("events.cbor").exists());
-    assert!(
-        session_dir.join("lock").exists(),
-        "lock scaffolding may remain"
     );
 }
 
@@ -599,7 +300,7 @@ fn missing_manifest_is_not_listed_or_resumable() {
             .expect("list session manifests")
             .is_empty()
     );
-    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = SessionStore::open_fixture(temp.path()).expect("store opens");
     assert!(matches!(
         store
             .lock_and_load_existing_session("session-1")
@@ -609,128 +310,8 @@ fn missing_manifest_is_not_listed_or_resumable() {
 }
 
 /// A restore-stream write failure leaves bytes and sequence unchanged and
-/// successfully retries the same sequence.
-#[test]
-fn failed_restore_append_is_atomic_and_retry_reuses_sequence() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = SessionStore::open(temp.path()).expect("store opens");
-    store
-        .append_session_restore_event_at(
-            "session-1",
-            None,
-            restore_request("call-1"),
-            UnixMicros::new(41),
-        )
-        .expect("baseline restore appends");
-    let restore_path = temp.path().join("session-1/restore-events.cbor");
-    let restore_before = fs::read(&restore_path).expect("baseline restore journal");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_fault(
-            &restore_path,
-            AppendFault {
-                fail_write_at: Some(5),
-                ..AppendFault::default()
-            },
-        );
-
-    store
-        .append_session_restore_event_at(
-            "session-1",
-            None,
-            restore_started("call-1"),
-            UnixMicros::new(42),
-        )
-        .expect_err("injected restore append fails");
-
-    assert_eq!(
-        fs::read(&restore_path).expect("restore journal"),
-        restore_before
-    );
-    store
-        .append_session_restore_event_at(
-            "session-1",
-            None,
-            restore_started("call-1"),
-            UnixMicros::new(43),
-        )
-        .expect("restore retry appends");
-    let events = store
-        .session_restore_events("session-1")
-        .expect("valid restore journal");
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[1].seq, PersistedSessionEventSeq::new(1));
-}
 
 /// An uncertain restore rollback poisons only the restore journal while the
-/// ordinary session journal remains writable.
-#[test]
-fn rollback_failure_poisons_only_restore_journal() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = SessionStore::open(temp.path()).expect("store opens");
-    store
-        .append_session_restore_event_at(
-            "session-1",
-            None,
-            restore_request("call-1"),
-            UnixMicros::new(41),
-        )
-        .expect("baseline restore appends");
-    let restore_path = temp.path().join("session-1/restore-events.cbor");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_fault(
-            &restore_path,
-            AppendFault {
-                fail_write_at: Some(5),
-                fail_truncate: true,
-                ..AppendFault::default()
-            },
-        );
-    store
-        .append_session_restore_event_at(
-            "session-1",
-            None,
-            restore_started("call-1"),
-            UnixMicros::new(42),
-        )
-        .expect_err("injected restore append fails");
-    let bytes_after_failure = fs::read(&restore_path).expect("failed restore journal");
-
-    let poisoned = store
-        .append_session_restore_event_at(
-            "session-1",
-            None,
-            restore_started("call-1"),
-            UnixMicros::new(43),
-        )
-        .expect_err("poisoned restore journal rejects append");
-    let ordinary = store
-        .append_session_event_at(
-            "session-1",
-            None,
-            loaded_event("session-1", "ordinary-agent"),
-            UnixMicros::new(44),
-        )
-        .expect("ordinary journal remains writable");
-
-    assert!(
-        poisoned
-            .to_string()
-            .contains("append disabled after an incomplete rollback")
-    );
-    assert_eq!(ordinary.seq, PersistedSessionEventSeq::new(0));
-    assert_eq!(
-        fs::read(&restore_path).expect("poisoned restore journal"),
-        bytes_after_failure
-    );
-}
 
 /// Strict restore replay rejects a partial frame before a valid suffix.
 #[test]
@@ -738,7 +319,7 @@ fn strict_restore_replay_rejects_partial_frame_before_valid_suffix() {
     let temp = tempfile::tempdir().expect("tempdir");
     let restore_path;
     {
-        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        let mut store = SessionStore::open_fixture(temp.path()).expect("store opens");
         store
             .append_session_restore_event_at(
                 "session-1",
@@ -756,7 +337,7 @@ fn strict_restore_replay_rejects_partial_frame_before_valid_suffix() {
         recorded_at: UnixMicros::new(42),
     };
     append_partial_frame_and_valid_suffix(&restore_path, &record);
-    let store = SessionStore::open(temp.path()).expect("ordinary store opens");
+    let store = SessionStore::open_fixture(temp.path()).expect("ordinary store opens");
 
     let error = store
         .session_restore_events("session-1")

@@ -204,7 +204,7 @@ fn local_summary_length_restart_claims_unstarted_successor_once() {
             .expect("id"),
         compact_prompt_id: tau_proto::AgentPromptId::parse("ap-length-successor").expect("id"),
     };
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -467,7 +467,7 @@ fn canonical_standalone_rejection_restart_repairs_retreat_once() {
         h.shutdown().expect("shutdown");
     }
     wait_for_session_unlock(&state, "s1");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -552,7 +552,7 @@ fn partial_compaction_restart_and_replacement_only_retreat_preserve_suffix() {
         h.shutdown().expect("shutdown");
     }
     wait_for_session_unlock(&state, "s1");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("store");
     store
         .append_agent_event_at(
             agent_id.as_str(),

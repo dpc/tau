@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 fn seed_agent_and_session(temp: &TempDir) -> AgentId {
     let agent_id = AgentId::parse("owned-agent").expect("agent id");
-    let mut agents = AgentStore::open_lazy(temp.path().join("agents")).expect("agent store");
+    let mut agents = AgentStore::open_fixture(temp.path().join("agents")).expect("agent store");
     agents
         .append_agent_event_at(
             agent_id.as_str(),
@@ -27,7 +27,8 @@ fn seed_agent_and_session(temp: &TempDir) -> AgentId {
         .expect("append agent");
     drop(agents);
     let session_id = SessionId::parse("owner-session").expect("session id");
-    let mut sessions = SessionStore::open(temp.path().join("sessions")).expect("session store");
+    let mut sessions =
+        SessionStore::open_fixture(temp.path().join("sessions")).expect("session store");
     sessions
         .append_session_event(
             session_id.as_str(),

@@ -34,7 +34,7 @@ fn refresh_extends_validated_journal_boundary_without_losing_prefix_references()
     let temp = TempDir::new().expect("temp state");
     let sessions_dir = temp.path().join("sessions");
     let session = SessionId::parse("session").expect("session id");
-    let mut store = SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("session store");
     append_load(&mut store, &session, "first");
 
     let mut references =
@@ -85,7 +85,7 @@ fn unreadable_manifest_aborts_reference_capture() {
     let temp = TempDir::new().expect("temp state");
     let sessions_dir = temp.path().join("sessions");
     let session = SessionId::parse("session").expect("session id");
-    let mut store = SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("session store");
     append_load(&mut store, &session, "agent");
     drop(store);
     let manifest = sessions_dir.join("session/meta.json");
@@ -108,7 +108,7 @@ fn replaced_journal_aborts_incremental_refresh() {
     let temp = TempDir::new().expect("temp state");
     let sessions_dir = temp.path().join("sessions");
     let session = SessionId::parse("session").expect("session id");
-    let mut store = SessionStore::open(&sessions_dir).expect("session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("session store");
     append_load(&mut store, &session, "first");
     drop(store);
     let mut references =

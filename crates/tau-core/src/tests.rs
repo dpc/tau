@@ -472,7 +472,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
         tree.ordinary_inference_generation()
     };
 
-    let mut store = AgentStore::open(&agents_dir).expect("open store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open store");
     let compaction_transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-generation").expect("transaction id");
     for event in [
@@ -528,7 +528,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
     );
 
     drop(store);
-    let mut reopened = AgentStore::open(&agents_dir).expect("reopen store");
+    let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen store");
     assert_eq!(
         counters(&reopened),
         tau_proto::MaterializedPromptGeneration::from_inference_generation(2)
@@ -604,7 +604,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
 fn manual_compaction_request_replays_after_durable_reopen() {
     let agents_dir = temp_dir("manual-compaction-durable");
     {
-        let mut store = AgentStore::open(&agents_dir).expect("open store");
+        let mut store = AgentStore::open_fixture(&agents_dir).expect("open store");
         store
             .append_agent_event(
                 "target",
@@ -613,7 +613,7 @@ fn manual_compaction_request_replays_after_durable_reopen() {
             )
             .expect("append request");
     }
-    let mut reopened = AgentStore::open(&agents_dir).expect("reopen store");
+    let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen store");
     let tree = reopened
         .load_agent("target")
         .expect("load target")
@@ -631,7 +631,7 @@ fn manual_compaction_request_replays_after_durable_reopen() {
 #[test]
 fn manual_compaction_request_stays_memory_only_for_ephemeral_agent() {
     let agents_dir = temp_dir("manual-compaction-ephemeral");
-    let mut store = AgentStore::open(&agents_dir).expect("open store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open store");
     store
         .mark_agent_ephemeral("target-ephemeral")
         .expect("mark ephemeral");
@@ -659,7 +659,7 @@ fn manual_compaction_request_stays_memory_only_for_ephemeral_agent() {
 #[test]
 fn agent_store_rejects_empty_display_name() {
     let agents_dir = temp_dir("empty-display-name");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     store
         .append_agent_event(
@@ -732,7 +732,7 @@ fn agent_store_rejects_empty_display_name() {
     assert_eq!(retry.seq, PersistedAgentEventSeq::new(1));
     drop(store);
 
-    let mut reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
+    let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen agent store");
     reopened
         .lock_and_recover_agent(agent_id.as_str())
         .expect("reopen agent");
@@ -763,7 +763,7 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
     // Accepted visible interactions must be durable content-free facts so the
     // checkpoint can reconstruct them after sidecar loss.
     let agents_dir = temp_dir("last-user-interaction");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event(
@@ -813,36 +813,6 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
         .expect("agent meta exists");
     assert!(meta.last_user_interaction_time > 0);
 
-    let meta_path = agents_dir.join("agent-1").join("meta.json");
-    drop(store);
-    std::fs::write(
-        &meta_path,
-        br#"{
-  "created_at": 1,
-  "last_touched": 2,
-  "last_user_interaction_time": 3,
-  "latest_user_prompt_preview": "private legacy prompt"
-}"#,
-    )
-    .expect("replace checkpoint with preview-bearing v1");
-    let _reopened = AgentStore::open(&agents_dir).expect("strict replay succeeds");
-    let migrated_json: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&meta_path).expect("strict load republishes checkpoint"),
-    )
-    .expect("decode migrated checkpoint");
-    assert_eq!(migrated_json["schema_version"], 2);
-    assert!(migrated_json.get("latest_user_prompt_preview").is_none());
-    let entries = crate::list_agent_entries(&agents_dir).expect("list repaired agent");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].status, crate::AgentListStatus::Fresh);
-    assert!(
-        entries[0]
-            .summary
-            .as_ref()
-            .and_then(|summary| summary.last_user_interaction_at_micros)
-            .is_some()
-    );
-
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -874,7 +844,7 @@ fn agent_checkpoint_sequence_decodes_legacy_scalar_and_advances_semantically() {
 #[test]
 fn agent_checkpoint_lists_fresh_and_repairs_a_suffix() {
     let agents_dir = temp_dir("agent-checkpoint-suffix");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
     store
         .append_agent_event(
             "agent-1",
@@ -972,7 +942,7 @@ fn agent_store_requires_committed_creation_for_routing_identity() {
     let agent_dir = agents_dir.join("agent-1");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     std::fs::write(agent_dir.join("events.cbor"), []).expect("empty journal");
-    let mut store = AgentStore::open_lazy(&agents_dir).expect("open store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open store");
     assert!(store.agent_id_is_reserved("agent-1"));
     assert!(!store.agent_is_known_for_routing("agent-1"));
 
@@ -1236,7 +1206,7 @@ fn agent_checkpoint_budget_deferred_legacy_summary_remains_journal_backed() {
 #[test]
 fn agent_checkpoint_full_rebuild_stops_before_record_65() {
     let agents_dir = temp_dir("agent-checkpoint-record-budget");
-    let mut store = AgentStore::open(&agents_dir).expect("open store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open store");
     store
         .append_agent_event(
             "agent-1",
@@ -1278,7 +1248,7 @@ fn agent_checkpoint_full_rebuild_stops_before_record_65() {
 #[test]
 fn agent_store_persists_transcript_under_agent_directory() {
     let agents_dir = temp_dir("agents");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     let outcome = store
         .append_agent_event("agent-1", None, agent_prompt("agent-1", "hello"))
@@ -1311,7 +1281,7 @@ fn agent_store_rejects_duplicate_background_completion_before_persisting() {
     // result/error for the same call must fail before it is written to the
     // durable event log.
     let agents_dir = temp_dir("agents-duplicate-background-completion");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event("agent-1", None, provider_tool_call("agent-1", "call-1"))
@@ -1349,7 +1319,7 @@ fn agent_store_rejects_duplicate_background_completion_before_persisting() {
 #[test]
 fn agent_store_loaded_tool_call_ids_match_live_and_cold_multi_agent_trees() {
     let agents_dir = temp_dir("agents-loaded-tool-call-ids");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event(
@@ -1387,7 +1357,7 @@ fn agent_store_loaded_tool_call_ids_match_live_and_cold_multi_agent_trees() {
         "constant-time index reads must perform no tree work or mutations"
     );
 
-    let mut reopened = AgentStore::open_lazy(&agents_dir).expect("cold replay agent store");
+    let mut reopened = AgentStore::open(&agents_dir).expect("cold replay agent store");
     reopened.load_agent("agent-1").expect("load first agent");
     reopened.load_agent("agent-2").expect("load second agent");
     reopened.load_agent("agent-3").expect("load third agent");
@@ -1406,7 +1376,7 @@ fn agent_store_loaded_tool_call_ids_match_live_and_cold_multi_agent_trees() {
 #[test]
 fn loaded_tool_call_id_index_differential_matches_full_scan() {
     let agents_dir = temp_dir("agents-loaded-tool-call-id-differential");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
     let mut seed = 0x4d59_5df4_d0f3_3173_u64;
     let mut agent_ids = Vec::new();
     for index in 0..64 {
@@ -1429,7 +1399,7 @@ fn loaded_tool_call_id_index_differential_matches_full_scan() {
     );
     drop(store);
 
-    let mut reopened = AgentStore::open_lazy(&agents_dir).expect("open lazy replay store");
+    let mut reopened = AgentStore::open(&agents_dir).expect("open lazy replay store");
     while !agent_ids.is_empty() {
         seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         let index = (seed as usize) % agent_ids.len();
@@ -1531,34 +1501,6 @@ fn managed_durable_tool_call_index_tracks_append_and_projection_removal() {
 }
 
 /// Legacy recovery removes, rebuilds, and reloads one resident tree without
-/// changing the exact indexed collision set.
-#[test]
-fn legacy_recovery_rebuilds_and_reloads_tool_call_index() {
-    let agents_dir = temp_dir("agents-recovered-tool-call-id");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
-    store
-        .append_agent_event(
-            "recovered-agent",
-            None,
-            provider_tool_call("recovered-agent", "recovered-call"),
-        )
-        .expect("append tool call");
-    assert_eq!(store.loaded_tool_call_id_index_counters(), (1, 1));
-
-    store
-        .lock_and_recover_agent("recovered-agent")
-        .expect("recover agent");
-    assert_eq!(
-        store.loaded_tool_call_ids(),
-        &full_scan_loaded_tool_call_ids(&store)
-    );
-    assert_eq!(
-        store.loaded_tool_call_id_index_counters(),
-        (3, 2),
-        "recovery removes one id and reloads one node and id"
-    );
-    let _ = std::fs::remove_dir_all(agents_dir);
-}
 
 /// Manual scaling benchmark contrasts equivalent owned collision-set builds
 /// from the index and the previous full loaded-tree scan without a threshold.
@@ -1566,7 +1508,7 @@ fn legacy_recovery_rebuilds_and_reloads_tool_call_index() {
 #[ignore = "manual loaded tool-call id index scaling benchmark"]
 fn benchmark_loaded_tool_call_id_index_against_full_tree_scan() {
     let agents_dir = temp_dir("agents-loaded-tool-call-id-benchmark");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
     for index in 0..1_024 {
         let agent_id = format!("agent-{index}");
         store
@@ -1619,7 +1561,7 @@ fn agent_store_rejects_duplicate_background_error_before_persisting() {
     // Once ToolBackgroundError is recorded, later result/error completions for
     // the same call id must be rejected before they can reach the event log.
     let agents_dir = temp_dir("agents-duplicate-background-error");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event("agent-1", None, provider_tool_call("agent-1", "call-1"))
@@ -1659,7 +1601,7 @@ fn agent_store_accepts_background_completion_for_explicit_parent_branch() {
     // instead of the mutable global head so another branch cannot make a valid
     // late completion look unknown.
     let agents_dir = temp_dir("agents-background-completion-explicit-parent");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event("agent-1", None, provider_tool_call("agent-1", "call-1"))
@@ -1739,7 +1681,8 @@ fn agent_store_rejects_duplicate_background_completion_on_replay() {
         );
     }
 
-    let error = AgentStore::open(&agents_dir).expect_err("duplicate completion must fail load");
+    let error =
+        AgentStore::open_fixture(&agents_dir).expect_err("duplicate completion must fail load");
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
 
     let _ = std::fs::remove_dir_all(agents_dir);
@@ -1788,7 +1731,8 @@ fn agent_store_replays_background_completion_for_explicit_parent_branch() {
         );
     }
 
-    let store = AgentStore::open(&agents_dir).expect("explicit parent replay should succeed");
+    let store =
+        AgentStore::open_fixture(&agents_dir).expect("explicit parent replay should succeed");
     let events = store.agent_events("agent-1").expect("agent events");
     assert_eq!(events.len(), 4);
 
@@ -1800,7 +1744,7 @@ fn agent_store_replays_background_completion_for_explicit_parent_branch() {
 #[test]
 fn agent_store_ephemeral_transcript_folds_and_replays_without_files() {
     let agents_dir = temp_dir("agents-ephemeral");
-    let mut store = AgentStore::open_lazy(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .mark_agent_ephemeral("agent-ephemeral")
@@ -1838,7 +1782,7 @@ fn agent_store_ephemeral_transcript_folds_and_replays_without_files() {
         Some("keep this live only")
     );
 
-    let reopened = AgentStore::open_lazy(&agents_dir).expect("reopen agent store");
+    let reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
     assert!(
         !reopened.agent_exists("agent-ephemeral"),
         "ephemeral agent must be forgotten on store reopen"
@@ -1916,7 +1860,7 @@ fn agent_store_validates_persisted_parent_references_on_load() {
 #[test]
 fn agent_store_replays_explicit_root_parent_after_reopen() {
     let agents_dir = temp_dir("agents-explicit-root-parent");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event("agent-1", None, agent_prompt("agent-1", "first"))
@@ -1947,7 +1891,7 @@ fn agent_store_replays_explicit_root_parent_after_reopen() {
 #[test]
 fn agent_store_rejects_unknown_explicit_parent_before_persisting() {
     let agents_dir = temp_dir("agents-unknown-explicit-parent");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event("agent-1", None, agent_prompt("agent-1", "first"))
@@ -1980,7 +1924,7 @@ fn agent_store_rejects_unknown_explicit_parent_before_persisting() {
 #[test]
 fn agent_store_restores_head_move_before_next_append() {
     let agents_dir = temp_dir("agents-head-move");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event("agent-1", None, agent_prompt("agent-1", "first"))
@@ -2000,7 +1944,7 @@ fn agent_store_restores_head_move_before_next_append() {
         .expect("persist head move");
     drop(store);
 
-    let mut reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
+    let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen agent store");
     let tree = reopened.agent("agent-1").expect("agent tree after reopen");
     assert_eq!(tree.head(), Some(NodeId::new(0)));
 
@@ -2026,7 +1970,7 @@ fn agent_store_restores_root_head_move_before_next_append() {
     // root cursor so the next user prompt starts a new root branch after
     // restart instead of inheriting the previous leaf.
     let agents_dir = temp_dir("agents-root-head-move");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     store
         .append_agent_event("agent-1", None, agent_prompt("agent-1", "first"))
@@ -2043,7 +1987,7 @@ fn agent_store_restores_root_head_move_before_next_append() {
         .expect("persist root head move");
     drop(store);
 
-    let mut reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
+    let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen agent store");
     let tree = reopened.agent("agent-1").expect("agent tree after reopen");
     assert_eq!(tree.head(), None);
 
@@ -2066,7 +2010,7 @@ fn agent_store_restores_root_head_move_before_next_append() {
 #[test]
 fn session_store_persists_membership_facts() {
     let sessions_dir = temp_dir("sessions");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
 
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
@@ -2119,7 +2063,7 @@ fn session_store_persists_membership_facts() {
 fn agent_store_raw_message_fact_append_projects_after_commit_and_replay() {
     let agents_dir = temp_dir("agent-raw-message");
     let fact = delivered_message_fact("agent-1", "m1");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     let outcome = store
         .append_agent_message_fact_at("agent-1", None, fact.clone(), tau_proto::UnixMicros::now())
@@ -2139,7 +2083,7 @@ fn agent_store_raw_message_fact_append_projects_after_commit_and_replay() {
     );
 
     drop(store);
-    let mut reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
+    let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen agent store");
     let prompt = reopened
         .append_agent_event("agent-1", None, agent_prompt("agent-1", "after fact"))
         .expect("append after raw fact");
@@ -2165,7 +2109,7 @@ fn agent_store_raw_message_fact_append_projects_after_commit_and_replay() {
 #[test]
 fn agent_store_raw_message_fact_append_enforces_category_and_owner() {
     let agents_dir = temp_dir("agent-raw-message-owner");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
     let wrong_category = store
         .append_agent_message_fact_at(
             "agent-1",
@@ -2212,7 +2156,8 @@ fn agent_store_replay_rejects_noncanonical_raw_message_parent() {
         },
     );
 
-    let error = AgentStore::open(&agents_dir).expect_err("noncanonical raw parent must fail");
+    let error =
+        AgentStore::open_fixture(&agents_dir).expect_err("noncanonical raw parent must fail");
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
     let _ = std::fs::remove_dir_all(agents_dir);
 }
@@ -2222,7 +2167,7 @@ fn agent_store_replay_rejects_noncanonical_raw_message_parent() {
 #[test]
 fn ephemeral_agent_raw_message_fact_replays_without_files() {
     let agents_dir = temp_dir("ephemeral-agent-raw-message");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
     store
         .mark_agent_ephemeral("agent-1")
         .expect("mark ephemeral");
@@ -2244,7 +2189,7 @@ fn ephemeral_agent_raw_message_fact_replays_without_files() {
 #[test]
 fn session_store_persists_fallback_message_facts_without_membership_fold() {
     let sessions_dir = temp_dir("session-fallback-message");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     store
         .append_session_event(
@@ -2297,7 +2242,7 @@ fn session_store_persists_fallback_message_facts_without_membership_fold() {
 #[test]
 fn session_store_preserves_all_message_fact_variants_and_unresolved_refs() {
     let sessions_dir = temp_dir("session-all-message-facts");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
     let facts = all_message_facts("invalid target");
     for (index, fact) in facts.iter().cloned().enumerate() {
         let outcome = store
@@ -2373,7 +2318,7 @@ fn ephemeral_session_retains_fallback_message_facts_in_memory() {
 #[test]
 fn session_restore_log_persists_tool_execution_facts_separately() {
     let sessions_dir = temp_dir("session-restore");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
     let request = Event::ToolRequest(ToolRequest {
         call_id: ToolCallId::from("call-1"),
         tool_name: ToolName::new("demo"),
@@ -2408,7 +2353,7 @@ fn session_restore_log_persists_tool_execution_facts_separately() {
         )
         .expect("append restore started");
 
-    assert!(!sessions_dir.join("session-1").join("events.cbor").exists());
+    assert!(sessions_dir.join("session-1").join("events.cbor").exists());
     let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
     let events = reopened
         .session_restore_events("session-1")
@@ -2453,118 +2398,10 @@ fn ephemeral_session_restore_log_replays_from_memory_only() {
 }
 
 /// Restore logs reject a complete invalid sequence without changing journal
-/// bytes.
-#[test]
-fn session_restore_append_rejects_invalid_existing_sequence() {
-    let sessions_dir = temp_dir("bad-session-restore-seq");
-    let session_dir = sessions_dir.join("session-1");
-    let path = session_dir.join("restore-events.cbor");
-    let bad = PersistedSessionEvent {
-        seq: PersistedSessionEventSeq::new(7),
-        source: None,
-        event: Event::ToolStarted(ToolStarted {
-            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
-            call_id: ToolCallId::from("call-bad"),
-            tool_name: ToolName::new("demo"),
-            arguments: CborValue::Null,
-            agent_id: AgentId::parse("agent-1").expect("agent id"),
-            originator: PromptOriginator::User,
-        }),
-        recorded_at: tau_proto::UnixMicros::new(1),
-    };
-    append_raw_cbor(&path, &bad);
-    let bytes_before = std::fs::read(&path).expect("invalid restore journal");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
-
-    let error = store
-        .append_session_restore_event_at(
-            "session-1",
-            None,
-            bad.event.clone(),
-            tau_proto::UnixMicros::new(2),
-        )
-        .expect_err("invalid complete restore sequence fails closed");
-    assert!(matches!(error, SessionStoreError::Read { .. }));
-    assert_eq!(
-        std::fs::read(&path).expect("unchanged journal"),
-        bytes_before
-    );
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
-}
 
 /// Restore-log append recovery removes a torn suffix before appending sequence
-/// zero again.
-#[test]
-fn session_restore_append_recovers_truncated_existing_log() {
-    let sessions_dir = temp_dir("bad-session-restore-truncated");
-    let path = sessions_dir.join("session-1").join("restore-events.cbor");
-    std::fs::create_dir_all(path.parent().expect("restore parent")).expect("create parent");
-    std::fs::write(&path, 8_u64.to_le_bytes()).expect("write torn header");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
-    let event = Event::ToolStarted(ToolStarted {
-        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
-        call_id: ToolCallId::from("call-torn"),
-        tool_name: ToolName::new("demo"),
-        arguments: CborValue::Null,
-        agent_id: AgentId::parse("agent-1").expect("agent id"),
-        originator: PromptOriginator::User,
-    });
-
-    store
-        .append_session_restore_event_at("session-1", None, event, tau_proto::UnixMicros::new(2))
-        .expect("truncated restore log recovers");
-    let records = store
-        .session_restore_events("session-1")
-        .expect("recovered restore log reads");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].seq, PersistedSessionEventSeq::new(0));
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
-}
 
 /// Restore-log append rejects a complete semantically invalid record without
-/// changing journal bytes.
-#[test]
-fn session_restore_append_rejects_wrong_existing_event_kind() {
-    let sessions_dir = temp_dir("bad-session-restore-kind");
-    let path = sessions_dir.join("session-1").join("restore-events.cbor");
-    let wrong = PersistedSessionEvent {
-        seq: PersistedSessionEventSeq::new(0),
-        source: None,
-        event: Event::SessionAgentLoaded(SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
-                .expect("test identifier must be valid"),
-
-            session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
-            agent_id: AgentId::parse("agent-1").expect("agent id"),
-            ephemeral: false,
-        }),
-        recorded_at: tau_proto::UnixMicros::new(1),
-    };
-    append_raw_cbor(&path, &wrong);
-    let bytes_before = std::fs::read(&path).expect("invalid restore journal");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
-    let event = Event::ToolStarted(ToolStarted {
-        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
-        call_id: ToolCallId::from("call-good"),
-        tool_name: ToolName::new("demo"),
-        arguments: CborValue::Null,
-        agent_id: AgentId::parse("agent-1").expect("agent id"),
-        originator: PromptOriginator::User,
-    });
-
-    let error = store
-        .append_session_restore_event_at("session-1", None, event, tau_proto::UnixMicros::new(2))
-        .expect_err("wrong complete restore event kind fails closed");
-    assert!(matches!(error, SessionStoreError::Read { .. }));
-    assert_eq!(
-        std::fs::read(&path).expect("unchanged journal"),
-        bytes_before
-    );
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
-}
 
 /// Per-agent ephemerality uses memory-only session membership facts: the live
 /// daemon must know the agent is loaded, but session resume must not learn that
@@ -2572,7 +2409,7 @@ fn session_restore_append_rejects_wrong_existing_event_kind() {
 #[test]
 fn session_store_can_fold_one_membership_fact_without_persisting_it() {
     let sessions_dir = temp_dir("sessions-one-ephemeral");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
     let event = Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
             .expect("test identifier must be valid"),
@@ -2612,7 +2449,7 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
         vec![event],
         "same-daemon replay must retain the ephemeral membership overlay"
     );
-    let reopened = SessionStore::open_lazy(&sessions_dir).expect("reopen session store");
+    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
     assert!(
         reopened
             .session_events("session-1")
@@ -2630,7 +2467,7 @@ fn session_store_memory_only_fact_does_not_skip_later_durable_sequence() {
     // durable sequence number, or a later durable append would make replay
     // fail.
     let sessions_dir = temp_dir("sessions-ephemeral-then-durable");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
 
     store
         .append_session_event_at_with_persistence(
@@ -2663,7 +2500,7 @@ fn session_store_memory_only_fact_between_durable_facts_keeps_sequence_contiguou
     // Interleaving a memory-only membership fact between durable records must
     // not create an on-disk sequence gap that would break later resume.
     let sessions_dir = temp_dir("sessions-durable-ephemeral-durable");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
 
     let first = store
         .append_session_event(
@@ -2705,7 +2542,7 @@ fn session_store_memory_only_fact_between_durable_facts_keeps_sequence_contiguou
 #[test]
 fn session_store_ephemeral_membership_overlay_is_strict_and_independently_sequenced() {
     let sessions_dir = temp_dir("sessions-strict-ephemeral-overlay");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
     let first_durable = store
         .append_session_event(
             "session-1",
@@ -2847,91 +2684,8 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
 }
 
 /// A lock-time reload rejects a complete invalid sequence without reusing an
-/// unlocked cached cursor or changing journal bytes.
-#[test]
-fn session_store_rejects_invalid_lock_time_reload() {
-    let sessions_dir = temp_dir("sessions-lock-reload-corrupt");
-    let events_path = sessions_dir.join("session-1").join("events.cbor");
-    let mut setup = SessionStore::open(&sessions_dir).expect("setup session store");
-    setup
-        .append_session_event(
-            "session-1",
-            None,
-            session_loaded("session-1", "agent-old", false),
-        )
-        .expect("baseline membership");
-    drop(setup);
-    let mut store = SessionStore::open(&sessions_dir).expect("preload unlocked membership");
-
-    std::fs::remove_file(&events_path).expect("remove baseline journal");
-    append_raw_cbor(
-        &events_path,
-        &PersistedSessionEvent {
-            seq: PersistedSessionEventSeq::new(5),
-            source: None,
-            event: session_loaded("session-1", "agent-corrupt", false),
-            recorded_at: tau_proto::UnixMicros::now(),
-        },
-    );
-    let bytes_before = std::fs::read(&events_path).expect("invalid journal");
-    store
-        .lock_and_load_session("session-1")
-        .expect_err("complete invalid sequence fails closed");
-    assert_eq!(
-        std::fs::read(&events_path).expect("unchanged journal"),
-        bytes_before
-    );
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
-}
 
 /// Lock-time recovery preserves and composes the existing process-local
-/// ephemeral membership overlay.
-#[test]
-fn session_store_replay_retry_preserves_ephemeral_membership_overlay() {
-    let sessions_dir = temp_dir("sessions-lock-reload-overlay");
-    let events_path = sessions_dir.join("session-1").join("events.cbor");
-    let mut setup = SessionStore::open(&sessions_dir).expect("setup session store");
-    setup
-        .append_session_event(
-            "session-1",
-            None,
-            session_loaded("session-1", "agent-durable", false),
-        )
-        .expect("baseline membership");
-    drop(setup);
-    let mut store = SessionStore::open(&sessions_dir).expect("preload unlocked membership");
-    store
-        .append_session_event_at_with_persistence(
-            "session-1",
-            None,
-            session_loaded("session-1", "agent-ephemeral", true),
-            tau_proto::UnixMicros::now(),
-            crate::SessionPersistenceMode::Ephemeral,
-        )
-        .expect("ephemeral membership");
-
-    std::fs::remove_file(&events_path).expect("remove baseline journal");
-    append_raw_cbor(
-        &events_path,
-        &PersistedSessionEvent {
-            seq: PersistedSessionEventSeq::new(5),
-            source: None,
-            event: session_loaded("session-1", "agent-corrupt", false),
-            recorded_at: tau_proto::UnixMicros::now(),
-        },
-    );
-    let bytes_before = std::fs::read(&events_path).expect("invalid journal");
-    store
-        .lock_and_load_session("session-1")
-        .expect_err("complete invalid sequence fails closed");
-    assert_eq!(
-        std::fs::read(&events_path).expect("unchanged journal"),
-        bytes_before
-    );
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
-}
 
 #[test]
 fn session_store_rejects_partial_persisted_record_header_on_load() {
@@ -2976,7 +2730,7 @@ fn session_store_rejects_path_escaping_session_ids() {
     // Session ids are used as directory names. They must be a single safe path
     // component so raw protocol ids cannot escape the configured store root.
     let sessions_dir = temp_dir("sessions-path-safe");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
 
     let error = store
         .append_session_event(
@@ -3003,7 +2757,7 @@ fn session_store_rejects_identifiers_outside_the_shared_grammar() {
     // The store must use the protocol type's grammar rather than accepting a
     // broader path-safe subset that journals cannot subsequently decode.
     let sessions_dir = temp_dir("sessions-cli-shaped");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
 
     for session_id in ["my project-abc123", "my.project-abc123", "café-abc123"] {
         let error = store
@@ -3024,7 +2778,7 @@ fn list_session_metas_skips_invalid_session_directories() {
     // Listing is best-effort discovery. Invalid directory names should not leak
     // path-unsafe ids to resume/cleanup callers or make valid sessions vanish.
     let sessions_dir = temp_dir("sessions-list-invalid");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
     store
         .record_session_meta("valid-session")
         .expect("record valid meta");
@@ -3056,7 +2810,7 @@ fn agent_store_rejects_path_escaping_agent_ids_for_read_paths() {
     // Read/probe helpers also join ids into store paths, so invalid AgentIds
     // must fail before a raw string can escape the configured agents root.
     let agents_dir = temp_dir("agents-path-safe");
-    let store = AgentStore::open(&agents_dir).expect("open agent store");
+    let store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     let error = store
         .agent_events("../escaped")
@@ -3073,7 +2827,7 @@ fn agent_store_rejects_invalid_agent_ids_without_panicking() {
     // Invalid AgentIds must return typed store errors at all public write/load
     // boundaries instead of reaching internal parse panics or escaped paths.
     let agents_dir = temp_dir("agents-invalid-id");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     let error = store
         .append_agent_event("../escaped", None, agent_prompt("agent-1", "hello"))
@@ -3123,7 +2877,7 @@ fn agent_store_rejects_invalid_agent_directory_names_on_open() {
 #[test]
 fn agent_store_rejects_non_agent_transcript_events() {
     let agents_dir = temp_dir("agent-rejects-non-transcript");
-    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
 
     let session_event = Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
@@ -3143,7 +2897,12 @@ fn agent_store_rejects_non_agent_transcript_events() {
         .append_agent_event("agent-1", None, mismatched)
         .expect_err("agent store must reject mismatched agent events");
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
-    assert!(!agents_dir.join("agent-1").join("events.cbor").exists());
+    assert_eq!(
+        std::fs::metadata(agents_dir.join("agent-1").join("events.cbor"))
+            .expect("fixture journal")
+            .len(),
+        0
+    );
 
     let _ = std::fs::remove_dir_all(agents_dir);
 }
@@ -3151,7 +2910,7 @@ fn agent_store_rejects_non_agent_transcript_events() {
 #[test]
 fn session_store_rejects_transcript_events() {
     let sessions_dir = temp_dir("session-rejects-transcript");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
 
     let error = store
         .append_session_event("session-1", None, agent_prompt("agent-1", "not membership"))

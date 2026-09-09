@@ -3683,7 +3683,8 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
         let td = TempDir::new().expect("tempdir");
         let state = td.path().join("state");
         seed_main_agent_loaded(&state);
-        let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+        let mut store =
+            tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
         append_seed_agent_event(
             &mut store,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {

@@ -1627,7 +1627,7 @@ fn append_seed_standalone_accounting(
 fn standalone_accounting_restore_is_session_scoped_and_idempotent() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
     store
         .append_agent_event_at(
             "parent",

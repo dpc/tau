@@ -84,7 +84,7 @@ pub enum PersistenceFailureKind {
 }
 
 /// Test-only result of waiting for all currently admitted durability debt.
-#[cfg(any(test, feature = "test-legacy-writer"))]
+#[cfg(any(test, feature = "test-persistence"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[doc(hidden)]
 pub enum DurabilityBarrierOutcome {
@@ -843,7 +843,7 @@ impl SemanticPersistenceOwner {
 
     /// Waits for one exact stream-local deterministic test failure without
     /// consuming failures from other streams.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[cfg(any(test, feature = "test-persistence"))]
     #[doc(hidden)]
     pub fn wait_for_stream_failure_for_test(
         &self,
@@ -926,14 +926,14 @@ impl SemanticPersistenceOwner {
     }
 
     /// Injects one deterministic pre-publication admission rejection.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[cfg(any(test, feature = "test-persistence"))]
     #[doc(hidden)]
     pub fn reject_next_admission_for_test(&self) {
         self.reject_admissions_for_test(1);
     }
 
     /// Injects a bounded run of deterministic admission rejections.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[cfg(any(test, feature = "test-persistence"))]
     #[doc(hidden)]
     pub fn reject_admissions_for_test(&self, count: usize) {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -942,7 +942,7 @@ impl SemanticPersistenceOwner {
     }
 
     /// Injects rejections after a fixed number of successful admissions.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[cfg(any(test, feature = "test-persistence"))]
     #[doc(hidden)]
     pub fn reject_admissions_after_for_test(&self, successful: usize, count: usize) {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -952,7 +952,7 @@ impl SemanticPersistenceOwner {
 
     /// Emits the same capacity-ready edge as worker disposal for deterministic
     /// harness tests.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[cfg(any(test, feature = "test-persistence"))]
     #[doc(hidden)]
     pub fn signal_capacity_ready_for_test(&self) {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -968,7 +968,7 @@ impl SemanticPersistenceOwner {
     /// [`DurabilityBarrierOutcome::DeadlineExpired`] when the bound expires, or
     /// [`DurabilityBarrierOutcome::UnavailableOrFailed`] when the owner or
     /// worker cannot complete the barrier.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[cfg(any(test, feature = "test-persistence"))]
     #[doc(hidden)]
     pub fn wait_for_latest_durability_for_test(
         &self,

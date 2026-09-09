@@ -90,8 +90,8 @@ fn runtime_construction_isolates_paths_and_stores() {
     runtime
         .open_agent_store()
         .expect("isolated agent store should open");
-    assert!(runtime.state_dir.join("sessions").is_dir());
-    assert!(runtime.state_dir.join("agents").is_dir());
+    assert!(!runtime.state_dir.join("sessions").exists());
+    assert!(!runtime.state_dir.join("agents").exists());
 }
 
 /// The public embedded helper must run the deterministic echo path and return

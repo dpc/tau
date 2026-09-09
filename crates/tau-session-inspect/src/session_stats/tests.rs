@@ -601,7 +601,7 @@ fn aggregation_distinguishes_nonnative_effort_from_missing_model_params() {
 fn persisted_traversal_reports_missing_member_journal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join("state").join("sessions");
-    let mut sessions = SessionStore::open(&sessions_dir).expect("session store");
+    let mut sessions = SessionStore::open_fixture(&sessions_dir).expect("session store");
     sessions
         .append_session_event(
             "s1",

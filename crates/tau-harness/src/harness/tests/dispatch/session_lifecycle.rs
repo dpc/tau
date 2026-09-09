@@ -283,7 +283,8 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
     let agent_id = tau_proto::AgentId::parse("restored-main").expect("agent id");
     {
         let sessions_dir = tau_config::settings::sessions_dir_of(&state);
-        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        let mut sessions =
+            tau_core::SessionStore::open_fixture(&sessions_dir).expect("session store");
         sessions
             .record_session_meta("s1")
             .expect("seed canonical session manifest");
@@ -301,7 +302,8 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
                 }),
             )
             .expect("seed membership");
-        let mut agents = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+        let mut agents =
+            tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
         agents
             .append_agent_event(
                 agent_id.as_str(),
@@ -1612,7 +1614,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     let state = td.path().join("state");
     seed_main_agent_loaded(&state);
     let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
     for text in ["activation A", "activation B"] {
         append_seed_agent_event(
             &mut store,

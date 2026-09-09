@@ -1163,7 +1163,7 @@ fn persisted_agent_branches(state_dir: &Path, session_id: &str) -> Vec<Vec<Agent
     let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
     let store = open_session_store(&sessions_dir).expect("session store");
     let session = store.session(session_id).expect("session membership");
-    let mut agent_store = AgentStore::open(state_dir.join("agents")).expect("agent store");
+    let mut agent_store = AgentStore::open_fixture(state_dir.join("agents")).expect("agent store");
     session
         .loaded_agents()
         .into_iter()

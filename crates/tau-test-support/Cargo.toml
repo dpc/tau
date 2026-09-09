@@ -20,7 +20,7 @@ workspace = true
 [dependencies]
 serde_json.workspace = true
 tau-config.workspace = true
-tau-core = { workspace = true, features = ["test-legacy-writer"] }
+tau-core = { workspace = true, features = ["test-persistence"] }
 tau-ext-provider-builtin = { workspace = true, features = [
   "quota-test-support",
 ] }

@@ -2,12 +2,10 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
+use std::sync as path_std_sync;
 use std::time::Instant;
-use std::{sync as path_std_sync, time as path_std_time};
 
 use super::*;
-use crate::journal_sync::SyncTargetKind;
-use crate::record_log::AppendFault;
 
 fn managed_charge_projection(event_count: usize) -> ManagedAgentProjection {
     let agent_id = AgentId::parse("charge-benchmark-agent").expect("agent id");
@@ -106,7 +104,7 @@ fn facts_budget(max_record_bytes: u64, remaining_bytes: u64) -> AgentCreationFac
 fn overlapping_v1_owner_append_rejects_before_mutation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("v1-overlap").expect("agent id");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("durable store");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("durable store");
     store
         .append_agent_event(
             agent_id.as_str(),
@@ -182,7 +180,7 @@ fn overlapping_v1_owner_append_rejects_before_mutation() {
     assert_eq!(store.agent(agent_id.as_str()).expect("tree"), &before_tree);
     assert_eq!(fs::read(&journal).expect("journal bytes"), before_bytes);
     drop(store);
-    let mut reopened = AgentStore::open_lazy(temp.path()).expect("reopen store");
+    let mut reopened = AgentStore::open_fixture(temp.path()).expect("reopen store");
     reopened
         .lock_and_recover_agent(agent_id.as_str())
         .expect("clean reopen");
@@ -493,7 +491,7 @@ fn body_for_encoded_length(encoded_length: usize, seq: u64) -> String {
 #[test]
 fn oversized_agent_append_is_atomic() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     store
         .append_agent_event_at(
@@ -566,7 +564,7 @@ fn oversized_agent_append_is_atomic() {
     assert_eq!(retry.seq, PersistedAgentEventSeq::new(1));
     drop(store);
 
-    let mut reopened = AgentStore::open_lazy(temp.path()).expect("reopen store");
+    let mut reopened = AgentStore::open_fixture(temp.path()).expect("reopen store");
     reopened
         .lock_and_recover_agent(agent_id.as_str())
         .expect("replay succeeds");
@@ -590,42 +588,6 @@ fn oversized_agent_append_is_atomic() {
 }
 
 /// A later semantic append and fold complete while prior journal sync remains
-/// blocked in the background.
-#[test]
-fn semantic_append_continues_while_sync_is_blocked() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-    let sync = store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_blocking_sync();
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    store
-        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
-        .expect("creation appends");
-    assert!(sync.wait_until_blocked(), "worker did not block");
-    let (tx, rx) = path_std_sync::mpsc::channel();
-    let continued_id = agent_id.clone();
-    let continuation = std::thread::spawn(move || {
-        let result = store.append_agent_event(
-            continued_id.as_str(),
-            None,
-            display_name_event(&continued_id, "continued"),
-        );
-        tx.send((store, result)).expect("send continuation");
-    });
-    let received = rx.recv_timeout(path_std_time::Duration::from_secs(2));
-    sync.release();
-    let (store, result) = received.expect("later semantic append blocked on sync");
-    result.expect("later semantic append completes");
-    continuation.join().expect("continuation thread");
-    assert_eq!(
-        store.agent(&agent_id).and_then(AgentTree::display_name),
-        Some("continued")
-    );
-}
 
 /// A first durable append creates and locks its missing branch, while later
 /// appends reuse that retained ownership and preserve the journal sequence.
@@ -634,7 +596,7 @@ fn durable_repeated_append_reuses_first_append_branch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     let agent_dir = temp.path().join(agent_id.as_str());
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
 
     assert!(!agent_dir.exists(), "first append must create the branch");
     store
@@ -659,7 +621,7 @@ fn durable_repeated_append_reuses_first_append_branch() {
     assert_eq!(second.seq, PersistedAgentEventSeq::new(1));
 
     drop(store);
-    let mut reopened = AgentStore::open_lazy(temp.path()).expect("reopen store");
+    let mut reopened = AgentStore::open_fixture(temp.path()).expect("reopen store");
     reopened
         .lock_and_recover_agent(agent_id.as_str())
         .expect("replay journal");
@@ -673,62 +635,13 @@ fn durable_repeated_append_reuses_first_append_branch() {
 }
 
 /// A later writable lifetime re-covers both an existing store root and its
-/// locked branch as independent typed boundary targets.
-#[test]
-fn writable_reopen_recovers_store_root_and_branch_boundaries() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let agents_dir = temp.path().join("state/agents");
-    {
-        let created = missing_directories(&agents_dir);
-        fs::create_dir_all(&agents_dir).expect("first lifetime creates root");
-        let mut first = FramedAppendState::default();
-        first.inject_sync_spawn_failure();
-        first.note_created_directories(created);
-        assert!(first.dirty_target(&agents_dir).is_some());
-    }
-    let mut store = AgentStore::open_lazy(&agents_dir).expect("second store opens");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_sync_spawn_failure();
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    store
-        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
-        .expect("writable append");
-
-    let root_target = store
-        .legacy_io
-        .as_ref()
-        .expect("legacy writer")
-        .framed_appends
-        .dirty_target(&agents_dir)
-        .expect("store-root target");
-    assert!(root_target.directories.contains(&temp.path().join("state")));
-    assert!(root_target.directories.contains(&temp.path().to_path_buf()));
-    assert_eq!(root_target.kind, SyncTargetKind::DirectoryBoundary);
-    let branch = agents_dir.join(agent_id.as_str());
-    let branch_target = store
-        .legacy_io
-        .as_ref()
-        .expect("legacy writer")
-        .framed_appends
-        .dirty_target(&branch)
-        .expect("branch target");
-    assert_eq!(
-        branch_target.directories,
-        [agents_dir].into_iter().collect()
-    );
-    assert_eq!(branch_target.kind, SyncTargetKind::DirectoryBoundary);
-}
 
 /// The roster enrichment path reads immutable creation fields and the latest
 /// in-memory display projection without scanning transcript history.
 #[test]
 fn creation_facts_read_valid_first_record() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     store
         .append_agent_event_at(
@@ -779,71 +692,12 @@ fn creation_facts_read_valid_first_record() {
 }
 
 /// Cold roster enrichment accepts a journal-bound checkpoint but suppresses a
-/// structurally valid checkpoint whose boundary witness no longer matches.
-#[test]
-fn creation_facts_require_journal_bound_cold_checkpoint() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-        store
-            .append_agent_event_at(
-                agent_id.as_str(),
-                None,
-                AgentEventParent::InheritHead,
-                Event::AgentStarted(tau_proto::AgentStarted {
-                    creator: Some(tau_proto::AgentCreator::default()),
-
-                    agent_id: agent_id.clone(),
-                    parent_agent: None,
-                    role: "engineer".to_owned(),
-                    display_name: Some("Cold".to_owned()),
-                    metadata: Vec::new(),
-                    ephemeral: false,
-                }),
-                UnixMicros::new(42),
-            )
-            .expect("creation appends");
-    }
-
-    let store = AgentStore::open_lazy(temp.path()).expect("cold store opens");
-    let facts = store
-        .agent_creation_facts(&agent_id, facts_budget(256 * 1024, 4 * 1024 * 1024))
-        .expect("fresh checkpoint");
-    assert!(matches!(
-        facts,
-        AgentCreationFacts::Available {
-            display_name: Some(display_name),
-            ..
-        } if display_name == "Cold"
-    ));
-
-    let checkpoint_path = store.agent_dir(agent_id.as_str()).join("meta.json");
-    let mut checkpoint = read_checkpoint(&checkpoint_path).expect("checkpoint");
-    checkpoint.journal.boundary_blake3_128 = "0".repeat(32);
-    fs::write(
-        &checkpoint_path,
-        serde_json::to_vec(&checkpoint).expect("encode checkpoint"),
-    )
-    .expect("rewrite checkpoint");
-
-    let facts = store
-        .agent_creation_facts(&agent_id, facts_budget(256 * 1024, 4 * 1024 * 1024))
-        .expect("invalid checkpoint stays categorical");
-    assert!(matches!(
-        facts,
-        AgentCreationFacts::Available {
-            display_name: None,
-            ..
-        }
-    ));
-}
 
 /// Missing journals remain categorical rows rather than becoming I/O errors.
 #[test]
 fn creation_facts_report_missing_journal() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let store = AgentStore::open_fixture(temp.path()).expect("store opens");
     let agent_id = AgentId::parse("missing").expect("agent id");
 
     let facts = store
@@ -859,7 +713,7 @@ fn creation_facts_report_missing_journal() {
 #[test]
 fn creation_facts_enforce_aggregate_budget() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     store
         .append_agent_event_at(
@@ -890,7 +744,7 @@ fn creation_facts_enforce_aggregate_budget() {
 #[test]
 fn ephemeral_creation_facts_enforce_aggregate_budget() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
     let agent_id = AgentId::parse("ephemeral").expect("agent id");
     store
         .mark_agent_ephemeral(agent_id.as_str())
@@ -925,7 +779,7 @@ fn ephemeral_creation_facts_enforce_aggregate_budget() {
 #[test]
 fn truncated_creation_records_consume_aggregate_budget() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let store = AgentStore::open_fixture(temp.path()).expect("store opens");
     let record_length = 256 * 1024_u64;
     let mut remaining = 4 * 1024 * 1024_u64;
     for index in 0..17 {
@@ -953,345 +807,14 @@ fn truncated_creation_records_consume_aggregate_budget() {
 }
 
 /// A durable agent append failure rolls back the frame, leaves its checkpoint
-/// and folded sequence unchanged, and reuses that sequence on retry.
-#[test]
-fn failed_frame_append_is_atomic_and_retry_reuses_sequence() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            started_event(&agent_id),
-            UnixMicros::new(41),
-        )
-        .expect("baseline appends");
-    let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
-    let checkpoint_path = store.agent_dir(agent_id.as_str()).join("meta.json");
-    let journal_before = fs::read(&journal_path).expect("baseline journal");
-    let checkpoint_before = fs::read(&checkpoint_path).expect("baseline checkpoint");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_fault(
-            &journal_path,
-            AppendFault {
-                fail_write_at: Some(3),
-                ..AppendFault::default()
-            },
-        );
-
-    let error = store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&agent_id, "failed"),
-            UnixMicros::new(42),
-        )
-        .expect_err("injected append fails");
-
-    assert!(matches!(error, AgentStoreError::Write { .. }));
-    assert_eq!(fs::read(&journal_path).expect("journal"), journal_before);
-    assert_eq!(
-        fs::read(&checkpoint_path).expect("checkpoint"),
-        checkpoint_before
-    );
-    assert_eq!(
-        store
-            .load_agent(agent_id.as_str())
-            .expect("agent remains loadable")
-            .expect("agent remains loaded")
-            .display_name(),
-        None
-    );
-    let retry = store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&agent_id, "retry"),
-            UnixMicros::new(43),
-        )
-        .expect("retry appends");
-    assert_eq!(retry.seq, PersistedAgentEventSeq::new(1));
-    assert_eq!(
-        store
-            .load_agent(agent_id.as_str())
-            .expect("agent remains loadable")
-            .expect("agent remains loaded")
-            .display_name(),
-        Some("retry")
-    );
-    assert_eq!(
-        store
-            .agent_events(agent_id.as_str())
-            .expect("valid journal")
-            .len(),
-        2
-    );
-}
 
 /// An uncertain agent-journal rollback poisons only that live stream and later
-/// appends reject it without changing its bytes.
-#[test]
-fn rollback_failure_poisons_agent_journal() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            started_event(&agent_id),
-            UnixMicros::new(41),
-        )
-        .expect("baseline appends");
-    let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_fault(
-            &journal_path,
-            AppendFault {
-                fail_write_at: Some(3),
-                fail_truncate: true,
-                ..AppendFault::default()
-            },
-        );
-    store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&agent_id, "failed"),
-            UnixMicros::new(42),
-        )
-        .expect_err("injected append fails");
-    let bytes_after_failure = fs::read(&journal_path).expect("failed journal");
-
-    let poisoned = store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&agent_id, "rejected"),
-            UnixMicros::new(43),
-        )
-        .expect_err("poisoned journal rejects append");
-    let other_agent_id = AgentId::parse("agent-2").expect("agent id");
-    let other = store
-        .append_agent_event_at(
-            other_agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            started_event(&other_agent_id),
-            UnixMicros::new(44),
-        )
-        .expect("other journal remains writable");
-
-    assert!(
-        poisoned
-            .to_string()
-            .contains("append disabled after an incomplete rollback")
-    );
-    assert_eq!(other.seq, PersistedAgentEventSeq::new(0));
-    assert_eq!(
-        fs::read(&journal_path).expect("poisoned journal"),
-        bytes_after_failure
-    );
-}
 
 /// A poisoned agent journal keeps its early write rejection ahead of later
-/// event validation, so callers receive the established deterministic error.
-#[test]
-fn poisoned_agent_journal_rejection_precedes_event_validation() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            started_event(&agent_id),
-            UnixMicros::new(41),
-        )
-        .expect("baseline appends");
-    let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
-    store
-        .legacy_io
-        .as_mut()
-        .expect("legacy writer")
-        .framed_appends
-        .inject_fault(
-            &journal_path,
-            AppendFault {
-                fail_write_at: Some(3),
-                fail_truncate: true,
-                ..AppendFault::default()
-            },
-        );
-    store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&agent_id, "failed"),
-            UnixMicros::new(42),
-        )
-        .expect_err("injected append poisons journal");
-
-    let mismatched_agent_id = AgentId::parse("agent-2").expect("agent id");
-    let error = store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&mismatched_agent_id, "rejected"),
-            UnixMicros::new(43),
-        )
-        .expect_err("poisoned journal rejects before event validation");
-
-    assert!(matches!(error, AgentStoreError::Write { .. }));
-    assert!(
-        error
-            .to_string()
-            .contains("append disabled after an incomplete rollback")
-    );
-}
 
 /// Read-only replay rejects a partial payload at EOF, while the next locked
-/// append keeps the valid prefix and removes only that incomplete crash tail.
-#[test]
-fn strict_replay_rejects_partial_frame_before_valid_suffix() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    let journal_path;
-    {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-        store
-            .append_agent_event_at(
-                agent_id.as_str(),
-                None,
-                AgentEventParent::InheritHead,
-                started_event(&agent_id),
-                UnixMicros::new(41),
-            )
-            .expect("baseline appends");
-        journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
-    }
-    let suffix = [5_u64.to_le_bytes().as_slice(), &[1, 2]].concat();
-    OpenOptions::new()
-        .append(true)
-        .open(&journal_path)
-        .expect("open journal")
-        .write_all(&suffix)
-        .expect("append malformed suffix");
-
-    let error = AgentStore::open(temp.path()).expect_err("strict replay rejects torn frame");
-
-    assert!(matches!(error, AgentStoreError::Read { .. }));
-    let mut store = AgentStore::open_lazy(temp.path()).expect("lazy store opens");
-    let appended = store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&agent_id, "recovered"),
-            UnixMicros::new(43),
-        )
-        .expect("locked append repairs suffix");
-    assert_eq!(appended.seq, PersistedAgentEventSeq::new(1));
-    let events = store
-        .agent_events(agent_id.as_str())
-        .expect("journal reads");
-    assert_eq!(events.len(), 2);
-    assert!(matches!(
-        &events[1].event,
-        Event::AgentDisplayNameSet(name) if name.display_name == "recovered"
-    ));
-}
 
 /// A complete framed record with a malformed durable controlled identifier is
-/// a decode failure, not a repairable incomplete crash tail.
-#[test]
-fn strict_replay_rejects_framed_record_with_malformed_agent_message_id() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let agent_id = AgentId::parse("agent-1").expect("agent id");
-    let journal_path;
-    {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-        store
-            .append_agent_event_at(
-                agent_id.as_str(),
-                None,
-                AgentEventParent::InheritHead,
-                started_event(&agent_id),
-                UnixMicros::new(41),
-            )
-            .expect("baseline appends");
-        journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
-    }
-    let valid = PersistedAgentEvent {
-        observation_id: tau_proto::ObservationId::from_bytes([1_u8; 16]),
-        seq: PersistedAgentEventSeq::new(1),
-        source: None,
-        event: Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: tau_proto::AgentMessageId::parse("message-1").expect("message id"),
-            sender_id: agent_id.clone(),
-            recipient: tau_proto::AgentMessageRecipient::Agent {
-                agent_id: AgentId::parse("recipient-agent").expect("agent id"),
-            },
-            kind: tau_proto::AgentMessageKind::Message,
-            message: "hello".to_owned(),
-        }),
-        parent: AgentEventParent::InheritHead,
-        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
-        recorded_at: UnixMicros::new(42),
-    };
-    let mut malformed = serde_json::to_value(valid).expect("serialize record value");
-    *malformed
-        .pointer_mut("/event/payload/message_id")
-        .expect("message id field") = serde_json::Value::String("bad.message".to_owned());
-    let mut encoded = Vec::new();
-    ciborium::into_writer(&malformed, &mut encoded).expect("encode malformed framed record");
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(&journal_path)
-        .expect("open journal");
-    file.write_all(&(encoded.len() as u64).to_le_bytes())
-        .expect("write frame length");
-    file.write_all(&encoded).expect("write complete frame");
-    drop(file);
-    let bytes_before = fs::read(&journal_path).expect("read malformed journal");
-
-    let error = AgentStore::open(temp.path()).expect_err("malformed identifier must fail replay");
-
-    assert!(matches!(error, AgentStoreError::Decode { .. }));
-    let mut lazy = AgentStore::open_lazy(temp.path()).expect("lazy store opens");
-    let append_error = lazy
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            AgentEventParent::InheritHead,
-            display_name_event(&agent_id, "must-not-append"),
-            UnixMicros::new(43),
-        )
-        .expect_err("locked writer must reject complete malformed frame");
-    assert!(matches!(append_error, AgentStoreError::Read { .. }));
-    assert_eq!(
-        fs::read(&journal_path).expect("read unchanged malformed journal"),
-        bytes_before
-    );
-}
 
 /// A complete journal frame with a malformed watched-agent status fails strict
 /// replay and reports the fixed validation diagnostic without retaining a
@@ -1302,7 +825,7 @@ fn strict_replay_rejects_framed_record_with_malformed_watch_work_status() {
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     let journal_path;
     {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+        let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
         store
             .append_agent_event_at(
                 agent_id.as_str(),
@@ -1400,7 +923,7 @@ fn durable_append_accepts_unknown_watch_work_status_without_title() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     let event = unknown_work_status_event(&agent_id);
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -1439,7 +962,7 @@ fn cold_replay_restores_unknown_watch_work_status_without_title() {
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     let event = unknown_work_status_event(&agent_id);
     {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+        let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
         store
             .append_agent_event_at(
                 agent_id.as_str(),
@@ -1460,7 +983,7 @@ fn cold_replay_restores_unknown_watch_work_status_without_title() {
             .expect("unknown status without title appends");
     }
 
-    let mut reopened = AgentStore::open_lazy(temp.path()).expect("cold store opens");
+    let mut reopened = AgentStore::open_fixture(temp.path()).expect("cold store opens");
     reopened
         .lock_and_recover_agent(agent_id.as_str())
         .expect("cold replay accepts unknown status without title");
@@ -1516,7 +1039,7 @@ fn journal_snapshot_does_not_create_missing_paths() {
 fn journal_snapshot_uses_lock_held_checkpoint_without_disrupting_writer() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-active").expect("agent id");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
@@ -1545,7 +1068,7 @@ fn journal_snapshot_uses_lock_held_checkpoint_without_disrupting_writer() {
 fn journal_snapshot_uses_inactive_eof_despite_mismatched_checkpoint_boundary() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-active-boundary").expect("agent id");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
@@ -1570,7 +1093,7 @@ fn journal_snapshot_uses_inactive_eof_despite_mismatched_checkpoint_boundary() {
 fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-active-sequence").expect("agent id");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
@@ -1605,7 +1128,7 @@ fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
 fn checkpoint_writer_reader_file_identity_round_trip() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-identity-round-trip").expect("agent id");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
@@ -1674,7 +1197,7 @@ fn journal_snapshot_retries_live_checkpoint_atomic_replacement_race() {
     );
     fs2::FileExt::unlock(&lock).expect("release simulated writer");
     drop(lock);
-    let mut store = AgentStore::open_lazy(&target_root).expect("reopen replacement generation");
+    let mut store = AgentStore::open_fixture(&target_root).expect("reopen replacement generation");
     store
         .append_agent_event(
             agent_id.as_str(),
@@ -1686,7 +1209,7 @@ fn journal_snapshot_retries_live_checkpoint_atomic_replacement_race() {
 
 fn prepared_snapshot_generation(root: &Path, agent_id: &AgentId, suffix_events: usize) -> PathBuf {
     let generation_root = root.join(format!("generation-{suffix_events}"));
-    let mut store = AgentStore::open_lazy(&generation_root).expect("generation store");
+    let mut store = AgentStore::open_fixture(&generation_root).expect("generation store");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(agent_id))
         .expect("generation creation");
@@ -1705,7 +1228,7 @@ fn prepared_snapshot_generation(root: &Path, agent_id: &AgentId, suffix_events: 
 
 fn prepared_collision_generation(root: &Path, agent_id: &AgentId, marker: &str) -> (PathBuf, u64) {
     let generation_root = root.join(format!("collision-{marker}"));
-    let mut store = AgentStore::open_lazy(&generation_root).expect("generation store");
+    let mut store = AgentStore::open_fixture(&generation_root).expect("generation store");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(agent_id))
         .expect("generation creation");
@@ -1810,7 +1333,7 @@ fn journal_snapshot_rejects_collision_shaped_generation_crossing() {
     assert_eq!(covered, checkpoint_one.journal.covered_bytes);
     fs2::FileExt::unlock(&lock).expect("release simulated writer");
     drop(lock);
-    let mut store = AgentStore::open_lazy(&target_root).expect("reopen replacement generation");
+    let mut store = AgentStore::open_fixture(&target_root).expect("reopen replacement generation");
     store
         .append_agent_event(
             agent_id.as_str(),
@@ -1863,7 +1386,7 @@ fn journal_snapshot_live_checkpoint_retry_budget_is_bounded() {
     ));
     fs2::FileExt::unlock(&lock).expect("release simulated writer");
     drop(lock);
-    let mut store = AgentStore::open_lazy(&target_root).expect("reopen final generation");
+    let mut store = AgentStore::open_fixture(&target_root).expect("reopen final generation");
     store
         .append_agent_event(
             agent_id.as_str(),
@@ -1879,7 +1402,7 @@ fn journal_snapshot_live_checkpoint_retry_budget_is_bounded() {
 fn journal_snapshot_selects_inactive_eof_after_lock_acquisition() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-race").expect("agent id");
-    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
@@ -1925,7 +1448,7 @@ fn journal_snapshot_rejects_non_monotonic_journal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-corrupt").expect("agent id");
     {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+        let mut store = AgentStore::open_fixture(temp.path()).expect("store");
         store
             .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
             .expect("creation");
@@ -1953,7 +1476,7 @@ fn journal_snapshot_rejects_torn_journal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-torn").expect("agent id");
     {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+        let mut store = AgentStore::open_fixture(temp.path()).expect("store");
         store
             .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
             .expect("creation");
@@ -1970,46 +1493,4 @@ fn journal_snapshot_rejects_torn_journal() {
         AgentJournalSnapshot::capture(temp.path(), [agent_id]).expect_err("torn journal must fail");
 
     assert!(matches!(error, AgentStoreError::Read { .. }));
-}
-
-/// A captured snapshot retains all journal locks, preventing records from
-/// changing until the consumer has finished with the validated data.
-#[test]
-fn journal_snapshot_prevents_changes_during_read() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let first = AgentId::parse("agent-a").expect("agent id");
-    let second = AgentId::parse("agent-b").expect("agent id");
-    for agent_id in [&second, &first] {
-        let mut store = AgentStore::open_lazy(temp.path()).expect("store");
-        store
-            .append_agent_event(agent_id.as_str(), None, started_event(agent_id))
-            .expect("creation");
-    }
-    let snapshot = AgentJournalSnapshot::capture(temp.path(), [second.clone(), first.clone()])
-        .expect("stable snapshot");
-    assert_eq!(
-        snapshot.agent_ids().collect::<Vec<_>>(),
-        vec![&first, &second],
-        "snapshot identities use lexical agent order"
-    );
-    let absent = AgentId::parse("agent-absent").expect("agent id");
-    assert!(matches!(
-        snapshot.records(&absent),
-        Err(AgentStoreError::JournalNotIncluded { agent_id }) if agent_id == absent
-    ));
-
-    let mut writer = AgentStore::open_lazy(temp.path()).expect("writer");
-    let error = writer
-        .append_agent_event(first.as_str(), None, display_name_event(&first, "changed"))
-        .expect_err("snapshot lock must prevent append");
-    assert!(matches!(error, AgentStoreError::Locked { .. }));
-    assert_eq!(
-        snapshot
-            .records(&first)
-            .expect("stable records")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("records")
-            .len(),
-        1
-    );
 }

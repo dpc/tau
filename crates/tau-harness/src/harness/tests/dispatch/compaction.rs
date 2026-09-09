@@ -3467,7 +3467,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     };
 
     seed_agent_loaded(&state, "s1", agent_id.as_str());
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -4258,7 +4258,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
 
     seed_agent_loaded(&state, "s1", caller_id.as_str());
     seed_agent_loaded(&state, "s1", target_id.as_str());
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
     store
         .append_agent_event_at(
             caller_id.as_str(),
@@ -7339,7 +7339,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
             ephemeral: false,
         }),
     );
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
     append_seed_agent_event(
         &mut store,
         Event::AgentStarted(tau_proto::AgentStarted {
@@ -7508,7 +7508,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
     let state = td.path().join("state");
     seed_main_agent_loaded(&state);
     let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -9620,7 +9620,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     let state = td.path().join("state");
     seed_main_agent_loaded(&state);
     let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
-    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {

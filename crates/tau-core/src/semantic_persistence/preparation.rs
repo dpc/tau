@@ -115,7 +115,7 @@ pub(crate) enum WorkerCommand {
         reply: SyncSender<Result<(), PersistenceAdmissionError>>,
     },
     /// Acknowledges only after every earlier frame and durability debt drains.
-    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[cfg(any(test, feature = "test-persistence"))]
     DurabilityBarrier {
         /// One-shot deterministic test reply.
         reply: SyncSender<Result<(), PersistenceAdmissionError>>,

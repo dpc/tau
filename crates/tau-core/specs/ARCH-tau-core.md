@@ -99,9 +99,9 @@ directory targets. Touch debt uses the prepared manifest's `created_at` and an
 exact global frame prerequisite. Release closes a complete generation set at one
 mutex cut, drains its accepted frames and debt, then drops handles and capacity;
 maintenance uses a distinct release/claim/read/finalize lifecycle. Normal
-`open`/`open_lazy` constructors are read-only inspection views. The foreground
-compatibility writer exists only behind the explicit test-fixture feature. Exact
-semantics are governed by
+`open`/`open_lazy` constructors are read-only inspection views. Test fixtures
+write through a fixture-owned `SemanticPersistenceOwner`. Exact semantics are
+governed by
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 
 Content-free operational observation reports bounded worker failures and

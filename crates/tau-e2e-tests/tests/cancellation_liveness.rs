@@ -369,7 +369,7 @@ fn assert_durable_lifecycle(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let session_id = tau_proto::SessionId::parse("deterministic-e2e-session")
         .expect("known-safe SessionId must be valid");
-    let mut sessions = SessionStore::open(fixture.harness_state_dir().join("sessions"))?;
+    let mut sessions = SessionStore::open_fixture(fixture.harness_state_dir().join("sessions"))?;
     let membership = sessions
         .load_session(session_id.as_str())?
         .ok_or("missing durable cancellation session")?;

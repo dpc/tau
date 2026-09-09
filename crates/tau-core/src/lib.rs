@@ -10,7 +10,6 @@ mod agent_store;
 mod bus;
 mod compaction_chain_view;
 mod connection;
-mod journal_sync;
 mod memory;
 mod record_log;
 mod semantic_persistence;
@@ -45,7 +44,7 @@ pub use connection::{
     RoutedFrame, SharedConsumerId, SharedDeliveryGroup, SharedDeliveryTarget, VisibilityFilter,
 };
 pub use memory::{MemoryInbox, memory_connection};
-#[cfg(any(test, feature = "test-legacy-writer"))]
+#[cfg(any(test, feature = "test-persistence"))]
 pub use semantic_persistence::DurabilityBarrierOutcome;
 pub use semantic_persistence::{
     PersistenceAdmissionError, PersistenceCapacity, PersistenceCapacityLimit,

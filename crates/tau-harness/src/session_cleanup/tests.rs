@@ -76,7 +76,7 @@ fn cleanup_skips_locked_session() {
 fn cleanup_detaches_tree_before_removal_and_writer_reload() {
     let temp = TempDir::new().expect("temp sessions");
     let sessions_dir = sessions_dir(&temp);
-    let mut setup = SessionStore::open(&sessions_dir).expect("setup session store");
+    let mut setup = SessionStore::open_fixture(&sessions_dir).expect("setup session store");
     setup
         .append_session_event(
             "old",
@@ -93,7 +93,7 @@ fn cleanup_detaches_tree_before_removal_and_writer_reload() {
         .expect("old membership append");
     drop(setup);
     write_session_meta(&sessions_dir, "old", 0);
-    let mut writer = SessionStore::open(&sessions_dir).expect("preloaded competing store");
+    let mut writer = SessionStore::open_fixture(&sessions_dir).expect("preloaded competing store");
     let mut removal_observed = false;
 
     cleanup_old_sessions_with(
