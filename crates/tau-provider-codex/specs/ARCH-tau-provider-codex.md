@@ -169,7 +169,7 @@ tool calls, forces all-turn reasoning context, omits image detail, and carries t
 HTTP header or per-request WebSocket metadata marker. Retries, reconnect, replay,
 and previous-response chaining retain the selected mode; there is no mode fallback.
 
-Both modes suppress legacy inline `context_management` for GPT-5.6 and advertise
+Both modes suppress provider-inline `context_management` for GPT-5.6 and advertise
 standalone compaction. Astra uses the same native standalone contract, with a
 244,800-token default threshold (90 percent of its 272,000-token raw window);
 its surface remains standard regardless of the profile's Lite compatibility flag.

@@ -18,7 +18,7 @@ pub struct ChatGptProfile {
     /// OAuth credentials used for ChatGPT/Codex Responses calls.
     #[serde(default)]
     pub auth: OpenAiAuth,
-    /// Select the startup-stable legacy Responses Lite route, not
+    /// Select the startup-stable Responses Lite route, not
     /// authentication.
     #[serde(default, skip_serializing_if = "is_false")]
     pub responses_lite_compatibility: bool,

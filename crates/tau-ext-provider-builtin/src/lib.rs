@@ -1195,7 +1195,7 @@ fn cmd_add_chatgpt_in(
     }
     let auth = run_openai_codex_login(network)?;
     let responses_lite_compatibility = Confirm::new()
-        .with_prompt("Use legacy Responses Lite compatibility for GPT-5.6?")
+        .with_prompt("Use Responses Lite compatibility for GPT-5.6?")
         .default(DEFAULT_RESPONSES_LITE_COMPATIBILITY)
         .interact()?;
     save_profile(

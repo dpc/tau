@@ -438,10 +438,10 @@ ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previo
 
 ChatGPT GPT-5.6 Sol, Terra, and Luna publish a 353,400-token effective context
 window and include `max` among their published reasoning choices. They use
-standard Responses and parallel direct tool calls by default. Legacy Responses
+standard Responses and parallel direct tool calls by default. Responses
 Lite is available only by setting `responses_lite_compatibility: true` on that
 ChatGPT profile (or answering Yes during `tau provider add`) and restarting.
-Tau never changes modes as a retry fallback. Both modes omit legacy inline
+Tau never changes modes as a retry fallback. Both modes omit provider-inline
 context management. Astra also uses native standalone compaction, with a
 244,800-token default threshold (90 percent of its raw 272,000-token window);
 named after-done policies can run earlier. Astra remains on standard Responses

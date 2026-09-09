@@ -181,13 +181,12 @@ pub enum ResponsesMode {
     /// Standard Responses request lowering with ordinary parallel tool calls.
     #[default]
     Standard,
-    /// Legacy Responses Lite lowering retained for explicit profile
-    /// compatibility.
+    /// Responses Lite lowering selected by explicit profile compatibility.
     LiteCompatibility,
 }
 
 impl ResponsesMode {
-    /// Returns whether this mode uses the legacy Responses Lite wire contract.
+    /// Returns whether this mode uses the Responses Lite wire contract.
     #[must_use]
     pub const fn is_lite_compatibility(self) -> bool {
         matches!(self, Self::LiteCompatibility)

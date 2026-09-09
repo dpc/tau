@@ -6319,7 +6319,7 @@ fn manual_compaction_rejects_already_terminalizing_wait() {
     }));
 }
 
-/// Legacy inline compaction applies the same cancel-then-compact boundary as
+/// Provider-inline compaction applies the same cancel-then-compact boundary as
 /// standalone provider compaction.
 #[test]
 fn manual_inline_compaction_cancels_sole_input_wait_first() {

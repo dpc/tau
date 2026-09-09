@@ -1272,7 +1272,7 @@ profiles:
             native: { enable: false }
 ```
 
-GPT-5.6 ChatGPT profiles use standard Responses by default. The legacy Lite
+GPT-5.6 ChatGPT profiles use standard Responses by default. The Responses Lite
 contract is available only as an explicit profile compatibility setting:
 
 ```json
@@ -1372,7 +1372,7 @@ invalidation discards the anchor and sends full context.
 The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices.
 Standard mode publishes and requests parallel direct tool calls; Lite
-compatibility publishes its one-call limit. Neither mode emits legacy inline
+compatibility publishes its one-call limit. Neither mode emits provider-inline
 context management. Astra also uses native standalone compaction, with a
 244,800-token default threshold over its 272,000-token raw window. It retains
 standard Responses even when the profile enables Lite compatibility. Named
@@ -1425,7 +1425,7 @@ Provider retries carry closed structured categories, saturating attempt counts, 
 
 The enabled-by-default `compact` tool and disabled-by-default `agent_compact`
 tool require the exact selected model and live route to advertise standalone
-compaction. They never fall back to legacy inline compaction. Self `compact`
+compaction. They never fall back to provider-inline compaction. Self `compact`
 internally uses an asynchronous transaction, but suspends ordinary inference
 until it directly delivers and consumes one correlated terminal; that call is
 not subsequently waitable. Cross-agent `agent_compact` remains asynchronous and

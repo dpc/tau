@@ -532,7 +532,7 @@ carry the correlated provider prompt, reported count, threshold, and threshold
 source. Transcript bytes, image dimensions, and local summaries never authorize
 threshold scheduling. Exact serialized transcript-growth bytes remain
 independent telemetry. Threshold-fired standalone compaction persists exact
-evidence; only explicit UI compaction retains the legacy/default `manual`
+evidence; explicit manual recovery without a queued request uses the `manual`
 trigger.
 
 Configured automatic-compaction boundaries may be an absolute used-context

@@ -148,7 +148,7 @@ impl Harness {
             {
                 self.start_admitted_manual_compaction(&cid);
             } else if self.try_start_inline_compaction_after_wait(&cid, &turn_state) {
-                // The legacy inline compactor has no standalone transaction.
+                // The provider-inline compactor has no standalone transaction.
                 // Preserve its sole-live-wait optimization as an immediate,
                 // closed-round operation rather than pretending it is queued.
             } else {
@@ -168,8 +168,8 @@ impl Harness {
         self.drain_publish_idle_dispatches();
     }
 
-    /// Preserve inline compaction's legacy sole-wait preemption when the model
-    /// has no standalone transaction support.
+    /// Preserve provider-inline compaction's sole-wait preemption when the
+    /// model has no standalone transaction support.
     fn try_start_inline_compaction_after_wait(
         &mut self,
         cid: &AgentId,

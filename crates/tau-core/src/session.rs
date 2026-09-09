@@ -256,7 +256,7 @@ pub enum AgentEntry {
         /// Last suffix node before the boundary for new boundaries.
         suffix_end: Option<tau_proto::AgentHead>,
     },
-    /// Durable request for either legacy inline or standalone compaction.
+    /// Durable request for either provider-inline or standalone compaction.
     CompactionTrigger {
         /// Whether successful standalone compaction resumes an
         /// already-published inference turn.
