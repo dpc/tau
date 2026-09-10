@@ -1187,7 +1187,8 @@ fn activating_input_wakes_only_target_owned_waits() {
 }
 
 /// Exact and bare background waits expose the closed provider-visible
-/// interruption contract without echoing a potentially untrusted target ID.
+/// interruption contract and conditional next-action guidance without echoing a
+/// potentially untrusted target ID.
 #[test]
 fn activating_input_interruption_results_use_typed_headers() {
     let owner = conv("owner");
@@ -1202,7 +1203,7 @@ fn activating_input_interruption_results_use_typed_headers() {
     assert_eq!(
         reply_result_with_display(exact_reply).0,
         CborValue::Text(
-            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact\n\nNew input is queued; retry the wait to consume its target result."
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact\n\nNew input interrupted this wait. Review the new input before deciding whether to cancel the tool or wait again for its result."
                 .to_owned()
         )
     );
@@ -1219,7 +1220,34 @@ fn activating_input_interruption_results_use_typed_headers() {
     assert_eq!(
         reply_result_with_display(any_reply).0,
         CborValue::Text(
-            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: any_background\n\nNew input is queued; retry the wait to consume its target result."
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: any_background\n\nNew input interrupted this wait. Review the new input before deciding whether to cancel a background tool or wait again for a result."
+                .to_owned()
+        )
+    );
+}
+
+/// Each interrupted background-wait mode gives conditional guidance without
+/// asserting that an arbitrary reserved or background tool remains running.
+#[test]
+fn interrupted_wait_guidance_matches_wait_mode() {
+    assert_eq!(
+        interrupted_wait_result(InterruptedWaitMode::Exact),
+        CborValue::Text(
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact\n\nNew input interrupted this wait. Review the new input before deciding whether to cancel the tool or wait again for its result."
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        interrupted_wait_result(InterruptedWaitMode::ExactAll),
+        CborValue::Text(
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact_all\n\nNew input interrupted this wait. Review the new input before deciding whether to cancel the tools or wait again for their results."
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        interrupted_wait_result(InterruptedWaitMode::AnyBackground),
+        CborValue::Text(
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: any_background\n\nNew input interrupted this wait. Review the new input before deciding whether to cancel a background tool or wait again for a result."
                 .to_owned()
         )
     );
@@ -2830,7 +2858,7 @@ fn wait_all_preflight_and_interruption_are_atomic() {
     assert_eq!(
         reply_result(replies[0].clone()),
         CborValue::Text(
-            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact_all\n\nNew input is queued; retry the wait to consume its target result."
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact_all\n\nNew input interrupted this wait. Review the new input before deciding whether to cancel the tools or wait again for their results."
                 .to_owned()
         )
     );

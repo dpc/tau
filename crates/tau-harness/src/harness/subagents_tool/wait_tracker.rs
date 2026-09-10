@@ -3343,12 +3343,31 @@ impl InterruptedWaitMode {
             Self::AnyBackground => "any_background",
         }
     }
+
+    /// Return concise next-action guidance that matches this wait mode.
+    fn guidance(&self) -> &'static str {
+        match self {
+            Self::Exact => {
+                "New input interrupted this wait. Review the new input before deciding whether to \
+                 cancel the tool or wait again for its result."
+            }
+            Self::ExactAll => {
+                "New input interrupted this wait. Review the new input before deciding whether to \
+                 cancel the tools or wait again for their results."
+            }
+            Self::AnyBackground => {
+                "New input interrupted this wait. Review the new input before deciding whether to \
+                 cancel a background tool or wait again for a result."
+            }
+        }
+    }
 }
 
 fn interrupted_wait_result(wait_mode: InterruptedWaitMode) -> CborValue {
-    let wait_mode = wait_mode.as_header_value();
+    let header_value = wait_mode.as_header_value();
+    let guidance = wait_mode.guidance();
     CborValue::Text(format!(
-        "{}: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: {wait_mode}\n\nNew input is queued; retry the wait to consume its target result.",
+        "{}: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: {header_value}\n\n{guidance}",
         tau_proto::TAU_INTERNAL_HEADER_NAME
     ))
 }
