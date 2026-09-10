@@ -72,11 +72,11 @@ expected_internal_dependencies = {
     "dpc-tau-actions": {},
     "dpc-tau-blocking-notify-channel": {},
     "dpc-tau-proto": {
-        "tau-actions": "=0.1.0",
+        "dpc-tau-actions": "=0.1.0",
     },
     "dpc-tau-client": {
-        "tau-blocking-notify-channel": "=0.1.0",
-        "tau-proto": "=0.2.0",
+        "dpc-tau-blocking-notify-channel": "=0.1.0",
+        "dpc-tau-proto": "=0.3.0",
     },
 }
 
@@ -87,23 +87,41 @@ def check_dependencies(table):
                 f"{package} package retains path dependency {dependency}"
             )
 
+expected = expected_internal_dependencies[package]
+actual_internal_dependency_names = set()
+
+def check_internal_dependencies(table):
+    for dependency, value in table.items():
+        package_name = value.get("package", dependency) if isinstance(value, dict) else dependency
+        if package_name.startswith("dpc-tau-"):
+            version = value.get("version") if isinstance(value, dict) else value
+            actual_internal_dependency_names.add(package_name)
+            expected_version = expected.get(package_name)
+            if version != expected_version:
+                raise SystemExit(
+                    f"{package} dependency {package_name} is {version!r}, "
+                    f"expected exact {expected_version!r}"
+                )
+
 if manifest.get("workspace") is not None:
     raise SystemExit(f"{package} package retains workspace inheritance")
 
 for key in ("dependencies", "dev-dependencies", "build-dependencies"):
-    check_dependencies(manifest.get(key, {}))
+    table = manifest.get(key, {})
+    check_dependencies(table)
+    check_internal_dependencies(table)
 for target in manifest.get("target", {}).values():
     for key in ("dependencies", "dev-dependencies", "build-dependencies"):
-        check_dependencies(target.get(key, {}))
+        table = target.get(key, {})
+        check_dependencies(table)
+        check_internal_dependencies(table)
 
-dependencies = manifest.get("dependencies", {})
-for dependency, expected_version in expected_internal_dependencies[package].items():
-    actual_version = dependencies.get(dependency, {}).get("version")
-    if actual_version != expected_version:
-        raise SystemExit(
-            f"{package} dependency {dependency} is {actual_version!r}, "
-            f"expected exact {expected_version!r}"
-        )
+if actual_internal_dependency_names != set(expected):
+    raise SystemExit(
+        f"{package} internal dependency names are "
+        f"{sorted(actual_internal_dependency_names)!r}, "
+        f"expected exact closure {sorted(expected)!r}"
+    )
 PY
   test -f "$tmp/packages/${package}-${version}/README.md"
 done
@@ -144,7 +162,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(5, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(6, 0));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 EOF
