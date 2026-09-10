@@ -293,6 +293,31 @@ fn mismatched_contended_record_fails_closed() {
     ));
 }
 
+/// Strict listing reports a content-free key-mismatch category instead of
+/// collapsing an incomplete raw claim scan into a generic failure.
+#[test]
+fn mismatched_contended_record_reports_scan_category() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let requested = session("session-requested");
+    let other = session("session-other");
+    let mut claim = claim_session(root.path(), &requested).expect("claim session");
+    claim.record.session_id = other;
+    claim
+        .publish(false)
+        .expect("publish mismatched diagnostics");
+
+    let error =
+        list_running_sessions_tolerant().expect_err("mismatched scan must remain incomplete");
+
+    assert_eq!(
+        error.to_string(),
+        "could not list every running session claim: claim record does not match its deterministic filename"
+    );
+    assert!(!error.to_string().contains(requested.as_str()));
+}
+
 /// Orderly retirement removes exactly the lock pathname owned by the claim.
 #[test]
 fn orderly_retirement_removes_owned_claim() {
@@ -326,10 +351,11 @@ fn ignored_entry_flood_marks_local_and_peer_listing_incomplete() {
     }
 
     let error = list_running_sessions().expect_err("local listing must reject exhaustion");
-    assert!(
-        error
-            .to_string()
-            .contains("could not list every running session claim")
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "could not list every running session claim: claims directory exceeded the {MAX_DIRECTORY_ENTRIES}-entry scan limit"
+        )
     );
     assert!(
         list_running_claim_records().is_err(),
@@ -694,7 +720,10 @@ fn running_session_list_isolates_slow_storage() {
     *TEST_DISCOVERY_SCAN_DELAY
         .lock()
         .expect("scan delay lock poisoned") = None;
-    assert!(result.is_err());
+    assert_eq!(
+        result.expect_err("slow scan must expire").to_string(),
+        "could not list every running session claim: claim scan deadline expired"
+    );
     assert!(started.elapsed() < DISCOVERY_TIMEOUT + Duration::from_secs(1));
     let worker_deadline = Instant::now() + Duration::from_secs(1);
     while ACTIVE_DISCOVERY_WORKERS.load(Ordering::Acquire) != 0 {
@@ -703,6 +732,62 @@ fn running_session_list_isolates_slow_storage() {
             "isolated listing worker did not retire"
         );
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Every raw-scan failure category renders bounded operational context without
+/// claim paths, session identities, or record bodies.
+#[test]
+fn claim_scan_failures_render_safe_actionable_categories() {
+    let cases = [
+        (
+            ClaimScanFailure::DeadlineExpired,
+            "claim scan deadline expired",
+        ),
+        (
+            ClaimScanFailure::ReadDirectory(io::ErrorKind::PermissionDenied),
+            "could not read claims directory (permission denied)",
+        ),
+        (
+            ClaimScanFailure::ReadEntry(io::ErrorKind::InvalidData),
+            "could not enumerate a claims directory entry (invalid data)",
+        ),
+        (
+            ClaimScanFailure::EntryLimitExceeded,
+            "claims directory exceeded the 4096-entry scan limit",
+        ),
+        (
+            ClaimScanFailure::OpenClaim(io::ErrorKind::TooManyLinks),
+            "could not open a claim file (too many links)",
+        ),
+        (
+            ClaimScanFailure::ValidateClaim(io::ErrorKind::PermissionDenied),
+            "claim file metadata validation failed (permission denied)",
+        ),
+        (
+            ClaimScanFailure::LockClaim(io::ErrorKind::Unsupported),
+            "could not test a claim file lock (unsupported)",
+        ),
+        (
+            ClaimScanFailure::ReadClaim(io::ErrorKind::InvalidData),
+            "claim record validation failed (invalid data)",
+        ),
+        (
+            ClaimScanFailure::ClaimKeyMismatch,
+            "claim record does not match its deterministic filename",
+        ),
+        (
+            ClaimScanFailure::DuplicateSessionId,
+            "duplicate session identity in contended claim records",
+        ),
+        (
+            ClaimScanFailure::WorkerStopped,
+            "claim scan worker stopped before reporting a result",
+        ),
+    ];
+
+    for (failure, expected) in cases {
+        assert_eq!(failure.to_string(), expected);
     }
 }
 

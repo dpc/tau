@@ -160,6 +160,74 @@ struct ClaimRecord {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimScanFailure {
+    /// The shared discovery deadline expired before traversal completed.
+    DeadlineExpired,
+    /// Opening the claims directory failed with this I/O category.
+    ReadDirectory(io::ErrorKind),
+    /// Reading one directory entry failed with this I/O category.
+    ReadEntry(io::ErrorKind),
+    /// Raw directory traversal exceeded its fixed entry budget.
+    EntryLimitExceeded,
+    /// Opening one claim file failed with this I/O category.
+    OpenClaim(io::ErrorKind),
+    /// Validating one claim file's metadata failed with this I/O category.
+    ValidateClaim(io::ErrorKind),
+    /// Testing one claim file's ownership lock failed with this I/O category.
+    LockClaim(io::ErrorKind),
+    /// Decoding one contended claim failed with this I/O category.
+    ReadClaim(io::ErrorKind),
+    /// A contended claim's record did not match its deterministic filename.
+    ClaimKeyMismatch,
+    /// More than one contended claim asserted the same session identity.
+    DuplicateSessionId,
+    /// The isolated scan worker stopped before reporting a result.
+    WorkerStopped,
+}
+
+impl std::fmt::Display for ClaimScanFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeadlineExpired => formatter.write_str("claim scan deadline expired"),
+            Self::ReadDirectory(kind) => {
+                write!(formatter, "could not read claims directory ({kind})")
+            }
+            Self::ReadEntry(kind) => {
+                write!(
+                    formatter,
+                    "could not enumerate a claims directory entry ({kind})"
+                )
+            }
+            Self::EntryLimitExceeded => {
+                write!(
+                    formatter,
+                    "claims directory exceeded the {MAX_DIRECTORY_ENTRIES}-entry scan limit"
+                )
+            }
+            Self::OpenClaim(kind) => write!(formatter, "could not open a claim file ({kind})"),
+            Self::ValidateClaim(kind) => {
+                write!(formatter, "claim file metadata validation failed ({kind})")
+            }
+            Self::LockClaim(kind) => {
+                write!(formatter, "could not test a claim file lock ({kind})")
+            }
+            Self::ReadClaim(kind) => {
+                write!(formatter, "claim record validation failed ({kind})")
+            }
+            Self::ClaimKeyMismatch => {
+                formatter.write_str("claim record does not match its deterministic filename")
+            }
+            Self::DuplicateSessionId => {
+                formatter.write_str("duplicate session identity in contended claim records")
+            }
+            Self::WorkerStopped => {
+                formatter.write_str("claim scan worker stopped before reporting a result")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity {
     /// Filesystem device number.
     device: u64,
@@ -711,14 +779,7 @@ pub fn list_running_sessions() -> io::Result<Vec<RunningSession>> {
         let result = list_running_claim_records_until(&scan_dir, deadline, &scan_cancelled);
         let _ = scan_tx.send(result);
     });
-    let records = deadline
-        .checked_duration_since(Instant::now())
-        .and_then(|remaining| scan_rx.recv_timeout(remaining).ok())
-        .and_then(Result::ok)
-        .ok_or_else(|| {
-            cancelled.store(true, Ordering::Release);
-            io::Error::other("could not list every running session claim")
-        })?;
+    let records = receive_claim_scan(scan_rx, deadline, &cancelled)?;
     let mut sessions = Vec::with_capacity(records.len());
     for record in records {
         let stem = harness_path_for_session(&record.session_id);
@@ -756,14 +817,7 @@ pub fn list_running_sessions_tolerant() -> io::Result<RunningSessionSnapshot> {
         let result = list_running_claim_records_until(&scan_dir, deadline, &scan_cancelled);
         let _ = scan_tx.send(result);
     });
-    let mut records = deadline
-        .checked_duration_since(Instant::now())
-        .and_then(|remaining| scan_rx.recv_timeout(remaining).ok())
-        .and_then(Result::ok)
-        .ok_or_else(|| {
-            cancelled.store(true, Ordering::Release);
-            io::Error::other("could not list every running session claim")
-        })?;
+    let mut records = receive_claim_scan(scan_rx, deadline, &cancelled)?;
     records.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     let candidate_count = records.len();
     let socket_dir = sockets_dir();
@@ -1116,7 +1170,7 @@ fn list_running_claim_records_until(
     claims_directory: &Path,
     deadline: Instant,
     cancelled: &AtomicBool,
-) -> Result<Vec<ClaimRecord>, ()> {
+) -> Result<Vec<ClaimRecord>, ClaimScanFailure> {
     #[cfg(test)]
     {
         let delay_ms = TEST_DISCOVERY_SCAN_DELAY
@@ -1130,24 +1184,26 @@ fn list_running_claim_records_until(
         }
     }
     if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return Err(());
+        return Err(ClaimScanFailure::DeadlineExpired);
     }
     let entries = match std::fs::read_dir(claims_directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(()),
+        Err(error) => return Err(ClaimScanFailure::ReadDirectory(error.kind())),
     };
     let mut records = Vec::new();
     let mut seen = HashSet::new();
     let mut visited = 0_usize;
     for entry in entries.take(MAX_DIRECTORY_ENTRIES + 1) {
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(());
+            return Err(ClaimScanFailure::DeadlineExpired);
         }
-        let path = entry.map_err(|_| ())?.path();
+        let path = entry
+            .map_err(|error| ClaimScanFailure::ReadEntry(error.kind()))?
+            .path();
         visited += 1;
         if MAX_DIRECTORY_ENTRIES < visited {
-            return Err(());
+            return Err(ClaimScanFailure::EntryLimitExceeded);
         }
         if path.extension().and_then(|value| value.to_str()) != Some(CLAIM_EXTENSION) {
             continue;
@@ -1157,26 +1213,30 @@ fn list_running_claim_records_until(
             .read(true)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        let mut file = options.open(&path).map_err(|_| ())?;
+        let mut file = options
+            .open(&path)
+            .map_err(|error| ClaimScanFailure::OpenClaim(error.kind()))?;
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(());
+            return Err(ClaimScanFailure::DeadlineExpired);
         }
-        validate_claim_file(&file, &path).map_err(|_| ())?;
+        validate_claim_file(&file, &path)
+            .map_err(|error| ClaimScanFailure::ValidateClaim(error.kind()))?;
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(_) => return Err(()),
+            Err(error) => return Err(ClaimScanFailure::LockClaim(error.kind())),
         }
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(());
+            return Err(ClaimScanFailure::DeadlineExpired);
         }
-        let record = read_claim(&mut file).map_err(|_| ())?;
+        let record =
+            read_claim(&mut file).map_err(|error| ClaimScanFailure::ReadClaim(error.kind()))?;
         let expected_name = format!("{}.{}", session_key(&record.session_id), CLAIM_EXTENSION);
         if path.file_name().and_then(|value| value.to_str()) != Some(expected_name.as_str()) {
-            return Err(());
+            return Err(ClaimScanFailure::ClaimKeyMismatch);
         }
         if !seen.insert(record.session_id.clone()) {
-            return Err(());
+            return Err(ClaimScanFailure::DuplicateSessionId);
         }
         records.push(record);
     }
@@ -1184,12 +1244,33 @@ fn list_running_claim_records_until(
 }
 
 #[cfg(test)]
-fn list_running_claim_records() -> Result<Vec<ClaimRecord>, ()> {
+fn list_running_claim_records() -> Result<Vec<ClaimRecord>, ClaimScanFailure> {
     list_running_claim_records_until(
         &claims_dir(),
         Instant::now() + DISCOVERY_TIMEOUT,
         &AtomicBool::new(false),
     )
+}
+
+fn receive_claim_scan(
+    receiver: mpsc::Receiver<Result<Vec<ClaimRecord>, ClaimScanFailure>>,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> io::Result<Vec<ClaimRecord>> {
+    let result = match deadline.checked_duration_since(Instant::now()) {
+        Some(remaining) => match receiver.recv_timeout(remaining) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(ClaimScanFailure::DeadlineExpired),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(ClaimScanFailure::WorkerStopped),
+        },
+        None => Err(ClaimScanFailure::DeadlineExpired),
+    };
+    result.map_err(|failure| {
+        cancelled.store(true, Ordering::Release);
+        io::Error::other(format!(
+            "could not list every running session claim: {failure}"
+        ))
+    })
 }
 
 fn discovery_probe_slots() -> &'static (Mutex<usize>, Condvar) {
