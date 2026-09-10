@@ -1128,6 +1128,188 @@ fn message_initial_display_includes_message_payload() {
     );
 }
 
+#[derive(Default)]
+struct RecordingMessageToolFinisher {
+    success: Option<RecordedMessageToolSuccess>,
+    error: Option<RecordedMessageToolError>,
+}
+
+struct RecordedMessageToolSuccess {
+    conversation_id: AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    result: CborValue,
+    display: Option<ToolUseState>,
+}
+
+struct RecordedMessageToolError {
+    conversation_id: AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    message: String,
+    details: Option<CborValue>,
+    display: Option<ToolUseState>,
+}
+
+impl MessageToolFinisher for RecordingMessageToolFinisher {
+    fn finish_message_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    ) {
+        self.success = Some(RecordedMessageToolSuccess {
+            conversation_id: conversation_id.clone(),
+            call_id,
+            tool_name,
+            tool_type,
+            result,
+            display,
+        });
+    }
+
+    fn finish_message_error(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        message: String,
+        details: Option<CborValue>,
+        display: Option<ToolUseState>,
+    ) {
+        self.error = Some(RecordedMessageToolError {
+            conversation_id: conversation_id.clone(),
+            call_id,
+            tool_name,
+            tool_type,
+            message,
+            details,
+            display,
+        });
+    }
+}
+
+/// The production success finisher attaches the recipient but no repeated body
+/// to the final compact message-tool display.
+#[test]
+fn finish_message_success_passes_recipient_display_without_message_payload() {
+    let call = message_call("agent-a", "please check this");
+    let mut finisher = RecordingMessageToolFinisher::default();
+
+    finish_message_success(
+        &mut finisher,
+        &AgentId::parse("parent-cid").expect("valid agent id"),
+        call.id.clone(),
+        call.name.clone(),
+        call.tool_type,
+        &call.arguments,
+        tau_proto::AgentMessageId::parse("message-1").expect("valid message id"),
+    );
+
+    let call = finisher.success.expect("finish call recorded");
+    let display = call.display.expect("recipient display is attached");
+    assert_eq!(call.conversation_id.as_str(), "parent-cid");
+    assert_eq!(call.call_id.as_str(), "message-call");
+    assert_eq!(call.tool_name.as_str(), MESSAGE_TOOL_NAME);
+    assert_eq!(call.tool_type, ToolType::Function);
+    assert_eq!(
+        call.result,
+        CborValue::Text(
+            "Message committed: message-1; recipient was live; response not guaranteed".to_owned()
+        )
+    );
+    assert_eq!(display.args, "agent-a");
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "ok");
+    assert_eq!(display.payload, None);
+}
+
+/// The production error finisher preserves both malformed details and a usable
+/// recipient label, without putting the attempted message body in the display.
+#[test]
+fn finish_message_error_passes_recipient_display_without_message_payload() {
+    let arguments = CborValue::Map(vec![
+        (
+            CborValue::Text("recipient_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        ),
+        (
+            CborValue::Text("message".to_owned()),
+            CborValue::Integer(1.into()),
+        ),
+    ]);
+    let mut finisher = RecordingMessageToolFinisher::default();
+
+    finish_message_error(
+        &mut finisher,
+        &AgentId::parse("parent-cid").expect("valid agent id"),
+        ToolCallId::from("message-call"),
+        ToolName::new(MESSAGE_TOOL_NAME),
+        ToolType::Function,
+        &arguments,
+        "`message` must be a string".to_owned(),
+    );
+
+    let call = finisher.error.expect("finish call recorded");
+    let display = call.display.expect("recipient display is attached");
+    assert_eq!(call.conversation_id.as_str(), "parent-cid");
+    assert_eq!(call.call_id.as_str(), "message-call");
+    assert_eq!(call.tool_name.as_str(), MESSAGE_TOOL_NAME);
+    assert_eq!(call.tool_type, ToolType::Function);
+    assert_eq!(call.message, "`message` must be a string");
+    assert_eq!(call.details, Some(arguments));
+    assert_eq!(display.args, "agent-a");
+    assert_eq!(display.status, ToolUseStatus::Error);
+    assert_eq!(display.status_text, "`message` must be a string");
+    assert_eq!(display.payload, None);
+}
+
+/// A valid recipient remains visible when other message arguments are missing,
+/// empty, or the wrong type, while validation continues to reject those calls.
+#[test]
+fn message_error_display_keeps_recipient_when_message_is_invalid() {
+    let invalid_arguments = [
+        CborValue::Map(vec![(
+            CborValue::Text("recipient_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        )]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("recipient_id".to_owned()),
+                CborValue::Text("agent-a".to_owned()),
+            ),
+            (
+                CborValue::Text("message".to_owned()),
+                CborValue::Integer(1.into()),
+            ),
+        ]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("recipient_id".to_owned()),
+                CborValue::Text("agent-a".to_owned()),
+            ),
+            (
+                CborValue::Text("message".to_owned()),
+                CborValue::Text("   ".to_owned()),
+            ),
+        ]),
+    ];
+
+    for arguments in invalid_arguments {
+        assert!(parse_message_args(&arguments).is_err());
+        assert_eq!(
+            message_error_display(&arguments, "invalid message").args,
+            "agent-a"
+        );
+    }
+}
+
 /// Runtime bookkeeping retains a logical tool name through a background
 /// placeholder, then clears both tracking maps for every terminal event.
 #[test]

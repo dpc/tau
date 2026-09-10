@@ -1358,22 +1358,24 @@ fn handle_message_tool_call(
         }
     });
     match result {
-        Ok(MessageToolFlow::Finished(message_id)) => host.finish_tool_with_result(
+        Ok(MessageToolFlow::Finished(message_id)) => finish_message_success(
+            host,
             conversation_id,
             call_id,
             visible_tool_name,
             call.tool_type,
-            format!("Message committed: {message_id}; recipient was live; response not guaranteed"),
-            None,
+            &call.arguments,
+            message_id,
         ),
         Ok(MessageToolFlow::PendingPeer | MessageToolFlow::PendingExternal) => {}
-        Err(message) => host.finish_tool_with_error(
+        Err(message) => finish_message_error(
+            host,
             conversation_id,
             call_id,
             visible_tool_name,
             call.tool_type,
+            &call.arguments,
             message,
-            Some(call.arguments.clone()),
         ),
     }
     Ok(())
@@ -1383,6 +1385,115 @@ enum MessageToolFlow {
     Finished(tau_proto::AgentMessageId),
     PendingPeer,
     PendingExternal,
+}
+
+trait MessageToolFinisher {
+    fn finish_message_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    );
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_message_error(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        message: String,
+        details: Option<CborValue>,
+        display: Option<ToolUseState>,
+    );
+}
+
+impl MessageToolFinisher for InternalToolHost<'_> {
+    fn finish_message_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    ) {
+        self.finish_tool_with_cbor_result(
+            conversation_id,
+            call_id,
+            tool_name,
+            tool_type,
+            result,
+            display,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_message_error(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        message: String,
+        details: Option<CborValue>,
+        display: Option<ToolUseState>,
+    ) {
+        self.finish_tool_with_display_error(
+            conversation_id,
+            call_id,
+            tool_name,
+            tool_type,
+            message,
+            details,
+            display,
+        );
+    }
+}
+
+fn finish_message_success(
+    finisher: &mut impl MessageToolFinisher,
+    conversation_id: &AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    arguments: &CborValue,
+    message_id: tau_proto::AgentMessageId,
+) {
+    finisher.finish_message_success(
+        conversation_id,
+        call_id,
+        tool_name,
+        tool_type,
+        CborValue::Text(format!(
+            "Message committed: {message_id}; recipient was live; response not guaranteed"
+        )),
+        Some(message_success_display(arguments)),
+    );
+}
+
+fn finish_message_error(
+    finisher: &mut impl MessageToolFinisher,
+    conversation_id: &AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    arguments: &CborValue,
+    message: String,
+) {
+    let display = message_error_display(arguments, &message);
+    finisher.finish_message_error(
+        conversation_id,
+        call_id,
+        tool_name,
+        tool_type,
+        message,
+        Some(arguments.clone()),
+        Some(display),
+    );
 }
 
 impl BuiltinTools {
@@ -1435,6 +1546,30 @@ impl BuiltinTools {
 struct MessageArgs {
     recipient_id: String,
     message: String,
+}
+
+fn message_display_args(arguments: &CborValue) -> String {
+    tau_proto::cbor_text_field(arguments, "recipient_id")
+        .filter(|recipient_id| !recipient_id.trim().is_empty())
+        .unwrap_or_default()
+}
+
+fn message_success_display(arguments: &CborValue) -> ToolUseState {
+    ToolUseState {
+        args: message_display_args(arguments),
+        status: ToolUseStatus::Success,
+        status_text: "ok".to_owned(),
+        ..Default::default()
+    }
+}
+
+fn message_error_display(arguments: &CborValue, message: &str) -> ToolUseState {
+    ToolUseState {
+        args: message_display_args(arguments),
+        status: ToolUseStatus::Error,
+        status_text: error_chip_text(message),
+        ..Default::default()
+    }
 }
 
 #[derive(Default)]
