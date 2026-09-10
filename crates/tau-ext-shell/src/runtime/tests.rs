@@ -510,7 +510,7 @@ fn assert_no_second_terminal_for(
 #[test]
 fn tool_cancel_request_signals_registered_running_call() {
     let (tx, _rx) = mpsc::channel();
-    let runtime = ShellRuntime::new(
+    let mut runtime = ShellRuntime::new(
         Output::channel(tx),
         ExtConfig::default(),
         DiscoverySourcePolicy::Environment,

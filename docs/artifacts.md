@@ -1,9 +1,14 @@
 # Artifact transfers
 
 Tau's Artifact RPC stores **immutable original bytes under their content hash**.
-This foundation exposes no model-facing artifact tools by itself. Shell
-import/export, image generation, and remote attachment consumers must register
-their own tools under ordinary role and recipient policy.
+The shell extension registers `export(path)` and `import(key)` under ordinary
+tool-role policy. Export reads one local regular file under the shell instance's
+remembered workdir authority, uploads at most 16 MiB of original bytes, and
+returns the descriptor plus a bounded filename hint. Import validates the key,
+downloads and verifies the complete original, and writes it to a private
+unpredictable mode-0600 temporary file on the shell execution host; that local
+path can be passed to `read_image`. Neither tool exposes store paths, inline
+original bytes, execution, or archive extraction.
 
 ## Consumer API
 
@@ -100,7 +105,7 @@ Rebuild the harness and configured extension/provider peers against matching
 `tau-proto`/`tau-client` revisions before activation. This change does not
 activate, publish, deploy, or migrate any external extension automatically.
 
-No artifact-dependent tool is registered by the foundation. Consumers must keep
+The shell consumer keeps
 their existing provider/model modality and role gates, and must not advertise a
 storage-dependent operation on an incompatible or unavailable route.
 

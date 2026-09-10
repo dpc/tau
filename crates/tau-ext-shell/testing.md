@@ -52,6 +52,9 @@ progress/completion names; harness-boundary tests separately lock report commit,
 canonical mapping, exact generation/route authority, activation ordering, and
 post-completion-commit transcript injection.
 Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
+Artifact coverage drives fake correlated export and import RPC responses, proves
+original-byte equality and private imported-file permissions, and passes the
+returned path through the existing typed `read_image` surface.
 the removed GPT `cwd` spelling appears only in an explicitly named legacy
 compatibility test.
 Allowlist coverage distinguishes absent from empty configuration, validates

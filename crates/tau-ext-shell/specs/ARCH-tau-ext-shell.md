@@ -2,6 +2,17 @@
 
 `tau-ext-shell` owns Tau's local filesystem and subprocess tools. It must avoid process-global cwd changes after startup: concurrent tool workers resolve paths against per-agent state instead.
 
+`export` reads a regular file off the protocol loop under the same remembered
+workdir authority, then the main loop drives one typed Artifact upload operation
+at a time. `import` drives a verified typed download on that loop and hands the
+completed bounded bytes to a shell worker, which creates a mode-0600 unpredictable
+temporary file on the shell host. Exact request correlation and complete Artifact
+frame validation precede transfer-state acceptance; cancellation submits
+Abort/Close best-effort and suppresses the normal tool result.
+Verified originals waiting for or executing temp-file writes share a separate
+16 MiB admission budget; cancellation and shutdown remain visible to the writer
+so an unreported retained temp file is removed.
+
 `read_image` uses the same remembered-cwd and bounded regular-file authority as
 `read`. It reads one opened file once and accepts sniffed PNG, JPEG, or WebP
 only. Source and normalized bytes are each capped at 8 MiB; pre-decode sides are

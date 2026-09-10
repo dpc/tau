@@ -15,6 +15,15 @@ Model-visible tools:
 
 - `read` — reads UTF-8 and non-UTF-8 files with line numbers, line-ending markers, Unicode replacement for invalid bytes plus `invalid-utf8` flags, range/ranges support, line/byte truncation metadata, a 10 MiB input safety cap, a rendered-range expansion cap that can reject large overlapping multi-range requests before rendering, and a bounded nearby-sibling suggestion for simple missing-path typos.
 - `read_image` — reads one local PNG, JPEG, or WebP under the same filesystem authority as `read`, validates and re-encodes it under strict byte/dimension/pixel/decoded-memory limits, strips source metadata, and returns bounded high-detail typed image content. Bare calls keep the 2048-side/2,500-patch high profile. Explicit experimental `mode: "overview"` uses 1024-side/600-patch local preparation for coarse inspection only. An optional half-open `region` uses EXIF-oriented source pixels and crops before profile resizing. It is visible only when the exact provider route publishes native image tool-result support, including audited GPT-5.6 ChatGPT Responses routes and explicitly declared multimodal llama.cpp Chat Completions models. Generic UI/debug output shows source/oriented/region/output geometry, profile, patches, format, and byte count, never pixels or base64. The complete encoded terminal envelope must fit the shared 8 MiB client frame limit; an oversized typed result fails locally without base64 or text fallback.
+- `export` — uploads one local regular file of at most 16 MiB to the persistent
+  shared content-addressed artifact store and returns its BLAKE3 key and size.
+  Relative paths use the invoking agent's remembered workdir. A successful new
+  export, including duplicate bytes, renews artifact age; originals persist
+  independently of ephemeral transcripts.
+- `import` — downloads one canonical artifact key without renewing retention,
+  verifies exact size and digest, and returns a private unpredictable mode-0600
+  temporary path on the shell execution host. Pass that path to `read_image` or
+  another filesystem tool. Import never executes or extracts content.
 - `edit` with explicit `shell:tool-style:edit` — exposes the legacy internal
   `edit` implementation, which applies context-checked line-oriented
   replacements. `newText` fully replaces the 1-based half-open

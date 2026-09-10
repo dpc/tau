@@ -70,6 +70,13 @@ its digest. A later new put of identical bytes can restore that same key.
 Processes sharing a root should use consistent retention settings: any enabled
 cleaner may apply its own configured policy.
 
+The shell `export` consumer reads one bounded local regular file using its
+ordinary remembered-workdir filesystem authority and performs a new explicit
+upload. Shell `import` validates a canonical key, verifies the complete download,
+and publishes only a private non-executable temporary path on the shell execution
+host. These tools never expose harness store paths or original bytes through
+model text; import and inspection do not renew age.
+
 The protocol revision follows
 [SPEC-extension-protocol-versioning](SPEC-extension-protocol-versioning.md).
 Detailed helper usage and finite implementation bounds live in

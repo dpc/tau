@@ -14,7 +14,7 @@ Use when asked to verify Tau tool behavior or Tau tool-verification skills.
 Tau exposes different tool sets depending on configuration, provider/model
 capabilities, and extension setup. Common sets include:
 
-* ext-shell's `read`, `read_image`, `edit`, and `shell` tools, plus related
+* ext-shell's `read`, `read_image`, `export`, `import`, `edit`, and `shell` tools, plus related
   tools such as `dir_lock`; `read_image` appears only on explicitly
   image-capable provider routes;
 * provider/native tools such as `apply_patch` and `shell_command`.
@@ -30,6 +30,12 @@ legacy line-coordinate implementation as `edit`; ChatGPT/Codex uses
 `shell_command` and `apply_patch` where possible, and explicitly report any
 tool-specific checks that cannot be run because the corresponding tool is not
 available.
+
+When `export` and `import` are exposed, verify a small original round trip:
+export a local regular file, import the returned `blake3:` key, compare the
+imported local file byte-for-byte, and confirm its private non-executable
+permissions. For an image original, pass the imported path to `read_image`.
+Do not inspect harness State paths or treat the digest as provenance or safety.
 
 ## Goal
 

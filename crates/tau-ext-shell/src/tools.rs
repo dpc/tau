@@ -25,6 +25,8 @@ pub(crate) mod world;
 pub const ECHO_TOOL_NAME: &str = "echo";
 pub const READ_TOOL_NAME: &str = "read";
 pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
+pub const EXPORT_TOOL_NAME: &str = "export";
+pub const IMPORT_TOOL_NAME: &str = "import";
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const REPLACE_TOOL_NAME: &str = "replace";
 pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
@@ -244,7 +246,10 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
                 .unwrap_or_else(|| format_requested_read_line_range(&invoke.arguments));
             format!("{path} {ranges}")
         }
-        READ_IMAGE_TOOL_NAME => cbor_text_field(&invoke.arguments, "path").unwrap_or_default(),
+        READ_IMAGE_TOOL_NAME | EXPORT_TOOL_NAME => {
+            cbor_text_field(&invoke.arguments, "path").unwrap_or_default()
+        }
+        IMPORT_TOOL_NAME => cbor_text_field(&invoke.arguments, "key").unwrap_or_default(),
         EDIT_TOOL_NAME | REPLACE_TOOL_NAME | APPLY_PATCH_TOOL_NAME => {
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();
             let ranges = cbor_array_field(&invoke.arguments, "edits")

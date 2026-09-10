@@ -33,6 +33,7 @@ use crate::{
 
 mod agents;
 mod argument;
+mod artifact_transfer;
 mod config;
 mod cwd_state;
 mod diff;
@@ -56,6 +57,7 @@ mod ui_shell_shutdown_generation;
 mod tests;
 
 use crate::agents::{ancestor_dirs, discover_session_agents_files};
+use crate::artifact_transfer::{ArtifactTransferControl, ArtifactTransferManager};
 use crate::config::{ExtConfig, ShellConfig};
 use crate::cwd_state::{CwdState, WorkdirSnapshot};
 use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
@@ -66,9 +68,9 @@ use crate::tool_lifecycle::{ToolCancellationState, ToolLifecycle};
 use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::shell::{ShellAccessMode, ShellCommandMode};
 use crate::tools::{
-    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, GREP_TOOL_NAME,
-    LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
-    WORKDIR_TOOL_NAME, execute_tool,
+    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, EXPORT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
+    GREP_TOOL_NAME, IMPORT_TOOL_NAME, LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME,
+    REPLACE_TOOL_NAME, SHELL_TOOL_NAME, WORKDIR_TOOL_NAME, execute_tool,
 };
 use crate::ui_shell_shutdown_generation::{
     UiShellShutdownGeneration, UiShellShutdownGenerationCounter,
@@ -570,6 +572,73 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             subcommand: None,
         }],
     };
+    let export_tool = ToolSpec {
+        name: tau_proto::ToolName::new(EXPORT_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Export one local regular file to the shared content-addressed artifact store. \
+             Originals are limited to 16 MiB. A successful export returns the BLAKE3 key and \
+             size and renews shared artifact age, including for duplicate bytes. Original bytes \
+             persist independently of ephemeral session transcripts."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to one local regular file"}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&[
+            "shell:read",
+            "artifact:write",
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        ]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "export-artifact".to_owned(),
+            title: Some("Export an original".to_owned()),
+            arguments: CborValue::Map(vec![example_field("path", example_text("output.png"))]),
+            note: Some("The returned key can be imported by another session.".to_owned()),
+            subcommand: None,
+        }],
+    };
+    let import_tool = ToolSpec {
+        name: tau_proto::ToolName::new(IMPORT_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Import one artifact key to a private, unpredictable, non-executable temporary file \
+             on this shell host. Size and digest are verified before success. Import does not \
+             renew retention age; pass the returned local path to read_image or filesystem tools."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "pattern": "^blake3:[0-9a-f]{64}$",
+                    "description": "Canonical artifact key returned by export"
+                }
+            },
+            "required": ["key"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&[
+            "shell:read",
+            "artifact:read",
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        ]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: Vec::new(),
+    };
     let edit_tool = ToolSpec {
         name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
         model_visible_name: None,
@@ -1025,6 +1094,8 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     let builtin_tools = [
         read_tool,
         read_image_tool,
+        export_tool,
+        import_tool,
         edit_tool,
         replace_tool,
         apply_patch_tool,
@@ -1055,9 +1126,12 @@ where
         initial_config: initial_config.clone(),
     })
     .start_manual_loop_with_state(reader, writer, |handle| match runtime_cwd_source {
-        RuntimeCwdSource::Process => {
-            ShellRuntime::new(Output::client(handle), initial_config, discovery_policy)
-        }
+        RuntimeCwdSource::Process => ShellRuntime::new_with_artifacts(
+            Output::client(handle.clone()),
+            ArtifactTransferManager::new(tau_client::ArtifactClient::new(handle)),
+            initial_config,
+            discovery_policy,
+        ),
         #[cfg(any(test, feature = "echo-agent"))]
         RuntimeCwdSource::Fixture(fixture_cwd) => ShellRuntime::new_for_test_harness(
             Output::client(handle),
@@ -1089,9 +1163,14 @@ fn run_shell_manual_loop(
     runtime: &mut tau_client::ManualExtensionRuntime<ShellRuntime>,
 ) -> tau_client::ClientResult<()> {
     loop {
+        runtime.state_mut().drain_artifact_commands()?;
         runtime.state().take_mandatory_output_failure()?;
         match runtime.try_recv()? {
             tau_client::ManualRuntimePoll::Message(message) => {
+                if let tau_proto::HarnessOutputMessage::ArtifactResult(result) = message {
+                    runtime.state_mut().handle_artifact_result(*result)?;
+                    continue;
+                }
                 match runtime.dispatch_one(message)? {
                     tau_client::DispatchOutcome::Continue => {}
                     tau_client::DispatchOutcome::StopRequested
@@ -1411,8 +1490,8 @@ fn rewrite_invoke_for_cwd(
     let field = match invoke.tool_name.as_str() {
         SHELL_TOOL_NAME => path_crate_tools::ShellSurface::Generic.directory_argument(),
         GPT_SHELL_TOOL_NAME => path_crate_tools::ShellSurface::ChatGpt.directory_argument(),
-        READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EDIT_TOOL_NAME | REPLACE_TOOL_NAME
-        | FIND_TOOL_NAME | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
+        READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EXPORT_TOOL_NAME | EDIT_TOOL_NAME
+        | REPLACE_TOOL_NAME | FIND_TOOL_NAME | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
         DIR_LOCK_TOOL_NAME => "directory",
         _ => return invoke,
     };
@@ -1492,6 +1571,10 @@ fn set_cbor_text_field(arguments: &mut CborValue, field: &str, value: String) {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "admission receives independently owned scheduler, policy, lifecycle, cwd, and Artifact routes"
+)]
 fn schedule_tool_started(
     (invoke, local_tool_name): (tau_proto::ToolStarted, &tau_proto::ToolName),
     scheduler: &WorkScheduler,
@@ -1500,6 +1583,7 @@ fn schedule_tool_started(
     lock_manager: DirLockManager,
     cancellation: ToolCancellationState,
     cwd_state: CwdState,
+    artifact_control: ArtifactTransferControl,
 ) -> Result<
     (),
     Box<(
@@ -1666,6 +1750,22 @@ fn schedule_tool_started(
                         }
                     },
                 );
+            } else if invoke.tool_name == EXPORT_TOOL_NAME || invoke.tool_name == IMPORT_TOOL_NAME {
+                if lifecycle.start_effect()
+                    && artifact_control.prepare(
+                        invoke,
+                        lifecycle.clone(),
+                        match &workdir_snapshot {
+                            WorkdirSnapshot::Valid(cwd) => cwd,
+                            WorkdirSnapshot::Invalid | WorkdirSnapshot::ReplayFailed => {
+                                unreachable!("artifact tools require a valid workdir")
+                            }
+                        },
+                        &tx_for_job,
+                    )
+                {
+                    return;
+                }
             } else {
                 if lifecycle.start_effect() {
                     dispatch_tool_invoke(
@@ -1774,7 +1874,12 @@ fn priority_for_tool(invoke: &tau_proto::ToolStarted, config: &ExtConfig) -> Wor
     }
     if matches!(
         invoke.tool_name.as_str(),
-        READ_TOOL_NAME | GREP_TOOL_NAME | FIND_TOOL_NAME | LS_TOOL_NAME
+        READ_TOOL_NAME
+            | EXPORT_TOOL_NAME
+            | IMPORT_TOOL_NAME
+            | GREP_TOOL_NAME
+            | FIND_TOOL_NAME
+            | LS_TOOL_NAME
     ) {
         return WorkPriority::Cheap;
     }
@@ -2659,6 +2764,8 @@ fn is_shell_tool(name: &str) -> bool {
         name,
         READ_TOOL_NAME
             | READ_IMAGE_TOOL_NAME
+            | EXPORT_TOOL_NAME
+            | IMPORT_TOOL_NAME
             | EDIT_TOOL_NAME
             | REPLACE_TOOL_NAME
             | APPLY_PATCH_TOOL_NAME

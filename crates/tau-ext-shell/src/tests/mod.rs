@@ -591,6 +591,8 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
         EventName::TOOL_REGISTRATION_DECLARED,                  // echo
         EventName::TOOL_REGISTRATION_DECLARED,                  // read
         EventName::TOOL_REGISTRATION_DECLARED,                  // read_image
+        EventName::TOOL_REGISTRATION_DECLARED,                  // export
+        EventName::TOOL_REGISTRATION_DECLARED,                  // import
         EventName::TOOL_REGISTRATION_DECLARED,                  // edit
         EventName::TOOL_REGISTRATION_DECLARED,                  // replace
         EventName::TOOL_REGISTRATION_DECLARED,                  // apply_patch

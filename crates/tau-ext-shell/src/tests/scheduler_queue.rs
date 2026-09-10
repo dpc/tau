@@ -146,6 +146,7 @@ fn schedule_tool_started_reports_queue_full_error() {
         DirLockManager::default(),
         ToolCancellationState::default(),
         CwdState::new(),
+        ArtifactTransferManager::unavailable().control(),
     ) else {
         panic!("queue-full call should be rejected");
     };
@@ -288,6 +289,7 @@ fn cancellation_after_dequeue_prevents_mutation_once() {
             ..Default::default()
         },
         CwdState::new(),
+        ArtifactTransferManager::unavailable().control(),
     )
     .expect("edit scheduled");
     reached_rx.recv().expect("worker reached dequeue handoff");
@@ -341,6 +343,7 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
             ..Default::default()
         },
         CwdState::new(),
+        ArtifactTransferManager::unavailable().control(),
     )
     .expect("edit queued");
     assert_eq!(

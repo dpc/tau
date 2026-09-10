@@ -22,6 +22,7 @@ use super::{
     send_identity_failure, send_ui_shell_saturated_failure, with_lock_wait_duration,
 };
 use crate::Output;
+use crate::artifact_transfer::ArtifactTransferManager;
 use crate::config::ExtConfig;
 use crate::cwd_state::CwdState;
 use crate::dir_lock::DirLockManager;
@@ -55,12 +56,15 @@ pub(super) struct ShellRuntime {
     /// Immutable session identity observed from the first lifecycle fact.
     bound_session_id: Option<tau_proto::SessionId>,
     runtime_started: bool,
+    /// Main-loop-owned shared artifact transfers.
+    artifact_transfers: ArtifactTransferManager,
 }
 
 impl ShellRuntime {
     /// Connects worker-side checked-output failures to the manual policy loop.
     pub(super) fn install_waker(&self, waker: tau_client::ManualRuntimeWaker) {
-        self.tx.install_waker(waker);
+        self.tx.install_waker(waker.clone());
+        self.artifact_transfers.install_waker(waker);
     }
 
     /// Propagates the first checked-output failure observed by a worker.
@@ -70,8 +74,25 @@ impl ShellRuntime {
 
     /// Creates a production runtime that freezes the process startup cwd during
     /// initial configuration.
+    #[cfg(any(test, feature = "echo-agent"))]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn new(
         tx: Output,
+        config: ExtConfig,
+        discovery_policy: DiscoverySourcePolicy,
+    ) -> Self {
+        Self::new_with_artifacts(
+            tx,
+            ArtifactTransferManager::unavailable(),
+            config,
+            discovery_policy,
+        )
+    }
+
+    /// Creates a production runtime with a live Artifact RPC writer.
+    pub(super) fn new_with_artifacts(
+        tx: Output,
+        artifact_transfers: ArtifactTransferManager,
         config: ExtConfig,
         discovery_policy: DiscoverySourcePolicy,
     ) -> Self {
@@ -81,6 +102,7 @@ impl ShellRuntime {
             discovery_policy,
             CwdState::new(),
             StartupCwdSource::Process,
+            artifact_transfers,
         )
     }
 
@@ -99,6 +121,7 @@ impl ShellRuntime {
             discovery_policy,
             CwdState::new_with_startup_cwd(fixture_cwd),
             StartupCwdSource::Fixture,
+            ArtifactTransferManager::unavailable(),
         )
     }
 
@@ -108,6 +131,7 @@ impl ShellRuntime {
         discovery_policy: DiscoverySourcePolicy,
         cwd_state: CwdState,
         startup_cwd_source: StartupCwdSource,
+        artifact_transfers: ArtifactTransferManager,
     ) -> Self {
         Self {
             config,
@@ -123,6 +147,7 @@ impl ShellRuntime {
             start_agent_owners: HashMap::new(),
             bound_session_id: None,
             runtime_started: false,
+            artifact_transfers,
         }
     }
 
@@ -137,6 +162,7 @@ impl ShellRuntime {
     }
 
     pub(super) fn shutdown(&mut self) {
+        self.artifact_transfers.shutdown();
         self.shutdown_generation_counter.advance();
         // Dir-lock waiters must be woken before the scheduler is dropped,
         // because scheduler drop joins workers that may be blocked on locks.
@@ -258,6 +284,8 @@ impl ShellRuntime {
                     Some(_) => return Ok(()),
                     None => self.bound_session_id = Some(started.session_id.clone()),
                 }
+                self.artifact_transfers
+                    .bind_session(started.session_id.clone());
                 dispatch_session_started(started, &self.tx, self.discovery_policy)?;
             }
             Event::SessionAgentLoaded(loaded) => {
@@ -332,6 +360,7 @@ impl ShellRuntime {
             self.lock_manager.clone(),
             self.cancellation.clone(),
             self.cwd_state.clone(),
+            self.artifact_transfers.control(),
         ) {
             let (identity, failure) = *error;
             let _ = send_identity_failure(identity, failure, &self.tx);
@@ -664,7 +693,7 @@ impl ShellRuntime {
         }
     }
 
-    fn handle_tool_cancel_request(&self, request: tau_proto::ToolCancelRequest) {
+    fn handle_tool_cancel_request(&mut self, request: tau_proto::ToolCancelRequest) {
         if self
             .cwd_state
             .request_pending_workdir_cancel(&request.target_call_id)
@@ -685,6 +714,8 @@ impl ShellRuntime {
             debug!(call_id = %request.target_call_id, "tool cancellation prevented effect start");
             return;
         }
+        self.artifact_transfers
+            .cancel(&request.target_call_id, &self.tx);
         let cancel_tx = self
             .cancellation
             .running_calls
@@ -707,6 +738,30 @@ impl ShellRuntime {
                 debug!(call_id = %request.target_call_id, "active cancellation recorded before sender registration");
             }
         }
+    }
+
+    /// Drains artifact filesystem completions before the manual loop sleeps.
+    pub(super) fn drain_artifact_commands(&mut self) -> tau_client::ClientResult<()> {
+        let scheduler = self
+            .scheduler
+            .as_ref()
+            .ok_or_else(|| tau_client::ClientError::handler("shell scheduler is shut down"))?;
+        self.artifact_transfers.drain(scheduler, &self.tx);
+        Ok(())
+    }
+
+    /// Routes one exact-correlated Artifact response to its typed transfer.
+    pub(super) fn handle_artifact_result(
+        &mut self,
+        result: tau_proto::ArtifactResult,
+    ) -> tau_client::ClientResult<()> {
+        let scheduler = self
+            .scheduler
+            .as_ref()
+            .ok_or_else(|| tau_client::ClientError::handler("shell scheduler is shut down"))?;
+        self.artifact_transfers
+            .handle_result(result, scheduler, &self.tx);
+        Ok(())
     }
 
     fn handle_ui_shell_command(

@@ -2,6 +2,181 @@
 
 use super::*;
 
+/// Drives one fake Artifact RPC operation and returns the request payload.
+fn next_artifact_request(reader: &mut TestExtensionReader) -> tau_proto::ArtifactRequest {
+    loop {
+        let message = reader
+            .read_raw_message()
+            .expect("read extension output")
+            .expect("extension output");
+        if let HarnessInputMessage::ArtifactRequest(request) = message {
+            return request;
+        }
+    }
+}
+
+/// Sends one exact-correlated fake Artifact RPC result.
+fn send_artifact_result(
+    writer: &mut TestExtensionWriter,
+    request_id: tau_proto::ArtifactRequestId,
+    result: Result<tau_proto::ArtifactValue, tau_proto::ArtifactError>,
+) {
+    writer
+        .write_frame(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult { request_id, result },
+        )))
+        .expect("artifact result");
+    writer.flush().expect("flush artifact result");
+}
+
+/// Ensures export preserves original bytes and import produces a private local
+/// file that the existing read_image tool can inspect without a new preview
+/// path.
+#[test]
+fn artifact_export_import_round_trip_preserves_original_and_read_image_path() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let source = tempdir.path().join("original.png");
+    image::DynamicImage::new_rgba8(2, 2)
+        .save(&source)
+        .expect("write png");
+    let original = fs::read(&source).expect("read png");
+    let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(&original).to_hex()))
+        .expect("artifact key");
+    let descriptor =
+        tau_proto::ArtifactDescriptor::new(key.clone(), original.len() as u64).expect("descriptor");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    writer
+        .write_event(&Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: "artifact-session".parse().expect("session id"),
+            reason: tau_proto::SessionStartReason::Initial,
+        }))
+        .expect("session start");
+    let source_text = source.display().to_string();
+    writer
+        .write_event(&tool_started(
+            "export-call",
+            EXPORT_TOOL_NAME,
+            cbor_text_map(vec![("path", source_text.as_str())]),
+            "agent-artifact",
+        ))
+        .expect("export");
+    writer.flush().expect("flush export");
+
+    let begin = next_artifact_request(&mut reader);
+    assert!(matches!(begin.op, tau_proto::ArtifactOp::Begin { .. }));
+    send_artifact_result(
+        &mut writer,
+        begin.request_id,
+        Ok(tau_proto::ArtifactValue::Upload {
+            upload: "upload-1".parse().expect("upload id"),
+        }),
+    );
+    let write = next_artifact_request(&mut reader);
+    let tau_proto::ArtifactOp::Write { bytes, .. } = &write.op else {
+        panic!("expected write");
+    };
+    assert_eq!(bytes, &original);
+    send_artifact_result(
+        &mut writer,
+        write.request_id,
+        Ok(tau_proto::ArtifactValue::Written {
+            next_offset: original.len() as u64,
+        }),
+    );
+    let finalize = next_artifact_request(&mut reader);
+    assert!(matches!(
+        finalize.op,
+        tau_proto::ArtifactOp::Finalize { .. }
+    ));
+    send_artifact_result(
+        &mut writer,
+        finalize.request_id,
+        Ok(tau_proto::ArtifactValue::Descriptor(descriptor.clone())),
+    );
+    let export = reader.read_event().expect("export result").expect("event");
+    let Event::ToolResult(export) = export else {
+        panic!("expected export result");
+    };
+    assert_eq!(cbor_map_text(&export.result, "key"), Some(key.as_str()));
+
+    writer
+        .write_event(&tool_started(
+            "import-call",
+            IMPORT_TOOL_NAME,
+            cbor_text_map(vec![("key", key.as_str())]),
+            "agent-artifact",
+        ))
+        .expect("import");
+    writer.flush().expect("flush import");
+    let open = next_artifact_request(&mut reader);
+    assert!(matches!(open.op, tau_proto::ArtifactOp::Open { .. }));
+    send_artifact_result(
+        &mut writer,
+        open.request_id,
+        Ok(tau_proto::ArtifactValue::Opened {
+            read: "read-1".parse().expect("read id"),
+            descriptor,
+        }),
+    );
+    let read = next_artifact_request(&mut reader);
+    send_artifact_result(
+        &mut writer,
+        read.request_id,
+        Ok(tau_proto::ArtifactValue::Chunk {
+            offset: 0,
+            bytes: original.clone(),
+            eof: true,
+        }),
+    );
+    let close = next_artifact_request(&mut reader);
+    assert!(matches!(close.op, tau_proto::ArtifactOp::Close { .. }));
+    send_artifact_result(
+        &mut writer,
+        close.request_id,
+        Ok(tau_proto::ArtifactValue::Done),
+    );
+    let imported = reader.read_event().expect("import result").expect("event");
+    let Event::ToolResult(imported) = imported else {
+        panic!("expected import result");
+    };
+    let path = PathBuf::from(cbor_map_text(&imported.result, "path").expect("import path"));
+    assert_eq!(fs::read(&path).expect("imported bytes"), original);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let path_text = path.display().to_string();
+    writer
+        .write_event(&tool_started(
+            "inspect-call",
+            READ_IMAGE_TOOL_NAME,
+            cbor_text_map(vec![("path", path_text.as_str())]),
+            "agent-artifact",
+        ))
+        .expect("read image");
+    writer.flush().expect("flush read image");
+    let inspected = reader.read_event().expect("image result").expect("event");
+    let Event::ToolResult(inspected) = inspected else {
+        panic!("expected image result");
+    };
+    assert!(matches!(
+        inspected.provider_content.as_slice(),
+        [tau_proto::ToolResultContentPart::Image(_)]
+    ));
+    fs::remove_file(path).expect("remove imported temp");
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush disconnect");
+}
+
 #[test]
 fn extension_finds_files() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -105,6 +280,8 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
         ECHO_TOOL_NAME,
         READ_TOOL_NAME,
         READ_IMAGE_TOOL_NAME,
+        EXPORT_TOOL_NAME,
+        IMPORT_TOOL_NAME,
         EDIT_TOOL_NAME,
         REPLACE_TOOL_NAME,
         APPLY_PATCH_TOOL_NAME,
@@ -1327,7 +1504,7 @@ fn startup_registers_schema_valid_tool_examples() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut checked = Vec::new();
-    for _ in 0..13 {
+    for _ in 0..15 {
         let event = reader
             .read_event()
             .expect("read")
@@ -1341,6 +1518,8 @@ fn startup_registers_schema_valid_tool_examples() {
     }
     for tool_name in [
         READ_TOOL_NAME,
+        EXPORT_TOOL_NAME,
+        IMPORT_TOOL_NAME,
         EDIT_TOOL_NAME,
         APPLY_PATCH_TOOL_NAME,
         DIR_LOCK_TOOL_NAME,
@@ -1678,7 +1857,7 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
     let mut found_read_image_foreground_only = false;
     let mut found_edit_schema = false;
     let mut found_write = false;
-    for _ in 0..13 {
+    for _ in 0..15 {
         let event = reader
             .read_event()
             .expect("read")
