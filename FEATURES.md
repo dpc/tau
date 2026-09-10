@@ -187,6 +187,8 @@ ChatGPT profiles can opt into provider-owned `generate_image` with
 returns a shared artifact key, not inline bytes or a storage path. Generic
 ordinary tools can share a public alias with a provider-scoped backing; the
 eligible exact-provider backing wins without new selection configuration.
+The declaration remains role-disabled until `enable_tools: [generate_image]`
+enables that public surface.
 Generation never retries or falls back to another account after failure.
 
 Roles package a model, its parameters, prompt fragments, skills, and tool policy

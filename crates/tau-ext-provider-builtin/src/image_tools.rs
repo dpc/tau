@@ -97,7 +97,7 @@ pub(super) fn declarations(
                 })),
                 format: None,
                 tags: Vec::new(),
-                enabled_by_default: true,
+                enabled_by_default: false,
                 background_support: None,
                 examples: Vec::new(),
             },

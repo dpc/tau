@@ -801,10 +801,19 @@ impl DeterministicFixture {
                 }
             })
         };
-        let config = serde_json::json!({
+        let mut config = serde_json::json!({
             "agents": role_config,
             "extensions": extensions,
         });
+        if mode == FixtureMode::CoreShell {
+            config
+                .as_object_mut()
+                .expect("literal harness configuration is an object")
+                .insert(
+                    "tool_policy".to_owned(),
+                    serde_json::json!({"default_shell_tool_style": "edit"}),
+                );
+        }
         let config_bytes = serde_json::to_vec_pretty(&config)?;
         tau_util_fs_err::write(config_dir.join("harness.yaml"), &config_bytes)?;
         tau_util_fs_err::write(

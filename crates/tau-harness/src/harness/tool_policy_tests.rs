@@ -14,6 +14,7 @@ use tau_proto::{
 use tempfile::TempDir;
 
 use super::Harness;
+use super::prompt_materialization::PromptSurfaceError;
 
 const ROLE: &str = "test";
 
@@ -45,13 +46,18 @@ fn tagged_tool(name: &str, enabled_by_default: bool, tags: &[&str]) -> ToolSpec 
 /// Registers two implementations of an arbitrary alias, demonstrating that the
 /// selection mechanism does not recognize a particular backend or image tool.
 fn register_asset_backings(harness: &mut Harness) {
-    let mut generic = tagged_tool("generic_asset", true, &[]);
+    register_asset_backings_with_default(harness, true);
+}
+
+/// Registers the same arbitrary alias with caller-selected base enablement.
+fn register_asset_backings_with_default(harness: &mut Harness, enabled_by_default: bool) {
+    let mut generic = tagged_tool("generic_asset", enabled_by_default, &[]);
     generic.model_visible_name = Some(ToolName::new("render_asset"));
     harness
         .tool_routing
         .registry
         .register(&crate::test_connection_id("generic"), generic);
-    let mut scoped = tagged_tool("provider_asset", true, &[]);
+    let mut scoped = tagged_tool("provider_asset", enabled_by_default, &[]);
     scoped.model_visible_name = Some(ToolName::new("render_asset"));
     scoped.provider_scope = Some(ProviderName::new("provider"));
     harness
@@ -143,6 +149,144 @@ fn provider_scoped_backing_respects_role_denial() {
         selected_asset(&policy.harness).as_deref(),
         Some("generic_asset")
     );
+}
+
+/// A role can opt into a default-off provider-backed surface by its public
+/// name; policy applies to every eligible backing before scoped selection.
+#[test]
+fn public_name_enable_selects_eligible_scoped_backing() {
+    let mut policy = policy_harness(
+        &[],
+        AgentRole {
+            enable_tools: vec![ToolName::new("render_asset")],
+            ..Default::default()
+        },
+    );
+    register_asset_backings_with_default(&mut policy.harness, false);
+    assert_eq!(
+        selected_asset(&policy.harness).as_deref(),
+        Some("provider_asset")
+    );
+}
+
+/// Public-name denial removes every backing for that surface rather than
+/// falling through from a denied scoped implementation to a generic one.
+#[test]
+fn public_name_disable_denies_scoped_and_generic_backings() {
+    let mut policy = policy_harness(
+        &[],
+        AgentRole {
+            disable_tools: vec![ToolName::new("render_asset")],
+            ..Default::default()
+        },
+    );
+    register_asset_backings(&mut policy.harness);
+    assert_eq!(selected_asset(&policy.harness), None);
+}
+
+/// The legacy allow-list field uses the same public namespace as successor
+/// named controls rather than requiring one backing identity.
+#[test]
+fn public_name_tools_allow_list_selects_scoped_backing() {
+    let mut policy = policy_harness(
+        &[],
+        AgentRole {
+            tools: Some(vec![ToolName::new("render_asset")]),
+            ..Default::default()
+        },
+    );
+    register_asset_backings(&mut policy.harness);
+    assert_eq!(
+        selected_asset(&policy.harness).as_deref(),
+        Some("provider_asset")
+    );
+}
+
+/// Public opt-in does not make a scoped backing available to the wrong model
+/// route or to the generic role-only direct-call fallback.
+#[test]
+fn public_name_enable_cannot_bypass_provider_scope() {
+    let mut policy = policy_harness(
+        &[],
+        AgentRole {
+            enable_tools: vec![ToolName::new("render_asset")],
+            ..Default::default()
+        },
+    );
+    let mut scoped = tagged_tool("private_asset_backing", false, &[]);
+    scoped.model_visible_name = Some(ToolName::new("render_asset"));
+    scoped.provider_scope = Some(ProviderName::new("other"));
+    policy
+        .harness
+        .tool_routing
+        .registry
+        .register(&crate::test_connection_id("other"), scoped);
+
+    assert_eq!(selected_asset(&policy.harness), None);
+    assert!(
+        policy
+            .harness
+            .resolve_enabled_tool_spec_for_role(&ToolName::new("render_asset"), ROLE)
+            .is_none()
+    );
+}
+
+/// Public-name opt-in cannot choose between same-tier provider backings; the
+/// ordinary ambiguity check still fails closed after role policy.
+#[test]
+fn public_name_enable_preserves_same_tier_ambiguity() {
+    let mut policy = policy_harness(
+        &[],
+        AgentRole {
+            enable_tools: vec![ToolName::new("render_asset")],
+            ..Default::default()
+        },
+    );
+    register_asset_backings(&mut policy.harness);
+    let mut duplicate = tagged_tool("other_provider_asset", false, &[]);
+    duplicate.model_visible_name = Some(ToolName::new("render_asset"));
+    duplicate.provider_scope = Some(ProviderName::new("provider"));
+    policy
+        .harness
+        .tool_routing
+        .registry
+        .register(&crate::test_connection_id("provider"), duplicate);
+    let error = policy
+        .harness
+        .prepare_tool_surface_for_dispatch(
+            ROLE,
+            &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+            policy
+                .harness
+                .config
+                .selected_model
+                .as_ref()
+                .expect("selected model"),
+        )
+        .expect_err("same-tier public backings must remain ambiguous");
+    assert!(matches!(
+        error,
+        PromptSurfaceError::DuplicateToolName(name) if name == "render_asset"
+    ));
+}
+
+/// The public shell surface keeps using the existing style selector even when
+/// one backing's private identity happens to equal the public name.
+#[test]
+fn public_shell_name_uses_selected_style_not_internal_collision() {
+    let policy = policy_harness(
+        &[],
+        AgentRole {
+            enable_tools: vec![ToolName::new("edit")],
+            ..Default::default()
+        },
+    );
+    let specs = policy.harness.gather_effective_tool_specs_for_role_model(
+        ROLE,
+        policy.harness.config.selected_model.as_ref(),
+    );
+    assert!(!specs.iter().any(|spec| spec.name == "edit"));
+    assert!(specs.iter().any(|spec| spec.name == "replace"));
 }
 
 /// Declaring two implementations in the same tier remains an ambiguity error;
@@ -1112,6 +1256,28 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
     );
 }
 
+/// A public named denial covers every backing even when an earlier broad role
+/// enable resurrects implementations outside the selected shell style.
+#[test]
+fn public_name_disable_covers_all_backings_after_tag_enable() {
+    let policy = policy_harness(
+        &[],
+        AgentRole {
+            enable_tool_tags: vec![
+                serde_json::from_str("\"shell:edit\"").expect("valid tool tag pattern"),
+            ],
+            disable_tools: vec![ToolName::new("edit")],
+            ..Default::default()
+        },
+    );
+    let specs = policy.harness.gather_effective_tool_specs_for_role_model(
+        ROLE,
+        policy.harness.config.selected_model.as_ref(),
+    );
+    assert!(!specs.iter().any(|spec| spec.name == "edit"));
+    assert!(!specs.iter().any(|spec| spec.name == "replace"));
+}
+
 /// Effective alias validation is snapshot-local: duplicates are diagnosed only
 /// among tools simultaneously supplied to one prompt.
 #[test]
@@ -1139,10 +1305,10 @@ fn effective_tool_surface_detects_visible_alias_collision() {
     );
 }
 
-/// Ensures enabling both shell editor implementations rejects their shared
-/// provider-visible `edit` name before prompt construction.
+/// Public shell naming remains owned by the style selector even when a legacy
+/// private selector names the selected backing too.
 #[test]
-fn role_cannot_enable_both_shell_editors_with_shared_visible_name() {
+fn public_and_legacy_shell_names_keep_one_selected_backing() {
     let policy = policy_harness(
         &[],
         AgentRole {
@@ -1159,16 +1325,13 @@ fn role_cannot_enable_both_shell_editors_with_shared_visible_name() {
     let specs = policy
         .harness
         .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
-    assert!(specs.iter().any(|spec| spec.name == "edit"));
     assert!(specs.iter().any(|spec| spec.name == "replace"));
-    let error = policy
-        .harness
-        .try_build_system_prompt_for_role_and_agent(ROLE, None, None, &specs, None, false)
-        .expect_err("both editors must collide as visible edit");
+    assert!(!specs.iter().any(|spec| spec.name == "edit"));
     assert!(
-        error
-            .to_string()
-            .contains("duplicate model-visible name `edit`")
+        policy
+            .harness
+            .try_build_system_prompt_for_role_and_agent(ROLE, None, None, &specs, None, false)
+            .is_ok()
     );
 }
 

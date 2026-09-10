@@ -187,6 +187,7 @@ fn image_declarations_are_opt_in_and_prompt_only() {
             tool.tool.model_visible_name,
             Some(ToolName::new("generate_image"))
         );
+        assert!(!tool.tool.enabled_by_default);
         assert!(tool.tool.tags.is_empty());
         assert!(tool.tool_group.is_none());
         let schema = tool.tool.parameters.expect("schema");

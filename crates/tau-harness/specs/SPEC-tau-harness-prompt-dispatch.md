@@ -119,6 +119,13 @@ Role precedence is broad-to-specific and runs after global policy: optional
 `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then
 `enable_tools`. This deliberately lets a role disable a broad family and
 re-enable a narrower tag, group, or named tool.
+Named role controls use the model-visible public tool name. They apply to all
+otherwise eligible backings before ordinary scoped/generic selection, so
+provider namespace, connection ownership, and fixed backing priority remain
+internal routing concerns. A name that is not any public tool name may retain
+legacy exact-internal matching, but an internal identity never takes precedence
+over a public name. Existing dedicated shell-style and web-candidate selectors
+continue to choose within their managed surfaces.
 
 Prompt dispatch snapshots the effective `ToolSpec` list for the selected prompt
 model. Provider tool calls are validated against that prompt-owned snapshot, not

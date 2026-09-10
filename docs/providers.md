@@ -1492,8 +1492,10 @@ In a ChatGPT profile, set `"image_generation": true` (default `false`) and
 restart the provider extension when deploying the updated configuration. This
 declares ordinary function tool `generate_image` for that exact provider
 namespace and serving connection. Both Standard and Lite profiles can opt in.
-Ordinary role tool policy still controls access; if a provider instance has a
-`tool_prefix`, the public alias receives that prefix too.
+The declaration is disabled by default. Enable it for a role with
+`enable_tools: [generate_image]`; Tau selects the eligible provider-scoped
+backing internally. If a provider instance has a `tool_prefix`, the public alias
+receives that prefix too.
 
 The only argument is `{"prompt":"..."}`: nonempty text, at most 32 KiB, with
 no account, model, size, edit, or batch arguments. One fixed `gpt-image-2`

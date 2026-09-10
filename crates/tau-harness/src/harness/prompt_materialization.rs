@@ -2545,7 +2545,9 @@ impl Harness {
             return enabled;
         };
         if let Some(tools) = &role.tools {
-            enabled = tools.iter().any(|name| name == &spec.name);
+            enabled = tools
+                .iter()
+                .any(|name| self.role_tool_name_matches(name, spec, model_tags, true));
         }
         if tags_match_any(&spec.tags, &role.disable_tool_tags) {
             enabled = false;
@@ -2569,13 +2571,85 @@ impl Harness {
                 enabled = true;
             }
         }
-        if role.disable_tools.iter().any(|name| name == &spec.name) {
+        if role
+            .disable_tools
+            .iter()
+            .any(|name| self.role_tool_name_matches(name, spec, model_tags, false))
+        {
             enabled = false;
         }
-        if role.enable_tools.iter().any(|name| name == &spec.name) {
+        if role
+            .enable_tools
+            .iter()
+            .any(|name| self.role_tool_name_matches(name, spec, model_tags, true))
+        {
             enabled = true;
         }
         enabled
+    }
+
+    /// Matches public role configuration before falling back to an
+    /// unambiguous legacy internal name.
+    fn role_tool_name_matches(
+        &self,
+        configured_name: &ToolName,
+        spec: &tau_proto::ToolSpec,
+        model_tags: &[tau_proto::ModelTag],
+        restrict_managed_selection: bool,
+    ) -> bool {
+        let configured_is_public = self
+            .tool_routing
+            .registry
+            .all_tools()
+            .iter()
+            .any(|registered| self.tool_model_visible_name(registered) == configured_name)
+            || self
+                .extensions
+                .activation_staging
+                .values()
+                .flat_map(|stage| stage.tool_registrations.iter())
+                .any(|registration| {
+                    self.tool_model_visible_name(&registration.tool) == configured_name
+                });
+        if !configured_is_public {
+            return spec.name == *configured_name;
+        }
+        if self.tool_model_visible_name(spec) != configured_name {
+            return false;
+        }
+        let public_backing_count = self
+            .tool_routing
+            .registry
+            .all_tools()
+            .iter()
+            .filter(|registered| self.tool_model_visible_name(registered) == configured_name)
+            .count()
+            + self
+                .extensions
+                .activation_staging
+                .values()
+                .flat_map(|stage| stage.tool_registrations.iter())
+                .filter(|registration| {
+                    self.tool_model_visible_name(&registration.tool) == configured_name
+                })
+                .count();
+        if !restrict_managed_selection
+            || public_backing_count < 2
+            || !spec.tags.iter().any(|tag| tag.as_str() == "shell:edit")
+        {
+            return true;
+        }
+        self.shell_tool_style_for_base_enablement(model_tags)
+            .is_some_and(|style| {
+                spec.tags.iter().any(|tag| {
+                    tag.as_str()
+                        == match style {
+                            ShellToolStyle::Edit => "shell:edit:line",
+                            ShellToolStyle::Replace => "shell:edit:replace",
+                            ShellToolStyle::Codex => "shell:edit:apply_patch",
+                        }
+                })
+            })
     }
 
     /// Resolves the requested shell surface before ordinary policy and role

@@ -40,13 +40,13 @@ A role can also set:
   `□ <configured message>` in the dedicated internal-notice style
 - `prompt_fragments`: role-specific prompt fragments
 - `prompt_override`: system prompt template name
-- `tools`: explicit internal tools enabled for this role
+- `tools`: explicit public tool names allowed for this role
 - `disable_tool_tags`: tool tag patterns removed after global policy
 - `enable_tool_tags`: tool tag patterns added after role tag disables
 - `disable_tool_groups`: tool groups removed after role tag changes
 - `enable_tool_groups`: tool groups added after role group disables
-- `disable_tools`: internal tools removed after role group changes
-- `enable_tools`: internal tools added last
+- `disable_tools`: public tool names removed after role group changes
+- `enable_tools`: public tool names added last
 - `required_skills`: exact skill names that must be
   discoverable and model-loadable before the role is available
 
@@ -422,7 +422,14 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
 
 Missing provider/model fields use `agents` defaults first, then group defaults, then provider-published fallback knobs for the role's resolved model. `required_skills` from `agents`, groups, and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:workdir`, or disable a group and keep one named tool. When the successor fields are omitted, `inference_compaction` uses the provider default and the built-in named `compactions.default` policy uses the model's published standalone threshold. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
-Global harness policy is configured under `tool_policy`. Set `default_shell_tool_style` to `codex`, `edit`, or `replace` to choose the apply-patch, line-coordinate, or exact-text implementation. Missing, null, or whitespace-only values select exact-text `replace` except for ChatGPT/Codex models, which select `apply_patch`. Both non-Codex implementations are provider-visible as `edit`; their internal/configuration names remain distinct, so a role that enables both fails prompt construction with a duplicate visible name. Rules under `tool_policy.rules` are keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:workdir`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:read:image`, `shell:exec:shell_command`, `shell:workdir`, and `shell:lock`; image-producing tools remain independently gated by the exact provider route modalities. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
+Named role controls use the public, model-visible tool name. For example, use
+`enable_tools: [generate_image]`; provider account names and extension backing
+identifiers are not role configuration. Tau applies the role policy first, then
+selects the eligible backing for the role's model using provider scope,
+connection ownership, and the existing fixed priority. Same-tier ambiguity
+still fails closed.
+
+Global harness policy is configured under `tool_policy`. Set `default_shell_tool_style` to `codex`, `edit`, or `replace` to choose the apply-patch, line-coordinate, or exact-text implementation. Missing, null, or whitespace-only values select exact-text `replace` except for ChatGPT/Codex models, which select `apply_patch`. Both non-Codex implementations are provider-visible as `edit`; public named enables and allow-lists retain the selected style rather than exposing their distinct backing identities. Rules under `tool_policy.rules` are keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:workdir`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:read:image`, `shell:exec:shell_command`, `shell:workdir`, and `shell:lock`; image-producing tools remain independently gated by the exact provider route modalities. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 
 Tau ships built-in `engineer-junior`, `engineer`, and `engineer-senior` roles,
 with `agents.default_role: engineer`. `engineer-junior` uses lower reasoning
