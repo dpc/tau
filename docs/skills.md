@@ -69,7 +69,7 @@ Users can force a skill into the next model prompt with either form:
 The harness validates against the selected agent's frozen skill snapshot, rejects
 unknown or non-user-invocable skills with a visible `harness.notice`, reads the
 same bounded 64 KiB prefix used by the model-visible tool, strips frontmatter,
-and expands the submitted prompt to a Pi-style block. A new agent's initial
+and expands the submitted prompt to a sentinel-delimited block. A new agent's initial
 `:skill` command waits for its discovery initialization to finalize before this
 expansion.
 

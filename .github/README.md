@@ -4,11 +4,7 @@
 
 # Tau coding agent
 
-> Tau is like [Pi][pi], but twice as much.
-
 Tau is a minimal Unix-first coding agent for people who want local control, simple process boundaries, and tooling that fits naturally into a command-line environment.
-
-[pi]: https://shittycodingagent.ai/
 
 ## Radicle note
 

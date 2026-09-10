@@ -56,11 +56,8 @@ scroll into the scrollback buffer. This is why a simple "emit `\n` to scroll"
 approach does not work — it would only push whatever happened to be on the
 screen previously, not the new content.
 
-This technique is borrowed from the
-[Pi coding agent](https://github.com/ArtificialWisdomAI/pi-monorepo)'s TUI
-renderer (`@mariozechner/pi-tui`), which renders lines sequentially and lets
-`\r\n` at the viewport bottom push content into scrollback rather than
-managing scrollback internally.
+This technique renders lines sequentially and lets `\r\n` at the viewport
+bottom push content into scrollback rather than managing scrollback internally.
 
 ### Path 3 — Full render (resize)
 
@@ -312,5 +309,3 @@ remain responsible for visible rows, scrollback, and cursor semantics.
 ## References
 
 - Fish shell screen rendering: <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>
-- Pi coding agent TUI: <https://github.com/ArtificialWisdomAI/pi-monorepo>
-  (specifically `@mariozechner/pi-tui`, `src/tui.ts`, the `doRender()` method)

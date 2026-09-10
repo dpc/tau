@@ -5,8 +5,6 @@
 
 # ([dpc's](#other-agents-named-tau)) Tau coding agent
 
-> Tau is like [Pi][pi], but twice as much.
-
 Tau is a minimal Unix-first coding agent for people who want local control, simple process boundaries, and tooling that fits naturally into a command-line environment.
 
 Tau runs its main components as standalone POSIX processes and connects them over stdio and Unix sockets.
@@ -25,9 +23,6 @@ This architecture has important benefits:
 * Components can be sandboxed individually using tools like bubblewrap, Docker, jails, or Landlock, according to their actual needs.
 * Components can be implemented in any programming language.
 * It avoids bringing in web technology where it does not belong.
-
-[pi]: https://shittycodingagent.ai/
-
 
 ## Features
 

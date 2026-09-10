@@ -1,11 +1,8 @@
 # tau-ext-std-notifications
 
 A tau extension that bridges agent activity into iTerm2-style
-[OSC 1337 `SetUserVar`][osc1337] user-variable updates. Mirrors the
-shape of dpc's Pi extensions
-[`notification-sounds.ts`][pi-sounds] and
-[`idle-notification.ts`][pi-idle], adapted to tau's harness-mediated
-event bus.
+[OSC 1337 `SetUserVar`][osc1337] user-variable updates through Tau's
+harness-mediated event bus.
 
 The extension itself does not play sounds or pop desktop notifications. It
 emits configured terminal-facing side effects — OSC 1337 user-vars, terminal
@@ -193,6 +190,4 @@ text_len, error }` and idle-deadline transitions; `trace` adds one
 line per ignored event for protocol-level debugging.
 
 [osc1337]: https://iterm2.com/documentation-escape-codes.html
-[pi-sounds]: https://github.com/dpc/dpc-personal/blob/master/.pi/agent/extensions/notification-sounds.ts
-[pi-idle]: https://github.com/dpc/dpc-personal/blob/master/.pi/agent/extensions/idle-notification.ts
 [var]: ../tau-proto/src/events.rs
