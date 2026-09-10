@@ -3,8 +3,10 @@
 Tau is a Unix-first coding agent built for local control, durable work, and a
 productive terminal workflow. This page is a tour of the major implemented
 capabilities, not a complete command or configuration reference. Start with the
-[README](README.md) for installation and project philosophy; follow the links
-below for details.
+[first-task guide](docs/getting-started.md) for an actionable installation,
+authentication, repository change, review, and resume path. The
+[README](README.md) covers project philosophy; follow the links below for
+details.
 
 For config-only extension inventories, `tau dev preview-declarations` uses an
 explicitly opted-in declaration branch rather than ordinary harness startup.

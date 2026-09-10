@@ -9,6 +9,11 @@ Tau is a minimal Unix-first coding agent for people who want local control, simp
 
 Tau runs its main components as standalone POSIX processes and connects them over stdio and Unix sockets.
 
+**New here?** Follow [Your first Tau task](docs/getting-started.md) from
+installation and authentication through a small reviewed repository change,
+then stop and resume the saved session. Read its trust/data summary before the
+first model request.
+
 Components include:
 
 * UI
@@ -47,6 +52,10 @@ Terminal demo:
 [![asciicast](https://asciinema.org/a/973826.svg)](https://asciinema.org/a/973826)
 
 ## Installing
+
+The canonical [first-task guide](docs/getting-started.md) explains prerequisites,
+provider authentication, a bounded first change, review, troubleshooting, and
+resume.
 
 ### via Nix
 
@@ -133,6 +142,10 @@ documentation before granting it access to Tau.
 Use `tau init` to generate config files.
 
 Use `tau provider add` to create or replace built-in provider profiles, including ChatGPT/Codex, OpenAI-compatible Chat Completions, and OpenRouter profiles; edit `harness.yaml` for harness-owned roles, defaults, and extension settings.
+
+Before using private repositories, review [Trust and data](docs/trust-and-data.md).
+For normal stop/resume behavior and conservative upgrades, see
+[Session lifecycle and upgrades](docs/lifecycle-and-upgrades.md).
 
 `wait({"timeout_minutes": N})` silently clamps its activating-input deadline to
 the global `harness.yaml` bounds. The defaults trade small waits for fewer model
