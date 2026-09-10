@@ -1126,23 +1126,33 @@ impl Harness {
             return None;
         }
         let stage_started = stage_start(timing);
-        let prompt_context = tree
-            .and_then(|tree| {
-                standalone_window.map_or_else(
-                    || Some(assemble_prompt_context_from(tree, head)),
-                    |(through, cut)| {
-                        crate::prompt::assemble_prompt_context_prefix_from(
-                            tree,
-                            through.as_option(),
-                            cut,
-                        )
-                    },
-                )
-            })
-            .unwrap_or_else(|| crate::prompt::AssembledPromptContext {
-                context: tau_proto::PromptContext::default(),
-                contains_payload_envelope_provenance_projection: false,
-            });
+        let (prompt_context, omitted_provider_context) = match tree {
+            Some(tree) => {
+                let (head, cut) = standalone_window.map_or((head, None), |(through, cut)| {
+                    (through.as_option(), Some(cut))
+                });
+                match crate::prompt::assemble_prompt_context_for_provider(
+                    tree,
+                    head,
+                    cut,
+                    &model.provider,
+                ) {
+                    Ok(projected) => projected,
+                    Err(message) => {
+                        self.emit_harness_failure(message);
+                        self.terminalize_owned_dispatch_error(cid, message.to_owned());
+                        return None;
+                    }
+                }
+            }
+            None => (
+                crate::prompt::AssembledPromptContext {
+                    context: tau_proto::PromptContext::default(),
+                    contains_payload_envelope_provenance_projection: false,
+                },
+                false,
+            ),
+        };
         let mut contains_payload_envelope_provenance_projection =
             prompt_context.contains_payload_envelope_provenance_projection;
         let mut context = prompt_context.context;
@@ -1161,6 +1171,25 @@ impl Harness {
                     items: vec![ContextItem::CompactionTrigger],
                 },
             ));
+        }
+        let warn = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(cid)
+            .is_some_and(|agent| {
+                agent
+                    .dispatch
+                    .provider_switch_warning
+                    .observe(&model.provider, omitted_provider_context)
+            });
+        if warn {
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                tau_proto::NoticeLevel::Warning,
+                tau_proto::NoticePurpose::Diagnostic,
+                &format!("Agent {cid}: incompatible or unknown-origin provider-specific context was omitted for provider {}; continuation is best effort.", model.provider),
+            );
         }
         if let Some(timing) = timing {
             timing.record(

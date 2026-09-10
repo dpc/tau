@@ -5,10 +5,13 @@ use std::collections::VecDeque;
 use tau_proto::AgentPromptId;
 
 use super::{ActivationDispatchState, PendingCancel, PendingMessageWake, PendingPrompt};
+use crate::prompt::provider_switch_warning::ProviderSwitchWarning;
 
 /// Queued work and provider-prompt dispatch bookkeeping for one agent.
 #[derive(Debug)]
 pub(crate) struct AgentDispatchState {
+    /// Process-local omission warning state, reset when the agent is loaded.
+    pub(crate) provider_switch_warning: ProviderSwitchWarning,
     /// Agent prompt id of the prompt currently in flight for this agent, or
     /// `None` if nothing is pending.
     pub(crate) in_flight_prompt: Option<AgentPromptId>,

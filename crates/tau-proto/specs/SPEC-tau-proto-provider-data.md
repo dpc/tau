@@ -53,6 +53,14 @@ records.
 
 ## Opaque provider item dual representation
 
+Replay eligibility is destination-specific under
+[REQ-best-effort-provider-switching](../../../specs/REQ-best-effort-provider-switching.md).
+The harness projects compatible material unchanged and omits incompatible
+reasoning, unknown items, response IDs, and message/tool wire envelopes before
+provider delivery. Semantic messages, tool correlation, arguments, and results
+remain intact. Canonical sidecars remain stored for later compatible replay.
+Missing authoritative producing-provider facts never grant replay compatibility.
+
 `OpaqueProviderItem.value` is the parsed CBOR form of provider-owned output
 items such as Responses reasoning, compaction, and unknown future provider items.
 

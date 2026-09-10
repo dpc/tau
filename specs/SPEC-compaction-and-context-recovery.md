@@ -457,7 +457,11 @@ bytes; only a retained suffix node whose committed source fact carried the typed
 background-completion kind keeps that replay-derived authority.
 Provider-authored opaque `Compaction` items are valid members of a nonempty,
 structurally closed standalone replacement window and retain their raw replay
-JSON. Every completed or durable opaque provider item carries required raw JSON
+JSON. Cross-provider materialization must not discard an incompatible opaque
+replacement; it refuses the request under
+[REQ-best-effort-provider-switching](REQ-best-effort-provider-switching.md).
+Portable textual replacements remain usable across providers.
+Every completed or durable opaque provider item carries required raw JSON
 that parses to the same semantic value as its structured value and whose
 provider `type` matches the outer reasoning, compaction, or unknown-item family.
 Missing, malformed, kind-mismatched, and semantically contradictory input fails

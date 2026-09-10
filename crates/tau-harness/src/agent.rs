@@ -768,6 +768,7 @@ impl Agent {
                 peer_entrypoint_endpoint: false,
             },
             dispatch: AgentDispatchState {
+                provider_switch_warning: Default::default(),
                 in_flight_prompt: None,
                 pending_prompts: VecDeque::new(),
                 pending_message_wakes: VecDeque::new(),

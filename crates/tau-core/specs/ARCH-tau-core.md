@@ -75,6 +75,12 @@ tree clones carry it with the other replay-derived indexes. Compaction replaceme
 items never acquire the bit, retained suffix nodes preserve it, and dropping the tree
 drops the index, so a stale or foreign `NodeId` cannot confer authority.
 
+The same replay-derived index owns node producing-model provenance from canonical
+prompt starts and compaction boundaries. It introduces no journal fields and
+never infers origin from backend JSON, usage labels, or the current model.
+Destination-specific request projection follows
+[REQ-best-effort-provider-switching](../../../specs/REQ-best-effort-provider-switching.md).
+
 A durable session keeps ephemeral-agent loads and matching unloads in a separate
 process-local, independently sequenced overlay. Late same-daemon replay first
 validates and folds the durable snapshot, then validates and composes the

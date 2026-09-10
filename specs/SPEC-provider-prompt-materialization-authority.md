@@ -11,6 +11,14 @@ provider request, remain provider-content authority. An inference dispatch
 checkpoint or standalone-compaction start is the sole durable recovery and
 no-resend owner; its terminal outcome is completion authority.
 
+Destination-specific projection follows
+[REQ-best-effort-provider-switching](REQ-best-effort-provider-switching.md).
+Canonical prompt starts and compaction boundaries establish the producing
+provider; the core reconstructs that provenance on live fold and cold replay.
+The harness removes incompatible replay material only from the transient request,
+before delivery, and refuses incompatible opaque history replacements. No
+conversion rewrites canonical history or backfills historical origin.
+
 Tau-owned local compaction summaries retain a typed
 `SyntheticCompactionSummary` origin in their canonical replacement message.
 Prompt assembly uses only that origin, never the narrative spelling, to select

@@ -197,7 +197,10 @@ Completed opaque reasoning, compaction, and unknown output retains its exact
 raw item JSON together with the equivalent structured value. Stream decoding
 rejects a completed opaque item when the raw item slice is unavailable, and
 request lowering replays the already validated raw JSON directly rather than
-falling back to structured serialization.
+falling back to structured serialization. The harness admits only compatible
+provider-owned material into this request projection under
+[REQ-best-effort-provider-switching](../../../specs/REQ-best-effort-provider-switching.md);
+the lowerer does not guess origin or repair foreign opaque JSON.
 Older models retain inline context management and ignore the profile's Lite
 compatibility flag.
 Standard ChatGPT/Codex Responses routes additionally advertise provider-hosted

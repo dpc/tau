@@ -12,6 +12,9 @@ use handlebars::Renderable as _;
 use tau_core::AgentEntry;
 use tau_proto::{ContextItem, PromptFragment, ToolName};
 
+mod provider_context_projection;
+pub(crate) mod provider_switch_warning;
+
 #[cfg(test)]
 thread_local! {
     static PROMPT_CONTEXT_CONSTRUCTION_COUNT: std::cell::Cell<usize> =
@@ -1402,11 +1405,40 @@ pub(crate) fn active_prompt_context_contains_payload_envelope_provenance_project
 }
 
 /// Assembles provider context from the selected transcript branch.
+#[cfg(test)]
 pub(crate) fn assemble_prompt_context_from(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
 ) -> AssembledPromptContext {
-    assemble_prompt_context_window(tree, head, None, None)
+    assemble_prompt_context_window(tree, head, None, None, None)
+}
+
+/// Projects retained history for one destination without changing canonical
+/// items. Incompatible opaque compaction fails before any provider dispatch.
+pub(crate) fn assemble_prompt_context_for_provider(
+    tree: &tau_core::AgentTree,
+    head: Option<tau_core::NodeId>,
+    prefix_through: Option<tau_proto::AgentHead>,
+    destination: &tau_proto::ProviderName,
+) -> Result<(AssembledPromptContext, bool), &'static str> {
+    if prefix_through.is_some_and(|cut| !prompt_context_cut_exists(tree, head, cut)) {
+        return Err(
+            "Cannot materialize provider context: compaction cut is outside the retained window.",
+        );
+    }
+    let mut projection = provider_context_projection::ProviderContextProjection {
+        destination,
+        omitted: false,
+        incompatible_compaction: false,
+    };
+    let context =
+        assemble_prompt_context_window(tree, head, prefix_through, None, Some(&mut projection));
+    if projection.incompatible_compaction {
+        return Err(
+            "Cannot switch provider: retained opaque compaction belongs to an incompatible or unknown provider. Continue with its original provider or start a new conversation with an explicit handoff.",
+        );
+    }
+    Ok((context, projection.omitted))
 }
 
 /// Returns whether one durable agent-message entry contributes model-visible
@@ -1448,13 +1480,23 @@ pub(crate) fn agent_message_is_provider_visible(entry: &AgentEntry) -> bool {
 /// Unlike physical ancestry assembly, this retains the latest replacement and
 /// addresses nodes in its preserved suffix, allowing a later rolling
 /// compaction pass to compact `replacement + prefix(suffix)`.
+#[cfg(test)]
 pub(crate) fn assemble_prompt_context_prefix_from(
     tree: &tau_core::AgentTree,
     active_head: Option<tau_core::NodeId>,
     cut: tau_proto::AgentHead,
 ) -> Option<AssembledPromptContext> {
+    prompt_context_cut_exists(tree, active_head, cut)
+        .then(|| assemble_prompt_context_window(tree, active_head, Some(cut), None, None))
+}
+
+fn prompt_context_cut_exists(
+    tree: &tau_core::AgentTree,
+    active_head: Option<tau_core::NodeId>,
+    cut: tau_proto::AgentHead,
+) -> bool {
     let window = tree.active_provider_window(active_head);
-    let cut_exists = match cut {
+    match cut {
         tau_proto::AgentHead::Root => window.replacement.is_none(),
         tau_proto::AgentHead::Node(node_id) => {
             window.replacement_boundary == Some(node_id)
@@ -1463,8 +1505,7 @@ pub(crate) fn assemble_prompt_context_prefix_from(
                     .iter()
                     .any(|(candidate, _)| *candidate == node_id)
         }
-    };
-    cut_exists.then(|| assemble_prompt_context_window(tree, active_head, Some(cut), None))
+    }
 }
 
 /// Assemble the complete logical window once and return its exact canonical
@@ -1474,7 +1515,7 @@ pub(crate) fn active_prompt_prefix_json_measurements(
     active_head: Option<tau_core::NodeId>,
 ) -> Option<Vec<(tau_core::NodeId, tau_proto::ByteCount)>> {
     let mut measurements = Vec::new();
-    let _ = assemble_prompt_context_window(tree, active_head, None, Some(&mut measurements));
+    let _ = assemble_prompt_context_window(tree, active_head, None, Some(&mut measurements), None);
     Some(measurements)
 }
 
@@ -1505,6 +1546,7 @@ fn assemble_prompt_context_window(
     head: Option<tau_core::NodeId>,
     prefix_through: Option<tau_proto::AgentHead>,
     measurements: Option<&mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>>,
+    mut projection: Option<&mut provider_context_projection::ProviderContextProjection<'_>>,
 ) -> AssembledPromptContext {
     #[cfg(test)]
     PROMPT_CONTEXT_CONSTRUCTION_COUNT
@@ -1545,6 +1587,14 @@ fn assemble_prompt_context_window(
                 items: project_compaction_replacement_items(replacement_window),
             },
         ));
+        if let Some(projection) = projection.as_deref_mut() {
+            projection.project(
+                tree,
+                active_window.replacement_boundary,
+                blocks.last_mut().expect("replacement block"),
+                true,
+            );
+        }
     }
     let mut measurement_state = measurements
         .map(|measurements| PromptContextMeasurementState::new(tree, &blocks, measurements));
@@ -1566,6 +1616,11 @@ fn assemble_prompt_context_window(
         let blocks_before = measurement_state
             .as_ref()
             .map(|_| measurement_block_count(&blocks));
+        let projected_blocks_start = if matches!(entry, AgentEntry::Compaction { .. }) {
+            0
+        } else {
+            blocks.len()
+        };
         match entry {
             AgentEntry::Compaction {
                 replacement_window, ..
@@ -1862,6 +1917,16 @@ fn assemble_prompt_context_window(
                         items: vec![ContextItem::Message(*item.clone())],
                     },
                 ));
+            }
+        }
+        if let Some(projection) = projection.as_deref_mut() {
+            for block in &mut blocks[projected_blocks_start..] {
+                projection.project(
+                    tree,
+                    Some(node_id),
+                    block,
+                    matches!(entry, AgentEntry::Compaction { .. }),
+                );
             }
         }
         if let Some(measurement_state) = measurement_state.as_mut() {

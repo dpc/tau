@@ -9,6 +9,8 @@ use tau_proto::{
 use super::*;
 use crate::discovery as path_crate_discovery;
 
+mod provider_switch;
+
 /// Explicit-parent compaction materializes the owning branch even when another
 /// branch holds the tree write cursor, identically after cold replay.
 #[test]

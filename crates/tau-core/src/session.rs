@@ -309,6 +309,8 @@ struct ProviderWindowIndex {
 /// Complete non-persisted query indexes rebuilt by agent-journal replay.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct AgentTreeIndexes {
+    /// Producing model from canonical prompt/boundary facts, never item JSON.
+    provider_models_by_node: HashMap<NodeId, tau_proto::ModelId>,
     /// Materialized provider-context input nodes keyed by journal occurrence.
     context_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
     /// Materialized assistant-response nodes keyed by journal occurrence.
@@ -2354,6 +2356,14 @@ impl AgentTree {
         node
     }
 
+    /// Returns the producing model established by canonical prompt or
+    /// compaction facts for this node. Missing origin is deliberately not
+    /// inferred.
+    #[must_use]
+    pub fn provider_model_for_node(&self, node: NodeId) -> Option<&tau_proto::ModelId> {
+        self.indexes.provider_models_by_node.get(&node)
+    }
+
     /// Return the single node materialized for a durable context occurrence.
     #[must_use]
     pub fn node_for_durable_event_seq(
@@ -3377,15 +3387,21 @@ impl AgentTree {
                     resume_inference: triggered.resume_inference,
                 },
             )),
-            Event::AgentCompacted(compacted) => Some(self.append_node_at(
-                parent,
-                AgentEntry::Compaction {
-                    replacement_window: compacted.replacement_window.clone(),
-                    transaction_id: compacted.transaction_id.clone(),
-                    cut: compacted.cut,
-                    suffix_end: compacted.suffix_end,
-                },
-            )),
+            Event::AgentCompacted(compacted) => {
+                let node = self.append_node_at(
+                    parent,
+                    AgentEntry::Compaction {
+                        replacement_window: compacted.replacement_window.clone(),
+                        transaction_id: compacted.transaction_id.clone(),
+                        cut: compacted.cut,
+                        suffix_end: compacted.suffix_end,
+                    },
+                );
+                self.indexes
+                    .provider_models_by_node
+                    .insert(node, compacted.model.clone());
+                Some(node)
+            }
             Event::AgentMessageSent(message) => self
                 .agent_message_entry_from_sent(message, durable_event_seq)
                 .and_then(|entry| {
@@ -3578,6 +3594,11 @@ impl AgentTree {
                 usage: response.usage.clone(),
             },
         );
+        if let Some(started) = self.prompt_starts.get(&response.agent_prompt_id) {
+            self.indexes
+                .provider_models_by_node
+                .insert(node_id, started.model.clone());
+        }
         assert!(
             self.indexes
                 .assistant_response_nodes_by_event_seq

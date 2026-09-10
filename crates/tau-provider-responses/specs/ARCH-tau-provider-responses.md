@@ -14,19 +14,23 @@ alone wraps one accepted narrative in the private extension-to-harness envelope.
 Invalid and canceled attempts release no semantic output. Ordinary inference
 streaming and opted-in private debug capture retain their existing behavior.
 
-The backend replays the complete typed Responses transcript on every request.
+The backend replays the complete destination-projected transcript on every
+request. The harness preserves portable message/tool semantics and admits opaque
+material and wire sidecars only for known-compatible producing-provider origin,
+under [REQ-best-effort-provider-switching](../../../specs/REQ-best-effort-provider-switching.md).
+The adapter neither guesses origin nor repairs foreign JSON.
 It supports assistant text, completed reasoning items, and Function tools.
 Plain `reasoning_text` produces full displayable reasoning under the existing
 thinking-visibility policy and a separate opaque durable item; replay skips the
-display companion and emits the opaque item's required validated raw JSON
+display companion and emits an admitted opaque item's required validated raw JSON
 directly. Completed reasoning without exact raw JSON rejects before durable
 output is formed; replay has no structured fallback or raw-less migration.
 Opaque, summary-only, and encrypted reasoning produces only the opaque durable
 item and is not projected as reasoning text. Documented combinations of summary,
 encrypted content, and plain reasoning content retain the same rule: only
-`reasoning_text` content is displayable, while the complete raw item is replayed.
+`reasoning_text` content is displayable, while an admitted raw item is replayed exactly.
 Malformed identities, encrypted content, summaries, or content remain unsupported. The backend
-also preserves Responses assistant and function-call replay sidecars and never
+also preserves admitted Responses assistant and function-call replay sidecars and never
 sends `previous_response_id` or provider-side compaction controls. The
 extension owns profile storage, model publication, retry scheduling,
 cancellation policy, and protocol-event sampling.
