@@ -195,6 +195,10 @@ fn current_attempt_timing(model: &str, profile: &str) -> Vec<u8> {
             },
         },
         AttemptTiming {
+            final_dispatch_us: None,
+            text_message_read: None,
+            associated_message_read: None,
+            dispatch_to_first_decoded_payload_us: None,
             backend: "codex",
             transport: "websocket",
             outcome: "completed",
@@ -273,6 +277,44 @@ fn future_attempt_timing_revisions_are_unsupported() {
         );
         assert!(inventory.prompts.is_empty());
     }
+}
+
+/// Both exact timing schemas remain readable, but a mislabeled version or an
+/// extra unreviewed field must not bypass the private scalar shape validator.
+#[test]
+fn timing_shape_accepts_both_exact_revisions() {
+    let mut value: Value =
+        serde_json::from_slice(&current_attempt_timing("model", "profile")).expect("timing JSON");
+    assert!(timing_shape::current(&value));
+    value["schema_version"] = 1.into();
+    assert!(!timing_shape::current(&value));
+    for key in [
+        "attempt_to_final_dispatch",
+        "final_dispatch_to_first_observed_text_message_read",
+        "first_observed_text_message_read_to_owner_dequeue",
+        "final_dispatch_to_first_observed_associated_message_read",
+        "first_observed_associated_message_read_to_association",
+        "final_dispatch_to_first_decoded_payload",
+    ] {
+        value["timings_us"]
+            .as_object_mut()
+            .expect("timings")
+            .remove(key);
+    }
+    for key in [
+        "final_dispatch",
+        "text_message_read",
+        "associated_message_read",
+        "first_decoded_payload",
+    ] {
+        value["coverage"]
+            .as_object_mut()
+            .expect("coverage")
+            .remove(key);
+    }
+    assert!(timing_shape::current(&value));
+    value["schema_version"] = 2.into();
+    assert!(!timing_shape::current(&value));
 }
 
 /// Exact duplicate scalar records are idempotent while a conflicting duplicate

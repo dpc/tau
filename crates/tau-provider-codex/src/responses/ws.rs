@@ -289,7 +289,12 @@ enum WsCommand {
 /// the sole full-event JSON decode and reports malformed text.
 enum InboundEvent {
     /// One bounded raw upstream text event.
-    Event { text: Utf8Bytes },
+    Event {
+        /// Complete upstream text message, not an individual WebSocket frame.
+        text: Utf8Bytes,
+        /// Optional observation from the active existing receive owner.
+        read: Option<message_read_timing::MessageRead>,
+    },
     /// Server sent a `Close` frame or the stream ended cleanly without one.
     /// Carries only the semantic termination fact used by bounded diagnostics.
     Closed {
@@ -307,6 +312,8 @@ enum InboundEvent {
     /// Tungstenite rejected a frame or complete message at Tau's explicit cap.
     ResourceLimit,
 }
+
+mod message_read_timing;
 
 const CONTROL_ABORT: u8 = 1;
 const CONTROL_WRITER_SEND_FAILURE: u8 = 2;
@@ -432,6 +439,8 @@ impl InboundSender {
 /// `run_turn` is a thin sync wrapper that pushes the envelope onto
 /// the outbound channel and pulls events off the inbound one.
 pub struct WsConn {
+    /// Optional owner-scoped read observations on the existing reader channel.
+    message_read_timing: Arc<message_read_timing::MessageReadTiming>,
     /// Process-local diagnostic socket epoch, allocated lazily without routing
     /// use.
     diagnostic_epoch: Option<u64>,
@@ -567,12 +576,18 @@ impl WsConn {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound_rx) = mpsc::channel(1);
         let inbound_control = Arc::new(InboundControl::new());
+        let message_read_timing = Arc::new(message_read_timing::MessageReadTiming::default());
         let inbound_sender = InboundSender {
             tx: inbound_tx,
             control: Arc::clone(&inbound_control),
         };
         let reader_abort = runtime
-            .spawn(read_loop(stream, inbound_sender, diagnostic_epoch))
+            .spawn(read_loop(
+                stream,
+                inbound_sender,
+                diagnostic_epoch,
+                Arc::clone(&message_read_timing),
+            ))
             .abort_handle();
         let writer_abort = runtime
             .spawn(write_loop(
@@ -585,6 +600,7 @@ impl WsConn {
             .abort_handle();
 
         Ok(Self {
+            message_read_timing,
             diagnostic_epoch,
             outbound_tx,
             inbound_rx,
@@ -994,6 +1010,9 @@ impl WsConn {
         on_update: &mut impl FnMut(&StreamState),
         private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<StreamState, LlmError> {
+        let read_timing = private_trace
+            .as_ref()
+            .and_then(|_| self.message_read_timing.activate());
         let mut diagnostics = EnvelopeDiagnostics::new(agent_prompt_id, self.diagnostic_epoch);
         let mut dispatch_attempted = false;
         let dispatch_result = serialize_and_enqueue_envelope_observed(
@@ -1147,8 +1166,12 @@ impl WsConn {
                 }
             };
             match event {
-                InboundEvent::Event { text } => {
+                InboundEvent::Event { text, read } => {
+                    let read_at = read_timing.as_ref().and_then(|timing| timing.read_at(read));
                     if let Some(trace) = private_trace.as_mut() {
+                        if let Some(read_at) = read_at {
+                            trace.text_message_read(read_at);
+                        }
                         trace.first_input(text.len());
                     }
                     let now = Instant::now();
@@ -1184,6 +1207,7 @@ impl WsConn {
                     };
                     if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
                         trace.decoded(started, false);
+                        trace.decoded_payload();
                     }
                     if let Some(shape) = compact_shape.as_mut() {
                         shape.validate(decoded.value())?;
@@ -1191,7 +1215,7 @@ impl WsConn {
                     if execution.response_mode == ResponseMode::LocalSummary {
                         crate::local_compaction::validate_event(decoded.value())?;
                     }
-                    observe_associated_timing_milestone(private_trace, decoded.value());
+                    observe_associated_timing_milestone(private_trace, decoded.value(), read_at);
                     let mut observed_update = |state: &StreamState| {
                         if state.has_timed_semantic_output()
                             && let Some(trace) = private_trace.as_mut()
@@ -1283,6 +1307,7 @@ impl WsConn {
 fn observe_associated_timing_milestone(
     private_trace: &mut Option<private_trace::AttemptTrace>,
     event: &serde_json::Value,
+    read_at: Option<Instant>,
 ) {
     let Some(trace) = private_trace.as_mut() else {
         return;
@@ -1290,6 +1315,9 @@ fn observe_associated_timing_milestone(
     let event_type = event["type"].as_str().unwrap_or("");
     if event_type.starts_with("response.") {
         trace.associated_event();
+        if let Some(read_at) = read_at {
+            trace.associated_message_read(read_at);
+        }
     }
 }
 
@@ -1672,10 +1700,21 @@ fn build_request(config: &ResponsesConfig, thread_id: &str) -> Result<Request, L
 /// transparently inside `tungstenite`'s state machine — they're
 /// buffered on the sink half and flushed by the writer task's next
 /// send (the periodic ping in the steady state).
-async fn read_loop(mut stream: Stream, tx: InboundSender, connection_epoch: Option<u64>) {
+async fn read_loop(
+    mut stream: Stream,
+    tx: InboundSender,
+    connection_epoch: Option<u64>,
+    timing: Arc<message_read_timing::MessageReadTiming>,
+) {
     while let Some(item) = stream.next().await {
         let (event, terminal) = match item {
-            Ok(Message::Text(text)) => (InboundEvent::Event { text }, false),
+            Ok(Message::Text(text)) => (
+                InboundEvent::Event {
+                    text,
+                    read: timing.observe(),
+                },
+                false,
+            ),
             Ok(Message::Close(frame)) => {
                 tracing::info!(
                     target: crate::LOG_TARGET,

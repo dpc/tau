@@ -27,7 +27,7 @@ an already-started capture frame waits for that frame, with no capture-specific
 terminal gate, priority scheduler, or second stream.
 
 Eligible exact-capture attempts may also retain one
-`tau.provider_attempt_timing` schema-v1 scalar record, capped at 8 KiB before
+`tau.provider_attempt_timing` scalar record, capped at 8 KiB before
 the same FIFO admission. The shared carrier reuses already-owned monotonic stage
 observations and adds only fixed first-seen milestones; it retains no event list,
 payload, provider prose, endpoint, or credential. Backend adapters supply their

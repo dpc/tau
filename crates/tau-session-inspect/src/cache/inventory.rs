@@ -233,7 +233,10 @@ impl Inventory {
         let cache_diagnostic = schema == Some("tau.cache_diagnostic")
             && value.get("schema_version").and_then(Value::as_u64) == Some(0);
         let attempt_timing = schema == Some("tau.provider_attempt_timing")
-            && value.get("schema_version").and_then(Value::as_u64) == Some(1)
+            && matches!(
+                value.get("schema_version").and_then(Value::as_u64),
+                Some(1 | 2)
+            )
             && value
                 .get("metric_definition_version")
                 .and_then(Value::as_u64)

@@ -44,6 +44,10 @@ fn bounded_record_preserves_null_and_zero() {
             },
         },
         AttemptTiming {
+            final_dispatch_us: Some(0),
+            text_message_read: Some((0, 0)),
+            associated_message_read: None,
+            dispatch_to_first_decoded_payload_us: None,
             backend: "codex",
             transport: "websocket",
             outcome: "completed",
@@ -75,6 +79,23 @@ fn bounded_record_preserves_null_and_zero() {
     .expect("bounded timing record");
     assert!(bytes.len() < MAX_RECORD_BYTES);
     let value: Value = serde_json::from_slice(&bytes).expect("timing JSON");
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["metric_definition_version"], 1);
+    assert_eq!(value["timings_us"]["attempt_to_final_dispatch"], 0);
+    assert_eq!(
+        value["timings_us"]["final_dispatch_to_first_observed_text_message_read"],
+        0
+    );
+    assert_eq!(
+        value["timings_us"]["first_observed_text_message_read_to_owner_dequeue"],
+        0
+    );
+    assert_eq!(value["coverage"]["text_message_read"], "observed");
+    assert_eq!(value["coverage"]["associated_message_read"], "not_observed");
+    assert_eq!(
+        value["timings_us"]["final_dispatch_to_first_decoded_payload"],
+        Value::Null
+    );
     assert_eq!(
         value["timings_us"]["final_dispatch_to_first_owner_dequeued_input"],
         0
@@ -99,6 +120,10 @@ fn closed_scalar_record_submits_within_bound() {
     let session_id = "session-timing".parse().expect("session id");
     let agent_prompt_id = "ap-timing".parse().expect("prompt id");
     let timing = AttemptTiming {
+        final_dispatch_us: None,
+        text_message_read: None,
+        associated_message_read: None,
+        dispatch_to_first_decoded_payload_us: None,
         backend: "codex",
         transport: "websocket",
         outcome: "failed",

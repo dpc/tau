@@ -35,7 +35,7 @@ per-agent sequence boundary; those boundaries are not cross-agent causal order.
 The private capture reader recognizes current Chat Completions, public
 Responses, and Codex request/response envelopes, Chat/Responses failures, and the
 current Codex finite-attempt failure envelope. It also recognizes version-0 scalar
-cache captures as `diagnostic_files` and current schema-v1 provider-attempt timing
+cache captures as `diagnostic_files` and schema-v1/v2 provider-attempt timing
 captures as content-free `timing_files` inventory only. Timing values are not retained,
 joined, or analyzed by this command. Current scalar cache records are
 deduplicated by provider-instance/process record identity; conflicting reuse is

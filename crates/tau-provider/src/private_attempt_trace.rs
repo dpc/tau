@@ -133,6 +133,12 @@ pub struct AttemptTrace {
 /// Fixed first-seen observations reset whenever transparent repair dispatches.
 #[derive(Debug)]
 struct FinalDispatchTiming {
+    /// First selected text-message read and its delay to owner dequeue.
+    text_message_read: Option<(u64, u64)>,
+    /// Read offset and association delay for one associated message.
+    associated_message_read: Option<(u64, u64)>,
+    /// First successfully decoded payload, including non-response events.
+    first_decoded_payload_us: Option<u64>,
     /// Final dispatch origin for response-relative milestones.
     started_at: Option<Instant>,
     /// First owner-dequeued input after the final dispatch.
@@ -158,6 +164,9 @@ struct FinalDispatchTiming {
 impl Default for FinalDispatchTiming {
     fn default() -> Self {
         Self {
+            text_message_read: None,
+            associated_message_read: None,
+            first_decoded_payload_us: None,
             started_at: None,
             first_input_us: None,
             first_input_bytes: 0,
@@ -319,7 +328,8 @@ impl AttemptTrace {
         }
     }
 
-    /// Record the first decoded body chunk or WebSocket frame only.
+    /// Record the first owner-dequeued body chunk or complete WebSocket
+    /// message.
     pub fn first_input(&mut self, bytes: usize) {
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
         if !self.first_input_seen {
@@ -330,6 +340,44 @@ impl AttemptTrace {
         if self.final_dispatch.first_input_us.is_none() {
             self.final_dispatch.first_input_us = Some(self.since_dispatch());
             self.final_dispatch.first_input_bytes = bytes;
+        }
+    }
+
+    /// Record the first observed complete text message and same-message queue
+    /// delay, without asserting that the message belongs to this response.
+    pub fn text_message_read(&mut self, read_at: Instant) {
+        if self.final_dispatch.text_message_read.is_none()
+            && let Some(offset) = self.read_offset(read_at)
+        {
+            self.final_dispatch.text_message_read = Some((offset, micros(read_at.elapsed())));
+        }
+    }
+
+    /// Record a selected message's read and association delay together.
+    /// Association uses the adapter's existing classifier, not response-ID
+    /// proof.
+    pub fn associated_message_read(&mut self, read_at: Instant) {
+        if self.final_dispatch.associated_message_read.is_none()
+            && let Some(offset) = self.read_offset(read_at)
+        {
+            self.final_dispatch.associated_message_read = Some((offset, micros(read_at.elapsed())));
+        }
+    }
+
+    /// Reject samples read before dispatch instead of saturating them to zero.
+    fn read_offset(&self, read_at: Instant) -> Option<u64> {
+        read_at
+            .checked_duration_since(self.final_dispatch.started_at?)
+            .map(micros)
+    }
+
+    /// Mark successful JSON payload decoding, independently of semantic
+    /// acceptance.
+    pub fn decoded_payload(&mut self) {
+        if self.final_dispatch.started_at.is_some()
+            && self.final_dispatch.first_decoded_payload_us.is_none()
+        {
+            self.final_dispatch.first_decoded_payload_us = Some(self.since_dispatch());
         }
     }
 
@@ -475,6 +523,13 @@ impl AttemptTrace {
         }
         let total_us = micros(self.started_at.elapsed());
         AttemptTiming {
+            final_dispatch_us: self
+                .final_dispatch
+                .started_at
+                .map(|started| micros(started.duration_since(self.started_at))),
+            text_message_read: self.final_dispatch.text_message_read,
+            associated_message_read: self.final_dispatch.associated_message_read,
+            dispatch_to_first_decoded_payload_us: self.final_dispatch.first_decoded_payload_us,
             backend: self.backend.as_str(),
             transport: self.transport.as_str(),
             outcome: outcome.as_str(),
@@ -528,6 +583,17 @@ impl Drop for AttemptTrace {
 /// Fixed-cardinality scalar timing projection for one finite attempt.
 #[derive(Clone, Copy, Debug)]
 pub struct AttemptTiming {
+    /// Attempt entry to the final attempted dispatch, absent before dispatch.
+    pub final_dispatch_us: Option<u64>,
+    /// Final dispatch to selected text read, and that message's
+    /// read-to-dequeue.
+    pub text_message_read: Option<(u64, u64)>,
+    /// Final dispatch to associated text read, and its
+    /// read-to-association.
+    pub associated_message_read: Option<(u64, u64)>,
+    /// Final dispatch to first successful payload decode, not semantic
+    /// acceptance.
+    pub dispatch_to_first_decoded_payload_us: Option<u64>,
     /// Closed adapter backend.
     pub backend: &'static str,
     /// Closed transport.

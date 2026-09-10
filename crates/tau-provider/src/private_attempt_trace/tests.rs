@@ -132,6 +132,9 @@ fn repair_resets_final_dispatch_input_without_rewriting_legacy_first_input() {
         .expect("capture selects state");
     trace.record_dispatch();
     trace.first_input(41);
+    trace.text_message_read(Instant::now());
+    trace.associated_message_read(Instant::now());
+    trace.decoded_payload();
     trace.semantic_qualified();
     trace.record_dispatch();
     let timing = trace.finish_with_timing(Outcome::Failed);
@@ -139,6 +142,46 @@ fn repair_resets_final_dispatch_input_without_rewriting_legacy_first_input() {
     assert_eq!(timing.dispatch_to_first_input_us, None);
     assert_eq!(timing.first_input_bytes, 0);
     assert_eq!(timing.dispatch_to_first_semantic_us, None);
+    assert_eq!(timing.text_message_read, None);
+    assert_eq!(timing.associated_message_read, None);
+    assert_eq!(timing.dispatch_to_first_decoded_payload_us, None);
+    assert!(timing.final_dispatch_us.is_some());
+}
+
+/// Predispatch read times must remain unavailable rather than look like an
+/// instantaneous response; first-seen paired samples must never be overwritten.
+#[test]
+fn message_read_boundaries_preserve_pairs_and_reject_predispatch_samples() {
+    let mut trace = AttemptTrace::selected_for_capture(Backend::Codex, Transport::Websocket, true)
+        .expect("capture selects state");
+    let before_dispatch = Instant::now() - Duration::from_secs(1);
+    trace.text_message_read(before_dispatch);
+    trace.decoded_payload();
+    assert!(trace.final_dispatch.text_message_read.is_none());
+    assert!(trace.final_dispatch.first_decoded_payload_us.is_none());
+    trace.record_dispatch();
+    trace.text_message_read(before_dispatch);
+    trace.associated_message_read(before_dispatch);
+    assert!(trace.final_dispatch.text_message_read.is_none());
+    assert!(trace.final_dispatch.associated_message_read.is_none());
+    let read_at = Instant::now();
+    trace.text_message_read(read_at);
+    trace.associated_message_read(read_at);
+    trace.decoded_payload();
+    let first = trace.final_dispatch.text_message_read;
+    let associated = trace.final_dispatch.associated_message_read;
+    let decoded = trace.final_dispatch.first_decoded_payload_us;
+    trace.text_message_read(Instant::now());
+    trace.associated_message_read(Instant::now());
+    trace.decoded_payload();
+    let timing = trace.finish_with_timing(Outcome::Completed);
+    assert_eq!(timing.text_message_read, first);
+    assert_eq!(timing.associated_message_read, associated);
+    assert_eq!(timing.dispatch_to_first_decoded_payload_us, decoded);
+    assert_eq!(
+        first.expect("read pair").0,
+        associated.expect("associated pair").0
+    );
 }
 
 /// The production callsite exposes one exact fixed scalar/class schema and no

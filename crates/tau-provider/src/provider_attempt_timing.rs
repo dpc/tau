@@ -13,8 +13,8 @@ pub const MAX_RECORD_BYTES: usize = 8 * 1024;
 /// Stable schema name for offline inspection.
 pub const SCHEMA: &str = "tau.provider_attempt_timing";
 
-/// Initial wire-independent schema revision.
-pub const SCHEMA_VERSION: u64 = 1;
+/// Additive private schema revision with owner-scoped message-read boundaries.
+pub const SCHEMA_VERSION: u64 = 2;
 
 /// Initial metric-definition revision.
 pub const METRIC_DEFINITION_VERSION: u64 = 1;
@@ -137,7 +137,7 @@ pub fn submit(metadata: CaptureMetadata<'_>, timing: AttemptTiming) {
     submit_with(metadata, timing, submit_provider_debug_capture);
 }
 
-/// Build one schema-v1 record for deterministic tests and alternate sinks.
+/// Build one current-schema record for deterministic tests and alternate sinks.
 pub fn record(metadata: CaptureMetadata<'_>, timing: AttemptTiming) -> Option<Vec<u8>> {
     let value = json!({
         "schema": SCHEMA,
@@ -173,6 +173,17 @@ pub fn record(metadata: CaptureMetadata<'_>, timing: AttemptTiming) -> Option<Ve
             "repair_reason": metadata.repair_reason,
         },
         "timings_us": {
+            "attempt_to_final_dispatch": timing.final_dispatch_us,
+            "final_dispatch_to_first_observed_text_message_read":
+                timing.text_message_read.map(|(read, _)| read),
+            "first_observed_text_message_read_to_owner_dequeue":
+                timing.text_message_read.map(|(_, dequeue)| dequeue),
+            "final_dispatch_to_first_observed_associated_message_read":
+                timing.associated_message_read.map(|(read, _)| read),
+            "first_observed_associated_message_read_to_association":
+                timing.associated_message_read.map(|(_, association)| association),
+            "final_dispatch_to_first_decoded_payload":
+                timing.dispatch_to_first_decoded_payload_us,
             "attempt_total": timing.total_us,
             "prepare": timing.prepare_us,
             "lowering": timing.lowering_us,
@@ -203,6 +214,10 @@ pub fn record(metadata: CaptureMetadata<'_>, timing: AttemptTiming) -> Option<Ve
             "decode_count": timing.decode_count,
         },
         "coverage": {
+            "final_dispatch": availability(timing.final_dispatch_us),
+            "text_message_read": availability(timing.text_message_read.map(|(read, _)| read)),
+            "associated_message_read": availability(timing.associated_message_read.map(|(read, _)| read)),
+            "first_decoded_payload": availability(timing.dispatch_to_first_decoded_payload_us),
             "first_owner_dequeued_input": availability(timing.dispatch_to_first_input_us),
             "first_associated_event": availability(timing.dispatch_to_first_associated_event_us),
             "first_text_delta": availability(timing.dispatch_to_first_text_delta_us),

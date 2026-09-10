@@ -1,5 +1,26 @@
 use super::*;
 
+/// Tool-path classification must match materialized callable output without
+/// confusing empty, invalid-name, or ordinary text accumulators with tools.
+#[test]
+fn produced_tool_call_matches_materialized_output() {
+    let mut state = StreamState::new();
+    assert!(!state.produced_tool_call());
+    for tool_type in [tau_proto::ToolType::Function, tau_proto::ToolType::Custom] {
+        state.output_items.clear();
+        state
+            .output_items
+            .push(OutputItemAccumulator::ToolCall(ToolCallAccumulator::new(
+                tool_type,
+            )));
+        assert!(!state.produced_tool_call());
+        state.tool_call_at_mut(0, tool_type).name = "test_tool".to_owned();
+        assert!(state.produced_tool_call());
+        state.tool_call_at_mut(0, tool_type).name = "x".repeat(tau_proto::ToolName::MAX_LEN + 1);
+        assert!(!state.produced_tool_call());
+    }
+}
+
 /// Only the canonical HTTP status can authorize credential recovery; provider
 /// prose and structured stream codes cannot impersonate a 401.
 #[test]

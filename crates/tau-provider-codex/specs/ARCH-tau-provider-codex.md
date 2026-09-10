@@ -117,6 +117,14 @@ never carries prompt, model, endpoint, account, credential, error, or response
 values. Disabled selection constructs no observation state and has no effect on
 pooling, retry, cancellation, replay, or public updates.
 
+Selected private attempt timing also carries complete-text-message read
+timestamps through the existing bounded inbound channel. A connection-local
+owner generation gates these observations and rejects queued prior-owner
+samples; scope exit disables them. This adds no receive owner, draining, tail
+observation, task, or transport policy. Read-to-dequeue and read-to-association
+intervals pair observations from the same message and do not establish network
+TTFB or response-ID correlation.
+
 All HTTP control-plane operations and the HTTP/1.1 WebSocket upgrade use the
 startup-injected shared reqwest/rustls policy. WSS uses CONNECT through the
 selected proxy before target TLS; plain WS uses proxy absolute-form. Both paths

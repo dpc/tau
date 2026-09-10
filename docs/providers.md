@@ -42,12 +42,14 @@ session directory, and diagnostic retention as request and response captures:
   <timestamp>-<agent-prompt-id>-provider-attempt-timing.json.zst
 ```
 
-`tau.provider_attempt_timing` schema version 1 and metric-definition version 1
+`tau.provider_attempt_timing` schema version 2 and metric-definition version 1
 measure provider-process monotonic microseconds. They do not measure remote
 request acceptance, inference start, individual token timing, server routing or
 queue time, network-only latency, or canonical harness publication. A missing
 record or nullable milestone means it was not observed; it never means zero.
 True zero values remain zero.
+The offline inspector accepts both schema versions 1 and 2; version 2 adds
+observations without changing the meanings of version-1 fields.
 
 The common fields are:
 
@@ -59,6 +61,8 @@ The common fields are:
   subtotal;
 - `pool_wait`, `connect_upgrade`, `enqueue_or_send`, and `decode_total`: totals
   around existing adapter-owned boundaries;
+- `attempt_to_final_dispatch`: attempt entry to the final attempted enqueue/send,
+  null if dispatch was never attempted;
 - `final_dispatch_to_first_owner_dequeued_input`: first body chunk or WebSocket
   message dequeued by the current owner, including local buffering;
 - `final_dispatch_to_first_associated_event`: first decoded event the adapter can
@@ -69,6 +73,47 @@ The common fields are:
   qualification;
 - `final_dispatch_to_terminal` and `terminal_to_return`: provider terminal
   recognition and remaining work through that same pre-timing-capture snapshot.
+
+Codex additionally records these optional boundaries in version 2:
+
+- `final_dispatch_to_first_observed_text_message_read` and
+  `first_observed_text_message_read_to_owner_dequeue`: the first complete
+  Tungstenite **text message** observed within the selected owner after dispatch,
+  plus that same message's delay through channel admission and owner scheduling.
+  This is not a frame, first socket byte, or proof of current-response association;
+- `final_dispatch_to_first_observed_associated_message_read` and
+  `first_observed_associated_message_read_to_association`: the corresponding paired
+  read and read-to-association times for the first observed message that
+  passes the existing `response.*` classifier. The latter includes buffering,
+  callbacks, recording, decoding and validation before classification, not just
+  JSON CPU time. The classifier does not prove response-ID correlation;
+- `final_dispatch_to_first_decoded_payload`: successful JSON payload decoding
+  before semantic application, including unrelated or subsequently rejected
+  payloads. Malformed JSON does not qualify;
+- `tool_produced`: whether successful, uncanceled ordinary Codex terminal output
+  materializes a callable Tau tool item. Failed/canceled attempts remain null.
+  The existing actionable-item milestone means an accepted completed function or
+  custom-tool item, **not execution of that tool or its result**.
+
+An owner generation gates reader timestamps and prevents queued prior-owner
+samples from becoming current-owner measurements. Samples before dispatch are
+rejected rather than clamped to zero. No timing is collected while the gate is
+inactive, no additional messages are read, and exiting the owner deactivates the
+gate on success, error, or cancellation. A concurrent exit invalidates a sampled
+timestamp. Unobserved messages stay unobserved; a later eligible message may
+provide the first observed read. The existing first-owner-dequeue and
+first-associated-event fields keep their original, potentially different
+message boundaries.
+
+Distinct DNS, TCP-connect, and TLS-handshake timings remain unavailable:
+the current reqwest upgrade API owns their combined execution. Its TLS metadata
+describes certificates, and its connector layer spans combined connection work;
+neither provides these substage timestamps. `connect_upgrade` still includes the
+combined connection/HTTP upgrade, not TLS alone. The upgraded Tungstenite API
+does not expose correlated first response bytes or individual text frames.
+Region and upstream server queue/engine time are unknown and are not inferred
+from addresses, latency, or model names. These unavailable boundaries have no
+fabricated scalar fields.
 
 Transparent repair replaces the response-relative origin with the final wire
 dispatch while preserving dispatch count, connection state, and repair reason.

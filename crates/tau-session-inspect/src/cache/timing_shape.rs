@@ -5,22 +5,23 @@ use serde_json::Value;
 /// One required producer field and its structural predicate.
 type FieldCheck<'a> = (&'a str, fn(&Value) -> bool);
 
-/// Validates the complete current schema-v1, metric-definition-v1 record.
+/// Validates schema v1 or v2 without changing the original metric definitions.
 pub(super) fn current(value: &Value) -> bool {
+    let revised = value["schema_version"].as_u64() == Some(2);
     object(
         value,
         &[
             ("schema", |v| literal(v, &["tau.provider_attempt_timing"])),
-            ("schema_version", |v| literal_u64(v, 1)),
+            ("schema_version", |v| matches!(v.as_u64(), Some(1 | 2))),
             ("metric_definition_version", |v| literal_u64(v, 1)),
             ("producer", producer),
             ("clock", clock),
             ("attribution", attribution),
             ("provider", provider),
             ("attempt", attempt),
-            ("timings_us", timings),
+            ("timings_us", if revised { timings_v2 } else { timings_v1 }),
             ("counts", counts),
-            ("coverage", coverage),
+            ("coverage", if revised { coverage_v2 } else { coverage_v1 }),
             ("facts", facts),
         ],
     )
@@ -100,8 +101,8 @@ fn attempt(value: &Value) -> bool {
 }
 
 /// Validates all required durations and nullable final-dispatch milestones.
-fn timings(value: &Value) -> bool {
-    object(
+fn timings(value: &Value, extra: &[FieldCheck<'_>]) -> bool {
+    object_extended(
         value,
         &[
             ("attempt_total", Value::is_u64),
@@ -122,6 +123,39 @@ fn timings(value: &Value) -> bool {
             ("final_dispatch_to_terminal", nullable_u64),
             ("terminal_to_return", nullable_u64),
         ],
+        extra,
+    )
+}
+
+/// Validates the original exact duration fields.
+fn timings_v1(value: &Value) -> bool {
+    timings(value, &[])
+}
+
+/// Validates additive owner-scoped message and decode boundaries.
+fn timings_v2(value: &Value) -> bool {
+    timings(
+        value,
+        &[
+            ("attempt_to_final_dispatch", nullable_u64),
+            (
+                "final_dispatch_to_first_observed_text_message_read",
+                nullable_u64,
+            ),
+            (
+                "first_observed_text_message_read_to_owner_dequeue",
+                nullable_u64,
+            ),
+            (
+                "final_dispatch_to_first_observed_associated_message_read",
+                nullable_u64,
+            ),
+            (
+                "first_observed_associated_message_read_to_association",
+                nullable_u64,
+            ),
+            ("final_dispatch_to_first_decoded_payload", nullable_u64),
+        ],
     )
 }
 
@@ -138,8 +172,8 @@ fn counts(value: &Value) -> bool {
 }
 
 /// Validates explicit milestone availability and the fixed tail boundary.
-fn coverage(value: &Value) -> bool {
-    object(
+fn coverage(value: &Value, extra: &[FieldCheck<'_>]) -> bool {
+    object_extended(
         value,
         &[
             ("first_owner_dequeued_input", availability),
@@ -150,6 +184,25 @@ fn coverage(value: &Value) -> bool {
             ("first_semantic", availability),
             ("terminal", availability),
             ("tail", |v| literal(v, &["not_observed_after_owner_return"])),
+        ],
+        extra,
+    )
+}
+
+/// Validates the original exact coverage fields.
+fn coverage_v1(value: &Value) -> bool {
+    coverage(value, &[])
+}
+
+/// Validates additive observation coverage without treating null as zero.
+fn coverage_v2(value: &Value) -> bool {
+    coverage(
+        value,
+        &[
+            ("final_dispatch", availability),
+            ("text_message_read", availability),
+            ("associated_message_read", availability),
+            ("first_decoded_payload", availability),
         ],
     )
 }
@@ -193,10 +246,16 @@ fn usage(value: &Value) -> bool {
 
 /// Requires exactly the named fields with their current producer-owned types.
 fn object(value: &Value, required: &[FieldCheck<'_>]) -> bool {
+    object_extended(value, required, &[])
+}
+
+/// Requires exactly the original fields plus the selected revision's additions.
+fn object_extended(value: &Value, required: &[FieldCheck<'_>], extra: &[FieldCheck<'_>]) -> bool {
     value.as_object().is_some_and(|object| {
-        object.len() == required.len()
+        object.len() == required.len() + extra.len()
             && required
                 .iter()
+                .chain(extra)
                 .all(|(name, check)| object.get(*name).is_some_and(check))
     })
 }

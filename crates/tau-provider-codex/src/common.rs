@@ -1485,6 +1485,14 @@ impl StreamState {
         items
     }
 
+    /// Whether terminal output can materialize a callable Tau tool item.
+    /// This scalar check does not materialize arguments or replay payloads.
+    pub(crate) fn produced_tool_call(&self) -> bool {
+        self.output_items.iter().any(|item| {
+            matches!(item, OutputItemAccumulator::ToolCall(_)) && item.materializes_context_item()
+        })
+    }
+
     /// Borrows the sole completed compaction item after validating the exact
     /// compact-response output shape.
     pub(crate) fn single_compaction_item(&self) -> Option<&OpaqueProviderItem> {

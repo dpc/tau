@@ -10,6 +10,7 @@ use crate::cache_diagnostic::{CacheAttempt, tests as cache_capture_tests};
 use crate::common::OutputItemAccumulator;
 
 mod direct_target_canary;
+mod owner_timing;
 mod scripted_tcp_server;
 mod test_ca;
 mod test_server;
@@ -44,7 +45,7 @@ fn rejected_decoded_event_does_not_record_accepted_timing_milestone() {
         true,
     );
     trace.as_mut().expect("trace").record_dispatch();
-    observe_associated_timing_milestone(&mut trace, &event);
+    observe_associated_timing_milestone(&mut trace, &event, None);
     let timing = trace
         .take()
         .expect("trace")
@@ -111,12 +112,14 @@ fn warm_anchor_does_not_synthesize_cache_read_ceiling() {
         if compaction {
             inbound_tx
                 .send_blocking(InboundEvent::Event {
+                    read: None,
                     text: r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","summary":"old history","input_items":[]}}"#.to_owned().into(),
                 })
                 .expect("queue compaction");
         }
         inbound_tx
             .send_blocking(InboundEvent::Event {
+                read: None,
                 text: r#"{"type":"response.completed","response":{"id":"resp_next","usage":{"input_tokens":2500,"output_tokens":10,"input_tokens_details":{"cached_tokens":1536}}}}"#.to_owned().into(),
             })
             .expect("queue completion");
@@ -161,11 +164,13 @@ fn compact_turn_validates_shape_while_reporting_private_progress() {
     let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","encrypted_content":"opaque"}}"#.into(),
         })
         .expect("queue compact item");
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.completed","response":{"id":"resp_compact","usage":{"input_tokens":4,"output_tokens":2}}}"#.into(),
         })
         .expect("queue compact terminal");
@@ -246,7 +251,10 @@ fn compact_anchor_rejects_malformed_output_shape() {
         r#"{"type":"response.completed","response":{"id":"resp_malformed","usage":{"input_tokens":4,"output_tokens":2}}}"#,
     ] {
         inbound_tx
-            .send_blocking(InboundEvent::Event { text: text.into() })
+            .send_blocking(InboundEvent::Event {
+                text: text.into(),
+                read: None,
+            })
             .expect("queue compact event");
     }
     let fixture = PromptFixture::new();
@@ -281,11 +289,13 @@ fn compact_turn_rejects_response_done_terminal() {
     let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction"}}"#.into(),
         })
         .expect("queue compact item");
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.done"}"#.into(),
         })
         .expect("queue wrong terminal");
@@ -688,6 +698,7 @@ fn websocket_response_live_path_preserves_capture_enqueue_bytes_and_order() {
     let (mut conn, inbound_tx, mut outbound_rx) = test_ws_conn();
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.completed","response":{"id":"resp-live"}}"#
                 .to_owned()
                 .into(),
@@ -778,6 +789,7 @@ fn test_ws_conn() -> (WsConn, InboundSender, UnboundedReceiver<WsCommand>) {
     let writer_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
     (
         WsConn {
+            message_read_timing: Arc::default(),
             diagnostic_epoch: Some(999),
             outbound_tx,
             inbound_rx,
@@ -1995,6 +2007,7 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
 
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.output_text.delta","delta":"hello"}"#.into(),
         })
         .expect("queue partial WS frame");
@@ -2040,6 +2053,7 @@ fn ws_metadata_only_frames_then_silence_returns_nonsemantic_idle_timeout() {
     let mut abort = NeverAbort;
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.created","response":{"id":"resp-metadata"}}"#.into(),
         })
         .expect("queue initial lifecycle metadata");
@@ -2048,6 +2062,7 @@ fn ws_metadata_only_frames_then_silence_returns_nonsemantic_idle_timeout() {
         std::thread::sleep(Duration::from_millis(100));
         delayed_metadata
             .send_blocking(InboundEvent::Event {
+                read: None,
                 text: r#"{"type":"response.in_progress","response":{"id":"resp-metadata"}}"#.into(),
             })
             .expect("queue delayed lifecycle metadata");
@@ -2144,6 +2159,7 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
     for _ in 0..4 {
         inbound_tx
             .send_blocking(InboundEvent::Event {
+                read: None,
                 text: r#"{"type":"response.output_text.delta","delta":"x"}"#.into(),
             })
             .expect("queue nonterminal frame");
@@ -2187,6 +2203,7 @@ fn malformed_text_frame_counts_bytes_before_protocol_error() {
     let malformed = "{not-json";
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: malformed.into(),
         })
         .expect("queue malformed frame");
@@ -2339,6 +2356,7 @@ fn carried_repair_bytes_share_the_production_attempt_budget() {
         conn.carry_response_bytes(carried);
         inbound_tx
             .send_blocking(InboundEvent::Event {
+                read: None,
                 text: completion.into(),
             })
             .expect("queue completion");
@@ -2647,9 +2665,11 @@ fn inbound_data_lane_backpressures_without_drop_or_reorder() {
         control: Arc::clone(&control),
     };
     let first = InboundEvent::Event {
+        read: None,
         text: r#"{"sequence":1}"#.into(),
     };
     let second = InboundEvent::Event {
+        read: None,
         text: r#"{"sequence":2}"#.into(),
     };
     sender.tx.try_send(first).expect("sole queue slot");
@@ -2658,11 +2678,11 @@ fn inbound_data_lane_backpressures_without_drop_or_reorder() {
         .try_send(second)
         .expect_err("second event is backpressured")
         .into_inner();
-    let InboundEvent::Event { text: first } = rx.blocking_recv().expect("first event") else {
+    let InboundEvent::Event { text: first, .. } = rx.blocking_recv().expect("first event") else {
         panic!("expected first text event");
     };
     sender.tx.try_send(second).expect("slot reopened");
-    let InboundEvent::Event { text: second } = rx.blocking_recv().expect("second event") else {
+    let InboundEvent::Event { text: second, .. } = rx.blocking_recv().expect("second event") else {
         panic!("expected second text event");
     };
     assert_eq!(first.as_str(), r#"{"sequence":1}"#);
@@ -2716,6 +2736,7 @@ fn async_control_ping_write_failure_wakes_blocked_response_reader() {
         ))
         .abort_handle();
     let mut conn = WsConn {
+        message_read_timing: Arc::default(),
         diagnostic_epoch: Some(1001),
         outbound_tx,
         inbound_rx,
@@ -2785,6 +2806,7 @@ fn writer_failure_preempts_queued_provider_data() {
     let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.completed","response":{"id":"must-not-commit"}}"#.into(),
         })
         .expect("queue provider completion");
@@ -2818,6 +2840,7 @@ fn cancellation_preempts_queued_provider_data() {
     let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
     inbound_tx
         .send_blocking(InboundEvent::Event {
+            read: None,
             text: r#"{"type":"response.completed","response":{"id":"must-not-commit"}}"#.into(),
         })
         .expect("queue provider completion");
@@ -2862,7 +2885,10 @@ fn ws_turn_surfaces_nameless_default_quota_in_both_modes() {
             r#"{"type":"response.completed","response":{"id":"resp_quota"}}"#,
         ] {
             inbound_tx
-                .send_blocking(InboundEvent::Event { text: text.into() })
+                .send_blocking(InboundEvent::Event {
+                    text: text.into(),
+                    read: None,
+                })
                 .expect("queue WS fixture frame");
         }
 

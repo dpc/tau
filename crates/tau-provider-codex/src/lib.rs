@@ -1079,6 +1079,11 @@ impl CodexRuntime {
                         repair_reason: attempt.correlation().repair_reason(),
                         facts: attempt_timing::AttemptFacts {
                             tool_enabled: Some(!request.tools.is_empty()),
+                            tool_produced: result
+                                .as_ref()
+                                .ok()
+                                .filter(|_| !canceled)
+                                .map(|result| result.state.produced_tool_call()),
                             response_bytes_received: result
                                 .as_ref()
                                 .ok()
