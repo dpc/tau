@@ -1021,6 +1021,11 @@ pub enum ToolFormat {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: ToolName,
+    /// Restricts this backing to models served by its registering connection
+    /// under this exact provider namespace. An absent scope denotes a generic
+    /// backing; eligible scoped backings take precedence for the same alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_scope: Option<crate::ProviderName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_visible_name: Option<ToolName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1449,7 +1454,8 @@ pub enum ToolResultPresentation {
 /// backgrounded calls, a result with [`ToolResultKind::BackgroundPlaceholder`]
 /// closes only the provider-visible foreground turn; the later
 /// [`ToolBackgroundResult`] carries the real output.
-/// Tool/Core peers submit this payload as [`Event::ToolResultReported`]; the
+/// Tool/Core/Provider peers submit this payload for their own routed calls as
+/// [`Event::ToolResultReported`]; the
 /// harness uses [`Event::ToolResult`] and [`Event::ProviderToolResult`] for
 /// canonical projections.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1537,7 +1543,8 @@ impl From<&ToolResult> for ToolResultDisplay {
 /// emitted a [`ToolResultKind::BackgroundPlaceholder`] must report their later
 /// failure as [`ToolBackgroundError`] instead, so provider state is not closed
 /// twice.
-/// Tool/Core peers submit this payload as [`Event::ToolErrorReported`]; the
+/// Tool/Core/Provider peers submit this payload for their own routed calls as
+/// [`Event::ToolErrorReported`]; the
 /// harness uses [`Event::ToolError`] and [`Event::ProviderToolError`] for
 /// canonical projections.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1862,7 +1869,8 @@ pub struct ProgressUpdate {
 /// Progress payload shared by peer reports and harness-validated canonical
 /// facts.
 ///
-/// Tool/Core peers submit this payload as [`Event::ToolProgressReported`].
+/// Tool/Core/Provider peers submit this payload for their own routed calls as
+/// [`Event::ToolProgressReported`].
 /// Subscribers consume it as the harness-authored [`Event::ToolProgress`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolProgress {
@@ -1890,7 +1898,8 @@ pub struct ToolCancelRequest {
 
 /// Tool-provider observation or harness fact that one call was cancelled.
 ///
-/// Tool/Core peers submit this payload as [`Event::ToolCancelledReported`].
+/// Tool/Core/Provider peers submit this payload for their own routed calls as
+/// [`Event::ToolCancelledReported`].
 /// The harness publishes [`Event::ToolCancelled`] only for accepted foreground
 /// cancellation; backgrounded cancellation becomes [`ToolBackgroundError`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

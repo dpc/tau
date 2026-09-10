@@ -8846,6 +8846,7 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
         h.tool_routing.registry.register(
             &crate::test_connection_id("late-surface-test"),
             ToolSpec {
+                provider_scope: None,
                 name: ToolName::new(internal_name),
                 model_visible_name: Some(ToolName::new("duplicate_visible")),
                 description: None,

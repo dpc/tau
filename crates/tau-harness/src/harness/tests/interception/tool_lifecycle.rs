@@ -4,6 +4,7 @@ use crate::{event_log as path_crate_event_log, extension as path_crate_extension
 /// Construct one test tool specification.
 fn declaration_tool_spec(name: &str, description: &str) -> tau_proto::ToolSpec {
     tau_proto::ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(name),
         model_visible_name: None,
         description: Some(description.to_owned()),
@@ -857,7 +858,8 @@ fn canonical_tool_unregistration_is_immutable_and_must_pass() {
     assert!(committed_tool_lifecycle_events(&h, "forged_withdrawal").is_empty());
 }
 
-/// Configured Provider/Action peers and unconfigured Tool peers cannot author
+/// Configured Provider peers cannot author unscoped declarations; Action peers
+/// and unconfigured Tool peers cannot author
 /// declarations, and even an authorized Tool peer cannot author canonical
 /// state.
 #[test]
@@ -927,5 +929,46 @@ fn tool_declaration_and_canonical_authorship_fail_closed() {
     ] {
         assert!(h.tool_routing.registry.providers_for(name).is_empty());
         assert!(committed_tool_lifecycle_events(&h, name).is_empty());
+    }
+}
+
+/// Provider authority is limited to scoped declarations and its own
+/// withdrawals.
+#[test]
+fn provider_scoped_declaration_and_owner_withdrawal() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    for source in ["scoped-owner", "other-provider"] {
+        connect_ready_configured_extension(&mut h, source, source, tau_proto::ClientKind::Provider);
+    }
+    let Event::ToolRegistrationDeclared(mut declaration) =
+        tool_registration_declaration("scoped_asset", "forged")
+    else {
+        panic!("declaration");
+    };
+    declaration.tool.provider_scope = Some(tau_proto::ProviderName::new("selected-account"));
+    h.handle_extension_event_inner_with_persist(
+        &crate::test_connection_id("scoped-owner"),
+        Event::ToolRegistrationDeclared(declaration),
+        Some(false),
+    )
+    .expect("scoped declaration");
+    assert_eq!(
+        h.tool_routing.registry.providers_for("scoped_asset").len(),
+        1
+    );
+    for (source, expected_count) in [("other-provider", 1), ("scoped-owner", 0)] {
+        h.handle_extension_event_inner_with_persist(
+            &crate::test_connection_id(source),
+            Event::ToolUnregistrationDeclared(tau_proto::ToolUnregistrationDeclared {
+                tool_name: tau_proto::ToolName::new("scoped_asset"),
+            }),
+            Some(false),
+        )
+        .expect("withdrawal");
+        assert_eq!(
+            h.tool_routing.registry.providers_for("scoped_asset").len(),
+            expected_count
+        );
     }
 }

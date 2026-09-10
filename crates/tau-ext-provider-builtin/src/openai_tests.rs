@@ -6769,6 +6769,7 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
             tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
             tau_proto::EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
             tau_proto::EventSelector::Exact(EventName::SESSION_SHUTDOWN),
+            tau_proto::EventSelector::Exact(EventName::TOOL_CANCEL_REQUEST),
         ],
         "provider startup subscriptions must stay exact and exclude ordinary prompt routing",
     );

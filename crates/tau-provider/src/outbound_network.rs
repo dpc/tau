@@ -248,6 +248,17 @@ impl OutboundNetworkPolicy {
         Self::build_client(builder, route_kind)
     }
 
+    /// Builds an account-bound client for operations that must never be
+    /// replayed automatically, including ambiguous paid generation
+    /// requests.
+    pub fn client_for_without_retries(
+        &self,
+        target: &str,
+    ) -> Result<reqwest::Client, OutboundError> {
+        let (builder, route_kind) = self.client_builder_for(target)?;
+        Self::build_client(builder.retry(reqwest::retry::never()), route_kind)
+    }
+
     /// Builds a client with an explicit resolver for deterministic
     /// route-failure acceptance without changing the production resolver
     /// boundary.

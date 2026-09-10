@@ -76,6 +76,9 @@ pub(crate) struct PromptRuntimeState {
     pub(super) operations: HashMap<AgentPromptId, (tau_proto::PromptOperation, bool)>,
     /// Effective tool specifications captured for each prompt.
     pub(super) tool_specs: HashMap<AgentPromptId, Vec<tau_proto::ToolSpec>>,
+    /// Exact chosen connections for aliases participating in scoped selection.
+    pub(super) backing_tool_connections:
+        HashMap<AgentPromptId, HashMap<ToolName, tau_proto::ConnectionId>>,
     /// Hidden ordinary-tool invocation policies frozen with each prompt.
     pub(super) tool_invocation_policies:
         HashMap<AgentPromptId, HashMap<ToolName, tau_proto::ToolInvocationPolicy>>,
@@ -134,6 +137,7 @@ impl PromptRuntimeState {
     /// Clears one prompt snapshot and every exact call backreference it owns.
     pub(super) fn clear_prompt_tool_snapshot(&mut self, prompt_id: &AgentPromptId) {
         self.tool_specs.remove(prompt_id);
+        self.backing_tool_connections.remove(prompt_id);
         self.tool_invocation_policies.remove(prompt_id);
         if let Some(call_ids) = self.tool_calls_by_prompt.remove(prompt_id) {
             for call_id in call_ids {
@@ -177,6 +181,7 @@ impl PromptRuntimeState {
         if retire {
             self.tool_calls_by_prompt.remove(prompt_id);
             self.tool_specs.remove(prompt_id);
+            self.backing_tool_connections.remove(prompt_id);
             self.tool_invocation_policies.remove(prompt_id);
         }
     }

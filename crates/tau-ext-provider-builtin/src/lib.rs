@@ -15,6 +15,7 @@ mod chat_completions;
 mod chatgpt_profile;
 pub use chatgpt_profile::ChatGptProfile;
 mod credential_record;
+mod image_tools;
 mod oauth_refresh_rejection;
 mod openai_auth;
 mod openai_prompt_cache;
@@ -1202,6 +1203,7 @@ fn cmd_add_chatgpt_in(
         extension_instance,
         &name,
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            image_generation: false,
             auth,
             responses_lite_compatibility,
             cache_diagnostics: Default::default(),
@@ -2532,6 +2534,7 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
     providers.insert(
         provider.clone(),
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            image_generation: false,
             auth,
             responses_lite_compatibility: false,
             cache_diagnostics: Default::default(),
@@ -2772,6 +2775,9 @@ where
                     .lock()
                     .expect("lock provider settings snapshot") = profiles.clone();
                 let provider_count = profiles.providers.len();
+                cx.state
+                    .images
+                    .configure(&profiles, cx.configure, &cx.handle)?;
                 if !publish_models_after_configure {
                     let model_count = models_for_profiles(&profiles).len();
                     tracing::info!(
@@ -2823,6 +2829,14 @@ where
             )
             .on_raw_live(
                 tau_proto::EventSelector::Exact(EventName::SESSION_SHUTDOWN),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw_routed_live(
+                tau_proto::EventSelector::Exact(EventName::TOOL_STARTED),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::TOOL_CANCEL_REQUEST),
                 handle_provider_delivery::<F>,
             )
             .on_raw_routed_live(
@@ -2908,6 +2922,12 @@ where
                             runtime.state_mut().diagnostics.receipt.current_input =
                                 Some(ReceiptObservation::new(observation));
                         }
+                        if let tau_proto::HarnessOutputMessage::ArtifactResult(result) = frame {
+                            runtime
+                                .state_mut()
+                                .handle_image_artifact_result(*result, &handle)?;
+                            continue;
+                        }
                         if let tau_proto::HarnessOutputMessage::ExtensionDataResult(result) = frame
                         {
                             runtime
@@ -2921,6 +2941,7 @@ where
                         match runtime.dispatch_one(frame)? {
                             DispatchOutcome::Continue => {}
                             DispatchOutcome::Disconnect(_) => {
+                                runtime.state_mut().images.abandon_all();
                                 runtime.state_mut().cancellation.shutdown();
                                 runtime.state_mut().cancel_all_prewarms();
                                 let _state = runtime.finish_detached();
@@ -3008,6 +3029,8 @@ struct ProviderDiagnosticsState {
 
 /// Live provider event loop state after the Tau extension handshake completes.
 struct ProviderRuntime<F> {
+    /// Ordinary image tool calls and correlated artifact publication.
+    images: image_tools::ImageTools,
     /// Clones either the complete validated settings snapshot or one indexed
     /// provider for runtime auth/model resolution.
     load_prompt_profiles: F,
@@ -3067,13 +3090,19 @@ struct ProviderRuntime<F> {
     /// Runtime Secret-scope RPC client, installed after startup transport
     /// setup.
     extension_data_client: Option<ExtensionDataClient>,
-    /// Credential generations observed when publishing the latest model
-    /// snapshot.
-    declared_credential_observations: Option<BTreeMap<ProviderName, CredentialObservation>>,
-    /// Latest complete replacement model snapshot published by this runtime.
-    declared_models: Option<Vec<ProviderModelInfo>>,
+    /// Latest model declaration and the credential observations it represents.
+    declared: DeclaredProviderState,
     /// Private diagnostics policy and observation state.
     diagnostics: ProviderDiagnosticsState,
+}
+
+/// Paired snapshots used to decide whether model publication needs replacement.
+#[derive(Default)]
+struct DeclaredProviderState {
+    /// Credential generations observed when publishing the latest snapshot.
+    credential_observations: Option<BTreeMap<ProviderName, CredentialObservation>>,
+    /// Latest complete replacement model snapshot published by this runtime.
+    models: Option<Vec<ProviderModelInfo>>,
 }
 
 impl<F> ProviderRuntime<F>
@@ -3122,13 +3151,14 @@ where
         observations: BTreeMap<ProviderName, CredentialObservation>,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let Some(previous_models) = self.declared_models.as_ref() else {
+        let Some(previous_models) = self.declared.models.as_ref() else {
             return self.publish_models_if_changed(profiles, observations, handle);
         };
         let models = replace_provider_models(previous_models, provider, profiles);
 
         let mut complete_observations = self
-            .declared_credential_observations
+            .declared
+            .credential_observations
             .clone()
             .unwrap_or_default();
         complete_observations.remove(provider);
@@ -3158,7 +3188,7 @@ where
         observations: BTreeMap<ProviderName, CredentialObservation>,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        if let Some(previous) = &self.declared_credential_observations {
+        if let Some(previous) = &self.declared.credential_observations {
             let superseded_negative_identities = reconcile_compact_state_after_credential_changes(
                 previous,
                 &observations,
@@ -3175,15 +3205,15 @@ where
             &self.unavailable_compact_identities,
         );
         if !declaration_needs_publication(
-            self.declared_models.as_ref(),
-            self.declared_credential_observations.as_ref(),
+            self.declared.models.as_ref(),
+            self.declared.credential_observations.as_ref(),
             &models,
             &observations,
         ) {
             return Ok(());
         }
         self.emit_model_declaration(models, handle)?;
-        self.declared_credential_observations = Some(observations);
+        self.declared.credential_observations = Some(observations);
         Ok(())
     }
 
@@ -3196,7 +3226,7 @@ where
         handle.emit_transient(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: models.clone(),
         }))?;
-        self.declared_models = Some(models);
+        self.declared.models = Some(models);
         Ok(())
     }
 
@@ -3368,7 +3398,7 @@ where
                 .insert(model.provider.clone(), identity)
                 .is_some_and(|previous| previous != identity);
             if changed {
-                let mut models = self.declared_models.as_ref().map_or_else(
+                let mut models = self.declared.models.as_ref().map_or_else(
                     || models_for_profiles(profiles),
                     |previous| replace_provider_models(previous, &model.provider, profiles),
                 );
@@ -3415,7 +3445,7 @@ where
                 .insert(model.provider.clone(), identity)
                 .is_some_and(|previous| previous != identity);
             if changed {
-                let mut models = self.declared_models.as_ref().map_or_else(
+                let mut models = self.declared.models.as_ref().map_or_else(
                     || models_for_profiles(profiles),
                     |previous| replace_provider_models(previous, &model.provider, profiles),
                 );
@@ -3502,6 +3532,7 @@ where
 
     fn begin_input_shutdown(&mut self) {
         self.input_closed = true;
+        self.images.abandon_all();
         self.cancel_all_prewarms();
         self.cancellation.shutdown();
         // No late Secret reply may resurrect an admission after input shutdown.
@@ -3521,6 +3552,10 @@ where
 
     fn handle_event(&mut self, event: Event, handle: &ClientHandle) -> ClientResult<()> {
         match event {
+            Event::ToolStarted(started) => self.start_image_call(started, handle)?,
+            Event::ToolCancelRequest(cancel) => {
+                self.images.cancel(&cancel.target_call_id, handle)?
+            }
             Event::HarnessSessionDir(session_dir) => self.record_session_debug_policy(session_dir),
             Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm, handle)?,
             Event::AgentCacheRefreshRequested(refresh) => {
@@ -3539,6 +3574,7 @@ where
     }
 
     fn record_session_debug_policy(&mut self, session_dir: tau_proto::HarnessSessionDir) {
+        self.images.session = Some(session_dir.session_id.clone());
         self.diagnostics.session_debug_allowed.insert(
             session_dir.session_id,
             !matches!(session_dir.status, tau_proto::SessionDirStatus::Ephemeral),
@@ -4791,6 +4827,7 @@ where
 
     /// Cancels every session-owned job during final daemon shutdown.
     fn handle_session_shutdown(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        self.images.cancel_all(handle)?;
         self.handle_cancel_prompt(
             tau_proto::UiCancelPrompt {
                 session_id: tau_proto::SessionId::parse("shutdown")
@@ -4817,6 +4854,12 @@ where
                 observation.message(matches!(message, WorkerMessage::Output { .. }));
             }
             match received {
+                Ok(WorkerMessage::ImageGenerated { call_id, result }) => {
+                    self.images.generated(call_id, result, handle)?;
+                }
+                Ok(WorkerMessage::ImageTimedOut { call_id }) => {
+                    self.images.timeout(&call_id, handle)?;
+                }
                 Ok(WorkerMessage::PromptOAuthRefreshFinished { key, result }) => {
                     let Some(refresh) = self.credential_admission.oauth_refreshes.get_mut(&key)
                     else {
@@ -7167,6 +7210,13 @@ impl PromptExecution {
 }
 
 enum WorkerMessage {
+    /// Finite overall availability/generation/publication deadline.
+    ImageTimedOut { call_id: tau_proto::ToolCallId },
+    /// Private original bytes, never serialized into event output.
+    ImageGenerated {
+        call_id: tau_proto::ToolCallId,
+        result: Result<Vec<u8>, tau_provider_codex::image_generation::GenerationError>,
+    },
     /// OAuth network result for one exact prompt credential generation.
     PromptOAuthRefreshFinished {
         /// Refresh generation shared by its current waiters.

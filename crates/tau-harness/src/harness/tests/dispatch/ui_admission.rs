@@ -702,6 +702,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("extra-shell"),
         tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("extra_shell"),
             model_visible_name: None,
             description: None,
@@ -753,6 +754,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("lost-shell"),
         tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("lost_shell"),
             model_visible_name: None,
             description: None,
@@ -838,6 +840,7 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("shell-provider"),
         tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("shell"),
             model_visible_name: None,
             description: None,

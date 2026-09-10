@@ -117,6 +117,7 @@ fn rendered_tool_preview_matches_live_web_tool_materialization() {
         h.tool_routing.registry.register(
             &connection_id,
             tau_proto::ToolSpec {
+                provider_scope: None,
                 name: tau_proto::ToolName::new(name),
                 model_visible_name: Some(tau_proto::ToolName::new(alias)),
                 description: None,

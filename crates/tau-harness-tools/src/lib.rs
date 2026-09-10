@@ -2023,6 +2023,7 @@ fn parse_cancel_args(arguments: &CborValue) -> Result<ToolCallId, String> {
 
 fn skill_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(SKILL_TOOL_NAME),
         model_visible_name: None,
         description: Some("Discover available skills not pre-advertised in <available_skills>. If the search resolves to one skill, the full skill is loaded; otherwise matching skill names and descriptions are returned with guidance. Query terms are split on punctuation, lowercased, and deduplicated; hyphenated skill names are preserved. Call with exact skill name to load exact match.".to_owned()),
@@ -2038,6 +2039,7 @@ fn skill_tool_spec() -> ToolSpec {
 
 fn agent_start_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(AGENT_START_TOOL_NAME),
         model_visible_name: None,
         description: Some("Start a sub-agent".to_owned()),
@@ -2054,11 +2056,12 @@ fn agent_start_tool_spec() -> ToolSpec {
 }
 
 fn message_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Commit an async message to another agent or another session. Success returns the stable message id and confirms acceptance, not recipient inference, reply, or completion. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { provider_scope: None, name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Commit an async message to another agent or another session. Success returns the stable message id and confirms acceptance, not recipient inference, reply, or completion. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(AGENT_WATCH_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -2079,6 +2082,7 @@ fn agent_watch_tool_spec() -> ToolSpec {
 
 fn session_list_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(SESSION_LIST_TOOL_NAME),
         model_visible_name: None,
         description: Some("List a bounded, redacted snapshot of live Tau sessions available for inter-session messaging. Results are racy and sorted by session id.".to_owned()),
@@ -2094,6 +2098,7 @@ fn session_list_tool_spec() -> ToolSpec {
 
 fn agent_list_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(AGENT_LIST_TOOL_NAME),
         model_visible_name: None,
         description: Some("List a bounded, redacted, current-session-only snapshot of pending, resumable live, restored-unavailable, and stopped agents. Results are racy and sorted by agent id.".to_owned()),
@@ -2109,6 +2114,7 @@ fn agent_list_tool_spec() -> ToolSpec {
 
 fn cancel_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(CANCEL_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -2127,11 +2133,12 @@ fn cancel_tool_spec() -> ToolSpec {
 }
 
 fn wait_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for one background tool call with `wait({\"tool_call_id\":\"ID\"})`, transactionally wait for all calls in request order with `wait({\"tool_call_ids\":[\"A\",\"B\"]})`, wait for the oldest unconsumed completed background result with `wait({})`, or wait for activating input with `wait({\"timeout_minutes\":N})`. `tool_call_ids` accepts 1 through 64 distinct nonempty IDs and is mutually exclusive with the other modes. A plural wait succeeds only after every member terminates, preserves typed member payloads in a `results` array, and represents member failures or cancellations as error members rather than failing fast. If no background result is complete and an owned background call is running, bare wait remains pending; otherwise it returns an error. Input waits accept positive integer minutes and silently clamp to the configured bounds (one through 1,440 minutes by default); they do not consume input or background output. Activating input can return a successful interruption with `wait_outcome: interrupted`, `wait_reason: activating_input`, and `wait_mode: exact` or `any_background`; plural interruption uses `wait_mode: exact_all`. The interruption consumes no background result or reserved completion. Already-finished matching results and already-queued activating input return immediately. Completion notifications leave results queued until `wait` consumes them; a wait suppresses or removes a completion notice only while it is pending, and plural rollback restores only undelivered notices.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. Wait for this conversation's specific background tool call."},"tool_call_ids":{"type":"array","minItems":1,"maxItems":tau_proto::MAX_WAIT_ALL_MEMBERS,"uniqueItems":true,"items":{"type":"string","minLength":1},"description":"Optional. Wait transactionally for all listed background tool calls in request order."},"timeout_minutes":{"type":"integer","minimum":1,"description":"Wait up to this many minutes for activating input addressed to this agent. The harness silently clamps this to configured effective bounds."}},"additionalProperties":false})), format: None, tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)], enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { provider_scope: None, name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for one background tool call with `wait({\"tool_call_id\":\"ID\"})`, transactionally wait for all calls in request order with `wait({\"tool_call_ids\":[\"A\",\"B\"]})`, wait for the oldest unconsumed completed background result with `wait({})`, or wait for activating input with `wait({\"timeout_minutes\":N})`. `tool_call_ids` accepts 1 through 64 distinct nonempty IDs and is mutually exclusive with the other modes. A plural wait succeeds only after every member terminates, preserves typed member payloads in a `results` array, and represents member failures or cancellations as error members rather than failing fast. If no background result is complete and an owned background call is running, bare wait remains pending; otherwise it returns an error. Input waits accept positive integer minutes and silently clamp to the configured bounds (one through 1,440 minutes by default); they do not consume input or background output. Activating input can return a successful interruption with `wait_outcome: interrupted`, `wait_reason: activating_input`, and `wait_mode: exact` or `any_background`; plural interruption uses `wait_mode: exact_all`. The interruption consumes no background result or reserved completion. Already-finished matching results and already-queued activating input return immediately. Completion notifications leave results queued until `wait` consumes them; a wait suppresses or removes a completion notice only while it is pending, and plural rollback restores only undelivered notices.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. Wait for this conversation's specific background tool call."},"tool_call_ids":{"type":"array","minItems":1,"maxItems":tau_proto::MAX_WAIT_ALL_MEMBERS,"uniqueItems":true,"items":{"type":"string","minLength":1},"description":"Optional. Wait transactionally for all listed background tool calls in request order."},"timeout_minutes":{"type":"integer","minimum":1,"description":"Wait up to this many minutes for activating input addressed to this agent. The harness silently clamps this to configured effective bounds."}},"additionalProperties":false})), format: None, tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)], enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn compact_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(COMPACT_TOOL_NAME),
         model_visible_name: None,
         description: Some("Compact your context.".to_owned()),
@@ -2152,6 +2159,7 @@ fn compact_tool_spec() -> ToolSpec {
 
 fn agent_compact_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(AGENT_COMPACT_TOOL_NAME),
         model_visible_name: None,
         description: Some("Request durable standalone compaction of another loaded agent. Possession of this tool is the cross-agent authority. The accepted result is asynchronous and can be awaited with wait.".to_owned()),

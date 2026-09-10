@@ -1308,8 +1308,8 @@ fn dropped_cancellation_report_has_no_downstream_effect() {
     );
 }
 
-/// Direct canonical spoofing, a non-Tool/Core report, and an unknown call all
-/// fail at their respective authority/validation boundaries.
+/// Direct canonical spoofing, an unauthorized-kind report, and an unknown call
+/// all fail at their respective authority/validation boundaries.
 #[test]
 fn terminal_report_authority_and_route_validation_fail_closed() {
     let (_tmp, mut harness) = setup_routed_test_tool_call("authority-call", "owned_tool");
@@ -1317,7 +1317,7 @@ fn terminal_report_authority_and_route_validation_fail_closed() {
         &mut harness,
         "provider-peer",
         "configured-provider",
-        tau_proto::ClientKind::Provider,
+        tau_proto::ClientKind::Action,
     );
     harness
         .handle_extension_event(

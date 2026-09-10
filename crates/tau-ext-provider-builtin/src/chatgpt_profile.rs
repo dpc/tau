@@ -22,6 +22,10 @@ pub struct ChatGptProfile {
     /// authentication.
     #[serde(default, skip_serializing_if = "is_false")]
     pub responses_lite_compatibility: bool,
+    /// Opts this account into the provider-owned, prompt-only image tool.
+    /// Startup declaration alone never dispatches a generation request.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub image_generation: bool,
 }
 
 impl ChatGptProfile {

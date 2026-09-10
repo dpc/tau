@@ -18,6 +18,7 @@ impl SelfInfoTool {
     /// Build the model-visible self-information tool contract.
     fn tool_spec() -> ToolSpec {
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new(SELF_INFO_TOOL_NAME),
             model_visible_name: None,
             description: Some(

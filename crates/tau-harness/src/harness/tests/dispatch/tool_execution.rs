@@ -5,6 +5,125 @@ use super::super::super::{
 };
 use super::*;
 
+/// Model changes cannot rebind an accepted scoped call, and replacing the
+/// registering connection fails the call rather than executing its fallback.
+#[test]
+fn provider_scoped_prompt_snapshot_never_rebinds_or_retries() {
+    for (replacement, scoped_winner) in [(false, true), (true, true), (false, false), (true, false)]
+    {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path().join("state")).expect("start");
+        h.config.selected_model = Some("test/model".into());
+        connect_ready_configured_extension(
+            &mut h,
+            "original-owner",
+            "scoped-owner",
+            tau_proto::ClientKind::Tool,
+        );
+        let mut scoped = shared_test_tool_spec("scoped_asset");
+        scoped.provider_scope = Some(tau_proto::ProviderName::new("test"));
+        scoped.model_visible_name = Some(ToolName::new("render_asset"));
+        h.tool_routing.registry.register(
+            &crate::test_connection_id(if scoped_winner {
+                "original-owner"
+            } else {
+                "scoped-ineligible"
+            }),
+            scoped.clone(),
+        );
+        let mut generic = shared_test_tool_spec("generic_asset");
+        generic.model_visible_name = Some(ToolName::new("render_asset"));
+        h.tool_routing.registry.register(
+            &crate::test_connection_id(if scoped_winner {
+                "generic-owner"
+            } else {
+                "original-owner"
+            }),
+            generic.clone(),
+        );
+        let chosen = if scoped_winner { scoped } else { generic };
+        let connections = h.selected_backing_connections(std::slice::from_ref(&chosen));
+        assert_eq!(
+            connections.get(&chosen.name),
+            Some(&crate::test_connection_id("original-owner"))
+        );
+        assert!(
+            h.selected_backing_connections(&[shared_test_tool_spec("unrelated")])
+                .is_empty()
+        );
+        let cid = ensure_test_user_agent(&mut h);
+        let prompt = test_agent_prompt_id("scoped-snapshot");
+        h.prompt_coordination
+            .prompt_runtime
+            .tool_specs
+            .insert(prompt.clone(), vec![chosen.clone()]);
+        h.prompt_coordination
+            .prompt_runtime
+            .backing_tool_connections
+            .insert(prompt.clone(), connections);
+        if replacement {
+            h.tool_routing
+                .registry
+                .unregister_connection(&crate::test_connection_id("original-owner"));
+            connect_ready_configured_extension(
+                &mut h,
+                "new-owner",
+                "replacement-owner",
+                tau_proto::ClientKind::Tool,
+            );
+            h.tool_routing
+                .registry
+                .register(&crate::test_connection_id("new-owner"), chosen.clone());
+            // A fresh prompt can select the new connection, never the old one.
+            let fresh = h.selected_backing_connections(std::slice::from_ref(&chosen));
+            assert_eq!(
+                fresh.get(&chosen.name),
+                Some(&crate::test_connection_id("new-owner"))
+            );
+        }
+        h.prompt_coordination
+            .prompt_runtime
+            .record_tool_call_prompt("frozen-asset".into(), prompt);
+        h.config.selected_model = Some("other/model".into());
+        h.execute_agent_tool_call(
+            &cid,
+            &AgentToolCall {
+                call_ref: None,
+                id: "frozen-asset".into(),
+                name: ToolName::new("render_asset"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            },
+        )
+        .expect("execute frozen call");
+        if replacement {
+            assert!(event_log_contains_any_source(&h, |event| matches!(event,
+                Event::ProviderToolError(error) if error.call_id.as_str() == "frozen-asset"
+            )));
+            assert!(
+                !h.tool_routing
+                    .tool_runtime
+                    .pending_tool_providers
+                    .contains_key("frozen-asset")
+            );
+        } else {
+            assert_eq!(
+                h.tool_routing
+                    .tool_runtime
+                    .pending_tool_providers
+                    .get("frozen-asset"),
+                Some(&crate::test_connection_id("original-owner"))
+            );
+        }
+        if scoped_winner {
+            assert!(!event_log_contains_any_source(&h, |event| matches!(event,
+                Event::ToolStarted(started) if started.tool_name.as_str() == "generic_asset"
+            )));
+        }
+        h.shutdown().expect("shutdown");
+    }
+}
+
 /// A tool result from any connection other than the routed provider must not
 /// close the call; otherwise a stale extension can spoof completion and make
 /// the real owner look like a duplicate.
@@ -1306,6 +1425,7 @@ fn tools_drift_invalidates_chain_anchor() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("test-ext"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("late_tool"),
             model_visible_name: None,
             description: Some("appeared between turns".to_owned()),
@@ -2071,6 +2191,7 @@ fn tool_group_overrides_apply_before_individual_tool_overrides() {
             &crate::test_connection_id("conn-grouped"),
             tau_core::ToolRegistration {
                 tool: ToolSpec {
+                    provider_scope: None,
                     name: ToolName::new(name),
                     model_visible_name: None,
                     description: Some(name.to_owned()),
@@ -2424,6 +2545,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -2440,6 +2562,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-mutate"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("mutate"),
             model_visible_name: None,
             description: None,
@@ -2532,6 +2655,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -2548,6 +2672,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-mutate"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("mutate"),
             model_visible_name: None,
             description: None,
@@ -2972,6 +3097,7 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_watch"),
             model_visible_name: None,
             description: Some("watch agent".to_owned()),
@@ -3057,6 +3183,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -3376,6 +3503,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -3578,6 +3706,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -3965,6 +4094,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("side_source"),
             model_visible_name: None,
             description: None,
@@ -4357,6 +4487,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -4825,6 +4956,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -5048,6 +5180,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -5064,6 +5197,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-websearch"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("websearch"),
             model_visible_name: None,
             description: None,
@@ -5438,6 +5572,7 @@ fn duplicate_tool_surface_does_not_resurrect_failed_create_prompt() {
         h.tool_routing.registry.register(
             &provider,
             ToolSpec {
+                provider_scope: None,
                 name: ToolName::new(internal_name),
                 model_visible_name: Some(ToolName::new("duplicate_visible")),
                 description: None,

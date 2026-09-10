@@ -47,6 +47,7 @@ fn model(hosted: bool) -> tau_proto::ProviderModelInfo {
 
 fn spec(name: &str, alias: &str, tags: &[&str]) -> tau_proto::ToolSpec {
     tau_proto::ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(name),
         model_visible_name: Some(tau_proto::ToolName::new(alias)),
         description: None,

@@ -1486,3 +1486,34 @@ server-requested delay, while retaining normal worker concurrency limits and
 initially leaving other delayed jobs untouched. A validated successful terminal
 from that exact attempt clears its matching current shared cooldown and wakes
 only peers constrained by that cooldown generation with anti-herd jitter.
+## Opt-in image generation
+
+In a ChatGPT profile, set `"image_generation": true` (default `false`) and
+restart the provider extension when deploying the updated configuration. This
+declares ordinary function tool `generate_image` for that exact provider
+namespace and serving connection. Both Standard and Lite profiles can opt in.
+Ordinary role tool policy still controls access; if a provider instance has a
+`tool_prefix`, the public alias receives that prefix too.
+
+The only argument is `{"prompt":"..."}`: nonempty text, at most 32 KiB, with
+no account, model, size, edit, or batch arguments. One fixed `gpt-image-2`
+generation uses the selected ChatGPT account. This is an explicit paid or
+quota-consuming effect, not an entitlement guarantee or a startup probe.
+An unavailable/expired account requires authentication; the image operation
+does not refresh and replay a failed generation, switch accounts, or use an
+API key.
+
+Before generation, the provider checks that shared artifact storage is
+available. Success returns `{"key":"blake3:...","size":123,"mime_type":"image/png"}`.
+The complete original PNG (up to 16 MiB, preserving alpha and metadata) lives
+in the harness-wide [artifact store](artifacts.md), independently of session
+lifetime. Use shell `import(key)` to obtain a private local path on the shell
+host, then `read_image` if the model supports it. No inline image or host storage
+path is returned by generation.
+
+Generation has a five-minute network deadline and a seven-minute overall
+availability/generation/publication deadline. It uses ordinary automatic
+background, wait, and cancellation handling. Failures and uncertain completion
+never retry generation; cancellation racing artifact finalization can leave
+an unreferenced original. Four concurrent image calls are admitted per provider
+process; excess calls fail busy.

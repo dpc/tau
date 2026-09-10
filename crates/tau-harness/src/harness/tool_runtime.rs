@@ -1817,11 +1817,11 @@ impl Harness {
             .prompt_runtime
             .tool_call_prompt(&call.id)
             .cloned();
-        let prompt_tool_spec = prompt_id
-            .as_ref()
-            .map(|prompt_id| self.resolve_enabled_tool_spec_for_prompt(&tool_name, prompt_id));
-        let current_role_tool_spec =
-            || self.resolve_enabled_tool_spec_for_role(&tool_name, &role_name);
+        let prompt_tool_spec = prompt_id.as_ref().map(|prompt_id| {
+            self.resolve_enabled_tool_spec_for_prompt(&tool_name, prompt_id)
+                .cloned()
+        });
+        let current_role_tool_spec = || self.resolve_enabled_tool_spec_for_agent(&tool_name, cid);
         let Some(tool_spec) = prompt_tool_spec.unwrap_or_else(current_role_tool_spec) else {
             let message = if prompt_id.is_some() && self.has_registered_tool_name(&tool_name) {
                 prompt_snapshot_tool_error_message(&tool_name)
@@ -1880,6 +1880,7 @@ impl Harness {
             );
             return Ok(());
         };
+        let tool_spec = &tool_spec;
         let internal_tool_name = tool_spec.name.clone();
         let visible_tool_name = self.tool_model_visible_name(tool_spec).clone();
         let allows_provider_image = tool_spec
@@ -1980,7 +1981,29 @@ impl Harness {
             originator: owner_originator.clone(),
         };
 
-        match self.tool_routing.registry.route_tool_request(request) {
+        let route = self
+            .tool_routing
+            .registry
+            .route_tool_request(request)
+            .and_then(|route| {
+                let expected = prompt_id.as_ref().and_then(|prompt_id| {
+                    self.prompt_coordination
+                        .prompt_runtime
+                        .backing_tool_connections
+                        .get(prompt_id)
+                        .and_then(|connections| connections.get(&internal_tool_name))
+                });
+                let changed = expected.is_some_and(|expected| {
+                    !matches!(&route.target, ToolRouteTarget::Extension(actual) if actual == expected)
+                });
+                if changed {
+                    return Err(ToolRouteError::NoProvider {
+                        tool_name: internal_tool_name.clone(),
+                    });
+                }
+                Ok(route)
+            });
+        match route {
             Ok(mut route) => {
                 if let Some(policy) = prompt_id.as_ref().and_then(|prompt_id| {
                     self.prompt_coordination

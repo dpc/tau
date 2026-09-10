@@ -22,6 +22,15 @@ observation is rejected rather than falling back.
 
 ## Typed image tool output
 
+Image generation is a separate finite backend operation, not Responses
+inference or typed image input. `image_generation` uses the selected subscription
+credentials for one fixed `gpt-image-2` request to `/codex/images/generations`,
+with redirects and transport retries disabled. It bounds the response, validates
+one complete PNG, and returns its original bytes unchanged. No provider prose,
+image bytes, or base64 enters diagnostic output; callers own artifact storage
+and ordinary tool lifecycle. Both Standard and Lite profiles may opt in, without
+claiming account entitlement or probing it.
+
 GPT-5.6 Sol, Terra, and Luna on the ChatGPT Responses surface explicitly
 publish image input and image tool-result support. Successful typed function
 results lower to one `function_call_output` whose `output` array contains the

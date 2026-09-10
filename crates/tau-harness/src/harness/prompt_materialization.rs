@@ -10,6 +10,9 @@ use super::prompt_materialization_timing::{
 };
 use super::*;
 
+mod tool_backing;
+use tool_backing::{RankedBacking, select_backing, select_ordinary_backings};
+
 #[cfg(test)]
 thread_local! {
     static DISPATCH_PROVIDER_SORT_COUNT: std::cell::Cell<usize> =
@@ -202,13 +205,15 @@ fn compile_web_tools(
         (LogicalWebOperation::Search, policy.search()),
         (LogicalWebOperation::Fetch, policy.fetch()),
     ] {
-        let mut candidates = logical.candidates().collect::<Vec<_>>();
-        candidates.sort_by(|(left_name, left), (right_name, right)| {
-            left.priority()
-                .cmp(&right.priority())
-                .then_with(|| left_name.cmp(right_name))
-        });
-        let winner = candidates.into_iter().find(|(_, candidate)| {
+        let candidates = logical
+            .candidates()
+            .map(|(name, candidate)| RankedBacking {
+                name,
+                priority: candidate.priority(),
+                backing: (name, candidate),
+            })
+            .collect();
+        let winner = select_backing(candidates, |(_, candidate)| {
             if !candidate.enabled() || !domains_available {
                 return false;
             }
@@ -1330,6 +1335,11 @@ impl Harness {
                     .is_some_and(|(_, _, resume)| resume.is_some()),
             ),
         );
+        let backing_connections = self.selected_backing_connections(&tool_specs);
+        self.prompt_coordination
+            .prompt_runtime
+            .backing_tool_connections
+            .insert(agent_prompt_id.clone(), backing_connections);
         self.prompt_coordination
             .prompt_runtime
             .tool_specs
@@ -1702,6 +1712,18 @@ impl Harness {
         );
         let mut hosted_tools = Vec::new();
         let mut invocation_policies = HashMap::new();
+        // Scope alone does not declare cached/live/context-size semantics.
+        // Ordinary provider-owned web tools must be explicitly selected through
+        // the existing web policy, not resurrect a disabled native candidate.
+        if let Some(role) = self.config.available_roles.get(role_name) {
+            let declared = role.web_tools.declared_tool_names().collect::<HashSet<_>>();
+            specs.retain(|spec| {
+                let alias = spec.model_visible_name.as_ref().unwrap_or(&spec.name);
+                spec.provider_scope.is_none()
+                    || !["web_search", "web_fetch"].contains(&alias.as_str())
+                    || declared.contains(&spec.name)
+            });
+        }
         if let Some(policy) = self
             .config
             .available_roles
@@ -1727,6 +1749,8 @@ impl Harness {
             hosted_tools = compiled.hosted_tools;
             invocation_policies = compiled.invocation_policies;
         }
+        select_ordinary_backings(&mut specs, &["web_search", "web_fetch"])
+            .map_err(|name| PromptSurfaceError::DuplicateToolName(name.to_string()))?;
         if hosted_web_search_collides(&hosted_tools, &specs) {
             return Err(PromptSurfaceError::DuplicateToolName(
                 "web_search".to_owned(),
@@ -1742,6 +1766,7 @@ impl Harness {
         };
         if !hide_tool_capabilities && !hosted_tools.is_empty() {
             capability_specs.push(tau_proto::ToolSpec {
+                provider_scope: None,
                 name: ToolName::new("web_search"),
                 model_visible_name: None,
                 description: Some("Search the web through the exact model provider.".to_owned()),
@@ -2285,7 +2310,15 @@ impl Harness {
                                 .tool_result_modalities
                                 .contains(&tau_proto::InputModality::Image)
                     });
-                provider_supports_type
+                let scope_available = provider.tool.provider_scope.as_ref().is_none_or(|scope| {
+                    model.is_some_and(|model| {
+                        &model.provider == scope
+                            && self.provider_runtime.model_routes.get(model)
+                                == Some(&provider.connection_id)
+                    })
+                });
+                scope_available
+                    && provider_supports_type
                     && provider_supports_image_content
                     && self.is_tool_enabled_for_role_model(
                         &provider.tool,
@@ -2634,7 +2667,9 @@ impl Harness {
     ) -> Option<&tau_proto::ToolSpec> {
         for provider in self.tool_routing.registry.all_tool_providers() {
             let spec = &provider.tool;
-            if !self.is_tool_provider_enabled_for_role(provider, role_name) {
+            if spec.provider_scope.is_some()
+                || !self.is_tool_provider_enabled_for_role(provider, role_name)
+            {
                 continue;
             }
             if self.tool_model_visible_name(spec) == requested_name {
@@ -2642,6 +2677,69 @@ impl Harness {
             }
         }
         None
+    }
+
+    /// Freezes scoped-selection aliases, including a chosen generic fallback.
+    /// Unrelated generic-only tools retain their existing reconnect behavior.
+    pub(super) fn selected_backing_connections(
+        &self,
+        specs: &[tau_proto::ToolSpec],
+    ) -> HashMap<ToolName, tau_proto::ConnectionId> {
+        let scoped_aliases = self
+            .tool_routing
+            .registry
+            .all_tool_providers()
+            .into_iter()
+            .filter(|provider| provider.tool.provider_scope.is_some())
+            .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
+            .collect::<HashSet<_>>();
+        specs
+            .iter()
+            .filter(|spec| scoped_aliases.contains(self.tool_model_visible_name(spec)))
+            .filter_map(|spec| {
+                self.tool_routing
+                    .registry
+                    .resolve_provider(spec.name.as_str())
+                    .map(|provider| (spec.name.clone(), provider.connection_id.clone()))
+            })
+            .collect()
+    }
+
+    /// Resolves automatic backing selection using an agent's authoritative
+    /// route.
+    ///
+    /// Calls lacking an exact route retain generic role lookup, but cannot gain
+    /// access to a provider-scoped backing through that fallback.
+    pub(super) fn resolve_enabled_tool_spec_for_agent(
+        &self,
+        requested_name: &ToolName,
+        cid: &AgentId,
+    ) -> Option<tau_proto::ToolSpec> {
+        let role_name = self.role_name_for_agent_id(cid);
+        let model = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| self.model_for_agent_role(agent));
+        let Some(model) = model else {
+            return self
+                .resolve_enabled_tool_spec_for_role(requested_name, &role_name)
+                .cloned();
+        };
+        self.prepare_prompt_surface_for_dispatch_timed(
+            &role_name,
+            Some(cid),
+            Some(cid),
+            &model,
+            false,
+            false,
+            None,
+        )
+        .ok()?
+        .tool_specs
+        .into_iter()
+        .find(|spec| self.tool_model_visible_name(spec) == requested_name)
     }
 
     pub(super) fn resolve_enabled_tool_spec_for_prompt(

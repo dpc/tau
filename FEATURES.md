@@ -182,6 +182,13 @@ metadata drives model selection and filters supported reasoning effort, response
 verbosity, reasoning summaries, input modalities, and compaction. Provider- and
 role-specific behavior also includes service tiers and prompt caching.
 
+ChatGPT profiles can opt into provider-owned `generate_image` with
+`image_generation: true`. It uses the selected account for one original PNG and
+returns a shared artifact key, not inline bytes or a storage path. Generic
+ordinary tools can share a public alias with a provider-scoped backing; the
+eligible exact-provider backing wins without new selection configuration.
+Generation never retries or falls back to another account after failure.
+
 Roles package a model, its parameters, prompt fragments, skills, and tool policy
 into a reusable agent profile. Controls can be changed for the current process;
 model-aware values are filtered or clamped to the model's supported surface. The

@@ -18,6 +18,7 @@ fn register_workdir_capability(h: &mut Harness, source: &str) {
     h.tool_routing.registry.register(
         &crate::test_connection_id(source),
         tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new(format!("{}_workdir", source.replace('-', "_"))),
             model_visible_name: None,
             description: None,

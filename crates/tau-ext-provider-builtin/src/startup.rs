@@ -8,6 +8,7 @@ use std::sync::{Arc, mpsc};
 use tau_client::TauExtensionRunner;
 use tau_proto::{ClientKind, ProviderName};
 
+use crate::image_tools::ImageTools;
 use crate::{
     BuiltinProviderProfiles, CancellationState, CodexRuntime, EXTENSION_NAME,
     OAuthRefreshRejectionCache, PrewarmSupervisor, PromptCredentialAdmissionState,
@@ -47,6 +48,7 @@ where
             tau_client::prepare_inspection(reader, writer, hello, |configure| {
                 let profiles = validate_configure_settings(&configure.settings_files)?;
                 Ok(tau_proto::InspectionComplete {
+                    tools: crate::image_tools::declarations(&profiles),
                     providers: vec![tau_proto::InspectionProviderModels {
                         models: models_for_profiles(&profiles),
                     }],
@@ -102,6 +104,7 @@ where
         codex_runtime.initialize_cache_diagnostics(startup.profiles.startup_cache_diagnostics());
     }
     let runtime = ProviderRuntime {
+        images: ImageTools::default(),
         load_prompt_profiles,
         startup_responses_modes,
         prompt_concurrency_limit,
@@ -129,8 +132,7 @@ where
         unavailable_compact_identities: HashSet::new(),
         compact_profile_identities: HashMap::new(),
         extension_data_client: None,
-        declared_credential_observations: None,
-        declared_models: None,
+        declared: Default::default(),
         diagnostics: ProviderDiagnosticsState {
             output_queue: WorkerQueueState::enabled(),
             ..ProviderDiagnosticsState::default()

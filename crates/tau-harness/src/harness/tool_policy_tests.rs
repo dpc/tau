@@ -28,6 +28,7 @@ fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
 
 fn tagged_tool(name: &str, enabled_by_default: bool, tags: &[&str]) -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(name),
         model_visible_name: None,
         description: None,
@@ -39,6 +40,141 @@ fn tagged_tool(name: &str, enabled_by_default: bool, tags: &[&str]) -> ToolSpec 
         background_support: Some(BackgroundSupport::Never),
         examples: Vec::new(),
     }
+}
+
+/// Registers two implementations of an arbitrary alias, demonstrating that the
+/// selection mechanism does not recognize a particular backend or image tool.
+fn register_asset_backings(harness: &mut Harness) {
+    let mut generic = tagged_tool("generic_asset", true, &[]);
+    generic.model_visible_name = Some(ToolName::new("render_asset"));
+    harness
+        .tool_routing
+        .registry
+        .register(&crate::test_connection_id("generic"), generic);
+    let mut scoped = tagged_tool("provider_asset", true, &[]);
+    scoped.model_visible_name = Some(ToolName::new("render_asset"));
+    scoped.provider_scope = Some(ProviderName::new("provider"));
+    harness
+        .tool_routing
+        .registry
+        .register(&crate::test_connection_id("provider"), scoped);
+}
+
+/// Reads the exact dispatch/preview surface rather than a preselection list.
+fn selected_asset(harness: &Harness) -> Option<String> {
+    let model = harness
+        .config
+        .selected_model
+        .as_ref()
+        .expect("selected model");
+    let (tools, _) = harness
+        .prepare_tool_surface_for_dispatch(
+            ROLE,
+            &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+            model,
+        )
+        .expect("unambiguous surface");
+    tools
+        .into_iter()
+        .find(|tool| {
+            tool.model_visible_name
+                .as_ref()
+                .is_some_and(|name| name.as_str() == "render_asset")
+        })
+        .map(|tool| tool.name.to_string())
+}
+
+/// Provider ownership includes connection generation, not just a matching
+/// namespace. Losing that exact route selects the generic backing on a new
+/// prompt.
+#[test]
+fn provider_scoped_backing_wins_only_on_exact_owned_route() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    register_asset_backings(&mut policy.harness);
+    assert_eq!(
+        selected_asset(&policy.harness).as_deref(),
+        Some("provider_asset")
+    );
+    let model = policy.harness.config.selected_model.clone().expect("model");
+    policy.harness.provider_runtime.model_routes.insert(
+        model.clone(),
+        crate::test_connection_id("different-provider-connection"),
+    );
+    assert_eq!(
+        selected_asset(&policy.harness).as_deref(),
+        Some("generic_asset")
+    );
+    policy
+        .harness
+        .provider_runtime
+        .model_routes
+        .insert(model.clone(), crate::test_connection_id("provider"));
+    let other = ModelId::new(ProviderName::new("other"), ModelName::new("model"));
+    policy
+        .harness
+        .provider_runtime
+        .model_info
+        .insert(other.clone(), model_info(&other, &[]));
+    policy
+        .harness
+        .provider_runtime
+        .model_routes
+        .insert(other.clone(), crate::test_connection_id("provider"));
+    policy.harness.config.selected_model = Some(other);
+    assert_eq!(
+        selected_asset(&policy.harness).as_deref(),
+        Some("generic_asset")
+    );
+}
+
+/// Role denial is an eligibility filter, never a preference overridden by
+/// provider-owned registration or same-alias fallback.
+#[test]
+fn provider_scoped_backing_respects_role_denial() {
+    let mut policy = policy_harness(
+        &[],
+        AgentRole {
+            disable_tools: vec![ToolName::new("provider_asset")],
+            ..Default::default()
+        },
+    );
+    register_asset_backings(&mut policy.harness);
+    assert_eq!(
+        selected_asset(&policy.harness).as_deref(),
+        Some("generic_asset")
+    );
+}
+
+/// Declaring two implementations in the same tier remains an ambiguity error;
+/// connection or registration ordering cannot pick an unintended account.
+#[test]
+fn provider_scoped_same_tier_alias_collision_is_rejected() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    register_asset_backings(&mut policy.harness);
+    let mut duplicate = tagged_tool("other_provider_asset", true, &[]);
+    duplicate.model_visible_name = Some(ToolName::new("render_asset"));
+    duplicate.provider_scope = Some(ProviderName::new("provider"));
+    policy
+        .harness
+        .tool_routing
+        .registry
+        .register(&crate::test_connection_id("provider"), duplicate);
+    let model = policy
+        .harness
+        .config
+        .selected_model
+        .as_ref()
+        .expect("model");
+    assert!(
+        policy
+            .harness
+            .prepare_tool_surface_for_dispatch(
+                ROLE,
+                &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+                model,
+            )
+            .is_err()
+    );
 }
 
 /// UI shell routing counts configured generic-shell owners exactly once,
@@ -981,6 +1117,7 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
 #[test]
 fn effective_tool_surface_detects_visible_alias_collision() {
     let spec = |internal: &str| ToolSpec {
+        provider_scope: None,
         name: ToolName::new(internal),
         model_visible_name: Some(ToolName::new("shared")),
         description: None,

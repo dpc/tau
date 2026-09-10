@@ -651,6 +651,7 @@ fn saturate_detached_fifo_for_test(
 
 fn restart_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -674,6 +675,7 @@ fn restart_tool_spec() -> ToolSpec {
 /// Returns the image-capable tool declaration reserved for one E2E fixture.
 fn typed_image_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(TYPED_IMAGE_TEST_DUMMY_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -695,6 +697,7 @@ fn typed_image_tool_spec() -> ToolSpec {
 
 fn provider_context_raw_message_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME),
         model_visible_name: None,
         description: Some(

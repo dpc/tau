@@ -4152,6 +4152,7 @@ fn test_tool_spec(
     background_support: Option<tau_proto::BackgroundSupport>,
 ) -> tau_proto::ToolSpec {
     tau_proto::ToolSpec {
+        provider_scope: None,
         name: ToolName::new(name),
         model_visible_name: None,
         description: Some(name.to_owned()),

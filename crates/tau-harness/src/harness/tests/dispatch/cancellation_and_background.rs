@@ -874,6 +874,7 @@ fn backgrounded_tool_progress_is_not_published() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-slow"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("slow"),
             model_visible_name: None,
             description: None,
@@ -1494,6 +1495,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-fail"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("fail"),
             model_visible_name: None,
             description: None,
@@ -3434,6 +3436,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -3455,6 +3458,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-slow"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("slow"),
             model_visible_name: None,
             description: None,
@@ -5036,6 +5040,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -5057,6 +5062,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-slow"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("slow"),
             model_visible_name: None,
             description: None,
@@ -5664,6 +5670,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-slow"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("slow"),
             model_visible_name: None,
             description: None,

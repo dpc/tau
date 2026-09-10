@@ -485,12 +485,12 @@ Tool specs may classify active calls for detailed turn presentation with the
 reserved `tau:turn:manipulator`, `tau:turn:data_fetch`, and `tau:turn:wait`
 tags. Calls without one of these tags conservatively classify as manipulator.
 
-- **`tool.registration_declared`** *(Tool/Core extension)* — A tool provider
+- **`tool.registration_declared`** *(Tool/Core; scoped-only Provider extension)* — A tool provider
   proposes a tool
   spec (name, description, JSON-schema parameters, `enabled_by_default`,
   and legacy execution-mode metadata). The declaration is transient and
   interceptable.
-- **`tool.unregistration_declared`** *(Tool/Core extension)* — A provider
+- **`tool.unregistration_declared`** *(Tool/Core/Provider extension)* — A provider
   proposes withdrawing one of its owned tools. Like registration declarations,
   it is transient and interceptable.
 - **`tool.register`** *(harness)* — Protected canonical state for an accepted
@@ -532,7 +532,7 @@ tags. Calls without one of these tags conservatively classify as manipulator.
 - **`tool.rejected`** *(harness)* — The harness rejected a tool request
   before any tool provider was asked to run it. UIs can display this as a tool
   call rejection.
-- **`tool.result_reported`** *(Tool/Core extension)* — Transient peer
+- **`tool.result_reported`** *(Tool/Core/Provider extension)* — Transient peer
   observation of successful completion. It commits through ordinary
   interception before the harness validates the captured configured generation,
   exact routed-call owner, tool-call state, media safety, and foreground or
@@ -550,7 +550,7 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   non-UI generic consumers. It retains the tool-owned raw result while clearing
   provider content. Interactive UIs subscribe to `tool.result_display` instead;
   the durable transcript authority remains `provider.tool_result`.
-- **`tool.error_reported`** *(Tool/Core extension)* — Transient peer
+- **`tool.error_reported`** *(Tool/Core/Provider extension)* — Transient peer
   observation of logical failure. It has the same generic commit and downstream
   route/generation validation boundary as `tool.result_reported`.
 - **`tool.error`** *(harness)* — Protected canonical renderer-facing failure
@@ -573,7 +573,7 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   emitted after a canonical `tool.background_result` commit and derived the same
   way during UI replay. It omits the raw successful background output; UI clients
   do not receive `tool.background_result`.
-- **`tool.progress_reported`** *(Tool/Core extension)* — Transient peer
+- **`tool.progress_reported`** *(Tool/Core/Provider extension)* — Transient peer
   observation of in-flight progress with an optional message, current/total
   counters, and/or complete display state. Tool providers should usually submit
   an initial report immediately after receiving `tool.started`, before expensive
@@ -586,7 +586,7 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   dropped.
 - **`tool.cancel_request`** *(harness)* — The harness asks an extension to cancel an
   in-flight call.
-- **`tool.cancelled_reported`** *(Tool/Core extension)* — Transient peer
+- **`tool.cancelled_reported`** *(Tool/Core/Provider extension)* — Transient peer
   cancellation observation. It commits before downstream generation, route, and
    call-state validation.
 - **`tool.cancelled`** *(harness)* — Protected canonical fact that a

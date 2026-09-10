@@ -7,6 +7,7 @@ struct PeerBackgroundTool;
 impl crate::InternalToolHandler for PeerBackgroundTool {
     fn tool_specs(&self) -> Vec<tau_proto::ToolSpec> {
         vec![tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("peer_background"),
             model_visible_name: None,
             description: Some("peer background fixture".to_owned()),
@@ -71,12 +72,22 @@ fn request(call_id: &str, tool_name: &str, agent_id: tau_proto::AgentId) -> Even
 
 /// Register one routable extension tool through the canonical declaration flow.
 fn register_tool(harness: &mut Harness, source: &str, name: &str) {
+    register_scoped_tool(harness, source, name, None);
+}
+
+fn register_scoped_tool(
+    harness: &mut Harness,
+    source: &str,
+    name: &str,
+    provider_scope: Option<tau_proto::ProviderName>,
+) {
     harness
         .handle_extension_event(
             source,
             TestProtocolItem::Event(Event::ToolRegistrationDeclared(
                 tau_proto::ToolRegistrationDeclared {
                     tool: tau_proto::ToolSpec {
+                        provider_scope,
                         name: tau_proto::ToolName::new(name),
                         model_visible_name: None,
                         description: Some("request test tool".to_owned()),
@@ -708,7 +719,10 @@ fn internal_request_publication_does_not_route_as_peer_input() {
 /// routed provider, publish canonical closure, and release all live mappings.
 #[test]
 fn routed_peer_requests_complete_from_terminal_reports() {
-    for outcome in ["result", "error", "cancel"] {
+    for (kind, outcome) in [tau_proto::ClientKind::Tool, tau_proto::ClientKind::Provider]
+        .into_iter()
+        .flat_map(|kind| ["result", "error", "cancel"].map(|outcome| (kind.clone(), outcome)))
+    {
         let tmp = TempDir::new().expect("tempdir");
         let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
         connect_ready_configured_extension(
@@ -721,16 +735,26 @@ fn routed_peer_requests_complete_from_terminal_reports() {
             &mut harness,
             "tool-owner",
             "configured-tool",
-            tau_proto::ClientKind::Tool,
+            kind.clone(),
         );
         connect_ready_configured_extension(
             &mut harness,
             "wrong-tool",
             "configured-wrong-tool",
-            tau_proto::ClientKind::Tool,
+            kind.clone(),
         );
-        register_tool(&mut harness, "tool-owner", "peer_terminal");
         let cid = ensure_test_user_agent(&mut harness);
+        let scope = if kind == tau_proto::ClientKind::Provider {
+            let model = harness.config.selected_model.clone().expect("model");
+            harness
+                .provider_runtime
+                .model_routes
+                .insert(model.clone(), crate::test_connection_id("tool-owner"));
+            Some(model.provider)
+        } else {
+            None
+        };
+        register_scoped_tool(&mut harness, "tool-owner", "peer_terminal", scope);
         let agent_id = durable_agent_id_for_conversation(&harness, &cid);
         let call_id = format!("peer-{outcome}");
         harness

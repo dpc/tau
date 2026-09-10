@@ -1234,6 +1234,7 @@ fn representative_events() -> Vec<Event> {
     let mut events = vec![
         Event::ToolRegistrationDeclared(ToolRegistrationDeclared {
             tool: ToolSpec {
+                provider_scope: None,
                 name: ToolName::new("echo"),
                 model_visible_name: None,
                 description: Some("Echo a payload".to_owned()),
@@ -6053,6 +6054,7 @@ fn tool_spec_defaults_and_background_support() {
     );
 
     let disabled = ToolSpec {
+        provider_scope: None,
         name: ToolName::new("echo"),
         model_visible_name: None,
         description: Some("Echo a payload".to_owned()),
@@ -6095,6 +6097,7 @@ fn prompt_fragment_primitives_serde_as_simple_values() {
 
 fn echo_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new("echo"),
         model_visible_name: None,
         description: Some("Echo a payload".to_owned()),
@@ -6816,6 +6819,7 @@ fn tool_spec_examples_default_to_empty() {
 #[test]
 fn tool_spec_examples_round_trip() {
     let spec = ToolSpec {
+        provider_scope: None,
         name: ToolName::new("edit"),
         model_visible_name: None,
         description: None,

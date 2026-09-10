@@ -349,6 +349,7 @@ fn configure_test_ui_shell_provider(
     h.tool_routing.registry.register(
         &crate::test_connection_id(connection_id),
         tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("shell"),
             model_visible_name: None,
             description: None,
@@ -978,6 +979,7 @@ pub(super) fn event_log_count(h: &Harness, matches_event: impl Fn(&Event) -> boo
 
 fn shared_test_tool_spec(name: &str) -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(name),
         model_visible_name: None,
         description: None,
@@ -1311,6 +1313,7 @@ struct TestAgentStartBuiltin;
 impl crate::InternalToolHandler for TestAgentStartBuiltin {
     fn tool_specs(&self) -> Vec<tau_proto::ToolSpec> {
         vec![tau_proto::ToolSpec {
+            provider_scope: None,
             name: ToolName::new("agent_start"),
             model_visible_name: None,
             description: Some("test agent_start".to_owned()),
@@ -1803,6 +1806,7 @@ impl crate::internal_tools::InternalToolHandler for SchedulerCompactionTools {
         ["compact", "agent_compact"]
             .into_iter()
             .map(|name| ToolSpec {
+                provider_scope: None,
                 name: ToolName::new(name),
                 model_visible_name: None,
                 description: Some("test compaction tool".to_owned()),
@@ -2324,6 +2328,7 @@ fn assert_manual_cross_compaction_error(h: &Harness, call: &AgentToolCall, expec
 
 fn instant_background_test_tool_spec(name: &str) -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(name),
         model_visible_name: None,
         description: None,

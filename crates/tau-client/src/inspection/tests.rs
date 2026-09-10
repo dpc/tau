@@ -272,6 +272,7 @@ fn deferred_manual_startup_preserves_configure_order() {
 fn registration() -> tau_proto::ToolRegistrationDeclared {
     tau_proto::ToolRegistrationDeclared {
         tool: tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("lookup"),
             model_visible_name: Some(tau_proto::ToolName::new("lookup_alias")),
             description: Some("literal lookup is not renamed".to_owned()),

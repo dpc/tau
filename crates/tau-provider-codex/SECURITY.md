@@ -132,3 +132,17 @@ and message/reason lengths, so it remains potentially credential-bearing and
 must receive the same private handling as full provider captures. Ordinary live
 retry status may contain separately bounded, single-line, known-secret-scrubbed
 provider detail and is therefore also potentially sensitive.
+
+The opt-in image transport is a separate single-attempt operation against the
+fixed subscription Images endpoint with model `gpt-image-2`. It uses only the
+credentials supplied by the selected profile, disables HTTP retries and
+redirects, bounds the response and original PNG, and validates without
+re-encoding alpha or metadata. It never logs or captures image bodies, remote
+error prose, credentials or prompts; its errors use closed byte-free categories.
+The built-in extension requires Artifact Available before invoking this paid
+effect and publishes original bytes only through typed artifact upload, never
+ordinary result serialization. No quota/authentication/transport/storage failure
+authorizes retry or account/API-key fallback. Cancellation and timeouts cannot
+prove remote generation stopped, and cancellation racing shared artifact
+finalization can leave an unreferenced original retained independently of the
+session.

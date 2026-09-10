@@ -10,11 +10,12 @@ canonical-before-projection-and-settlement contract.
 
 ## Scope
 
-Authenticated configured Tool and Core extensions submit transient
+Authenticated configured Tool, Core, and Provider extensions submit transient
 `tool.result_reported`, `tool.error_reported`, and
 `tool.cancelled_reported` observations for routed calls. These peer-owned
 reports use ordinary generic `HarnessInputMessage::Emit` admission,
-interception, commit, and broadcast. Provider, Action, UI, socket,
+interception, commit, and broadcast. Provider authority covers only its own
+routed ordinary tool calls, not general tool or shell authority. Action, UI, socket,
 unconfigured, and stale configured generations have no report authority. No
 peer may author canonical `tool.result`, `tool.result_display`, `tool.error`, `tool.cancelled`,
 `provider.tool_result`, `provider.tool_error`, or background completion facts.
@@ -29,7 +30,7 @@ completion remain separate protocol families.
 
 The harness evaluates a terminal report only after it commits. It revalidates
 the committed interception replacement against the immutable configured
-publisher, source connection, Tool/Core kind, and harness-assigned logical
+publisher, source connection, Tool/Core/Provider kind, and harness-assigned logical
 configured-instance identity captured when publication entered the generic
 queue. The report must name a currently tracked call routed to that exact live
 source. An unknown, completed, non-owned, harness-internal, disconnected, or

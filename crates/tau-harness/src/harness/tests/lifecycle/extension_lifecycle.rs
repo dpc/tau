@@ -875,6 +875,7 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -2499,6 +2500,7 @@ fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("drop-ext"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("stale_tool"),
             model_visible_name: None,
             description: Some("stale".to_owned()),
@@ -2545,6 +2547,7 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("init-ext"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("init_stale_tool"),
             model_visible_name: None,
             description: Some("stale".to_owned()),
@@ -3132,6 +3135,7 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
             publisher_extension_id: crate::test_extension_name("length-tool-terminal-race"),
             publisher_instance_id: 42.into(),
             tool: tau_proto::ToolSpec {
+                provider_scope: None,
                 name: ToolName::new("cancel_test_tool"),
                 model_visible_name: None,
                 description: Some("must remain undispatched".to_owned()),

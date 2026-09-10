@@ -6,6 +6,29 @@ advertise: false
 
 # Tau provider-builtin extension self-knowledge
 
+## Opt-in image generation
+
+A ChatGPT profile may set `image_generation: true` (default false) to declare
+ordinary function tool `generate_image` for that exact provider namespace and
+serving connection. Standard and Lite are supported; ordinary role allow/deny
+policy still applies, and an instance `tool_prefix` prefixes the alias.
+The only input is `{"prompt":"..."}`, nonempty and at most 32 KiB. The backend
+uses fixed `gpt-image-2` and the selected subscription account; it does not
+probe entitlement, switch accounts, or fall back to an API key.
+
+Artifact availability is checked before generation. Success returns
+`{"key":"blake3:...","size":123,"mime_type":"image/png"}` for the original PNG,
+up to 16 MiB with alpha/metadata intact. Use `import(key)` for a private path on
+the shell host, then `read_image` where supported. Shared originals outlive
+sessions, including ephemeral transcripts. No inline image or store path is
+returned. Ordinary background/wait/cancel applies; failed or uncertain
+generation is never retried. Cancellation during publication may orphan the
+shared original. The network deadline is five minutes; the overall call deadline
+is seven minutes. Expired credentials require authentication before another
+explicit invocation.
+
+## Provider overview
+
 `provider-builtin` is Tau's built-in provider extension. It runs `tau-ext-provider-builtin`, is enabled by default, publishes available models from configured providers, and executes agent turns for built-in provider backends.
 
 `tau dev preview-declarations` can inspect config-owned provider/model metadata

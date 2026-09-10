@@ -22,6 +22,7 @@ fn register_sensitive_timing_fixture(h: &mut Harness) {
     h.tool_routing.registry.register(
         &crate::test_connection_id("provider-identifier-canary"),
         ToolSpec {
+            provider_scope: None,
             name: ToolName::new("schema_canary_tool"),
             model_visible_name: None,
             description: Some("SCHEMA_DESCRIPTION_CANARY".to_owned()),
@@ -1787,6 +1788,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
             description: None,
@@ -3438,6 +3440,7 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     h.config.selected_model = Some("test/model".into());
     h.extensions.enabled_names.insert("optional-ext".to_owned());
     let aliased = ToolSpec {
+        provider_scope: None,
         name: ToolName::new("internal_alias"),
         model_visible_name: Some(ToolName::new("visible_alias")),
         description: None,
@@ -3743,6 +3746,7 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
         h.tool_routing.registry.register(
             &tool_provider,
             ToolSpec {
+                provider_scope: None,
                 name: ToolName::new(internal_name),
                 model_visible_name: Some(ToolName::new("duplicate_visible")),
                 description: None,
@@ -3881,6 +3885,7 @@ fn failed_create_prompt_does_not_resurrect_after_cold_reload() {
             h.tool_routing.registry.register(
                 &provider,
                 ToolSpec {
+                    provider_scope: None,
                     name: ToolName::new(internal_name),
                     model_visible_name: Some(ToolName::new("duplicate_visible")),
                     description: None,

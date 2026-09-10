@@ -81,13 +81,16 @@ payloads identify the configured extension and its harness-assigned logical
 instance; this is stable across supervised process respawn rather than a
 process-connection generation. See
 [SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
+Configured Provider publishers are limited to scoped tool registration and
+withdrawal of their own declarations, with no generic registration or shell
+authority. Scope remains mandatory after interception.
 `extension.prompt_fragment_publish` remains the extension-authored declaration
 name but now defaults to transient and never enters semantic history. See
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 Per-agent context registration, values, and readiness retain their existing wire
 names, default to transient, and remain runtime-only observations. See
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
-Tool progress likewise separates transient Tool/Core
+Tool progress likewise separates transient Tool/Core/Provider
 `tool.progress_reported` observations from protected harness-authored canonical
 `tool.progress` facts. Both share the `ToolProgress` payload, but the event names
 distinguish a committed peer report from the canonical harness fact. The
@@ -98,7 +101,9 @@ Terminal tool outcomes likewise use transient peer
 `tool.result_reported`, `tool.error_reported`, and
 `tool.cancelled_reported` inputs, distinct from protected harness-authored
 canonical terminal and provider projections. Reports and canonical facts reuse
-the existing full terminal payload DTOs. Successful UI display events instead
+the existing full terminal payload DTOs. Provider progress and terminal reports
+are accepted only for its own routed ordinary calls under the same captured
+generation checks; this does not authorize shell reports. Successful UI display events instead
 use dedicated payload-free DTOs, so `tool.result_display` and
 `tool.background_result_display` cannot expose raw result data. Event names
 establish authorship and commit stage. See

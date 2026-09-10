@@ -1163,6 +1163,7 @@ dependencies = [
  "dpc-tau-provider",
  "dpc-tau-vcr",
  "futures-util",
+ "image",
  "lru",
  "rand 0.8.6",
  "rcgen",

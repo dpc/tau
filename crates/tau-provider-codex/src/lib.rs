@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 mod decoded_event;
+pub mod image_generation;
 mod local_compaction;
 use attempt_context::{AttemptOperation, ProviderAttemptContext, RetryFailureInput};
 use responses::pool as path_responses_pool;

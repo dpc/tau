@@ -6,10 +6,11 @@ Protocol report authority, client and extension publication, harness post-commit
 
 ## Scope
 
-Authenticated configured Tool and Core extensions submit transient
+Authenticated configured Tool, Core, and Provider extensions submit transient
 `tool.progress_reported` observations for in-flight calls. These peer-owned
 reports use ordinary generic `HarnessInputMessage::Emit` admission,
-interception, commit, and broadcast. Provider, Action, UI, socket, and
+interception, commit, and broadcast. Provider authority covers only its own
+routed ordinary tool calls, not shell reports. Action, UI, socket, and
 unconfigured peers have no report authority. No peer may author canonical
 `tool.progress`.
 
@@ -21,7 +22,7 @@ events remain separate protocol families.
 
 The harness evaluates a progress report only after it commits. It revalidates
 the committed interception replacement against the immutable configured
-publisher, source connection, Tool/Core kind, and harness-assigned logical
+publisher, source connection, Tool/Core/Provider kind, and harness-assigned logical
 configured-instance identity captured when publication entered the generic
 queue. The report must name a currently tracked call routed to that exact live
 source. Progress for an unknown, completed, non-owned, harness-internal, or

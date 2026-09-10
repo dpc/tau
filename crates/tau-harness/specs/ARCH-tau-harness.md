@@ -290,9 +290,12 @@ mutates the registry, and publishes protected harness-authored canonical
 `tool.register` / `tool.unregister` state with configured instance provenance.
 The harness owns final-name validation and deterministic startup collision
 resolution. Extensions retain declaration and tool-specific semantic ownership.
+Configured Provider peers may register only provider-scoped declarations and
+withdraw their own tools, not declare generic tools or acquire shell authority.
+The committed replacement must retain scope.
 The exact flow is
 [SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
-Tool/Core peers likewise submit `tool.progress_reported` observations through
+Tool/Core/Provider peers likewise submit `tool.progress_reported` observations through
 ordinary generic publication. Only the post-commit consumer validates the
 captured live routed-call owner and background state, then publishes protected
 harness-sourced `tool.progress`; see
@@ -301,6 +304,8 @@ They submit terminal result, error, and cancellation reports through the same
 generic commit boundary. The post-commit consumer revalidates the captured live
 generation and exact routed-call owner before applying existing terminal
 processing and publishing protected harness-sourced terminal or provider facts.
+Provider authority is limited to its own routed ordinary calls; shell reports
+remain Tool/Core-only.
 Successful provider and background facts then produce distinct payload-free UI
 display events in both live and replay paths; see
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).

@@ -195,7 +195,15 @@ impl Harness {
             // validation and registry mutation run from the committed-event
             // consumer, never from this generic Emit intake path.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
-                matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                (matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                    || (entry.kind == ClientKind::Provider
+                        && match &event {
+                            Event::ToolRegistrationDeclared(registration) => {
+                                registration.tool.provider_scope.is_some()
+                            }
+                            Event::ToolUnregistrationDeclared(_) => true,
+                            _ => false,
+                        }))
                     && entry.state != ExtensionState::Disconnected
             });
             if !authorized {
@@ -260,8 +268,10 @@ impl Harness {
             // from the committed-event consumer. Keep this path semantically
             // identical to ordinary generic Emit publication.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
-                matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
-                    && entry.state != ExtensionState::Disconnected
+                matches!(
+                    entry.kind,
+                    ClientKind::Tool | ClientKind::Core | ClientKind::Provider
+                ) && entry.state != ExtensionState::Disconnected
             });
             if !authorized {
                 tracing::warn!(
@@ -1283,6 +1293,40 @@ impl Harness {
         }
 
         self.track_extension_tool_request_metadata(request);
+        // Direct requests retain the existing internal-name contract, but may
+        // not bypass automatic selection for a provider-scoped alias.
+        if let Some(provider) = self
+            .tool_routing
+            .registry
+            .resolve_provider(request.tool_name.as_str())
+        {
+            let alias = self.tool_model_visible_name(&provider.tool).clone();
+            let has_scoped_backing = self
+                .tool_routing
+                .registry
+                .all_tool_providers()
+                .into_iter()
+                .any(|candidate| {
+                    candidate.tool.provider_scope.is_some()
+                        && self.tool_model_visible_name(&candidate.tool) == &alias
+                });
+            if has_scoped_backing {
+                let selected = self
+                    .agent_runtime
+                    .agent_registry
+                    .agent_routes
+                    .get(request.agent_id.as_str())
+                    .and_then(|cid| self.resolve_enabled_tool_spec_for_agent(&alias, cid));
+                if selected.as_ref().map(|spec| &spec.name) != Some(&request.tool_name) {
+                    self.reject_peer_tool_request(
+                        request.clone(),
+                        request.tool_name.clone(),
+                        "tool backing is not selected for the agent's provider route".to_owned(),
+                    );
+                    return;
+                }
+            }
+        }
         let turn_categories = self
             .tool_routing
             .registry
@@ -1769,11 +1813,12 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         progress: &tau_proto::ToolProgress,
     ) {
-        let Some(extension) = peer_context
-            .extension
-            .as_ref()
-            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
-        else {
+        let Some(extension) = peer_context.extension.as_ref().filter(|extension| {
+            matches!(
+                extension.kind,
+                ClientKind::Tool | ClientKind::Core | ClientKind::Provider
+            )
+        }) else {
             return;
         };
         let source_is_current =
@@ -1783,7 +1828,10 @@ impl Harness {
                 .is_some_and(|entry| {
                     entry.instance_id == extension.instance_id
                         && entry.name == extension.publisher
-                        && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                        && matches!(
+                            entry.kind,
+                            ClientKind::Tool | ClientKind::Core | ClientKind::Provider
+                        )
                         && entry.state != ExtensionState::Disconnected
                 });
         let source_owns_route = self
@@ -1843,11 +1891,12 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
-        let Some(extension) = peer_context
-            .extension
-            .as_ref()
-            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
-        else {
+        let Some(extension) = peer_context.extension.as_ref().filter(|extension| {
+            matches!(
+                extension.kind,
+                ClientKind::Tool | ClientKind::Core | ClientKind::Provider
+            )
+        }) else {
             return;
         };
         let source_is_current =
@@ -1857,7 +1906,10 @@ impl Harness {
                 .is_some_and(|entry| {
                     entry.instance_id == extension.instance_id
                         && entry.name == extension.publisher
-                        && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                        && matches!(
+                            entry.kind,
+                            ClientKind::Tool | ClientKind::Core | ClientKind::Provider
+                        )
                         && entry.state != ExtensionState::Disconnected
                 });
         let call_id = match event {
@@ -2021,11 +2073,12 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
-        let Some(extension) = peer_context
-            .extension
-            .as_ref()
-            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
-        else {
+        let Some(extension) = peer_context.extension.as_ref().filter(|extension| {
+            matches!(
+                extension.kind,
+                ClientKind::Tool | ClientKind::Core | ClientKind::Provider
+            )
+        }) else {
             return;
         };
         let source_id = &extension.source;
@@ -2033,7 +2086,10 @@ impl Harness {
             entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher
-                && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                && matches!(
+                    entry.kind,
+                    ClientKind::Tool | ClientKind::Core | ClientKind::Provider
+                )
                 && entry.state != ExtensionState::Disconnected
         });
         if !source_is_current {
@@ -2051,7 +2107,12 @@ impl Harness {
 
         match event {
             Event::ToolRegistrationDeclared(registration) => {
-                if self.validate_or_reject_assigned_prefix(source_id, registration) {
+                // Interception cannot broaden a provider's declaration
+                // authority.
+                if (extension.kind != ClientKind::Provider
+                    || registration.tool.provider_scope.is_some())
+                    && self.validate_or_reject_assigned_prefix(source_id, registration)
+                {
                     if self.should_stage_extension_capabilities(source_id)
                         && extension.activation_reservation.is_some()
                     {

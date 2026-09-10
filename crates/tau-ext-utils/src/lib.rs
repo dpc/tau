@@ -1631,6 +1631,7 @@ fn error_display(args: String) -> ToolUseState {
 
 fn timer_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(TIMER_TOOL_NAME),
         model_visible_name: None,
         description: Some("Schedule, cancel, and list session-scoped timer reminders. A relative schedule must include delay_seconds for its initial firing; interval_seconds optionally sets the repeat cadence after that initial firing. Alternatively, use daily_time for a daily HH:MM wall-clock timer; daily timers use the host local timezone unless utc is true. Timers wake the agent with internal prompts.".to_owned()),
@@ -1664,6 +1665,7 @@ fn timer_tool_spec() -> ToolSpec {
 
 fn papercut_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(PAPERCUT_TOOL_NAME),
         model_visible_name: None,
         description: Some(PAPERCUT_MODEL_GUIDANCE.to_owned()),

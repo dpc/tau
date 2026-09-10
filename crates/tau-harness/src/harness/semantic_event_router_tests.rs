@@ -348,6 +348,7 @@ fn provider_execution_reports_never_enter_semantic_history() {
 fn tool_lifecycle_state_never_enters_semantic_history() {
     let declaration = tau_proto::ToolRegistrationDeclared {
         tool: tau_proto::ToolSpec {
+            provider_scope: None,
             name: ToolName::new("runtime_tool"),
             model_visible_name: None,
             description: None,

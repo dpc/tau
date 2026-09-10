@@ -271,3 +271,17 @@ crosses trusted directed IPC and backend execution, but the Codex warm path
 retains no exact request or response capture. Its private scalar operation
 records omit that content and describe backend execution only, not authenticated
 refresh-terminal acceptance.
+
+Opt-in image generation uses only the selected ChatGPT profile's credentials.
+An authenticated Available artifact reply must precede the paid effect. The
+fixed subscription endpoint and `gpt-image-2` model never fall back to another
+account, an API key, or another generation attempt. Quota, authentication,
+transport and storage failures do not retry. Response bytes and PNG decoding are
+bounded; original bytes cross only the backend response and typed artifact
+upload, not ordinary tool-result payloads, transcripts, or diagnostic logs.
+The result contains only a hash key, size and MIME type. Shared originals retain
+the artifact store's session-independent lifetime, including ephemeral sessions.
+Cancellation and timeout stop local waiting without proving remote work stopped;
+a race with artifact finalization may leave an unreferenced original. This is a
+reliability boundary under trusted configured-extension IPC, not hostile local
+process isolation.

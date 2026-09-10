@@ -28,6 +28,7 @@ fn register_shell_provider(harness: &mut Harness, source: &str, kind: tau_proto:
     harness.tool_routing.registry.register(
         &crate::test_connection_id(source),
         tau_proto::ToolSpec {
+            provider_scope: None,
             name: tau_proto::ToolName::new("shell"),
             model_visible_name: None,
             description: None,

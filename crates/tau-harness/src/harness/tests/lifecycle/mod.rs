@@ -313,6 +313,7 @@ fn reregister_shell(h: &mut Harness, spec: ToolSpec) {
 
 fn staged_tool_spec(name: &str) -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(name),
         model_visible_name: None,
         description: Some(format!("{name} test tool")),

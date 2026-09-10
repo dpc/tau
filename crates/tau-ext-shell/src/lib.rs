@@ -410,6 +410,7 @@ where
 fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     #[cfg(any(test, feature = "echo-agent"))]
     let echo_tool = Some(ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(ECHO_TOOL_NAME),
         model_visible_name: None,
         description: Some("Echo the provided payload unchanged".to_owned()),
@@ -428,6 +429,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         tools.push(echo_tool);
     }
     let read_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(READ_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -506,6 +508,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let read_image_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
         model_visible_name: None,
         description: Some("Read one local image for visual inspection.".to_owned()),
@@ -573,6 +576,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let export_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(EXPORT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -608,6 +612,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let import_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(IMPORT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -640,6 +645,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         examples: Vec::new(),
     };
     let edit_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -730,6 +736,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let apply_patch_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
         model_visible_name: None,
         description: Some("Use the `apply_patch` tool to edit files.".to_owned()),
@@ -747,6 +754,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         examples: Vec::new(),
     };
     let replace_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(REPLACE_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(EDIT_TOOL_NAME)),
         description: Some(
@@ -792,6 +800,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     };
     let dir_lock_tool = dir_lock_tool_spec(dir_lock_enabled);
     let grep_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(GREP_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -858,6 +867,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let find_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(FIND_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -907,6 +917,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let ls_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(LS_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -951,6 +962,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let workdir_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(WORKDIR_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -979,6 +991,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let shell_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
         model_visible_name: None,
         description: Some(
@@ -1041,6 +1054,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         }],
     };
     let gpt_shell_tool = ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
         description: Some(
@@ -1343,6 +1357,7 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
         tool_tags(&[tau_proto::TURN_WAIT_TOOL_TAG])
     };
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),
         model_visible_name: None,
         description: Some(

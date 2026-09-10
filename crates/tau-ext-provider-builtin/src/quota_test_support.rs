@@ -120,6 +120,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
     providers.insert(
         ProviderName::new(CHATGPT_PROVIDER_NAME),
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            image_generation: false,
             auth: OpenAiAuth {
                 access_token: "fixture-access".to_owned(),
                 refresh_token: String::new(),

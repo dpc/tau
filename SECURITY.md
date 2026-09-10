@@ -790,8 +790,12 @@ revisit this boundary when changing the preview window or encoding,
 `requires_visible_escape`, directed routing, or either client's tree rendering.
 See
 [`SPEC-tau-harness-session-state`](crates/tau-harness/specs/SPEC-tau-harness-session-state.md).
-Only authenticated configured Tool/Core peers may publish transient tool
-registration/unregistration declarations; canonical `tool.register` and
+Authenticated configured Tool/Core peers may publish transient tool
+registration/unregistration declarations. Configured Provider peers may register
+only provider-scoped tools and withdraw their own declarations; scope must remain
+present after interception. Scope eligibility requires the selected model's
+namespace and exact serving connection. This grants no generic registration or
+shell authority. Canonical `tool.register` and
 `tool.unregister` state is harness-authored. After declaration commit, the
 harness binds processing to the captured configured identity and live connection,
 then enforces assigned prefixes, schema/example bounds, ownership, and startup
@@ -838,19 +842,21 @@ Review this boundary when changing the papercut record schema, extension-data
 file limit, User-scope lock, normal `std-utils` instance naming, or CLI output
 sanitization.
 
-The same configured-peer boundary admits transient `tool.progress_reported`
+The same configured Tool/Core/Provider boundary admits transient `tool.progress_reported`
 observations. The report commits before routed-call authorization; only the
 downstream consumer may validate the captured live source, suppress backgrounded
 calls, and publish immutable harness-sourced `tool.progress`. Parked reports
 retain their original configured identity, and stale generations cannot produce
 canonical progress. See
 [`SPEC-tool-progress-reports-and-canonical-facts`](specs/SPEC-tool-progress-reports-and-canonical-facts.md).
-Terminal Tool/Core reports use the same captured configured-generation
+Terminal Tool/Core/Provider reports use the same captured configured-generation
 boundary. Mutable `tool.result_reported`, `tool.error_reported`, and
 `tool.cancelled_reported` observations commit before exact routed-call
 authorization and terminal state changes. Valid reports produce only immutable
 harness-sourced terminal/provider/background facts; stale generations,
 non-owners, completed calls, and direct canonical spoofs cannot close a call.
+Provider report authority covers only its own routed ordinary tool calls, not
+shell reports or another connection's work.
 Reports and raw canonical result/error facts stay out of semantic journals,
 while existing provider/cancellation/background transcript persistence is
 unchanged. Ephemeral-agent classification suppresses raw reports and every

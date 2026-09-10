@@ -7,6 +7,8 @@ use std::{io as path_std_io, time as path_std_time};
 use tau_proto::ProviderBackendKind;
 use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
 
+use crate::image_tools::ImageTools;
+
 mod compatibility;
 
 use super::*;
@@ -293,6 +295,7 @@ fn provider_list_shows_actionable_chatgpt_login_remediation() {
     let payload = provider_setup_payload(
         &provider,
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            image_generation: false,
             auth: OpenAiAuth {
                 access_token: "fixture-access".to_owned(),
                 refresh_token: "fixture-refresh".to_owned(),
@@ -385,6 +388,7 @@ fn provider_add_chatgpt_noninteractive_preflight_preserves_collision_safety() {
     let payload = provider_setup_payload(
         &provider,
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            image_generation: false,
             auth: OpenAiAuth {
                 access_token: "fixture-access".to_owned(),
                 refresh_token: "fixture-refresh".to_owned(),
@@ -726,6 +730,7 @@ fn chatgpt_setup_keeps_oauth_credential_publication() {
     let payload = provider_setup_payload(
         &provider,
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            image_generation: false,
             auth: OpenAiAuth {
                 access_token: "fixture-access".to_owned(),
                 refresh_token: "fixture-refresh".to_owned(),
@@ -2646,6 +2651,7 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
     assert!(standard.get("responses_lite_compatibility").is_none());
 
     let lite = BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+        image_generation: false,
         auth: OpenAiAuth::default(),
         responses_lite_compatibility: true,
         cache_diagnostics: Default::default(),
@@ -2717,6 +2723,7 @@ fn responses_transport_recommendation_is_endpoint_exact() {
 #[test]
 fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
     let mut profile = ChatGptProfile {
+        image_generation: false,
         auth: OpenAiAuth::default(),
         responses_lite_compatibility: true,
         cache_diagnostics: Default::default(),
@@ -3127,6 +3134,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
             (
                 first.clone(),
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    image_generation: false,
                     auth: expired.clone(),
                     responses_lite_compatibility: false,
                     cache_diagnostics: Default::default(),
@@ -3135,6 +3143,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
             (
                 second.clone(),
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    image_generation: false,
                     auth: expired,
                     responses_lite_compatibility: false,
                     cache_diagnostics: Default::default(),
@@ -3318,6 +3327,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
             (
                 lite.clone(),
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    image_generation: false,
                     auth: OpenAiAuth::default(),
                     responses_lite_compatibility: true,
                     cache_diagnostics: Default::default(),
@@ -3889,10 +3899,11 @@ fn prompt_async_test_auth() -> OpenAiAuth {
 }
 
 /// Builds an inert runtime owner for focused credential-admission transitions.
-fn observation_test_runtime()
--> ProviderRuntime<impl FnMut(Option<&ProviderName>) -> BuiltinProviderProfiles> {
+pub(super) fn observation_test_runtime()
+-> ProviderRuntime<fn(Option<&ProviderName>) -> BuiltinProviderProfiles> {
     let (worker_tx, worker_rx) = mpsc::channel();
     ProviderRuntime {
+        images: ImageTools::default(),
         load_prompt_profiles: |_: Option<&ProviderName>| BuiltinProviderProfiles::default(),
         startup_responses_modes: BTreeMap::new(),
         prompt_concurrency_limit: 0,
@@ -3920,8 +3931,7 @@ fn observation_test_runtime()
         unavailable_compact_identities: HashSet::new(),
         compact_profile_identities: HashMap::new(),
         extension_data_client: None,
-        declared_credential_observations: None,
-        declared_models: None,
+        declared: Default::default(),
         diagnostics: ProviderDiagnosticsState::default(),
     }
 }

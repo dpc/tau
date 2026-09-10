@@ -9,13 +9,40 @@ Protocol declaration authority, client and extension publication, harness post-c
 Authenticated configured Tool and Core extensions publish transient
 `tool.registration_declared` and `tool.unregistration_declared` events. These
 peer-owned declarations use ordinary generic `Emit` admission, interception,
-commit, and broadcast. Provider, Action, UI, socket, and unconfigured peers have
-no declaration authority. No peer may author canonical `tool.register` or
+commit, and broadcast. Configured Provider extensions may additionally declare
+only tools with a nonempty `provider_scope` and withdraw their own declarations.
+The scope must remain present after interception. Action, UI, socket, and
+unconfigured peers have no declaration authority. No peer may author canonical `tool.register` or
 `tool.unregister` state.
 
 This specification covers registration lifecycle only. Tool requests, progress,
 terminal reports, cancellation, action schemas, and later authority-matrix
 families remain outside this slice.
+
+## Provider-scoped backings
+
+An optional exact provider namespace marks an ordinary tool backing, not a
+hosted provider tool. It is eligible only when the selected model uses that
+namespace and its serving connection owns the declaration. Role and capability
+eligibility apply before selection. For an unmanaged public alias, one eligible
+scoped backing precedes one eligible generic backing (fixed priorities 10 and
+20); multiple eligible backings in either tier reject the surface even if the
+other tier would win. There are no user-configured ordinary backing priorities.
+
+Existing logical web candidate policy retains its named candidates, configured
+priorities, and tie-breaks. Scoped ordinary web backings require an explicitly
+listed `kind: tool` candidate and existing capability tags; they never satisfy
+`kind: model_provider` or gain inferred web capabilities. Unlisted scoped web
+backings are suppressed.
+
+Prompt dispatch freezes selected internal identity and connection. A later
+model switch recomputes a new prompt; connection replacement cannot redirect
+an accepted call or retry it on a generic backing. Direct requests must name
+the selected internal backing for the owning agent route. This is selection
+fallback only, never execution retry or account failover.
+Connection freezing includes a generic winner for an alias with a scoped
+declaration. Unrelated generic-only aliases keep their existing reconnect
+semantics.
 
 ## Downstream validation and canonical state
 

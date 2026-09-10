@@ -13,7 +13,9 @@ model-visible aliases, and groups. It never rewrites tags, actions, prompt prose
 schemas, grammars, examples, or other extension meaning.
 
 Final internal-name collisions are rejected deterministically; an incumbent is
-not evicted. Effective prompts reject simultaneously visible alias collisions.
+not evicted. Effective prompts reject simultaneously visible alias collisions
+after the scoped/generic backing selection defined by
+[SPEC-tool-declarations-and-canonical-state](SPEC-tool-declarations-and-canonical-state.md).
 Durable facts retain the final names without retroactive rewriting.
 
 Configuration remains harness-owned while declarations and semantics remain

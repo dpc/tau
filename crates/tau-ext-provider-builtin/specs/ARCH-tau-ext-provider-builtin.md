@@ -14,6 +14,16 @@ credential acceptance before publishing usable models. See
 
 ## Ownership boundaries
 
+Opted-in ChatGPT profiles also declare a scoped ordinary `generate_image` tool.
+`image_tools` owns availability preflight, selected-profile credential resolution,
+bounded call admission, cancellation, and correlated artifact upload on the
+main loop. The backend worker performs one finite Images request and returns
+original PNG bytes privately. It does not save files, publish events, or retry
+generation. Artifact failures terminate the call without account fallback;
+publication racing cancellation may leave a shared original. See
+[SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md) and
+[SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
+
 Tau loads credential-free profiles as a disjoint union from XDG config and state
 at `providers/<extension>/<namespace>.json`; each profile's serialized kind
 selects its backend family. Typed credentials live separately in the selected

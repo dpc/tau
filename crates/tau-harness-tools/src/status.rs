@@ -9,6 +9,7 @@ use tau_proto::{
 /// Build the model-visible status tool contract.
 pub(crate) fn tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new("status"),
         model_visible_name: None,
         description: Some(

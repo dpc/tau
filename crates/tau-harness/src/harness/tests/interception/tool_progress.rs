@@ -313,7 +313,7 @@ fn parked_stale_generation_cannot_publish_canonical_progress() {
     );
 }
 
-/// Reports from a configured non-Tool/Core peer and peer-authored canonical
+/// Reports from a configured unauthorized peer and peer-authored canonical
 /// facts must fail authority admission before generic publication.
 #[test]
 fn progress_authority_rejects_wrong_kind_and_peer_canonical_fact() {
@@ -323,7 +323,7 @@ fn progress_authority_rejects_wrong_kind_and_peer_canonical_fact() {
         &mut harness,
         "provider",
         "configured-provider",
-        tau_proto::ClientKind::Provider,
+        tau_proto::ClientKind::Action,
     );
     connect_ready_configured_extension(
         &mut harness,

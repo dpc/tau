@@ -2,6 +2,7 @@ use super::*;
 
 fn strict_tool(parameters: serde_json::Value) -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new("strict"),
         model_visible_name: None,
         description: Some("strict test tool".to_owned()),

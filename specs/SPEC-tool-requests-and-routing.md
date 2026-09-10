@@ -43,6 +43,12 @@ committed request's agent id, arguments, tool identity, and originator;
 request-time rejection preserves its tool identity and originator. Later
 terminal reports retain their routed producer metadata.
 
+For aliases with provider-scoped backings, direct requests additionally require
+the currently selected internal backing for the payload agent's loaded model
+route. Naming a generic or another account's internal backing cannot bypass
+[SPEC-tool-declarations-and-canonical-state](SPEC-tool-declarations-and-canonical-state.md).
+This does not retry a failed execution or change a prompt's frozen backing.
+
 Ownerless, non-transcript calls have no durable provider-terminal journal
 authority. Their provider-first runtime commit and post-commit settlement, and
 the durable provider-first boundary for journal-backed request rejection, are

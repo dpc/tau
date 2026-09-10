@@ -967,6 +967,7 @@ fn stage_tool(state: &HostStateRef, name: &str, spec: Map, handler: FnPtr) -> Re
     }
     state.tools.push(StagedTool {
         spec: ToolSpec {
+            provider_scope: None,
             name: tool_name,
             model_visible_name,
             description,

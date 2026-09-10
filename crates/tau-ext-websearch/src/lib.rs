@@ -914,6 +914,7 @@ fn is_loopback_url(url: &Url) -> bool {
 
 fn exa_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(EXA_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(MODEL_VISIBLE_SEARCH_TOOL_NAME)),
         description: Some(
@@ -979,6 +980,7 @@ fn hybrid_search_tool_spec_for_pool(pool: &ProviderPool) -> ToolSpec {
 
 fn hybrid_fetch_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: ToolName::new(HYBRID_FETCH_TOOL_NAME),
         model_visible_name: Some(ToolName::new(MODEL_VISIBLE_FETCH_TOOL_NAME)),
         description: Some(
@@ -1026,6 +1028,7 @@ fn exa_fetch_tool_spec() -> ToolSpec {
 
 fn parallel_search_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(MODEL_VISIBLE_SEARCH_TOOL_NAME)),
         description: Some(
@@ -1057,6 +1060,7 @@ fn parallel_search_tool_spec() -> ToolSpec {
 
 fn parallel_fetch_tool_spec() -> ToolSpec {
     ToolSpec {
+        provider_scope: None,
         name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(MODEL_VISIBLE_FETCH_TOOL_NAME)),
         description: Some(
