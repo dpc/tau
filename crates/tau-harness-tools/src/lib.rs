@@ -11,8 +11,6 @@
 //! events.
 
 use std::collections::{HashMap, HashSet};
-use std::fs as path_std_fs;
-use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 mod status;
@@ -912,15 +910,16 @@ fn read_skill_by_name(
         let message = format!("failed to read skill file: {e}");
         (message.clone(), Some(skill_error_display(name, &message)))
     })?;
-    let mut body = skill_body_from_prefix(&read)
+    let prepared = prepare_skill_content(read)
         .map_err(|message| (message.clone(), Some(skill_error_display(name, &message))))?;
-    if read.truncated {
+    let mut body = prepared.model_body;
+    if prepared.truncated {
         host.emit_info_important(&format!(
             "skill too long: {source_label} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while loading {name}",
         ));
         body.push_str(&format!(
             "\n\n[skill content truncated at {MAX_SKILL_CONTENT_BYTES} bytes; file has {} bytes]",
-            read.total_bytes
+            prepared.total_bytes
         ));
     }
     let mut display = skill_ok_display(name);
@@ -938,11 +937,11 @@ fn read_skill_by_name(
             (CborValue::Text("content".to_owned()), CborValue::Text(body)),
             (
                 CborValue::Text("truncated".to_owned()),
-                CborValue::Bool(read.truncated),
+                CborValue::Bool(prepared.truncated),
             ),
             (
                 CborValue::Text("total_bytes".to_owned()),
-                CborValue::Integer(read.total_bytes.into()),
+                CborValue::Integer(prepared.total_bytes.into()),
             ),
         ]),
         Some(display),
@@ -991,8 +990,8 @@ fn search_discovered_skills(
             }
             if search_content {
                 let body = body.get_or_insert_with(|| match read_skill_source_prefix(&skill.source, MAX_SKILL_CONTENT_BYTES) {
-                    Ok(read) => match skill_body_from_prefix(&read) {
-                        Ok(body) => { if read.truncated { warnings.push(format!("skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while content-searching {}", skill.source.label(), skill.name)); } body.to_lowercase() }
+                    Ok(read) => match prepare_skill_content(read) {
+                        Ok(prepared) => { if prepared.truncated { warnings.push(format!("skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while content-searching {}", skill.source.label(), skill.name)); } prepared.body.to_lowercase() }
                         Err(message) => { warnings.push(format!("skill frontmatter too long: {} while content-searching {}: {message}", skill.source.label(), skill.name)); String::new() }
                     },
                     Err(_) => String::new(),
@@ -1114,70 +1113,29 @@ fn skill_search_result(
 
 // Keep this behavior in sync with harness/user_skill_invocation.rs: user
 // `:skill` and the model-visible `skill` tool intentionally share bounded
-// prefix reads, frontmatter truncation rejection, frontmatter stripping, and
-// call-site truncation notes.
-struct LimitedTextRead {
-    text: String,
-    truncated: bool,
-    total_bytes: u64,
-}
-fn skill_body_from_prefix(read: &LimitedTextRead) -> Result<String, String> {
-    if read.truncated && tau_skills::has_unclosed_frontmatter(&read.text) {
-        return Err(format!(
-            "frontmatter closing fence was not found before the {MAX_SKILL_CONTENT_BYTES} byte read limit; file has {} bytes",
-            read.total_bytes
-        ));
-    }
-    Ok(tau_skills::strip_frontmatter(&read.text).to_owned())
+// prefix reads, frontmatter truncation rejection, model-context filtering for
+// returned bodies, and call-site truncation notes. Content search intentionally
+// uses the unfiltered source body so maintenance comments remain searchable.
+fn prepare_skill_content(
+    read: tau_skills::LoadedSkillContent,
+) -> Result<tau_skills::PreparedSkillContent, String> {
+    let total_bytes = read.total_bytes;
+    read.prepare().map_err(|error| match error {
+        tau_skills::SkillContentPreparationError::FrontmatterTruncated => format!(
+            "frontmatter closing fence was not found before the {MAX_SKILL_CONTENT_BYTES} byte read limit; file has {total_bytes} bytes"
+        ),
+    })
 }
 fn read_skill_source_prefix(
     source: &InternalSkillSource,
     max_bytes: usize,
-) -> std::io::Result<LimitedTextRead> {
+) -> std::io::Result<tau_skills::LoadedSkillContent> {
     match source {
-        InternalSkillSource::File(path) => read_text_file_prefix(path, max_bytes),
-        InternalSkillSource::BuiltIn { content } => {
-            Ok(read_text_prefix(content.as_ref(), max_bytes))
-        }
-    }
-}
-fn read_text_file_prefix(
-    path: &std::path::Path,
-    max_bytes: usize,
-) -> std::io::Result<LimitedTextRead> {
-    let mut file = path_std_fs::File::open(path)?;
-    let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(max_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)?;
-    let truncated = max_bytes < bytes.len();
-    if truncated {
-        bytes.truncate(max_bytes);
-    }
-    Ok(LimitedTextRead {
-        text: String::from_utf8_lossy(&bytes).into_owned(),
-        truncated,
-        total_bytes,
-    })
-}
-fn read_text_prefix(text: &str, max_bytes: usize) -> LimitedTextRead {
-    let total_bytes = text.len() as u64;
-    if text.len() <= max_bytes {
-        return LimitedTextRead {
-            text: text.to_owned(),
-            truncated: false,
-            total_bytes,
-        };
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    LimitedTextRead {
-        text: text[..end].to_owned(),
-        truncated: true,
-        total_bytes,
+        InternalSkillSource::File(path) => tau_skills::read_skill_file_prefix(path, max_bytes),
+        InternalSkillSource::BuiltIn { content } => Ok(tau_skills::read_skill_text_prefix(
+            content.as_ref(),
+            max_bytes,
+        )),
     }
 }
 fn sort_skill_hits(hits: &mut [SkillSearchHit]) {

@@ -1451,6 +1451,86 @@ fn strip_frontmatter_returns_body() {
     assert_eq!(strip_frontmatter(content), "The body.");
 }
 
+/// Standalone single-line and multiline comments, including surrounding line
+/// whitespace, must be absent from the model-facing body.
+#[test]
+fn strips_standalone_html_comment_blocks() {
+    let body = "before\n  <!-- one --> \n<!-- two\nmiddle\nend -->\nafter\n";
+    assert_eq!(strip_model_context_comments(body), "before\nafter\n");
+}
+
+/// The first eligible close ends a block while nested-looking openers have no
+/// special meaning.
+#[test]
+fn ignores_nested_openers_and_uses_first_eligible_close() {
+    let body = "before\n<!-- outer\n<!-- inner -->\nafter\n";
+    assert_eq!(strip_model_context_comments(body), "before\nafter\n");
+}
+
+/// Unterminated candidates and close delimiters followed by prose must remain
+/// byte-for-byte intact so filtering cannot silently discard ordinary content.
+#[test]
+fn preserves_unterminated_and_trailing_prose_candidates() {
+    for body in [
+        "before\n<!-- unfinished\nstill here",
+        "before\n<!-- comment --> trailing prose\nafter\n",
+        "before\n<!-- comment\nend --> trailing prose\nafter\n",
+    ] {
+        assert_eq!(strip_model_context_comments(body), body);
+    }
+}
+
+/// Comments embedded in prose are outside the deliberately narrow standalone
+/// syntax and must remain visible.
+#[test]
+fn preserves_inline_prose_comments() {
+    let body = "before <!-- maintenance note --> after\n";
+    assert_eq!(strip_model_context_comments(body), body);
+}
+
+/// Empty and comments-only bodies must filter without adding blank lines.
+#[test]
+fn handles_empty_and_comments_only_bodies() {
+    assert_eq!(strip_model_context_comments(""), "");
+    assert_eq!(strip_model_context_comments("<!-- only -->"), "");
+    assert_eq!(strip_model_context_comments(" \t<!-- only -->\r\n"), "");
+}
+
+/// Filtering must preserve CRLF terminators and a missing final newline on
+/// neighboring non-comment content.
+#[test]
+fn preserves_line_endings_and_final_newline_state() {
+    let body = "before\r\n<!-- comment -->\r\nafter";
+    assert_eq!(strip_model_context_comments(body), "before\r\nafter");
+}
+
+/// Preparation must retain the complete bounded source including frontmatter
+/// while exposing distinct raw-body and model-facing projections.
+#[test]
+fn prepares_raw_body_and_model_projections() {
+    let raw = "---\nname: demo\ndescription: demo\n---\nvisible\n<!-- maintenance note -->\nend";
+    let prepared = read_skill_text_prefix(raw, usize::MAX)
+        .prepare()
+        .expect("prepare skill");
+
+    assert_eq!(prepared.raw, raw);
+    assert_eq!(prepared.body, "visible\n<!-- maintenance note -->\nend");
+    assert_eq!(prepared.model_body, "visible\nend");
+    assert!(!prepared.truncated);
+    assert_eq!(prepared.total_bytes, raw.len() as u64);
+}
+
+/// Bounded text reads must truncate on UTF-8 boundaries and retain the original
+/// total byte count for existing skill-loading diagnostics.
+#[test]
+fn bounded_text_read_preserves_utf8_and_total_size() {
+    let loaded = read_skill_text_prefix("aéz", 2);
+
+    assert_eq!(loaded.raw, "a");
+    assert!(loaded.truncated);
+    assert_eq!(loaded.total_bytes, 4);
+}
+
 #[test]
 fn has_unclosed_frontmatter_detects_missing_closing_fence() {
     assert!(has_unclosed_frontmatter("---\nname: x\n"));

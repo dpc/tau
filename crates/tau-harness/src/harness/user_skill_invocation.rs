@@ -1,8 +1,5 @@
 //! User-facing `:skill` command parsing and prompt expansion helpers.
 
-use std::fs as path_std_fs;
-use std::io::Read as _;
-
 use crate::discovery::DiscoveredSkillSource;
 
 pub(super) const MAX_USER_INVOKED_SKILL_BYTES: usize = 64 * 1024;
@@ -44,60 +41,28 @@ pub(super) fn read_user_invoked_skill_body(
 ) -> Result<LoadedSkillBody, String> {
     // Keep this behavior in sync with tau-harness-tools' model-visible `skill`
     // tool: both read a bounded prefix, reject frontmatter truncated before the
-    // closing fence, strip frontmatter from the loaded prefix, and append a
-    // truncation note at the call site.
-    let (text, truncated, total_bytes) = match source {
+    // closing fence, filter the model-facing body, and append a truncation note
+    // at the call site.
+    let loaded = match source {
         DiscoveredSkillSource::File(path) => {
-            read_text_file_prefix(path, MAX_USER_INVOKED_SKILL_BYTES)
+            tau_skills::read_skill_file_prefix(path, MAX_USER_INVOKED_SKILL_BYTES)
                 .map_err(|error| error.to_string())?
         }
         DiscoveredSkillSource::BuiltIn { content } => {
-            read_text_prefix(content.as_ref(), MAX_USER_INVOKED_SKILL_BYTES)
+            tau_skills::read_skill_text_prefix(content.as_ref(), MAX_USER_INVOKED_SKILL_BYTES)
         }
     };
-    if truncated && tau_skills::has_unclosed_frontmatter(&text) {
-        return Err(format!(
+    let total_bytes = loaded.total_bytes;
+    let prepared = loaded.prepare().map_err(|error| match error {
+        tau_skills::SkillContentPreparationError::FrontmatterTruncated => format!(
             "frontmatter closing fence was not found before the {MAX_USER_INVOKED_SKILL_BYTES} byte read limit; file has {total_bytes} bytes"
-        ));
-    }
+        ),
+    })?;
     Ok(LoadedSkillBody {
-        body: tau_skills::strip_frontmatter(&text).to_owned(),
-        truncated,
-        total_bytes,
+        body: prepared.model_body,
+        truncated: prepared.truncated,
+        total_bytes: prepared.total_bytes,
     })
-}
-
-fn read_text_file_prefix(
-    path: &std::path::Path,
-    max_bytes: usize,
-) -> std::io::Result<(String, bool, u64)> {
-    let mut file = path_std_fs::File::open(path)?;
-    let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(max_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)?;
-    let truncated = max_bytes < bytes.len();
-    if truncated {
-        bytes.truncate(max_bytes);
-    }
-    Ok((
-        String::from_utf8_lossy(&bytes).into_owned(),
-        truncated,
-        total_bytes,
-    ))
-}
-
-fn read_text_prefix(text: &str, max_bytes: usize) -> (String, bool, u64) {
-    let total_bytes = text.len() as u64;
-    if text.len() <= max_bytes {
-        return (text.to_owned(), false, total_bytes);
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_owned(), true, total_bytes)
 }
 
 pub(super) fn format_user_invoked_skill_prompt(

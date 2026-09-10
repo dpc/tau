@@ -36,3 +36,20 @@ fn rejects_frontmatter_truncated_before_closing_fence() {
     let error = read_user_invoked_skill_body(&source).expect_err("frontmatter error");
     assert!(error.contains("frontmatter closing fence was not found"));
 }
+
+/// User `:skill` expansion must hide maintenance comments from model context
+/// while leaving the source file untouched for editors and other consumers.
+#[test]
+fn filters_comments_without_modifying_user_skill_source() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("commented.md");
+    let content =
+        "---\nname: commented\ndescription: commented skill\n---\nvisible\n<!-- hidden -->\nend";
+    std::fs::write(&path, content).expect("write skill");
+    let source = DiscoveredSkillSource::File(path.clone());
+
+    let loaded = read_user_invoked_skill_body(&source).expect("load skill body");
+
+    assert_eq!(loaded.body, "visible\nend");
+    assert_eq!(std::fs::read_to_string(path).expect("read source"), content);
+}

@@ -209,9 +209,27 @@ fn hidden_repository_tool_verification_skills_load_by_exact_query() {
             .expect("exact-query selection");
         let read = read_skill_source_prefix(&selected.source, MAX_SKILL_CONTENT_BYTES)
             .expect("bounded exact-name skill read");
-        let body = skill_body_from_prefix(&read).expect("strip exact-name skill frontmatter");
-        assert!(body.contains("# Tau Tool Verification"));
+        let prepared = prepare_skill_content(read).expect("prepare exact-name skill");
+        assert!(prepared.model_body.contains("# Tau Tool Verification"));
     }
+}
+
+/// Exact skill loading filters maintenance comments from the returned
+/// model-facing body without changing the source text used by content search.
+#[test]
+fn exact_skill_loading_filters_comments_but_content_search_keeps_them() {
+    let read = tau_skills::LoadedSkillContent {
+        raw: "---\nname: demo\ndescription: demo\n---\nvisible\n<!-- searchable note -->\nend"
+            .to_owned(),
+        truncated: false,
+        total_bytes: 0,
+    };
+
+    let prepared = prepare_skill_content(read.clone()).expect("prepared content");
+    assert!(prepared.body.contains("searchable note"));
+    assert_eq!(prepared.model_body, "visible\nend");
+    assert_eq!(prepared.raw, read.raw);
+    assert!(read.raw.contains("<!-- searchable note -->"));
 }
 
 fn cbor_map_text<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {

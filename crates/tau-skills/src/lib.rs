@@ -138,6 +138,58 @@ pub struct LoadSkillsResult {
     pub diagnostics: Vec<SkillDiagnostic>,
 }
 
+/// A bounded skill source read before model-context preparation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadedSkillContent {
+    /// Exact decoded text loaded from the source, including frontmatter.
+    pub raw: String,
+    /// Whether the source exceeded the requested byte limit.
+    pub truncated: bool,
+    /// Total source size in bytes before truncation.
+    pub total_bytes: u64,
+}
+
+/// A bounded skill read plus its prepared model-facing body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedSkillContent {
+    /// Exact decoded text loaded from the source, including frontmatter.
+    pub raw: String,
+    /// Skill body with frontmatter removed and maintenance comments preserved.
+    pub body: String,
+    /// Body with frontmatter and supported maintenance comments removed.
+    pub model_body: String,
+    /// Whether the source exceeded the requested byte limit.
+    pub truncated: bool,
+    /// Total source size in bytes before truncation.
+    pub total_bytes: u64,
+}
+
+/// Failure to prepare a bounded skill source for model context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkillContentPreparationError {
+    /// The bounded read ended inside frontmatter, so no body can be identified.
+    FrontmatterTruncated,
+}
+
+impl LoadedSkillContent {
+    /// Preserve the raw loaded text and derive its model-facing body.
+    pub fn prepare(self) -> Result<PreparedSkillContent, SkillContentPreparationError> {
+        if self.truncated && has_unclosed_frontmatter(&self.raw) {
+            return Err(SkillContentPreparationError::FrontmatterTruncated);
+        }
+        let body = strip_frontmatter(&self.raw);
+        let model_body = strip_model_context_comments(body).into_owned();
+        let body = body.to_owned();
+        Ok(PreparedSkillContent {
+            raw: self.raw,
+            body,
+            model_body,
+            truncated: self.truncated,
+            total_bytes: self.total_bytes,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -286,6 +338,92 @@ pub fn parse_frontmatter(content: &str) -> (BTreeMap<String, String>, &str) {
 /// Strip frontmatter and return only the body.
 pub fn strip_frontmatter(content: &str) -> &str {
     parse_frontmatter(content).1
+}
+
+/// Remove standalone HTML comment blocks from a model-facing skill body.
+///
+/// An opening delimiter must be preceded only by whitespace on its line, and a
+/// closing delimiter must be followed only by whitespace on its line. A
+/// candidate containing a closing delimiter followed by prose, or one left
+/// open at end of input, is preserved verbatim.
+pub fn strip_model_context_comments(body: &str) -> Cow<'_, str> {
+    let mut candidate_start = None;
+    let mut copied_through = 0;
+    let mut filtered = String::new();
+    let mut line_start = 0;
+
+    for line in body.split_inclusive('\n') {
+        let line_end = line_start + line.len();
+        let line_body = line.strip_suffix('\n').unwrap_or(line);
+        let line_body = line_body.strip_suffix('\r').unwrap_or(line_body);
+
+        if candidate_start.is_none() && line_body.trim_start().starts_with("<!--") {
+            candidate_start = Some(line_start);
+        }
+
+        if let Some(comment_start) = candidate_start
+            && let Some(close_start) = line_body.find("-->")
+        {
+            let after_close = &line_body[close_start + "-->".len()..];
+            if after_close.trim().is_empty() {
+                filtered.push_str(&body[copied_through..comment_start]);
+                copied_through = line_end;
+            }
+            candidate_start = None;
+        }
+
+        line_start = line_end;
+    }
+
+    if copied_through == 0 {
+        Cow::Borrowed(body)
+    } else {
+        filtered.push_str(&body[copied_through..]);
+        Cow::Owned(filtered)
+    }
+}
+
+/// Read at most `max_bytes` from a skill file while retaining its total size.
+pub fn read_skill_file_prefix(
+    path: &Path,
+    max_bytes: usize,
+) -> std::io::Result<LoadedSkillContent> {
+    let mut file = fs::File::open(path)?;
+    let total_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    let truncated = max_bytes < bytes.len();
+    if truncated {
+        bytes.truncate(max_bytes);
+    }
+    Ok(LoadedSkillContent {
+        raw: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+        total_bytes,
+    })
+}
+
+/// Read at most `max_bytes` from in-memory skill text on a UTF-8 boundary.
+pub fn read_skill_text_prefix(text: &str, max_bytes: usize) -> LoadedSkillContent {
+    let total_bytes = text.len() as u64;
+    if text.len() <= max_bytes {
+        return LoadedSkillContent {
+            raw: text.to_owned(),
+            truncated: false,
+            total_bytes,
+        };
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    LoadedSkillContent {
+        raw: text[..end].to_owned(),
+        truncated: true,
+        total_bytes,
+    }
 }
 
 /// Returns true when `content` starts with a frontmatter opening fence
