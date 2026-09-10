@@ -9,6 +9,12 @@ lifecycle and recovery invariants coherently.
 
 ## Non-destructive saved-agent unload
 
+Shared original-byte artifacts are not session-owned state: their digest
+namespace and separate retention survive session deletion and saved-agent unload.
+Persistent ephemeral sessions may explicitly use them, while memory-only
+harnesses cannot inspect, create, or clean them. See
+[SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
+
 Operator unload supports durable members only and preserves both the agent
 transcript and complete session membership history. A known durable historical
 member that is already absent is an idempotent success. Unload rejects accepted

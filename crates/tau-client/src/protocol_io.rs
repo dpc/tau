@@ -538,6 +538,7 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
             "message.unload_session_agent_result".to_owned()
         }
         HarnessOutputMessage::ExtensionDataResult(_) => "message.extension_data_result".to_owned(),
+        HarnessOutputMessage::ArtifactResult(_) => "message.artifact_result".to_owned(),
         HarnessOutputMessage::ExternalAgentMessageResult(_) => {
             "message.external_agent_message_result".to_owned()
         }
@@ -578,6 +579,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::UiRetryExtensionRequest(_) => "ui_retry_extension_request",
         HarnessInputMessage::ProviderDebugCapture(_) => "provider_debug_capture",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
+        HarnessInputMessage::ArtifactRequest(_) => "artifact_request",
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "external_agent_message_auth",
         HarnessInputMessage::PeerSessionProbe(_) => "peer_session_probe",

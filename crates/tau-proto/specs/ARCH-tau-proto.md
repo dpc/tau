@@ -1,5 +1,10 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 6.0 adds directed, non-event Artifact request/result transfers for
+shared original bytes. Major-skew admission prevents configured peers from
+silently expecting an RPC that an older harness cannot answer. The contract is
+[SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
+
 Protocol 5.0 requires complete standalone-compaction boundary and
 inference-checkpoint ownership plus an explicit start trigger. Old automatic
 threshold, successful-pass continuation, and preflight

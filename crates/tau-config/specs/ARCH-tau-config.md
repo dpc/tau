@@ -1,5 +1,10 @@
 # ARCH-tau-config: tau-config architecture
 
+`artifact_retention` is an independent nullable startup policy using the existing
+retention-duration grammar. Its built-in default is `null`, and session/agent
+retention cannot delete shared original bytes. The cross-component contract is
+[SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
+
 `tau_state_access` selects `hidden` or `read_only` for supervised
 extensions, and an extension entry can override it with the same field. A
 selected profile can replace this global default before command-line layers.

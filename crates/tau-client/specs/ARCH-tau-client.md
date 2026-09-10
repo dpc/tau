@@ -1,5 +1,12 @@
 # ARCH-tau-client: tau-client architecture
 
+`ArtifactClient` uses existing bounded detached output and leaves correlation to
+the ordinary receive loop. `ArtifactUpload` and `ArtifactDownload` keep retryable
+transfer state separate from transport and tool lifecycle; downloads verify exact
+original size and digest before exposing bytes. They provide no direct operational
+filesystem access. See
+[SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
+
 Architectural or externally meaningful functional changes to this shared
 harness-extension interface require the explicit confirmation mandated by
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).

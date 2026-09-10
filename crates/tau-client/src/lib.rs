@@ -19,6 +19,9 @@
 //! structural identifiers automatically. Raw [`ClientHandle::send`] and
 //! [`ClientHandle::emit`] are wire-level APIs and never rewrite names.
 
+mod artifact_client;
+mod artifact_download;
+mod artifact_upload;
 mod builder;
 mod client_error;
 mod client_handle;
@@ -40,6 +43,9 @@ mod tool_name_scope;
 mod tool_terminal_outcome;
 mod writer_thread;
 
+pub use artifact_client::ArtifactClient;
+pub use artifact_download::ArtifactDownload;
+pub use artifact_upload::ArtifactUpload;
 pub use builder::ExtensionBuilder;
 pub use client_error::{ClientError, ClientResult};
 pub use client_handle::ClientHandle;

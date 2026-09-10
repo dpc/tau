@@ -615,6 +615,7 @@ fn handle_harness_message(
         | HarnessOutputMessage::SessionAgentListResult(_)
         | HarnessOutputMessage::UnloadSessionAgentResult(_)
         | HarnessOutputMessage::ExtensionDataResult(_)
+        | HarnessOutputMessage::ArtifactResult(_)
         | HarnessOutputMessage::ExternalAgentMessageResult(_)
         | HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
         | HarnessOutputMessage::PeerSessionProbeResult(_)

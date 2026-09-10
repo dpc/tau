@@ -27,6 +27,8 @@ pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 /// Commands that mutate harness-owned state from inside the central loop.
 pub(crate) enum HarnessCommand {
+    /// Route one bounded, transient artifact RPC completion.
+    ArtifactCompleted(Box<crate::artifact_worker::ArtifactCompleted>),
     /// Stop the foreground daemon after retiring listener admission.
     Shutdown(ShutdownCause),
     /// Observe persistence transitions and retry exact retained publications.

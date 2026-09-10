@@ -996,6 +996,31 @@ fn session_and_agent_retention_default_to_disabled() {
     let settings = HarnessSettings::built_in();
     assert_eq!(settings.session_retention(), None);
     assert_eq!(settings.agent_retention(), None);
+    assert_eq!(settings.artifact_retention(), None);
+}
+
+/// Artifact policy is independent, explicitly nullable, and uses the same
+/// validated duration grammar rather than borrowing diagnostic defaults.
+#[test]
+fn artifact_retention_is_independent_and_nullable() {
+    let mut json: serde_json::Value =
+        serde_yaml_ng::from_str(BUILT_IN_HARNESS_YAML).expect("built-in YAML");
+    json["artifact_retention"] = serde_json::json!("2h");
+    let settings: HarnessSettings =
+        serde_json::from_value(json.clone()).expect("artifact retention settings");
+    assert_eq!(
+        settings.artifact_retention(),
+        Some(Duration::from_secs(7200))
+    );
+    assert_eq!(settings.session_retention(), None);
+    json["artifact_retention"] = serde_json::Value::Null;
+    let disabled: HarnessSettings =
+        serde_json::from_value(json.clone()).expect("disabled artifact retention");
+    assert_eq!(disabled.artifact_retention(), None);
+    for invalid in ["0s", "-1d", "1d2h", "1.5h"] {
+        json["artifact_retention"] = serde_json::json!(invalid);
+        assert!(serde_json::from_value::<HarnessSettings>(json.clone()).is_err());
+    }
 }
 
 /// Ensures non-authoritative diagnostic cleanup defaults to thirty days and

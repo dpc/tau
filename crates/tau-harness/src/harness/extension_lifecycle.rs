@@ -76,6 +76,9 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         now: Instant,
     ) {
+        if let Some(artifacts) = &mut self.runtime_io.artifacts {
+            artifacts.disconnect(connection_id);
+        }
         self.ui_runtime.quitting_uis.remove(connection_id);
         self.runtime_io
             .protocol_version_skew_warned

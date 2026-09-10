@@ -90,6 +90,53 @@ fn routed_notice(message: &str) -> tau_core::RoutedFrame {
     )
 }
 
+/// Retryable one-MiB reads cannot accumulate behind a stalled writer;
+/// successful acknowledgement and consumer retirement each release capacity
+/// exactly once.
+#[test]
+fn artifact_egress_is_bounded_until_acknowledgement_or_retirement() {
+    let log = EventLog::new();
+    let consumer = log.register_consumer();
+    let target = tau_core::SharedDeliveryTarget::new(log.group(), consumer);
+    let frame = || {
+        tau_core::RoutedFrame::new(
+            None,
+            tau_proto::HarnessOutputMessage::ArtifactResult(Box::new(tau_proto::ArtifactResult {
+                request_id: "retry".parse().expect("valid request"),
+                result: Ok(tau_proto::ArtifactValue::Chunk {
+                    offset: 0,
+                    bytes: vec![1; tau_proto::ARTIFACT_CHUNK_BYTES],
+                    eof: false,
+                }),
+            })),
+        )
+    };
+    for _ in 0..8 {
+        assert_eq!(log.append_egress(frame(), &[target]), vec![target]);
+    }
+    for _ in 0..32 {
+        assert!(log.append_egress(frame(), &[target]).is_empty());
+    }
+    assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 8);
+    let pending = log.next_egress(consumer).expect("writer ownership");
+    // Merely acquiring a frame does not acknowledge it.
+    assert!(log.append_egress(frame(), &[target]).is_empty());
+    log.acknowledge_egress(consumer, &pending);
+    log.acknowledge_egress(consumer, &pending);
+    assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 7);
+    assert_eq!(log.append_egress(frame(), &[target]), vec![target]);
+    log.retire_consumer(consumer);
+    log.retire_consumer(consumer);
+    assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 0);
+    assert!(log.inner.lock().expect("log").retained.is_empty());
+    let replacement = log.register_consumer();
+    let replacement = tau_core::SharedDeliveryTarget::new(log.group(), replacement);
+    assert_eq!(
+        log.append_egress(frame(), &[replacement]),
+        vec![replacement]
+    );
+}
+
 /// One publication must retain one canonical frame while two independent
 /// consumer generations advance, then reclaim it after the slower cursor.
 #[test]

@@ -22,6 +22,15 @@ there is no release publisher or artifact promotion path in this lane.
 
 ## Runtime boundaries
 
+Shared content-addressed artifacts expose original bytes by known BLAKE3 digest
+only through configured Artifact RPC peers. Hash possession does not grant
+listing, mutation, deletion, model-role, or remote-recipient authority. Originals
+are independent of session deletion and may be explicitly persisted from ephemeral
+sessions; memory-only harnesses cannot access or clean them. Transfer bytes are
+directed and omitted from semantic journals and debug JSONL. Cancellation or a
+lost result may leave a committed shared original. See
+[SPEC-shared-artifacts](specs/SPEC-shared-artifacts.md).
+
 Provider-hosted web search runs inside the selected inference provider and does
 not cross Tau's registered-tool dispatch boundary. Search queries, actions,
 returned content, URLs, titles, and citation metadata are untrusted external
@@ -150,6 +159,12 @@ not backpressure or reject publication because of egress lag, spool the suffix
 to disk, or expire/disconnect the component solely for lag. Revisit this
 accepted trusted-component risk when changing live routing, cursor identity,
 target freezing, pruning, or lag diagnostics and lifecycle.
+
+Directed non-event Artifact RPC is a separate bounded lane: eight worker
+requests/completions plus eight retained Artifact egress frames. The latter
+remain charged through writer acknowledgement or retirement, and overflow
+disconnects only the affected recipient without another queued error response.
+This does not change the accepted semantic-event retention policy above.
 
 A connected trusted interceptor may leave an intercept request unanswered and
 thereby stall that publication plus every globally serialized publication

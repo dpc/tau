@@ -5,6 +5,69 @@ use tau_core::{AgentEventParent, AgentStore, SessionStore};
 use tau_proto::{AgentId, Event, SessionAgentLoaded, SessionId, UnixMicros};
 use tempfile::TempDir;
 
+use crate::artifact_store::ArtifactStore;
+
+/// A persistent harness with both journal domains ephemeral still cleans shared
+/// artifacts while leaving durable session and agent trees untouched.
+#[test]
+fn artifact_cleanup_runs_with_ephemeral_session_and_agent_persistence() {
+    let temp = TempDir::new().expect("temp state");
+    seed_agent_and_session(&temp);
+    let mut store = ArtifactStore::new(temp.path());
+    let tau_proto::ArtifactValue::Upload { upload } = store
+        .execute(
+            "tool/session",
+            "connection",
+            tau_proto::ArtifactOp::Begin {
+                size: tau_proto::ArtifactSize::new(0).expect("size"),
+            },
+            1,
+        )
+        .expect("begin empty original")
+    else {
+        panic!("upload response")
+    };
+    let tau_proto::ArtifactValue::Descriptor(descriptor) = store
+        .execute(
+            "tool/session",
+            "connection",
+            tau_proto::ArtifactOp::Finalize { upload },
+            1,
+        )
+        .expect("publish empty original")
+    else {
+        panic!("descriptor response")
+    };
+    super::run_retention_cleanup(
+        super::RetentionCleanup {
+            memory_only: false,
+            artifact_retention: Some(Duration::from_secs(1)),
+            state_dir: temp.path().to_path_buf(),
+            sessions_dir: temp.path().join("sessions"),
+            session_persistence: tau_core::SessionPersistenceMode::Ephemeral,
+            agent_persistence: tau_core::AgentPersistenceMode::Ephemeral,
+            current_session: "current".parse().expect("session"),
+            session_retention: Some(Duration::from_secs(1)),
+            agent_retention: Some(Duration::from_secs(1)),
+            diagnostic_retention: None,
+        },
+        SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+    );
+    assert_eq!(
+        store.execute(
+            "tool/session",
+            "connection",
+            tau_proto::ArtifactOp::Stat {
+                key: descriptor.key
+            },
+            100
+        ),
+        Err(tau_proto::ArtifactError::Unavailable)
+    );
+    assert!(temp.path().join("sessions/owner-session").exists());
+    assert!(temp.path().join("agents/owned-agent").exists());
+}
+
 fn seed_agent_and_session(temp: &TempDir) -> AgentId {
     let agent_id = AgentId::parse("owned-agent").expect("agent id");
     let mut agents = AgentStore::open_fixture(temp.path().join("agents")).expect("agent store");
@@ -63,6 +126,8 @@ fn session_deletion_precedes_agent_reference_authority() {
     let agent_id = seed_agent_and_session(&temp);
     super::run_retention_cleanup(
         super::RetentionCleanup {
+            memory_only: false,
+            artifact_retention: None,
             state_dir: temp.path().to_path_buf(),
             sessions_dir: temp.path().join("sessions"),
             session_persistence: tau_core::SessionPersistenceMode::Durable,
@@ -91,6 +156,8 @@ fn disabled_agent_policy_preserves_live_agent_tree() {
     std::fs::create_dir_all(&detached_session).expect("detached session staging");
     super::run_retention_cleanup(
         super::RetentionCleanup {
+            memory_only: false,
+            artifact_retention: None,
             state_dir: temp.path().to_path_buf(),
             sessions_dir: temp.path().join("sessions"),
             session_persistence: tau_core::SessionPersistenceMode::Durable,
@@ -115,6 +182,8 @@ fn uncertain_session_detach_suppresses_agent_deletion_until_restart_finalization
     let temp = TempDir::new().expect("temp state");
     let agent_id = seed_agent_and_session(&temp);
     let cleanup = super::RetentionCleanup {
+        memory_only: false,
+        artifact_retention: None,
         state_dir: temp.path().to_path_buf(),
         sessions_dir: temp.path().join("sessions"),
         session_persistence: tau_core::SessionPersistenceMode::Durable,

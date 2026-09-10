@@ -24,6 +24,8 @@ mod agent;
 mod agent_cleanup;
 mod agent_cost_ledger;
 mod agent_creator_topology;
+mod artifact_store;
+mod artifact_worker;
 mod background_completion_preview;
 mod client_writer_lifecycle;
 #[cfg(test)]

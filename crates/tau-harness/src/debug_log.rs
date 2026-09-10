@@ -116,6 +116,7 @@ impl DebugEventLog {
                     }
                     tau_proto::HarnessInputMessage::UiDebugEventStatsRequest(_) => return Ok(()),
                     tau_proto::HarnessInputMessage::ProviderDebugCapture(_) => return Ok(()),
+                    tau_proto::HarnessInputMessage::ArtifactRequest(_) => return Ok(()),
                     _ => "<message>".to_owned(),
                 };
                 let mut frame_json = debug_harness_input_json(message.as_ref());
@@ -681,6 +682,9 @@ fn append_line(io: &mut impl LineIo, line: &[u8]) -> Result<LineAppendTiming, Li
 
 fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_json::Value {
     match message {
+        tau_proto::HarnessInputMessage::ArtifactRequest(_) => {
+            return serde_json::json!({"message": "artifact_request", "payload": "<omitted>"});
+        }
         tau_proto::HarnessInputMessage::Emit(emit)
             if matches!(
                 emit.event.as_ref(),

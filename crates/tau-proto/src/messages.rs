@@ -1561,6 +1561,8 @@ pub enum HarnessInputMessage {
     UiRetryExtensionRequest(UiRetryExtensionRequest),
     ProviderDebugCapture(ProviderDebugCapture),
     ExtensionDataRequest(ExtensionDataRequest),
+    /// Directed shared original-byte artifact transfer, never a journal event.
+    ArtifactRequest(crate::ArtifactRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),
     PeerSessionProbe(PeerSessionProbe),
@@ -1610,6 +1612,8 @@ pub enum HarnessOutputMessage {
     SessionAgentListResult(Box<SessionAgentListResult>),
     UnloadSessionAgentResult(UnloadSessionAgentResult),
     ExtensionDataResult(Box<ExtensionDataResult>),
+    /// Directed bounded original-byte transfer result.
+    ArtifactResult(Box<crate::ArtifactResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult),
     PeerSessionProbeResult(PeerSessionProbeResult),

@@ -71,12 +71,20 @@ The effective retention settings are startup configuration in `harness.yaml`:
 session_retention: null
 agent_retention: null
 diagnostic_retention: 30d
+artifact_retention: null
 ```
 
 `null` disables that cleanup policy; it does not disable storage. See
 [provider diagnostics](providers.md) and Tau's
 [debugging self-help](../crates/tau-skills/self-knowledge/tau-self-knowledge-debugging.md)
 before changing or sharing stored data.
+
+Shared original-byte [artifacts](artifacts.md) outlive their creating sessions.
+Explicit puts, including new uploads of duplicate bytes, renew their shared age;
+reads, imports, sharing, and recognized same-upload retries do not. Ephemeral
+sessions in persistent harnesses can explicitly store these originals; memory-only
+harnesses cannot read, create, or clean them. Artifact cleanup is opportunistic
+startup maintenance, not a hard TTL, and journal references do not pin originals.
 
 ## Before asking for support
 

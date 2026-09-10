@@ -8,6 +8,12 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 6.0 adds the directed shared Artifact RPC. Configured peers must rebuild
+together: a 5.x harness cannot answer a 6.0 client's new operations, and no
+best-effort silent-ignore fallback is provided. Major-skew admission rejects
+before Configure/Ready; the existing cooperative cross-harness messaging
+exception below remains unchanged. See [SPEC-shared-artifacts](SPEC-shared-artifacts.md).
+
 The explicit `{major, minor}` protocol revision covers the shared harness-peer
 wire contract and extension-visible event schemas and behavior. It is independent
 of Cargo, package, release, journal physical-format, and every other version.
@@ -24,13 +30,13 @@ activation. UI and dedicated cross-harness message connections instead continue
 best-effort with a visible warning because partial interactive access and simple
 message delivery are preferable to deliberate rejection.
 
-The current Protocol 5.0 contract also rejects obsolete standalone-compaction
+The prior Protocol 5.0 contract also rejected obsolete standalone-compaction
 event shapes without another revision bump. Canonical compaction boundaries,
 inference checkpoints, and standalone starts are harness-authored facts that
-external peers cannot publish, and current harness output remains decodable by
+external peers cannot publish, and that revision's harness output remained decodable by
 the matched Protocol 5.0 sidecars: complete ownership fields are additive to
 their prior optional fields and every emitted trigger variant is already known.
-This deliberate matched-current compatibility does not restore obsolete journal
+This deliberate historical matched-version compatibility did not restore obsolete journal
 decoding or promise that arbitrary older Protocol 5.0 payloads remain valid.
 
 Protocol 4.2 deliberately permits ordinary minor-skew continuation: declaration

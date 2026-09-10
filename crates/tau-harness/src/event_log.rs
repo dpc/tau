@@ -61,6 +61,8 @@ pub(crate) struct LogEntry {
 
 /// Mutable state protected by one event-log mutex.
 struct EventLogInner {
+    /// Artifact-only payload charges, retained through writer acknowledgement.
+    artifact_egress_count: usize,
     /// Next committed-event observation sequence.
     next_seq: EventLogSeq,
     /// Test-only committed-event observations.
@@ -214,6 +216,7 @@ impl EventLog {
                 NEXT_DELIVERY_GROUP.fetch_add(1, Ordering::Relaxed),
             ),
             inner: Mutex::new(EventLogInner {
+                artifact_egress_count: 0,
                 next_seq: EventLogSeq::new(0),
                 #[cfg(test)]
                 entries: BTreeMap::new(),
@@ -265,6 +268,15 @@ impl EventLog {
         targets: &[tau_core::SharedDeliveryTarget],
     ) -> Vec<tau_core::SharedDeliveryTarget> {
         let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        // Artifact RPC is a separately bounded non-event lane. Ordinary
+        // semantic output retains its existing admission/lag policy.
+        let artifact = matches!(
+            &frame.frame,
+            tau_proto::HarnessOutputMessage::ArtifactResult(_)
+        );
+        if artifact && inner.artifact_egress_count >= 8 {
+            return Vec::new();
+        }
         let seq = inner.next_egress_seq;
         inner.next_egress_seq = inner.next_egress_seq.next();
         let admitted = targets
@@ -279,6 +291,9 @@ impl EventLog {
             .map(|target| target.consumer())
             .collect::<HashSet<_>>();
         let payload = (!pending_targets.is_empty()).then(|| Arc::new(frame));
+        if artifact && payload.is_some() {
+            inner.artifact_egress_count += 1;
+        }
         inner.retained.push_back(LivePosition {
             seq,
             payload,
@@ -432,8 +447,18 @@ impl EventLog {
                 .get_mut(index)
                 .expect("acknowledged position remains retained");
             position.pending_targets.remove(&consumer);
+            let release_artifact = position.pending_targets.is_empty()
+                && position.payload.as_ref().is_some_and(|frame| {
+                    matches!(
+                        &frame.frame,
+                        tau_proto::HarnessOutputMessage::ArtifactResult(_)
+                    )
+                });
             if position.pending_targets.is_empty() {
                 position.payload = None;
+            }
+            if release_artifact {
+                inner.artifact_egress_count -= 1;
             }
             inner
                 .consumers
@@ -578,12 +603,22 @@ impl EventLog {
     /// Removes one consumer and releases every retained target it owned.
     fn retire_consumer_locked(inner: &mut EventLogInner, consumer: tau_core::SharedConsumerId) {
         inner.consumers.remove(&consumer);
+        let mut released_artifacts = 0;
         for position in &mut inner.retained {
             position.pending_targets.remove(&consumer);
             if position.pending_targets.is_empty() {
+                if position.payload.as_ref().is_some_and(|frame| {
+                    matches!(
+                        &frame.frame,
+                        tau_proto::HarnessOutputMessage::ArtifactResult(_)
+                    )
+                }) {
+                    released_artifacts += 1;
+                }
                 position.payload = None;
             }
         }
+        inner.artifact_egress_count -= released_artifacts;
         Self::prune_locked(inner);
         Self::observe_delivery_memory_locked(inner);
     }

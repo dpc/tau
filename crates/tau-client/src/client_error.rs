@@ -20,6 +20,8 @@ pub enum ClientError {
     WriterClosed,
     /// A frame exceeds 8 MiB or detached output exhausted its bounded FIFO.
     Overloaded,
+    /// An Artifact caller supplied an invalid operation or oversized frame.
+    InvalidArtifactRequest,
     /// The reader thread stopped before reporting input EOF or decode failure.
     ReaderClosed,
     /// The reader thread panicked while decoding inbound frames.
@@ -69,6 +71,7 @@ impl fmt::Display for ClientError {
             Self::Overloaded => {
                 f.write_str("tau client detached FIFO or frame byte limit is exhausted")
             }
+            Self::InvalidArtifactRequest => f.write_str("invalid artifact request"),
             Self::ReaderClosed => f.write_str("tau client reader thread is closed"),
             Self::ReaderPanicked => f.write_str("tau client reader thread panicked"),
             Self::WriterPanicked => f.write_str("tau client writer thread panicked"),
@@ -88,6 +91,7 @@ impl std::error::Error for ClientError {
             | Self::NameScope(_)
             | Self::WriterClosed
             | Self::Overloaded
+            | Self::InvalidArtifactRequest
             | Self::ReaderClosed
             | Self::ReaderPanicked
             | Self::WriterPanicked => None,

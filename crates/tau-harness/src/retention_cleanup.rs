@@ -11,12 +11,18 @@ use tau_core::{AgentPersistenceMode, SessionPersistenceMode};
 use tau_proto::SessionId;
 
 use crate::agent_cleanup::AgentCleanupSummary;
+use crate::artifact_store::ArtifactStore;
 use crate::diagnostic_cleanup::DiagnosticCleanupSummary;
 use crate::session_cleanup::SessionCleanupSummary;
 
 /// Immutable startup retention inputs.
 #[derive(Clone)]
 pub(crate) struct RetentionCleanup {
+    /// Actual harness storage boundary; ephemeral sessions still allow
+    /// artifacts.
+    pub(crate) memory_only: bool,
+    /// Independent original-byte artifact age policy.
+    pub(crate) artifact_retention: Option<Duration>,
     /// Tau state root containing the global agent store.
     pub(crate) state_dir: PathBuf,
     /// Canonical durable session root.
@@ -37,7 +43,7 @@ pub(crate) struct RetentionCleanup {
 
 /// Starts one ordered opportunistic cleanup pass.
 pub(crate) fn spawn_retention_cleanup(cleanup: RetentionCleanup) {
-    if cleanup.session_persistence.is_ephemeral() && cleanup.agent_persistence.is_ephemeral() {
+    if cleanup.memory_only {
         return;
     }
     if let Err(error) = thread::Builder::new()
@@ -53,6 +59,19 @@ pub(crate) fn spawn_retention_cleanup(cleanup: RetentionCleanup) {
 }
 
 fn run_retention_cleanup(cleanup: RetentionCleanup, now: SystemTime) {
+    if !cleanup.memory_only {
+        let store = ArtifactStore::new(&cleanup.state_dir);
+        let seconds = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        match store.cleanup(cleanup.artifact_retention, seconds) {
+            Ok(()) | Err(tau_proto::ArtifactError::Busy) => {}
+            Err(error) => {
+                tracing::warn!(target: "tau_harness::retention_cleanup", %error, "shared artifact cleanup did not complete")
+            }
+        }
+    }
     run_retention_cleanup_with_session_cleanup(
         cleanup,
         now,

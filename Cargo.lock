@@ -839,6 +839,7 @@ dependencies = [
 name = "dpc-tau-client"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "ciborium",
  "dpc-tau-blocking-notify-channel",
  "dpc-tau-proto",

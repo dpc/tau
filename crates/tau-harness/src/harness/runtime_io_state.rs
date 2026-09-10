@@ -4,6 +4,8 @@ use super::*;
 
 /// Runtime I/O state with deliberate field order for shutdown and drop.
 pub(crate) struct RuntimeIoState {
+    /// Lazy bounded worker for the independent shared artifact storage domain.
+    pub(crate) artifacts: Option<crate::artifact_worker::ArtifactWorker>,
     /// Sender side of the central harness event channel.
     pub(crate) tx: Sender<HarnessEvent>,
     /// Receiver side of the central harness event channel.

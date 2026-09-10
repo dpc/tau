@@ -1101,6 +1101,9 @@ pub struct HarnessSettings {
     pub agent_retention: Option<RetentionDuration>,
     /// Optional lifetime of non-authoritative session diagnostic files.
     pub diagnostic_retention: Option<RetentionDuration>,
+    /// Optional lifetime of shared original-byte artifacts since last explicit
+    /// put.
+    pub artifact_retention: Option<RetentionDuration>,
     /// Whether a newly spawned interactive harness greets its initial UI with
     /// the Tau onboarding notice.
     pub show_introduction_notice: bool,
@@ -1187,6 +1190,8 @@ struct HarnessSettingsWire {
     agent_retention: Option<RetentionDuration>,
     /// Optional non-authoritative session diagnostic retention.
     diagnostic_retention: Option<RetentionDuration>,
+    /// Independent original-byte artifact retention policy.
+    artifact_retention: Option<RetentionDuration>,
     /// Whether to show Tau's onboarding notice to the initial UI.
     show_introduction_notice: bool,
     /// Lowest effective activating-input wait timeout in whole minutes.
@@ -1296,6 +1301,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             session_retention: wire.session_retention,
             agent_retention: wire.agent_retention,
             diagnostic_retention: wire.diagnostic_retention,
+            artifact_retention: wire.artifact_retention,
             show_introduction_notice: wire.show_introduction_notice,
             wait_timeout_bounds,
             agent_watch_retry_notification_threshold: AgentWatchRetryNotificationPolicy::from_raw(
@@ -2496,6 +2502,13 @@ impl HarnessSettings {
     #[must_use]
     pub fn diagnostic_retention(&self) -> Option<Duration> {
         self.diagnostic_retention.map(RetentionDuration::duration)
+    }
+
+    /// Returns opportunistic original-byte cleanup age, independent of
+    /// sessions.
+    #[must_use]
+    pub fn artifact_retention(&self) -> Option<Duration> {
+        self.artifact_retention.map(RetentionDuration::duration)
     }
 }
 
@@ -4424,6 +4437,7 @@ fn validate_retention_config_values(
         "session_retention",
         "agent_retention",
         "diagnostic_retention",
+        "artifact_retention",
     ] {
         let Some(value) = map.get(key) else {
             continue;

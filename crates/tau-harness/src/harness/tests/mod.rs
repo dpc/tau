@@ -86,6 +86,7 @@ enum TestMessage {
     SessionAgentListResult(Box<tau_proto::SessionAgentListResult>),
     UnloadSessionAgentResult(tau_proto::UnloadSessionAgentResult),
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
+    ArtifactResult(Box<tau_proto::ArtifactResult>),
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
     PeerSessionProbeResult(tau_proto::PeerSessionProbeResult),
@@ -153,6 +154,9 @@ impl TestProtocolItem {
             }
             HarnessOutputMessage::ExtensionDataResult(message) => {
                 Self::Message(TestMessage::ExtensionDataResult(message))
+            }
+            HarnessOutputMessage::ArtifactResult(message) => {
+                Self::Message(TestMessage::ArtifactResult(message))
             }
             HarnessOutputMessage::ExternalAgentMessageResult(message) => {
                 Self::Message(TestMessage::ExternalAgentMessageResult(message))
@@ -226,6 +230,7 @@ impl TestMessage {
             | Self::SessionAgentListResult(_)
             | Self::UnloadSessionAgentResult(_)
             | Self::ExtensionDataResult(_)
+            | Self::ArtifactResult(_)
             | Self::ExternalAgentMessageResult(_)
             | Self::ExternalAgentMessageAuthResult(_)
             | Self::UiQuitResult(_)
@@ -2489,6 +2494,7 @@ mod action;
 mod agent_list;
 mod agent_unload;
 mod agent_watch_wait;
+mod artifacts;
 mod dedup;
 mod dispatch;
 mod interception;

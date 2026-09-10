@@ -406,6 +406,8 @@ impl Harness {
         }
         crate::retention_cleanup::spawn_retention_cleanup(
             crate::retention_cleanup::RetentionCleanup {
+                memory_only: storage_mode.is_memory_only(),
+                artifact_retention: harness_settings.artifact_retention(),
                 state_dir: state_dir.clone(),
                 sessions_dir: sessions_dir.clone(),
                 session_persistence: storage_mode.session_persistence(),
@@ -423,6 +425,7 @@ impl Harness {
         );
         let mut harness = Self::from_base_parts(HarnessBaseParts {
             runtime_io: RuntimeIoState {
+                artifacts: None,
                 tx,
                 rx,
                 component_ingress_tx,
@@ -894,6 +897,11 @@ impl Harness {
         )?;
         crate::retention_cleanup::spawn_retention_cleanup(
             crate::retention_cleanup::RetentionCleanup {
+                memory_only: storage_mode.is_memory_only(),
+                artifact_retention: harness
+                    .config
+                    .accepted_harness_settings
+                    .artifact_retention(),
                 state_dir: retention_state_dir,
                 sessions_dir: sessions_dir.clone(),
                 session_persistence: storage_mode.session_persistence(),
@@ -1026,6 +1034,7 @@ impl Harness {
             .collect();
         Ok(Self::from_base_parts(HarnessBaseParts {
             runtime_io: RuntimeIoState {
+                artifacts: None,
                 tx,
                 rx,
                 component_ingress_tx,

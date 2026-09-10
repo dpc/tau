@@ -1505,6 +1505,7 @@ impl Harness {
                         | HarnessInputMessage::InterceptReply(_)
                         | HarnessInputMessage::GetAgentPromptCreated(_)
                         | HarnessInputMessage::ProviderDebugCapture(_)
+                        | HarnessInputMessage::ArtifactRequest(_)
                         | HarnessInputMessage::ExtensionDataRequest(_)
                         | HarnessInputMessage::UiDebugEventStatsRequest(_)
                         | HarnessInputMessage::UiShutdownRequest(_)
@@ -1779,6 +1780,9 @@ impl Harness {
             }
             HarnessInputMessage::ExtensionDataRequest(request) => {
                 self.handle_extension_data_request(source_id, request, admission);
+            }
+            HarnessInputMessage::ArtifactRequest(request) => {
+                self.handle_artifact_request(source_id, request, admission);
             }
             HarnessInputMessage::ProviderDebugCapture(capture) => {
                 self.handle_provider_debug_capture(source_id, capture);

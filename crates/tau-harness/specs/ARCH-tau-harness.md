@@ -1,5 +1,13 @@
 # ARCH-tau-harness: tau-harness architecture
 
+Shared original-byte artifacts form a separate persistent domain, not extension
+data or semantic journal persistence. Configured-extension admission captures
+instance/session authority, then a bounded worker owns all storage I/O and returns
+directed non-event completions. Immutable digest objects and explicit last-new-put
+metadata survive session deletion; independent startup retention skips active
+cross-process-coordinated reads. Memory-only admission and cleanup never access
+the domain. See [SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
+
 The attached-socket operator path can unload one saved agent without deleting
 history. The harness classifies only committed in-memory membership, rejects
 targets with accepted work, reserves the exact runtime by marking it

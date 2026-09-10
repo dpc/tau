@@ -565,6 +565,9 @@ impl Harness {
         command: HarnessCommand,
     ) -> Result<(), HarnessError> {
         match command {
+            HarnessCommand::ArtifactCompleted(command) => {
+                self.send_artifact_result(&command.connection, command.result);
+            }
             HarnessCommand::Shutdown(_) => {}
             HarnessCommand::SemanticPersistenceProgress => {
                 self.observe_semantic_persistence_progress();
