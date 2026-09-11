@@ -9,7 +9,7 @@ use tau_provider::cache_diagnostic::CacheDiagnostics;
 use super::{BuiltinProviderProfile, BuiltinProviderProfiles, CodexMode, OpenAiAuth, is_false};
 
 /// ChatGPT/Codex provider profile.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatGptProfile {
     /// Startup-frozen scalar cache diagnostics; exact captures are independent.
@@ -22,10 +22,21 @@ pub struct ChatGptProfile {
     /// authentication.
     #[serde(default, skip_serializing_if = "is_false")]
     pub responses_lite_compatibility: bool,
-    /// Opts this account into the provider-owned, prompt-only image tool.
+    /// Enables the provider-owned, prompt-only image tool for this account.
     /// Startup declaration alone never dispatches a generation request.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default = "default_image_generation", skip_serializing_if = "is_true")]
     pub image_generation: bool,
+}
+
+impl Default for ChatGptProfile {
+    fn default() -> Self {
+        Self {
+            cache_diagnostics: CacheDiagnostics::default(),
+            auth: OpenAiAuth::default(),
+            responses_lite_compatibility: false,
+            image_generation: default_image_generation(),
+        }
+    }
 }
 
 impl ChatGptProfile {
@@ -43,6 +54,14 @@ impl ChatGptProfile {
     pub(crate) fn replace_auth(&mut self, refreshed: OpenAiAuth) {
         self.auth = refreshed;
     }
+}
+
+const fn default_image_generation() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl BuiltinProviderProfiles {

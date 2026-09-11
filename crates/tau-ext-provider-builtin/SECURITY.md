@@ -272,7 +272,8 @@ retains no exact request or response capture. Its private scalar operation
 records omit that content and describe backend execution only, not authenticated
 refresh-terminal acceptance.
 
-Opt-in image generation uses only the selected ChatGPT profile's credentials.
+Image generation, enabled by default unless its ChatGPT profile opts out, uses
+only the selected profile's credentials.
 An authenticated Available artifact reply must precede the paid effect. The
 fixed subscription endpoint and `gpt-image-2` model never fall back to another
 account, an API key, or another generation attempt. Quota, authentication,

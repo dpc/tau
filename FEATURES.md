@@ -182,13 +182,13 @@ metadata drives model selection and filters supported reasoning effort, response
 verbosity, reasoning summaries, input modalities, and compaction. Provider- and
 role-specific behavior also includes service tiers and prompt caching.
 
-ChatGPT profiles can opt into provider-owned `generate_image` with
-`image_generation: true`. It uses the selected account for one original PNG and
-returns a shared artifact key, not inline bytes or a storage path. Generic
-ordinary tools can share a public alias with a provider-scoped backing; the
-eligible exact-provider backing wins without new selection configuration.
-The declaration remains role-disabled until `enable_tools: [generate_image]`
-enables that public surface.
+ChatGPT profiles declare provider-owned `generate_image` by default and can opt
+out with `image_generation: false`. It uses the selected account for one
+original PNG and returns a shared artifact key, not inline bytes or a storage
+path. Generic ordinary tools can share a public alias with a provider-scoped
+backing; the eligible exact-provider backing wins without new selection
+configuration. The declaration remains role-disabled until
+`enable_tools: [generate_image]` enables that public surface.
 Generation never retries or falls back to another account after failure.
 
 Roles package a model, its parameters, prompt fragments, skills, and tool policy

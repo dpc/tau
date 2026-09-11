@@ -1486,13 +1486,13 @@ server-requested delay, while retaining normal worker concurrency limits and
 initially leaving other delayed jobs untouched. A validated successful terminal
 from that exact attempt clears its matching current shared cooldown and wakes
 only peers constrained by that cooldown generation with anti-herd jitter.
-## Opt-in image generation
+## Image generation
 
-In a ChatGPT profile, set `"image_generation": true` (default `false`) and
-restart the provider extension when deploying the updated configuration. This
-declares ordinary function tool `generate_image` for that exact provider
-namespace and serving connection. Both Standard and Lite profiles can opt in.
-The declaration is disabled by default. Enable it for a role with
+ChatGPT profiles declare ordinary function tool `generate_image` for their exact
+provider namespace and serving connection by default. Set
+`"image_generation": false` and restart the provider extension to opt out. Both
+Standard and Lite profiles support the capability. The declaration remains
+disabled by default for roles. Enable it for a role with
 `enable_tools: [generate_image]`; Tau selects the eligible provider-scoped
 backing internally. If a provider instance has a `tool_prefix`, the public alias
 receives that prefix too.

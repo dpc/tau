@@ -1203,10 +1203,9 @@ fn cmd_add_chatgpt_in(
         extension_instance,
         &name,
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            image_generation: false,
             auth,
             responses_lite_compatibility,
-            cache_diagnostics: Default::default(),
+            ..Default::default()
         }),
         ProviderSetupInput::ProfileOAuth,
         target,

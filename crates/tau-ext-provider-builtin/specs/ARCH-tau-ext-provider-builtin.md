@@ -14,7 +14,8 @@ credential acceptance before publishing usable models. See
 
 ## Ownership boundaries
 
-Opted-in ChatGPT profiles also declare a scoped ordinary `generate_image` tool.
+ChatGPT profiles declare a scoped ordinary `generate_image` tool unless the
+profile explicitly opts out.
 `image_tools` owns availability preflight, selected-profile credential resolution,
 bounded call admission, cancellation, and correlated artifact upload on the
 main loop. The backend worker performs one finite Images request and returns

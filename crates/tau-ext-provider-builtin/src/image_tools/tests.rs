@@ -164,9 +164,10 @@ fn call(phase: Phase) -> ImageCall {
     }
 }
 
-/// Default-off declarations are pure, account-specific and have one flat alias.
+/// Default-on profile capability declares a pure account-specific tool while
+/// preserving the default-off role surface and explicit profile opt-out.
 #[test]
-fn image_declarations_are_opt_in_and_prompt_only() {
+fn image_declarations_default_on_but_remain_role_authorized() {
     let mut profiles = BuiltinProviderProfiles::default();
     for (name, enabled, lite) in [("a", true, false), ("b", true, true), ("c", false, false)] {
         profiles.providers.insert(
@@ -197,7 +198,7 @@ fn image_declarations_are_opt_in_and_prompt_only() {
             1
         );
     }
-    assert!(!crate::ChatGptProfile::default().image_generation);
+    assert!(crate::ChatGptProfile::default().image_generation);
     let mut args = started().arguments;
     assert!(parse_prompt(&args).is_some());
     let CborValue::Map(entries) = &mut args else {

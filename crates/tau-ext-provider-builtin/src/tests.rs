@@ -2667,6 +2667,28 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
     ));
 }
 
+/// ChatGPT image capability defaults on for missing and newly constructed
+/// profiles while an explicit false remains a serialized opt-out.
+#[test]
+fn chatgpt_profile_image_generation_defaults_on_with_explicit_opt_out() {
+    let missing: ChatGptProfile = serde_json::from_str("{}").expect("default profile");
+    assert!(missing.image_generation);
+    assert!(
+        serde_json::to_value(ChatGptProfile::default())
+            .expect("default profile serialization")
+            .get("image_generation")
+            .is_none()
+    );
+
+    let off: ChatGptProfile =
+        serde_json::from_str(r#"{"image_generation":false}"#).expect("image opt-out");
+    assert!(!off.image_generation);
+    assert_eq!(
+        serde_json::to_value(off).expect("opt-out profile serialization")["image_generation"],
+        false
+    );
+}
+
 /// Interactive ChatGPT setup must remain standard-by-default unless the user
 /// explicitly confirms the compatibility prompt.
 #[test]

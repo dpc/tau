@@ -6,14 +6,14 @@ advertise: false
 
 # Tau provider-builtin extension self-knowledge
 
-## Opt-in image generation
+## Image generation
 
-A ChatGPT profile may set `image_generation: true` (default false) to declare
-ordinary function tool `generate_image` for that exact provider namespace and
-serving connection. Standard and Lite are supported. The declaration is
-default-off for roles; configure `enable_tools: [generate_image]` on an allowed
-role and Tau selects its eligible account backing internally. An instance
-`tool_prefix` prefixes the alias.
+ChatGPT profiles declare ordinary function tool `generate_image` for their exact
+provider namespace and serving connection by default. Set
+`image_generation: false` to opt out. Standard and Lite are supported. The
+declaration is default-off for roles; configure
+`enable_tools: [generate_image]` on an allowed role and Tau selects its eligible
+account backing internally. An instance `tool_prefix` prefixes the alias.
 The only input is `{"prompt":"..."}`, nonempty and at most 32 KiB. The backend
 uses fixed `gpt-image-2` and the selected subscription account; it does not
 probe entitlement, switch accounts, or fall back to an API key.
