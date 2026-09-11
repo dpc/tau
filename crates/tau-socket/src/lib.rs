@@ -434,21 +434,40 @@ impl SocketPeer {
         path: impl Into<PathBuf>,
         timeout: Duration,
     ) -> Result<Self, SocketTransportError> {
+        Self::connect_with_timeouts(path, timeout, timeout)
+    }
+
+    /// Connects to an existing Unix socket with separate connect and stream-I/O
+    /// timeouts.
+    ///
+    /// This supports control RPCs that require fast endpoint discovery but
+    /// allow an already-connected peer more time to produce a complete
+    /// response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket cannot be connected, its I/O timeouts
+    /// cannot be configured, or it cannot be cloned for split I/O ownership.
+    pub fn connect_with_timeouts(
+        path: impl Into<PathBuf>,
+        connect_timeout: Duration,
+        io_timeout: Duration,
+    ) -> Result<Self, SocketTransportError> {
         let path = path.into();
-        let stream = connect_unix_with_timeout(&path, timeout).map_err(|source| {
+        let stream = connect_unix_with_timeout(&path, connect_timeout).map_err(|source| {
             SocketTransportError::Connect {
                 path: path.clone(),
                 source,
             }
         })?;
         stream
-            .set_read_timeout(Some(timeout))
+            .set_read_timeout(Some(io_timeout))
             .map_err(|source| SocketTransportError::Connect {
                 path: path.clone(),
                 source,
             })?;
         stream
-            .set_write_timeout(Some(timeout))
+            .set_write_timeout(Some(io_timeout))
             .map_err(|source| SocketTransportError::Connect { path, source })?;
         Self::new(stream)
     }

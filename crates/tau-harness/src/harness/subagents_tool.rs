@@ -4037,7 +4037,7 @@ fn bounded_runtime_lookup(
     let worker_cancelled = Arc::clone(cancelled);
     std::thread::spawn(move || {
         let _permit = permit;
-        let result = crate::runtime_dir::find_harness_for_session_until(
+        let result = crate::runtime_dir::find_harness_for_message_delivery_until(
             &worker_session_id,
             deadline,
             &worker_cancelled,

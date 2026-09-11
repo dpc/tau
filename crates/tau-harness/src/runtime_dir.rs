@@ -35,6 +35,8 @@ const CLAIM_VERSION: u32 = 0;
 const MAX_CLAIM_BYTES: u64 = 16 * 1024;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const MESSAGE_DELIVERY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MESSAGE_DELIVERY_CANCELLATION_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_DISCOVERY_CALLS: usize = 8;
 const MAX_DISCOVERY_PROBES: usize = 8;
@@ -612,6 +614,35 @@ pub(crate) fn find_harness_for_session_until(
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
+    find_harness_for_session_with_timing(
+        session_id,
+        deadline,
+        cancelled,
+        ExactProbeTiming::FastStages,
+    )
+}
+
+/// Resolves one targeted message recipient with a bounded post-connect
+/// handshake.
+pub(crate) fn find_harness_for_message_delivery_until(
+    session_id: &str,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
+    find_harness_for_session_with_timing(
+        session_id,
+        deadline,
+        cancelled,
+        ExactProbeTiming::MessageDelivery,
+    )
+}
+
+fn find_harness_for_session_with_timing(
+    session_id: &str,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    probe_timing: ExactProbeTiming,
+) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
     #[cfg(test)]
     if let Some(path) = TEST_SESSION_HARNESSES
         .lock()
@@ -676,11 +707,58 @@ pub(crate) fn find_harness_for_session_until(
                 return Err(incomplete(session_id));
             }
             let stem = harness_path_for_session(&parsed);
-            probe_exact_session(&stem, &parsed, deadline, cancelled)
+            probe_exact_session(&stem, &parsed, deadline, cancelled, probe_timing)
                 .ok_or_else(|| incomplete(session_id))?;
             Ok(Some(stem))
         }
         Err(_) => Err(incomplete(session_id)),
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExactProbeTiming {
+    FastStages,
+    MessageDelivery,
+}
+
+impl ExactProbeTiming {
+    fn post_connect_deadline(self, overall_deadline: Instant, now: Instant) -> Instant {
+        match self {
+            Self::FastStages => overall_deadline,
+            Self::MessageDelivery => overall_deadline.min(now + MESSAGE_DELIVERY_HANDSHAKE_TIMEOUT),
+        }
+    }
+
+    fn initial_io_timeout(
+        self,
+        overall_deadline: Instant,
+        cancelled: &AtomicBool,
+        now: Instant,
+    ) -> Option<Duration> {
+        match self {
+            Self::FastStages => probe_remaining_at(overall_deadline, cancelled, now),
+            Self::MessageDelivery => deadline_remaining_at(overall_deadline, cancelled, now)
+                .map(|remaining| remaining.min(MESSAGE_DELIVERY_HANDSHAKE_TIMEOUT)),
+        }
+    }
+
+    fn remaining(
+        self,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+        now: Instant,
+    ) -> Option<Duration> {
+        match self {
+            Self::FastStages => probe_remaining_at(deadline, cancelled, now),
+            Self::MessageDelivery => deadline_remaining_at(deadline, cancelled, now),
+        }
+    }
+
+    fn receive_timeout(self, remaining: Duration) -> Duration {
+        match self {
+            Self::FastStages => remaining,
+            Self::MessageDelivery => remaining.min(MESSAGE_DELIVERY_CANCELLATION_POLL_TIMEOUT),
+        }
     }
 }
 
@@ -695,17 +773,24 @@ fn probe_exact_session(
     session_id: &tau_proto::SessionId,
     deadline: Instant,
     cancelled: &AtomicBool,
+    timing: ExactProbeTiming,
 ) -> Option<RunningSession> {
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
-    let timeout = probe_remaining(deadline, cancelled)?;
-    let mut peer =
-        tau_socket::SocketPeer::connect_with_io_timeout(socket_path(stem), timeout).ok()?;
+    let connect_timeout = probe_remaining(deadline, cancelled)?;
+    let io_timeout = timing.initial_io_timeout(deadline, cancelled, Instant::now())?;
+    let mut peer = tau_socket::SocketPeer::connect_with_timeouts(
+        socket_path(stem),
+        connect_timeout,
+        io_timeout,
+    )
+    .ok()?;
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
-    peer.set_write_timeout(probe_remaining(deadline, cancelled)?)
+    let handshake_deadline = timing.post_connect_deadline(deadline, Instant::now());
+    peer.set_write_timeout(timing.remaining(handshake_deadline, cancelled, Instant::now())?)
         .ok()?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         declaration_inspection: false,
@@ -719,10 +804,7 @@ fn probe_exact_session(
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
-    match peer
-        .recv_timeout(probe_remaining(deadline, cancelled)?)
-        .ok()?
-    {
+    match receive_exact_probe_message(&mut peer, timing, handshake_deadline, cancelled)? {
         tau_socket::SocketReceive::Message {
             message: tau_proto::HarnessOutputMessage::SessionAccepted(accepted),
         } if accepted.session_id == *session_id => {}
@@ -732,7 +814,7 @@ fn probe_exact_session(
         return None;
     }
     let request_id = "runtime-probe".to_owned();
-    peer.set_write_timeout(probe_remaining(deadline, cancelled)?)
+    peer.set_write_timeout(timing.remaining(handshake_deadline, cancelled, Instant::now())?)
         .ok()?;
     peer.send(&tau_proto::HarnessInputMessage::GetCurrentSession(
         tau_proto::GetCurrentSession {
@@ -744,10 +826,7 @@ fn probe_exact_session(
         if cancelled.load(Ordering::Acquire) {
             return None;
         }
-        match peer
-            .recv_timeout(probe_remaining(deadline, cancelled)?)
-            .ok()?
-        {
+        match receive_exact_probe_message(&mut peer, timing, handshake_deadline, cancelled)? {
             tau_socket::SocketReceive::Message {
                 message: tau_proto::HarnessOutputMessage::CurrentSessionResult(result),
             } if result.request_id == request_id && result.session_id == *session_id => {
@@ -759,6 +838,24 @@ fn probe_exact_session(
             tau_socket::SocketReceive::Message { .. } => {}
             _ => return None,
         }
+    }
+}
+
+fn receive_exact_probe_message(
+    peer: &mut tau_socket::SocketPeer,
+    timing: ExactProbeTiming,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Option<tau_socket::SocketReceive> {
+    loop {
+        let remaining = timing.remaining(deadline, cancelled, Instant::now())?;
+        let received = peer.recv_timeout(timing.receive_timeout(remaining)).ok()?;
+        if timing == ExactProbeTiming::MessageDelivery
+            && matches!(received, tau_socket::SocketReceive::Timeout)
+        {
+            continue;
+        }
+        return Some(received);
     }
 }
 
@@ -783,8 +880,14 @@ pub fn list_running_sessions() -> io::Result<Vec<RunningSession>> {
     let mut sessions = Vec::with_capacity(records.len());
     for record in records {
         let stem = harness_path_for_session(&record.session_id);
-        let running = probe_exact_session(&stem, &record.session_id, deadline, &cancelled)
-            .ok_or_else(|| io::Error::other("contended runtime claim is not responding"))?;
+        let running = probe_exact_session(
+            &stem,
+            &record.session_id,
+            deadline,
+            &cancelled,
+            ExactProbeTiming::FastStages,
+        )
+        .ok_or_else(|| io::Error::other("contended runtime claim is not responding"))?;
         sessions.push(running);
     }
     drop(permit);
@@ -853,8 +956,13 @@ pub fn list_running_sessions_tolerant() -> io::Result<RunningSessionSnapshot> {
                         break;
                     };
                     let probe_deadline = candidate_probe_deadline(deadline);
-                    let running =
-                        probe_exact_session(&stem, &record.session_id, probe_deadline, &cancelled);
+                    let running = probe_exact_session(
+                        &stem,
+                        &record.session_id,
+                        probe_deadline,
+                        &cancelled,
+                        ExactProbeTiming::FastStages,
+                    );
                     drop(slot);
                     if tx.send(running).is_err() {
                         break;
@@ -1158,12 +1266,18 @@ fn prioritize_peer_claims(records: &mut [ClaimRecord], current_session_id: &str)
 }
 
 fn probe_remaining_at(deadline: Instant, cancelled: &AtomicBool, now: Instant) -> Option<Duration> {
+    deadline_remaining_at(deadline, cancelled, now).map(|remaining| remaining.min(PROBE_TIMEOUT))
+}
+
+fn deadline_remaining_at(
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    now: Instant,
+) -> Option<Duration> {
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
-    deadline
-        .checked_duration_since(now)
-        .map(|remaining| remaining.min(PROBE_TIMEOUT))
+    deadline.checked_duration_since(now)
 }
 
 fn list_running_claim_records_until(

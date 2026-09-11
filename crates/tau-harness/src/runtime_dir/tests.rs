@@ -85,7 +85,9 @@ fn spawn_peer_daemon(
 enum ExactProbeReply {
     Correlated,
     Close,
+    DelayedAcceptance(Duration),
     Timeout,
+    WrongAcceptance,
 }
 
 fn spawn_exact_probe_daemon(
@@ -117,15 +119,35 @@ fn spawn_exact_probe_daemon(
                 if hello.expected_session_id.as_ref() == Some(&id) => {}
             other => panic!("expected exact hello, got {other:?}"),
         }
-        writer
-            .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
-                tau_proto::SessionAccepted {
-                    session_id: id.clone(),
-                    harness_protocol_version: None,
-                },
-            ))
-            .expect("write exact acceptance");
-        writer.flush().expect("flush exact acceptance");
+        let tolerate_disconnect = if let ExactProbeReply::DelayedAcceptance(delay) = reply {
+            std::thread::sleep(delay);
+            true
+        } else {
+            false
+        };
+        let accepted_id = if matches!(reply, ExactProbeReply::WrongAcceptance) {
+            session("wrong-exact-acceptance")
+        } else {
+            id.clone()
+        };
+        let acceptance = writer.write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+            tau_proto::SessionAccepted {
+                session_id: accepted_id,
+                harness_protocol_version: None,
+            },
+        ));
+        if tolerate_disconnect && acceptance.is_err() {
+            return;
+        }
+        acceptance.expect("write exact acceptance");
+        let flush = writer.flush();
+        if tolerate_disconnect && flush.is_err() {
+            return;
+        }
+        flush.expect("flush exact acceptance");
+        if matches!(reply, ExactProbeReply::WrongAcceptance) {
+            return;
+        }
         let request = match reader.read_message().expect("read exact request") {
             Some(tau_proto::HarnessInputMessage::GetCurrentSession(request)) => request,
             other => panic!("expected current-session request, got {other:?}"),
@@ -631,6 +653,7 @@ fn exact_session_probe_correlates_authoritative_response() {
             &id,
             Instant::now() + Duration::from_secs(1),
             &AtomicBool::new(false),
+            ExactProbeTiming::FastStages,
         ),
         Some(RunningSession {
             session_id: id,
@@ -661,12 +684,201 @@ fn exact_session_probe_maps_timeout_and_closure_to_unresponsive() {
                 &id,
                 Instant::now() + Duration::from_secs(1),
                 &AtomicBool::new(false),
+                ExactProbeTiming::FastStages,
             ),
             None
         );
         daemon.join().expect("exact daemon");
         drop(claim);
     }
+}
+
+/// Targeted delivery gives an already-connected exact responder enough time to
+/// finish a loaded handshake that exceeds the ordinary fast probe stage.
+#[test]
+fn message_delivery_lookup_allows_slow_post_connect_handshake() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("delivery-slow-handshake");
+    let delay = PROBE_TIMEOUT + Duration::from_millis(100);
+    let (claim, daemon) = spawn_exact_probe_daemon(
+        &root,
+        id.as_str(),
+        ExactProbeReply::DelayedAcceptance(delay),
+    );
+
+    assert_eq!(
+        find_harness_for_message_delivery_until(
+            id.as_str(),
+            Instant::now() + Duration::from_secs(2),
+            &AtomicBool::new(false),
+        ),
+        Ok(Some(harness_path_for_session(&id)))
+    );
+
+    daemon.join().expect("exact daemon");
+    drop(claim);
+}
+
+/// Ordinary exact lookup retains its fast stage budget instead of inheriting
+/// the targeted message-delivery handshake allowance.
+#[test]
+fn ordinary_lookup_rejects_slow_post_connect_handshake() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("ordinary-slow-handshake");
+    let delay = PROBE_TIMEOUT + Duration::from_millis(100);
+    let (claim, daemon) = spawn_exact_probe_daemon(
+        &root,
+        id.as_str(),
+        ExactProbeReply::DelayedAcceptance(delay),
+    );
+
+    assert!(matches!(
+        find_harness_for_session_until(
+            id.as_str(),
+            Instant::now() + Duration::from_secs(2),
+            &AtomicBool::new(false),
+        ),
+        Err(FindHarnessForSessionError::Incomplete { .. })
+    ));
+
+    daemon.join().expect("exact daemon");
+    drop(claim);
+}
+
+/// The delivery-specific allowance starts after connection, has one absolute
+/// ten-second budget, and never extends a shorter overall operation deadline.
+#[test]
+fn message_delivery_handshake_deadline_is_bounded_once() {
+    let connected_at = Instant::now();
+    let long_overall = connected_at + Duration::from_secs(30);
+    let short_overall = connected_at + Duration::from_secs(3);
+
+    assert_eq!(
+        ExactProbeTiming::MessageDelivery.post_connect_deadline(long_overall, connected_at),
+        connected_at + MESSAGE_DELIVERY_HANDSHAKE_TIMEOUT
+    );
+    assert_eq!(
+        ExactProbeTiming::MessageDelivery.post_connect_deadline(short_overall, connected_at),
+        short_overall
+    );
+    assert_eq!(
+        ExactProbeTiming::MessageDelivery.remaining(
+            connected_at + MESSAGE_DELIVERY_HANDSHAKE_TIMEOUT,
+            &AtomicBool::new(false),
+            connected_at + Duration::from_secs(9),
+        ),
+        Some(Duration::from_secs(1))
+    );
+}
+
+/// A silent connected recipient remains bounded by the shorter overall
+/// delivery deadline rather than receiving an unbounded handshake wait.
+#[test]
+fn message_delivery_lookup_observes_shorter_overall_deadline() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("delivery-short-overall");
+    let (claim, daemon) = spawn_exact_probe_daemon(&root, id.as_str(), ExactProbeReply::Timeout);
+    let started = Instant::now();
+
+    assert!(matches!(
+        find_harness_for_message_delivery_until(
+            id.as_str(),
+            started + Duration::from_millis(100),
+            &AtomicBool::new(false),
+        ),
+        Err(FindHarnessForSessionError::Incomplete { .. })
+    ));
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    daemon.join().expect("exact daemon");
+    drop(claim);
+}
+
+/// Cancellation interrupts a silent delivery handshake promptly so its
+/// isolated lookup worker can release process-wide admission capacity.
+#[test]
+fn message_delivery_lookup_cancellation_interrupts_silent_handshake() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("delivery-cancel-silent");
+    let mut claim = claim_session(root.path(), &id).expect("claim exact session");
+    claim.reclaim_stale_socket().expect("reclaim exact socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind exact socket");
+    claim.publish(false).expect("publish exact claim");
+    let (hello_tx, hello_rx) = mpsc::sync_channel(1);
+    let daemon_id = id.clone();
+    let daemon = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept exact probe");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(stream));
+        match reader.read_message().expect("read exact hello") {
+            Some(tau_proto::HarnessInputMessage::Hello(hello))
+                if hello.expected_session_id.as_ref() == Some(&daemon_id) => {}
+            other => panic!("expected exact hello, got {other:?}"),
+        }
+        hello_tx.send(()).expect("report exact hello");
+        std::thread::sleep(Duration::from_secs(1));
+    });
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let worker_id = id.clone();
+    let worker_runtime_dir = root.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        with_runtime_dir(Some(&worker_runtime_dir), || {
+            find_harness_for_message_delivery_until(
+                worker_id.as_str(),
+                Instant::now() + Duration::from_secs(10),
+                &worker_cancelled,
+            )
+        })
+    });
+    hello_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("delivery hello");
+    let cancelled_at = Instant::now();
+
+    cancelled.store(true, Ordering::Release);
+
+    assert!(matches!(
+        worker.join().expect("delivery lookup worker"),
+        Err(FindHarnessForSessionError::Incomplete { .. })
+    ));
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(500),
+        "cancelled delivery lookup retained its worker too long"
+    );
+    daemon.join().expect("exact daemon");
+    drop(claim);
+}
+
+/// The longer targeted handshake allowance still rejects a responder whose
+/// admission identity differs from the claimed recipient session.
+#[test]
+fn message_delivery_lookup_rejects_mismatched_acceptance() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("delivery-wrong-acceptance");
+    let (claim, daemon) =
+        spawn_exact_probe_daemon(&root, id.as_str(), ExactProbeReply::WrongAcceptance);
+
+    assert!(matches!(
+        find_harness_for_message_delivery_until(
+            id.as_str(),
+            Instant::now() + Duration::from_secs(2),
+            &AtomicBool::new(false),
+        ),
+        Err(FindHarnessForSessionError::Incomplete { .. })
+    ));
+
+    daemon.join().expect("exact daemon");
+    drop(claim);
 }
 
 /// Every blocking probe stage derives its remaining allowance from one absolute
