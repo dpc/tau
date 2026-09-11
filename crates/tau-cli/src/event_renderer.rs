@@ -933,6 +933,9 @@ fn checked_streamed_text_capacity(
 /// as suppressed) and torn down on `ToolResult`/`ToolError`.
 #[derive(Default)]
 struct ToolCallState {
+    /// Provider-declared public name retained for presentation while lifecycle
+    /// events use the harness-routed internal tool name.
+    display_name: Option<tau_proto::ToolName>,
     /// Live tool-call block in the active-tools area. `None` for sub-agent
     /// tool calls whose UI is suppressed while generic watched-agent status
     /// rows summarize their owner agent's activity.
@@ -8147,11 +8150,19 @@ impl EventRenderer {
         {
             return;
         }
+        let display_name = self
+            .transcript
+            .runtime
+            .tool_calls
+            .get(&call_id)
+            .and_then(|state| state.display_name.as_ref())
+            .unwrap_or(&started.tool_name)
+            .clone();
         let is_blocker = is_blocker_tool_name(started.tool_name.as_str());
         let blocker_action = blocker_action_descriptor(started);
         let effective_shell_timeout = effective_shell_timeout(started);
         let is_activating_input_wait = is_activating_input_wait(started);
-        let mut display = pending_tool_call_display(started.tool_name.as_str());
+        let mut display = pending_tool_call_display(display_name.as_str());
         sanitize_blocker_display(&mut display, is_blocker, blocker_action);
         Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO, effective_shell_timeout);
         let live_block = self.render_live_tool_block(&display);
@@ -8177,6 +8188,7 @@ impl EventRenderer {
                 );
                 self.resources.handle.push_history(history_id);
                 ToolCallState {
+                    display_name: Some(display_name),
                     history_block_id: Some(history_id),
                     is_main_delegate: started.tool_name.as_str() == AGENT_START_TOOL_NAME,
                     blocker_action,
@@ -8186,6 +8198,7 @@ impl EventRenderer {
             });
         state.blocker_action = blocker_action;
         state.is_blocker = is_blocker;
+        state.is_main_delegate = started.tool_name.as_str() == AGENT_START_TOOL_NAME;
         state.effective_tool_timeout = effective_shell_timeout;
         state.is_activating_input_wait = is_activating_input_wait;
         state.block_id = Some(live_id);
@@ -8305,10 +8318,11 @@ impl EventRenderer {
                 .get_mut(&progress.call_id)
                 && let Some(block_id) = state.block_id
             {
+                let display_name = state.display_name.as_ref().unwrap_or(&progress.tool_name);
                 let mut display = if state.is_blocker {
-                    pending_tool_call_display(&progress.tool_name)
+                    pending_tool_call_display(display_name.as_str())
                 } else {
-                    render_tool_use_state(&progress.tool_name, progress_display)
+                    render_tool_use_state(display_name, progress_display)
                 };
                 let wait_timeout =
                     normalize_wait_display_timeout(state.is_activating_input_wait, &mut display);
@@ -8611,6 +8625,7 @@ impl EventRenderer {
         {
             presentation.block_id = prior.history_block_id;
         }
+        let display_name = prior.display_name.as_ref().unwrap_or(tool_name);
         let is_blocker = prior.is_blocker || is_blocker_tool_name(tool_name.as_str());
         let diff = (!is_blocker)
             .then(|| Self::tool_result_diff(descriptor))
@@ -8625,9 +8640,12 @@ impl EventRenderer {
         {
             compaction_tool_display(status_text, status)
         } else if is_blocker {
-            render_tool_use_state(tool_name, &synthesize_fallback_display(tool_name, None))
+            render_tool_use_state(
+                display_name,
+                &synthesize_fallback_display(display_name, None),
+            )
         } else {
-            Self::tool_result_display(tool_name, descriptor, diff.as_ref())
+            Self::tool_result_display(display_name, descriptor, diff.as_ref())
         };
         self.apply_self_compaction_name_style(call_id, &mut display);
         let wait_timeout =
@@ -8785,15 +8803,18 @@ impl EventRenderer {
         else {
             return;
         };
+        let display_name = prior.display_name.as_ref().unwrap_or(error.tool_name);
+        let is_main_delegate = error.tool_name.as_str() == AGENT_START_TOOL_NAME;
         let is_blocker = prior.is_blocker || is_blocker_tool_name(error.tool_name.as_str());
         let mut display = if is_blocker {
             render_tool_use_state(
-                error.tool_name,
-                &synthesize_fallback_display(error.tool_name, Some("failed")),
+                display_name,
+                &synthesize_fallback_display(display_name, Some("failed")),
             )
         } else {
             Self::tool_error_display_fields(
-                error.tool_name,
+                display_name,
+                is_main_delegate,
                 error.message,
                 error.details,
                 error.descriptor,
@@ -8839,12 +8860,13 @@ impl EventRenderer {
     }
 
     fn tool_error_display_fields(
-        tool_name: &tau_proto::ToolName,
+        display_name: &tau_proto::ToolName,
+        is_main_delegate: bool,
         message: &str,
         details: Option<&CborValue>,
         display: Option<&tau_proto::ToolUseState>,
     ) -> ToolCallDisplay {
-        let descriptor = if tool_name.as_str() == AGENT_START_TOOL_NAME {
+        let descriptor = if is_main_delegate {
             if let Some(descriptor) = display {
                 descriptor.clone()
             } else {
@@ -8857,7 +8879,7 @@ impl EventRenderer {
         } else if let Some(descriptor) = display {
             descriptor.clone()
         } else {
-            synthesize_fallback_display(tool_name, Some(message))
+            synthesize_fallback_display(display_name, Some(message))
         };
         let descriptor = normalize_terminal_tool_use_state(
             descriptor,
@@ -8865,7 +8887,7 @@ impl EventRenderer {
                 canonical_message: message,
             },
         );
-        render_tool_use_state(tool_name, &descriptor)
+        render_tool_use_state(display_name, &descriptor)
     }
 
     fn handle_tool_cancelled(
@@ -8877,12 +8899,14 @@ impl EventRenderer {
         else {
             return;
         };
-        let descriptor = cancelled.display.clone().unwrap_or_else(|| {
-            synthesize_fallback_display(&cancelled.tool_name, Some("cancelled"))
-        });
+        let display_name = prior.display_name.as_ref().unwrap_or(&cancelled.tool_name);
+        let descriptor = cancelled
+            .display
+            .clone()
+            .unwrap_or_else(|| synthesize_fallback_display(display_name, Some("cancelled")));
         let descriptor =
             normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::Cancelled);
-        let mut display = render_tool_use_state(&cancelled.tool_name, &descriptor);
+        let mut display = render_tool_use_state(display_name, &descriptor);
         self.apply_self_compaction_name_style(&cancelled.call_id, &mut display);
         let is_blocker = prior.is_blocker || is_blocker_tool_name(cancelled.tool_name.as_str());
         let wait_timeout =

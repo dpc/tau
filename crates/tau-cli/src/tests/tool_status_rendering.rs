@@ -5903,6 +5903,195 @@ fn tool_started_renders_pending_until_provider_progress() {
     assert!(vt.screen_contains(80, "read semantic.rs"));
 }
 
+/// Provider-declared tool aliases must label every UI lifecycle phase even when
+/// the harness routes the invocation through an internal implementation name.
+#[test]
+fn provider_tool_alias_labels_lifecycle_while_stray_starts_fall_back_to_internal_name() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "image-prompt",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "image-call".into(),
+                name: tau_proto::ToolName::new("generate_image"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started("image-call", "codex_image_1", CborValue::Map(Vec::new())),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(100, "generate_image 0s pending"));
+    assert!(!vt.screen_contains(100, "codex_image_1"));
+
+    renderer.handle_recorded_at(
+        &Event::ToolProgress(tau_proto::ToolProgress {
+            call_id: "image-call".into(),
+            tool_name: tau_proto::ToolName::new("codex_image_1"),
+            message: None,
+            progress: None,
+            display: Some(tau_proto::ToolUseState {
+                args: "sunset over water".into(),
+                status: tau_proto::ToolUseStatus::InProgress,
+                status_text: "creating".into(),
+                ..Default::default()
+            }),
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(100, "generate_image sunset over water"));
+    assert!(vt.screen_contains(100, "creating"));
+    assert!(!vt.screen_contains(100, "codex_image_1"));
+
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
+            call_id: "image-call".into(),
+            tool_name: tau_proto::ToolName::new("codex_image_1"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "sunset over water".into(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "created".into(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(3_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(100, "generate_image sunset over water"));
+    assert!(vt.screen_contains(100, "ok"));
+    assert!(!vt.screen_contains(100, "codex_image_1"));
+
+    renderer.handle(&tool_started(
+        "stray-image-call",
+        "codex_image_2",
+        CborValue::Map(Vec::new()),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "codex_image_2 0s pending"));
+}
+
+/// A late provider terminal must replace an already-rendered internal fallback
+/// name with its durable public alias.
+#[test]
+fn late_provider_tool_alias_relabels_running_tool() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle_recorded_at(
+        &tool_started(
+            "late-image-call",
+            "codex_image_3",
+            CborValue::Map(Vec::new()),
+        ),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(100, "codex_image_3 0s pending"));
+
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "late-image-prompt",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "late-image-call".into(),
+                name: tau_proto::ToolName::new("generate_image"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(100, "generate_image 0s pending"));
+    assert!(!vt.screen_contains(100, "codex_image_3"));
+
+    renderer.apply_setting("show-tools", "summarize-turn");
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
+            call_id: "late-image-call".into(),
+            tool_name: tau_proto::ToolName::new("codex_image_3"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(100, "tools 1/1"));
+}
+
+/// A public alias must not replace the routed `agent_start` identity used to
+/// shape delegated-call errors.
+#[test]
+fn aliased_delegate_error_uses_internal_classification_and_public_label() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "delegate-prompt",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: tau_proto::ToolName::new("launch_worker"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+    )));
+    renderer.handle(&tool_started(
+        "delegate-call",
+        "agent_start",
+        CborValue::Map(Vec::new()),
+    ));
+    renderer.handle(&Event::ToolError(ToolError {
+        presentation: Default::default(),
+        call_id: "delegate-call".into(),
+        tool_name: tau_proto::ToolName::new("agent_start"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "worker startup failed".to_owned(),
+        details: Some(CborValue::Text("first line\nsecond line".to_owned())),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "launch_worker"));
+    assert!(vt.screen_contains(100, "2L"));
+    assert!(!vt.screen_contains(100, "agent_start"));
+}
+
 /// Streaming assistant text must stay above already-running tool calls so the
 /// tool UI remains pinned near the prompt even when the live response grows
 /// taller than the viewport.

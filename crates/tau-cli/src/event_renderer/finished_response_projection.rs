@@ -779,7 +779,24 @@ impl EventRenderer {
         name: &tau_proto::ToolName,
         summary_block_id: Option<tau_cli_term::BlockId>,
     ) {
-        if self.transcript.runtime.tool_calls.contains_key(call_id) {
+        let mut live_display = None;
+        if let Some(state) = self.transcript.runtime.tool_calls.get_mut(call_id) {
+            if state.summary_block_id.is_none() {
+                state.summary_block_id = summary_block_id;
+            }
+            if state.display_name.as_ref() != Some(name) {
+                state.display_name = Some(name.clone());
+                if let (Some(block_id), Some(display)) =
+                    (state.block_id, state.live_display.as_mut())
+                {
+                    display.tool_name = name.to_string();
+                    live_display = Some((block_id, display.clone()));
+                }
+            }
+            if let Some((block_id, display)) = live_display {
+                let block = self.render_live_tool_block(&display);
+                self.resources.handle.set_block(block_id, block);
+            }
             return;
         }
         let history_id = self.resources.handle.new_block(
@@ -790,9 +807,9 @@ impl EventRenderer {
         self.transcript.runtime.tool_calls.insert(
             call_id.clone(),
             ToolCallState {
+                display_name: Some(name.clone()),
                 history_block_id: Some(history_id),
                 summary_block_id,
-                is_main_delegate: name.as_str() == AGENT_START_TOOL_NAME,
                 ..ToolCallState::default()
             },
         );

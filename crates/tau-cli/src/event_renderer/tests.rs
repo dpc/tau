@@ -1641,6 +1641,7 @@ fn terminal_builders_render_canonical_status_wording() {
     assert_eq!(
         rendered_tool_header(&super::EventRenderer::tool_error_display_fields(
             &error.tool_name,
+            false,
             &error.message,
             error.details.as_ref(),
             error.display.as_ref(),
@@ -1667,6 +1668,7 @@ fn delegate_error_fallback_retains_stats_and_canonical_wording() {
     assert_eq!(
         rendered_tool_header(&super::EventRenderer::tool_error_display_fields(
             &error.tool_name,
+            true,
             &error.message,
             error.details.as_ref(),
             error.display.as_ref(),
