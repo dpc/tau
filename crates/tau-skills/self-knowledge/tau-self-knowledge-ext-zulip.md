@@ -17,6 +17,13 @@ email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
 Tau protocol 6.0 and registry SDK 0.3.0. Its configuration schema, snake_case
 keys, secret bindings, and catch-up checkpoint format remain unchanged.
 
+An immediate reply for an already queued event, or a non-blocking poll reply,
+may omit the queue-ID echo. The bridge accepts that omission only for its
+authenticated request. A supplied echo must still be well-formed and match the
+requested queue. Events from either reply follow ordinary admission,
+report-before-cursor, and backlog handling; omission never resets the queue or
+drops queued messages.
+
 Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_secret`, a nonempty numeric `allowed_user_ids`, optional sender aliases, optional `direct_messages: { receive: all_messages }`, optional `proactive_direct_messages` aliases with one fixed recipient each, and name-based stream/topic routes. Keep the identity key stable across API-key rotation; changing it deliberately starts a new opaque sender/conversation/message namespace. `allowed_user_ids` admits inbound senders only; it does not authorize proactive DMs. Routes independently select `receive: mentions_only|all_messages` and `proactive_send`; every configured channel name resolves to a private native ID before queue registration, and `all_messages` subscribes the bot idempotently before that registration without later unsubscribing. Exact proactive stream names remain the default, while `agent_chosen_topic: true` on a proactive name without `topic` explicitly grants agent topic choice within that configured channel. Production requires HTTPS.
 
 Set `non_allowlisted_activity: {}` to collect bounded stream activity that
