@@ -14,9 +14,8 @@ starts it through the normal supervised stdio extension route. The
 owns its source and detailed operational documentation. The bridge uses bot
 email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
 `GET /api/v1/events`; it does not use webhooks. The current executable requires
-Tau protocol 5.0 and registry SDK 0.2.0. Its configuration schema, snake_case
-keys, secret bindings, and catch-up checkpoint format did not change in that
-migration.
+Tau protocol 6.0 and registry SDK 0.3.0. Its configuration schema, snake_case
+keys, secret bindings, and catch-up checkpoint format remain unchanged.
 
 Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_secret`, a nonempty numeric `allowed_user_ids`, optional sender aliases, optional `direct_messages: { receive: all_messages }`, optional `proactive_direct_messages` aliases with one fixed recipient each, and name-based stream/topic routes. Keep the identity key stable across API-key rotation; changing it deliberately starts a new opaque sender/conversation/message namespace. `allowed_user_ids` admits inbound senders only; it does not authorize proactive DMs. Routes independently select `receive: mentions_only|all_messages` and `proactive_send`; every configured channel name resolves to a private native ID before queue registration, and `all_messages` subscribes the bot idempotently before that registration without later unsubscribing. Exact proactive stream names remain the default, while `agent_chosen_topic: true` on a proactive name without `topic` explicitly grants agent topic choice within that configured channel. Production requires HTTPS.
 
@@ -34,7 +33,36 @@ autonomous deadline delivery are not supported.
 
 For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all inbound fields, and configure exactly one `proactive_direct_messages` alias. This mode declares only scoped `zulip_send` without a tool group; sending uses `message` plus that sole alias and needs no registration. It never registers or polls a queue, publishes Zulip-originated events, installs reply/reaction authority, or activates an agent. Mode changes require extension restart.
 
-In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the group. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
+In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the text tool group. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
+
+The approved attachment-capable extension revision adds
+`zulip_send_attachment`. An `std-zulip` instance exposes it only when its
+installed `tau-ext-zulip` implements that revision's attachment contract. An
+ordinary-mode role can share one existing shared Artifact file or image only
+when it explicitly grants that exact scoped tool. `zulip_send_attachment` is
+disabled by default, tagged `zulip:attach`, and has no tool group, so text-send
+permission does not authorize uploads. Register first, then provide a canonical
+shared `blake3:<64 lowercase hex>` Artifact `key`, a safe ASCII basename
+`filename`, optional Markdown `message` caption, and exactly one existing
+`destination` or `reply_to`. Filenames are 1–128 bytes, cannot start with `.`,
+and contain only letters, digits, `.`, `_`, and `-`. `topic` follows the same
+explicit agent-chosen-topic authority as text sends.
+
+The tool verifies at most 16 MiB of original binary bytes through Artifact
+RPC, uploads once, then sends to the frozen route. It accepts files as well as
+images; Zulip selects previews and can impose a lower file-size limit. It never
+accepts local paths, raw bytes, remote URLs, inbound downloads, public temporary
+links, or harness-store access. The sent fact preserves the exact outbound
+Markdown, including an ordinary authenticated relative upload link as inert
+content, never as recipient or reply authority.
+
+One attachment runs at a time. Artifact reads have one 60-second total
+deadline, while provider operations retain 30-second HTTP deadlines. Sharing
+does not renew Artifact retention: existing originals persist independently
+of ephemeral transcripts and can become unavailable. Upload and send are
+separate effects, so failure or cancellation can leave an orphan upload or an
+uncertain sent message. Do not retry an uncertain send automatically; inspect
+the conversation first. Send-only mode remains text-only.
 
 The extension emits generic message reports for creates, edits, deletes,
 reactions, and successful sends. Edits, reactions, and deletes with a supplied
@@ -51,10 +79,9 @@ delivered fact returns on the post-persistence downpath. First use establishes
 the current baseline without replay. Offline edits, deletes, and reactions are
 not recovered; filter changes do not rescan before the checkpoint. Crash
 recovery is at-least-once and can duplicate messages. Runtime reply/reaction
-references disappear on restart. The bridge is Markdown text-only and
-deliberately provides no file upload/download capability. Admitted Zulip
-Markdown remains exact through canonical facts, replay, and provider context,
-including a leading addressed bot mention.
+references disappear on restart. The bridge does not download inbound files.
+Admitted Zulip Markdown remains exact through canonical facts, replay, and
+provider context, including a leading addressed bot mention.
 
 A successfully completed ordinary-mode `zulip_register {"enabled":true}`
 records explicit receive resume-intent. After complete successful session and
