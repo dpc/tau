@@ -17,7 +17,12 @@ and
 [`SPEC-exact-sentinel-prompt-envelopes`](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md);
 template authors must not invent local provenance wrappers for them.
 
-Tau renders prompt fragments and system prompt templates with Handlebars in strict mode. Unknown variables make that fragment/template fail to render, so prefer documented variables and guard optional data with stable fields like `cwd` or `working_directory.present`. A bad prompt fragment is skipped; a bad custom system prompt template falls back to Tau's built-in system template.
+Tau renders prompt fragments and system prompt templates with Handlebars in strict mode. Unknown variables make that fragment/template fail to render and prevent prompt dispatch, so prefer documented variables and guard optional data with stable fields like `cwd` or `working_directory.present`.
+
+Context-size alert `message` values use the same prompt-fragment template data
+and helpers. Tau renders each enabled alert with the owning prompt snapshot;
+whitespace-only output omits that alert for the prompt, and a render error
+rejects prompt materialization before provider dispatch.
 
 Templates are plain prompt text, not HTML. Tau disables default HTML escaping so paths and shell snippets render exactly. Use `xml_escape` only when inserting text into XML-shaped prompt sections.
 

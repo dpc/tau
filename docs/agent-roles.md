@@ -36,8 +36,9 @@ A role can also set:
 - `visible`: whether the role appears in the built-in available-sub-task-role
   prompt catalog; defaults to `true`
 - `context_size_alerts`: named token thresholds that queue configurable internal
-  prompts after a turn; committed deliveries appear in UI history as
-  `□ <configured message>` in the dedicated internal-notice style
+  prompts after a turn; messages use the same Handlebars inputs and helpers as
+  prompt fragments, and committed deliveries appear in UI history as
+  `□ <rendered message>` in the dedicated internal-notice style
 - `prompt_fragments`: role-specific prompt fragments
 - `prompt_override`: system prompt template name
 - `tools`: explicit public tool names allowed for this role
@@ -271,6 +272,24 @@ agents:
           context_size_alerts:
             compact-soon:
               enable: false
+```
+
+Alert `message` values are strict Handlebars templates with the same variables
+and helpers as prompt fragments. Tau renders them from the owning prompt's
+role, skills, agent context, working directory, session directory, and
+capability snapshot. A template error rejects prompt materialization before
+provider dispatch. Whitespace-only output omits that alert for the prompt,
+which allows role- or directory-conditional alerts. Plain messages render
+unchanged:
+
+```yaml
+agents:
+  context_size_alerts:
+    compact-soon:
+      threshold: 160000
+      message: >-
+        {{role.name}} is using {{session.cwd}}.
+        Use the `compact` tool after finishing your current task.
 ```
 
 Named automatic-compaction policies use the same broad-to-specific named merge:

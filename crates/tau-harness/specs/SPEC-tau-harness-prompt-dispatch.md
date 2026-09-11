@@ -223,7 +223,13 @@ alter response-time policy. Usage must strictly exceed the threshold. Failed,
 canceled, stale, duplicate, reactive-recovery, standalone-compaction, and
 inline-compacting responses do not create alert work.
 
-An `after_response` alert queues its configured text after the response and, when
+Prompt materialization renders each enabled alert message with the same strict
+Handlebars engine, helpers, and dynamic input snapshot as ordinary prompt
+fragments. A render failure rejects materialization before provider dispatch;
+whitespace-only output omits that alert from the prompt-owned policy snapshot.
+Plain messages remain unchanged.
+
+An `after_response` alert queues its rendered text after the response and, when
 tool calls are present, after those calls finish; delivery continues the current
 turn. An `outer_turn_finished` alert is evaluated against the accepted terminal
 response and logical finishing status, then wakes a fresh internal-prompt turn

@@ -3449,7 +3449,8 @@ pub struct ContextSizeAlert {
     /// Whether this alert is active. Defaults to `true`.
     #[serde(default = "context_size_alert_enabled_default")]
     pub enable: bool,
-    /// Internal prompt injected when the threshold is crossed.
+    /// Prompt-fragment-compatible template for the internal prompt injected
+    /// when the threshold is crossed.
     #[serde(
         default = "context_size_alert_message_default",
         deserialize_with = "deserialize_nonempty_context_size_alert_message"
@@ -3511,7 +3512,8 @@ struct ContextSizeAlertPatch {
     threshold: Option<u64>,
     /// Replacement enablement when the current layer specifies one.
     enable: Option<bool>,
-    /// Replacement prompt message when the current layer specifies one.
+    /// Replacement prompt-message template when the current layer specifies
+    /// one.
     message: Option<String>,
     /// Nested condition patch; null resets this alert to after-response/any.
     #[serde(deserialize_with = "present_option")]

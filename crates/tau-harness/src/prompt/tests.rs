@@ -421,6 +421,83 @@ fn template_session_cwd_is_distinct_from_agent_workdir() {
     assert_eq!(prompt, "/harness/session /agent/workdir");
 }
 
+/// Additional prompt templates receive the same dynamic values and helpers as
+/// ordinary prompt fragments, preserve plain text, and omit whitespace-only
+/// conditional output.
+#[test]
+fn additional_prompt_templates_match_prompt_fragment_context() {
+    let engine = PromptTemplateEngine::default();
+    let skills = path_std_collections::HashMap::from([(
+        tau_proto::SkillName::from("alpha"),
+        discovered_skill("first skill", true),
+    )]);
+    let agent_id = tau_proto::AgentId::parse("template-agent").expect("valid agent id");
+    let templates = [
+        "plain alert",
+        "{{role.group}}/{{role.name}} {{session.cwd}} {{agent_id}} \
+         {{#each skills}}{{name}}={{description}}{{/each}} \
+         {{#each agent_context.cwd}}{{value}}{{/each}} \
+         {{#if (tool_available capabilities.tools \"compact\")}}compact-enabled{{/if}}",
+        "{{#if (eq role.name \"other\")}}hidden{{/if}}",
+    ];
+    let rendered = try_build_system_prompt_and_additional_templates_with_engine(
+        &engine,
+        "SYSTEM",
+        &skills,
+        &[],
+        &[],
+        serde_json::json!({
+            "cwd": [
+                { "extension_name": "tau-ext-shell", "value": "/agent/workdir" }
+            ]
+        }),
+        RolePromptTemplateContext::for_agent("engineer", &agent_id)
+            .with_role_group("builders")
+            .with_session_cwd(Path::new("/harness/session")),
+        PromptCapabilities::new(
+            ["compact".to_owned()],
+            std::iter::empty(),
+            std::iter::empty(),
+        ),
+        &templates,
+    )
+    .expect("additional templates render");
+
+    assert_eq!(rendered.system_prompt, "SYSTEM");
+    assert_eq!(
+        rendered.additional,
+        vec![
+            Some("plain alert".to_owned()),
+            Some(
+                "builders/engineer /harness/session template-agent alpha=first skill \
+                 /agent/workdir compact-enabled"
+                    .to_owned()
+            ),
+            None,
+        ]
+    );
+}
+
+/// Strict-mode failures in additional prompt templates remain explicit rather
+/// than silently substituting an empty advisory message.
+#[test]
+fn additional_prompt_template_unknown_variable_fails_render() {
+    let error = try_build_system_prompt_and_additional_templates_with_engine(
+        &PromptTemplateEngine::default(),
+        "SYSTEM",
+        &path_std_collections::HashMap::new(),
+        &[],
+        &[],
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer"),
+        PromptCapabilities::default(),
+        &["{{missing.value}}"],
+    )
+    .expect_err("strict additional template must fail");
+
+    assert!(error.to_string().contains("missing"));
+}
+
 /// Provider summaries cover every tagged state, while long-delay summaries and
 /// live model-visible notifications share readable, provider-content-free text.
 #[test]

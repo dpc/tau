@@ -226,6 +226,42 @@ fn provider_dispatch_reuses_one_sorted_tool_provider_snapshot() {
     h.shutdown().expect("shutdown");
 }
 
+/// Invalid context-size alert templates fail the same strict prompt-surface
+/// materialization gate as invalid prompt fragments.
+#[test]
+fn invalid_context_size_alert_template_rejects_prompt_surface() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let role_name = h.config.selected_role.clone();
+    h.config
+        .available_roles
+        .get_mut(&role_name)
+        .expect("selected role")
+        .context_size_alerts
+        .insert(
+            "invalid".to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                    .expect("positive test threshold"),
+                enable: true,
+                message: "{{missing.value}}".to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
+            },
+        );
+    let model = h.config.selected_model.clone().expect("selected model");
+
+    let error = h
+        .prepare_prompt_surface_for_dispatch(&role_name, None, None, &model, false, false)
+        .expect_err("strict alert template must reject materialization");
+    assert!(
+        matches!(error, PromptSurfaceError::Render(ref error) if error.to_string().contains("missing"))
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Manual benchmark reports dispatch-surface scaling while deterministic work
 /// counters prove one provider sort per dispatch and parse-cache reuse after
 /// warmup. It intentionally has no wall-clock pass/fail threshold.
@@ -2747,9 +2783,10 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
+    let original_role = h.config.selected_role.clone();
     h.config
         .available_roles
-        .get_mut(&h.config.selected_role)
+        .get_mut(&original_role)
         .expect("selected role")
         .context_size_alerts
         .insert(
@@ -2758,7 +2795,25 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
                 threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
                     .expect("positive test threshold"),
                 enable: true,
-                message: "original role alert".to_owned(),
+                message: "original {{role.name}} alert".to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
+            },
+        );
+    h.config
+        .available_roles
+        .get_mut(&original_role)
+        .expect("selected role")
+        .context_size_alerts
+        .insert(
+            "role-mismatch".to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(1)
+                    .expect("positive test threshold"),
+                enable: true,
+                message: "{{#if (eq role.name \"never\")}}must not appear{{/if}}".to_owned(),
                 when: tau_config::settings::ContextPolicyWhen {
                     at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
                     statuses: None,
@@ -2768,6 +2823,16 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
         .expect("dispatch");
     let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(
+        h.prompt_coordination.prompt_runtime.context_size_alerts
+            [&prompt.agent_prompt_id]["compact-soon"]
+            .message,
+        format!("original {original_role} alert")
+    );
+    assert!(
+        !h.prompt_coordination.prompt_runtime.context_size_alerts[&prompt.agent_prompt_id]
+            .contains_key("role-mismatch")
+    );
 
     let mut replacement_role = path_tau_config_settings::AgentRole::default();
     replacement_role.context_size_alerts.insert(
@@ -2804,7 +2869,8 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::AgentPromptSubmitted(submitted) if submitted.text == "original role alert"
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == format!("original {original_role} alert")
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,

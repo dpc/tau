@@ -146,6 +146,18 @@ pub(super) struct MaterializedPromptSurface {
     invocation_policies: HashMap<ToolName, tau_proto::ToolInvocationPolicy>,
     /// Rendered system prompt based on the selected surface.
     system_prompt: String,
+    /// Prompt-owned context-size alerts rendered from the same dynamic
+    /// template inputs as prompt fragments.
+    context_size_alerts: BTreeMap<String, tau_config::settings::ContextSizeAlert>,
+}
+
+/// System prompt and advisory alerts rendered from one exact template-input
+/// snapshot.
+struct RenderedRolePrompt {
+    /// Complete rendered system prompt.
+    system_prompt: String,
+    /// Enabled alerts whose rendered messages are not whitespace-only.
+    context_size_alerts: BTreeMap<String, tau_config::settings::ContextSizeAlert>,
 }
 
 impl MaterializedPromptSurface {
@@ -1285,6 +1297,7 @@ impl Harness {
             hosted_tools,
             invocation_policies: tool_invocation_policies,
             system_prompt,
+            context_size_alerts,
         } = surface;
         let durable_agent_id = agent_id_for_tree.as_deref().unwrap_or(cid.as_ref());
         let agent_prompt_id = reserved_compact_prompt_id
@@ -1340,13 +1353,6 @@ impl Harness {
             .prompt_runtime
             .context_limits
             .insert(agent_prompt_id.clone(), context_limit_snapshot);
-        let role_name = self.role_name_for_agent_id(cid);
-        let context_size_alerts = self
-            .config
-            .available_roles
-            .get(&role_name)
-            .map(|role| role.context_size_alerts.clone())
-            .unwrap_or_default();
         self.prompt_coordination
             .prompt_runtime
             .context_size_alerts
@@ -1830,7 +1836,7 @@ impl Harness {
                     .elapsed(),
             );
         }
-        let prompt = self
+        let rendered = self
             .try_build_system_prompt_for_role_and_agent_with_snapshot_timed(
                 role_name,
                 agent_id,
@@ -1848,7 +1854,8 @@ impl Harness {
             tool_definitions: tools,
             hosted_tools,
             invocation_policies,
-            system_prompt: prompt,
+            system_prompt: rendered.system_prompt,
+            context_size_alerts: rendered.context_size_alerts,
         })
     }
 
@@ -1924,6 +1931,7 @@ impl Harness {
             &providers,
             &effective_tool_names,
         )
+        .map(|rendered| rendered.system_prompt)
     }
 
     /// Render with the dispatch-owned sorted provider and effective-name
@@ -1939,7 +1947,7 @@ impl Harness {
         contains_payload_envelope_provenance_projection: bool,
         providers: &[&tau_core::ToolProvider],
         effective_tool_names: &HashSet<ToolName>,
-    ) -> Result<String, handlebars::RenderError> {
+    ) -> Result<RenderedRolePrompt, handlebars::RenderError> {
         self.try_build_system_prompt_for_role_and_agent_with_snapshot_timed(
             role_name,
             agent_id,
@@ -1966,7 +1974,7 @@ impl Harness {
         providers: &[&tau_core::ToolProvider],
         effective_tool_names: &HashSet<ToolName>,
         timing: Option<&PromptMaterializationTiming>,
-    ) -> Result<String, handlebars::RenderError> {
+    ) -> Result<RenderedRolePrompt, handlebars::RenderError> {
         let stage_started = stage_start(timing);
         if let Some(name) = duplicate_model_visible_tool_name(tool_specs) {
             return Err(handlebars::RenderError::from(
@@ -2054,7 +2062,22 @@ impl Harness {
             );
         }
         let stage_started = stage_start(timing);
-        let rendered = try_build_system_prompt_with_engine(
+        let configured_alerts = self
+            .config
+            .available_roles
+            .get(role_name)
+            .map(|role| {
+                role.context_size_alerts
+                    .iter()
+                    .filter(|(_, alert)| alert.enable)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let alert_templates = configured_alerts
+            .iter()
+            .map(|(_, alert)| alert.message.as_str())
+            .collect::<Vec<_>>();
+        let rendered = try_build_system_prompt_and_additional_templates_with_engine(
             &self
                 .prompt_coordination
                 .context_discovery
@@ -2066,7 +2089,25 @@ impl Harness {
             agent_context,
             template_context,
             capabilities,
-        );
+            &alert_templates,
+        )
+        .map(|rendered| {
+            let context_size_alerts = configured_alerts
+                .into_iter()
+                .zip(rendered.additional)
+                .filter_map(|((name, alert), message)| {
+                    message.map(|message| {
+                        let mut alert = alert.clone();
+                        alert.message = message;
+                        (name.clone(), alert)
+                    })
+                })
+                .collect();
+            RenderedRolePrompt {
+                system_prompt: rendered.system_prompt,
+                context_size_alerts,
+            }
+        });
         if let Some(timing) = timing {
             timing.record(
                 MaterializationStage::HandlebarsRender,

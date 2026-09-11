@@ -202,7 +202,7 @@ use crate::pending_agent_discovery::PendingAgentDiscovery;
 use crate::prompt::{
     BUILT_IN_SYSTEM_TEMPLATE_NAME, PromptTemplateEngine, RolePromptTemplateContext,
     ToolPromptFragment, built_in_system_prompt_templates, render_agents_context_message,
-    render_effective_prompt_message, try_build_system_prompt_with_engine,
+    render_effective_prompt_message, try_build_system_prompt_and_additional_templates_with_engine,
 };
 use crate::provider_cache_residency::{
     ProviderCacheResidency, RuntimeCacheClock, RuntimeCacheJitter,

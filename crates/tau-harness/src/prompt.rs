@@ -164,6 +164,7 @@ impl PromptTemplateEngine {
         system_template: &str,
         prompt_fragments: &[PromptFragment],
         tool_prompt_fragments: &[ToolPromptFragment],
+        additional_templates: &[&str],
     ) -> u64 {
         let sources = std::iter::once(system_template)
             .chain(
@@ -175,10 +176,13 @@ impl PromptTemplateEngine {
                 tool_prompt_fragments
                     .iter()
                     .map(|item| item.fragment.template.as_str()),
-            );
+            )
+            .chain(additional_templates.iter().copied());
         let mut cache = self.cache.borrow_mut();
         let unchanged = cache.sources.len()
-            == 1 + prompt_fragments.len() + tool_prompt_fragments.len()
+            == 1 + prompt_fragments.len()
+                + tool_prompt_fragments.len()
+                + additional_templates.len()
             && cache.sources.iter().map(String::as_str).eq(sources.clone());
         if !unchanged {
             cache.generation = cache.generation.wrapping_add(1);
@@ -515,6 +519,7 @@ pub(crate) fn try_build_system_prompt_with_tool_template_context(
 
 /// Render one system prompt with a reusable registry and immutable-source
 /// cache.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_build_system_prompt_with_engine(
     engine: &PromptTemplateEngine,
@@ -526,44 +531,90 @@ pub(crate) fn try_build_system_prompt_with_engine(
     template_context: RolePromptTemplateContext<'_>,
     capabilities: PromptCapabilities,
 ) -> Result<String, handlebars::RenderError> {
-    let template_generation =
-        engine.activate_source_snapshot(system_template, prompt_fragments, tool_prompt_fragments);
-    render_system_prompt_template(
-        engine,
-        template_generation,
-        system_template,
-        template_context,
-        skills,
-        prompt_fragments,
-        tool_prompt_fragments,
-        agent_context,
-        capabilities,
+    Ok(
+        try_build_system_prompt_and_additional_templates_with_engine(
+            engine,
+            system_template,
+            skills,
+            prompt_fragments,
+            tool_prompt_fragments,
+            agent_context,
+            template_context,
+            capabilities,
+            &[],
+        )?
+        .system_prompt,
     )
 }
 
+/// One system-prompt render plus templates evaluated from the same fragment
+/// inputs.
+#[derive(Debug)]
+pub(crate) struct PromptTemplateRender {
+    /// Complete rendered system prompt.
+    pub(crate) system_prompt: String,
+    /// Additional template results; whitespace-only output is represented as
+    /// `None`, matching ordinary prompt-fragment omission.
+    pub(crate) additional: Vec<Option<String>>,
+}
+
+/// Render a system prompt and additional prompt-fragment-compatible templates
+/// against one exact dynamic input snapshot.
 #[allow(clippy::too_many_arguments)]
-fn render_system_prompt_template(
+pub(crate) fn try_build_system_prompt_and_additional_templates_with_engine(
     engine: &PromptTemplateEngine,
-    template_generation: u64,
     system_template: &str,
-    context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     prompt_fragments: &[PromptFragment],
     tool_prompt_fragments: &[ToolPromptFragment],
     agent_context: serde_json::Value,
+    template_context: RolePromptTemplateContext<'_>,
     capabilities: PromptCapabilities,
-) -> Result<String, handlebars::RenderError> {
-    let data = system_prompt_template_data(
-        engine,
-        template_generation,
-        context,
-        skills,
+    additional_templates: &[&str],
+) -> Result<PromptTemplateRender, handlebars::RenderError> {
+    let template_generation = engine.activate_source_snapshot(
+        system_template,
         prompt_fragments,
         tool_prompt_fragments,
-        agent_context,
-        capabilities,
+        additional_templates,
+    );
+    let payload_envelope_provenance_notice = template_context.payload_envelope_provenance_notice;
+    let mut data = prompt_template_data(template_context, skills, agent_context, capabilities);
+    let additional = additional_templates
+        .iter()
+        .map(|template| {
+            engine
+                .render(template_generation, template, &data)
+                .map(|rendered| (!rendered.trim().is_empty()).then_some(rendered))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let rendered_fragments = rendered_prompt_fragment_template_parts(
+        engine,
+        template_generation,
+        prompt_fragments,
+        &data,
     )?;
-    engine.render(template_generation, system_template, &data)
+    let rendered_tool_fragments = rendered_tool_prompt_fragment_template_parts(
+        engine,
+        template_generation,
+        tool_prompt_fragments,
+        &data,
+    )?;
+    let object = data
+        .as_object_mut()
+        .expect("system prompt template data is an object");
+    object.insert("prompt_fragments".to_owned(), rendered_fragments);
+    object.insert("tool_prompt_fragments".to_owned(), rendered_tool_fragments);
+    object.insert(
+        "payload_envelope_provenance_notice".to_owned(),
+        serde_json::to_value(payload_envelope_provenance_notice)
+            .expect("optional payload-envelope provenance notice serializes"),
+    );
+    let system_prompt = engine.render(template_generation, system_template, &data)?;
+    Ok(PromptTemplateRender {
+        system_prompt,
+        additional,
+    })
 }
 
 fn prompt_template_data(
@@ -595,6 +646,7 @@ fn prompt_template_data(
     })
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn system_prompt_template_data(
     engine: &PromptTemplateEngine,
