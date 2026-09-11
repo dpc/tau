@@ -72,7 +72,7 @@ tau-cli = { package = "dpc-tau-cli", path = "crates/tau-cli" }
 tau-cli-picker = { package = "dpc-tau-cli-picker", path = "crates/tau-cli-picker" }
 tau-cli-term = { package = "dpc-tau-cli-term", path = "crates/tau-cli-term" }
 tau-cli-term-raw = { package = "dpc-tau-cli-term-raw", path = "crates/tau-cli-term-raw" }
-tau-client = { package = "dpc-tau-client", path = "crates/tau-client", version = "=0.3.0" }
+tau-client = { package = "dpc-tau-client", path = "crates/tau-client", version = "=0.4.0" }
 tau-config = { package = "dpc-tau-config", path = "crates/tau-config" }
 tau-core = { package = "dpc-tau-core", path = "crates/tau-core" }
 tau-delivery-memory = { package = "dpc-tau-delivery-memory", path = "crates/tau-delivery-memory" }
@@ -85,7 +85,7 @@ tau-ext-utils = { package = "dpc-tau-ext-utils", path = "crates/tau-ext-utils" }
 tau-ext-websearch = { package = "dpc-tau-ext-websearch", path = "crates/tau-ext-websearch" }
 tau-harness = { package = "dpc-tau-harness", path = "crates/tau-harness" }
 tau-harness-tools = { package = "dpc-tau-harness-tools", path = "crates/tau-harness-tools" }
-tau-proto = { package = "dpc-tau-proto", path = "crates/tau-proto", version = "=0.3.0" }
+tau-proto = { package = "dpc-tau-proto", path = "crates/tau-proto", version = "=0.4.0" }
 tau-provider = { package = "dpc-tau-provider", path = "crates/tau-provider" }
 tau-provider-chat-completions = { package = "dpc-tau-provider-chat-completions", path = "crates/tau-provider-chat-completions" }
 tau-provider-codex = { package = "dpc-tau-provider-codex", path = "crates/tau-provider-codex" }

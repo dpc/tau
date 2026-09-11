@@ -20,6 +20,14 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+The protocol `7.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
+`0.4.0`, with their unchanged leaf dependencies remaining at
+`dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Protocol 7
+adds typed sender-trust metadata to external message parties. Adding the field
+changes Rust struct construction, so the source API moves to the new `0.4`
+minor line. Extensions compiled for protocol 6 are rejected before
+configuration and must be rebuilt or updated together with the harness.
+
 The protocol `6.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.3.0`, with their unchanged leaf dependencies remaining at
 `dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Protocol 6
@@ -65,9 +73,9 @@ manifests, and builds a small consumer outside the workspace against the exact
 archives. Before the first registry release, the consumer uses temporary Cargo
 patches to stand in for the unpublished packages.
 
-For the protocol `6.0` release, the leaf versions are already published.
-Dry-run and upload `dpc-tau-proto` `0.3.0`, verify that registry release, then
-dry-run and upload `dpc-tau-client` `0.3.0`. Each `cargo publish --dry-run`
+For the protocol `7.0` release, the leaf versions are already published.
+Dry-run and upload `dpc-tau-proto` `0.4.0`, verify that registry release, then
+dry-run and upload `dpc-tau-client` `0.4.0`. Each `cargo publish --dry-run`
 must immediately precede its upload; do not upload a package whose current
 dry-run fails.
 

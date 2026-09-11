@@ -1,6 +1,6 @@
 [package]
 name = "dpc-tau-client"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 description = "Client runtime for standalone Tau extensions and UI protocol peers."
 repository.workspace = true
