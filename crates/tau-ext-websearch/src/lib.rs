@@ -946,7 +946,10 @@ fn exa_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG)],
+        tags: vec![
+            tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG),
+            tau_proto::ToolTag::new(tau_proto::WEB_SEARCH_TOOL_TAG),
+        ],
         enabled_by_default: false,
         background_support: None,
         examples: Vec::new(),
@@ -963,8 +966,6 @@ fn hybrid_search_tool_spec() -> ToolSpec {
             .to_owned(),
     );
     spec.enabled_by_default = true;
-    spec.tags
-        .push(tau_proto::ToolTag::new(tau_proto::WEB_SEARCH_TOOL_TAG));
     spec
 }
 
@@ -1049,9 +1050,10 @@ fn parallel_search_tool_spec() -> ToolSpec {
             "description": "Provider-specific Parallel MCP arguments may be passed through in addition to query."
         })),
         format: None,
-        tags: vec![tau_proto::ToolTag::new(
-            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
-        )],
+        tags: vec![
+            tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG),
+            tau_proto::ToolTag::new(tau_proto::WEB_SEARCH_TOOL_TAG),
+        ],
         enabled_by_default: false,
         background_support: None,
         examples: Vec::new(),
@@ -1081,9 +1083,11 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
             "description": "Provider-specific Parallel MCP arguments may be passed through in addition to url."
         })),
         format: None,
-        tags: vec![tau_proto::ToolTag::new(
-            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
-        )],
+        tags: vec![
+            tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG),
+            tau_proto::ToolTag::new(tau_proto::WEB_FETCH_TOOL_TAG),
+            tau_proto::ToolTag::new(tau_proto::WEB_REQUESTED_TARGET_DOMAIN_ENFORCEMENT_TAG),
+        ],
         enabled_by_default: false,
         background_support: None,
         examples: Vec::new(),

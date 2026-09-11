@@ -24,7 +24,7 @@ thread_local! {
 mod web_tools_tests;
 
 /// Logical web operation selected independently at prompt materialization.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LogicalWebOperation {
     /// Search for web sources.
     Search,
@@ -82,6 +82,42 @@ fn suppress_declared_web_candidates(
 ) {
     let declared_candidates = policy.declared_tool_names().collect::<HashSet<_>>();
     specs.retain(|spec| !declared_candidates.contains(&spec.name));
+}
+
+fn is_managed_logical_web_backing(
+    policy: &tau_config::WebToolsPolicy,
+    operation: LogicalWebOperation,
+    spec: &tau_proto::ToolSpec,
+) -> bool {
+    spec.tool_type == tau_proto::ToolType::Function
+        && spec
+            .model_visible_name
+            .as_ref()
+            .unwrap_or(&spec.name)
+            .as_str()
+            == operation.model_alias()
+        && spec
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == operation.operation_tag())
+        && (policy.allowed_domains().is_none()
+            || spec
+                .tags
+                .iter()
+                .any(|tag| tag.as_str() == operation.enforcement_tag()))
+}
+
+fn project_compiled_web_tools(
+    policy: &tau_config::WebToolsPolicy,
+    compiled: &CompiledWebTools,
+    specs: &mut Vec<tau_proto::ToolSpec>,
+) {
+    specs.retain(|spec| {
+        compiled.retained_tools.contains(&spec.name)
+            || ![LogicalWebOperation::Search, LogicalWebOperation::Fetch]
+                .into_iter()
+                .any(|operation| is_managed_logical_web_backing(policy, operation, spec))
+    });
 }
 
 fn hosted_web_search_collides(
@@ -177,13 +213,36 @@ fn compile_web_tools(
     model: &tau_proto::ProviderModelInfo,
     specs: &[tau_proto::ToolSpec],
 ) -> Result<CompiledWebTools, String> {
+    compile_web_tools_inner(policy, Some(model), specs, true).map_err(|operation| {
+        format!(
+            "logical web {} is unavailable for exact route `{}`",
+            operation.as_str(),
+            model.id,
+        )
+    })
+}
+
+fn compile_provisional_web_tools(
+    policy: &tau_config::WebToolsPolicy,
+    specs: &[tau_proto::ToolSpec],
+) -> CompiledWebTools {
+    compile_web_tools_inner(policy, None, specs, false)
+        .expect("provisional web compilation never enforces unavailable policy")
+}
+
+fn compile_web_tools_inner(
+    policy: &tau_config::WebToolsPolicy,
+    model: Option<&tau_proto::ProviderModelInfo>,
+    specs: &[tau_proto::ToolSpec],
+    enforce_unavailable: bool,
+) -> Result<CompiledWebTools, LogicalWebOperation> {
     let allowed_domains = policy.allowed_domains().map(<[String]>::to_vec);
     let domains_available = allowed_domains
         .as_ref()
         .is_none_or(|domains| !domains.is_empty());
     let native_capability = model
-        .hosted_tool_capabilities
-        .iter()
+        .into_iter()
+        .flat_map(|model| &model.hosted_tool_capabilities)
         .map(|capability| {
             let tau_proto::ProviderHostedToolCapability::WebSearch {
                 access_modes,
@@ -236,23 +295,7 @@ fn compile_web_tools(
                         })
                 }
                 tau_config::WebToolCandidate::Tool { tool, .. } => specs.iter().any(|spec| {
-                    spec.name == *tool
-                        && spec.tool_type == tau_proto::ToolType::Function
-                        && spec
-                            .model_visible_name
-                            .as_ref()
-                            .unwrap_or(&spec.name)
-                            .as_str()
-                            == operation.model_alias()
-                        && spec
-                            .tags
-                            .iter()
-                            .any(|tag| tag.as_str() == operation.operation_tag())
-                        && (allowed_domains.is_none()
-                            || spec
-                                .tags
-                                .iter()
-                                .any(|tag| tag.as_str() == operation.enforcement_tag()))
+                    spec.name == *tool && is_managed_logical_web_backing(policy, operation, spec)
                 }),
             }
         });
@@ -286,12 +329,10 @@ fn compile_web_tools(
                     );
                 }
             }
-            None if logical.unavailable() == tau_config::WebToolUnavailablePolicy::Error => {
-                return Err(format!(
-                    "logical web {} is unavailable for exact route `{}`",
-                    operation.as_str(),
-                    model.id,
-                ));
+            None if enforce_unavailable
+                && logical.unavailable() == tau_config::WebToolUnavailablePolicy::Error =>
+            {
+                return Err(operation);
             }
             None => {}
         }
@@ -1741,11 +1782,7 @@ impl Harness {
         ) {
             let compiled = compile_web_tools(policy, model_info, &specs)
                 .map_err(PromptSurfaceError::WebUnavailable)?;
-            let declared_candidates = policy.declared_tool_names().collect::<HashSet<_>>();
-            specs.retain(|spec| {
-                !declared_candidates.contains(&spec.name)
-                    || compiled.retained_tools.contains(&spec.name)
-            });
+            project_compiled_web_tools(policy, &compiled, &mut specs);
             hosted_tools = compiled.hosted_tools;
             invocation_policies = compiled.invocation_policies;
         }
@@ -1812,6 +1849,30 @@ impl Harness {
             invocation_policies,
             system_prompt: prompt,
         })
+    }
+
+    /// Selects the provisional ordinary tool surface when exact route metadata
+    /// is unavailable to developer introspection.
+    pub(super) fn prepare_provisional_tool_surface_for_preview(
+        &self,
+        role_name: &str,
+    ) -> Result<Vec<ToolDefinition>, PromptSurfaceError> {
+        let mut specs = self.gather_effective_tool_specs_for_role_model(role_name, None);
+        if let Some(policy) = self
+            .config
+            .available_roles
+            .get(role_name)
+            .map(|role| &role.web_tools)
+        {
+            let compiled = compile_provisional_web_tools(policy, &specs);
+            project_compiled_web_tools(policy, &compiled, &mut specs);
+        }
+        select_ordinary_backings(&mut specs, &["web_search", "web_fetch"])
+            .map_err(|name| PromptSurfaceError::DuplicateToolName(name.to_string()))?;
+        if let Some(name) = duplicate_model_visible_tool_name(&specs) {
+            return Err(PromptSurfaceError::DuplicateToolName(name.to_string()));
+        }
+        Ok(self.tool_definitions_from_specs(&specs))
     }
 
     /// Resolves the same exact-route surface as live dispatch for a developer

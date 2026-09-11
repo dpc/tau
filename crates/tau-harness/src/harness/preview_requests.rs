@@ -212,20 +212,25 @@ impl Harness {
                                 PromptSurfaceError::WebUnavailable(error) => error,
                             })
                     } else {
-                        let specs = self.gather_effective_tool_specs_for_role_model(&role, None);
-                        if let Some(name) = duplicate_model_visible_tool_name(&specs) {
-                            Err(format!(
-                                "effective tool surface contains duplicate model-visible name `{name}`"
-                            ))
-                        } else {
-                            Ok((
-                                self.tool_definitions_from_specs(&specs),
-                                Vec::new(),
-                                vec![format!(
-                                    "role `{role}` has no exact model capability metadata; provider-native replacement could not be resolved, so ordinary tool entries are provisional"
-                                )],
-                            ))
-                        }
+                        self.prepare_provisional_tool_surface_for_preview(&role)
+                            .map(|tools| {
+                                (
+                                    tools,
+                                    Vec::new(),
+                                    vec![format!(
+                                        "role `{role}` has no exact model capability metadata; provider-native replacement could not be resolved, so ordinary tool entries are provisional"
+                                    )],
+                                )
+                            })
+                            .map_err(|error| match error {
+                                PromptSurfaceError::DuplicateToolName(name) => format!(
+                                    "effective tool surface contains duplicate model-visible name `{name}`"
+                                ),
+                                PromptSurfaceError::Render(error) => {
+                                    format!("failed to render system prompt: {error}")
+                                }
+                                PromptSurfaceError::WebUnavailable(error) => error,
+                            })
                     };
                     self.send_rendered_tools(&connection_id, request_id, result);
                 }

@@ -2,6 +2,46 @@
 
 use super::*;
 
+fn register_managed_fetch_backings(harness: &mut Harness) {
+    let connection_id = crate::test_connection_id("managed-fetch-backings");
+    for (name, enabled_by_default) in [
+        ("websearch_hybrid_fetch", true),
+        ("websearch_exa_fetch", false),
+        ("websearch_parallel_fetch", false),
+    ] {
+        harness.tool_routing.registry.register(
+            &connection_id,
+            tau_proto::ToolSpec {
+                provider_scope: None,
+                name: tau_proto::ToolName::new(name),
+                model_visible_name: Some(tau_proto::ToolName::new("web_fetch")),
+                description: None,
+                tool_type: tau_proto::ToolType::Function,
+                parameters: Some(serde_json::json!({"type": "object"})),
+                format: None,
+                tags: vec![
+                    tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG),
+                    tau_proto::ToolTag::new(tau_proto::WEB_FETCH_TOOL_TAG),
+                    tau_proto::ToolTag::new(tau_proto::WEB_REQUESTED_TARGET_DOMAIN_ENFORCEMENT_TAG),
+                ],
+                enabled_by_default,
+                background_support: None,
+                examples: Vec::new(),
+            },
+        );
+    }
+}
+
+fn enable_public_fetch_name(harness: &mut Harness, role: &str) {
+    harness
+        .config
+        .available_roles
+        .get_mut(role)
+        .expect("selected role")
+        .enable_tools
+        .push(tau_proto::ToolName::new("web_fetch"));
+}
+
 /// Cancelling a disconnected preview requester must discard its waiting
 /// ephemeral agent so a context provider that never becomes ready cannot leak
 /// runtime routes or deferred response state.
@@ -200,4 +240,117 @@ fn rendered_tool_preview_matches_live_web_tool_materialization() {
         Err(PromptSurfaceError::WebUnavailable(message))
             if message.contains("model capability metadata is unavailable")
     ));
+}
+
+/// Public-name enablement makes every managed fetch backing eligible, while
+/// logical-web policy still exposes only its configured ordinary winner.
+#[test]
+fn exact_web_materialization_projects_managed_fetch_family_before_collision_check() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let role = h.config.selected_role.clone();
+    let model = h
+        .config
+        .selected_model
+        .clone()
+        .expect("quiet provider selected model");
+    let cid = h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    register_managed_fetch_backings(&mut h);
+    enable_public_fetch_name(&mut h, &role);
+
+    let (tools, hosted) = h
+        .prepare_tool_surface_for_dispatch(&role, &agent_id, &model)
+        .expect("configured fetch winner");
+    assert!(hosted.is_empty());
+    let fetches = tools
+        .iter()
+        .filter(|tool| tool.name.as_str() == "websearch_hybrid_fetch")
+        .count();
+    assert_eq!(fetches, 1);
+    assert!(
+        tools.iter().all(|tool| {
+            !matches!(
+                tool.name.as_str(),
+                "websearch_exa_fetch" | "websearch_parallel_fetch"
+            )
+        }),
+        "{tools:#?}"
+    );
+
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("unrelated-fetch-alias"),
+        tau_proto::ToolSpec {
+            provider_scope: None,
+            name: tau_proto::ToolName::new("unrelated_fetch"),
+            model_visible_name: Some(tau_proto::ToolName::new("web_fetch")),
+            description: None,
+            tool_type: tau_proto::ToolType::Function,
+            parameters: Some(serde_json::json!({"type": "object"})),
+            format: None,
+            tags: Vec::new(),
+            enabled_by_default: false,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+    assert!(matches!(
+        h.prepare_tool_surface_for_dispatch(&role, &agent_id, &model),
+        Err(PromptSurfaceError::DuplicateToolName(name)) if name == "web_fetch"
+    ));
+}
+
+/// Metadata-less developer introspection selects the configured ordinary fetch
+/// implementation and retains its existing provisional-resolution warning.
+#[test]
+fn rendered_tool_preview_without_model_metadata_projects_managed_fetch_family() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let role = h.config.selected_role.clone();
+    register_managed_fetch_backings(&mut h);
+    enable_public_fetch_name(&mut h, &role);
+    h.provider_runtime.model_info.clear();
+    let requester = crate::test_connection_id("provisional-web-preview");
+    let frames = connect_test_client(&mut h, requester.as_str(), tau_proto::ClientKind::Ui);
+
+    h.send_rendered_tool_definitions_result(
+        &requester,
+        tau_proto::GetRenderedToolDefinitions {
+            request_id: "provisional-web-preview".to_owned(),
+            role: Some(role.clone()),
+        },
+    );
+
+    let frames = frames.lock().expect("preview frames");
+    let result = frames
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            HarnessOutputMessage::RenderedToolDefinitionsResult(result)
+                if result.request_id == "provisional-web-preview" =>
+            {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("rendered tool definitions");
+    assert_eq!(result.error, None);
+    assert!(result.hosted_tools.is_empty());
+    assert_eq!(
+        result.warnings,
+        vec![format!(
+            "role `{role}` has no exact model capability metadata; provider-native replacement could not be resolved, so ordinary tool entries are provisional"
+        )]
+    );
+    let tools = result.tools.as_ref().expect("provisional ordinary tools");
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name.as_str() == "websearch_hybrid_fetch")
+    );
+    assert!(tools.iter().all(|tool| {
+        !matches!(
+            tool.name.as_str(),
+            "websearch_exa_fetch" | "websearch_parallel_fetch"
+        )
+    }));
 }

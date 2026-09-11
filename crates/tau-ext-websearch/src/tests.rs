@@ -1024,6 +1024,38 @@ fn restricted_search_reservation_filters_before_attempt_cap() {
     );
 }
 
+/// Provider-specific registrations carry the same logical-operation metadata
+/// as their composite aliases so harness policy can identify the managed
+/// family.
+#[test]
+fn provider_specific_tools_advertise_logical_web_operations() {
+    for spec in [exa_tool_spec(), parallel_search_tool_spec()] {
+        assert!(
+            spec.tags
+                .iter()
+                .any(|tag| tag.as_str() == tau_proto::WEB_SEARCH_TOOL_TAG),
+            "{} must advertise logical web search",
+            spec.name
+        );
+    }
+    for spec in [exa_fetch_tool_spec(), parallel_fetch_tool_spec()] {
+        assert!(
+            spec.tags
+                .iter()
+                .any(|tag| tag.as_str() == tau_proto::WEB_FETCH_TOOL_TAG),
+            "{} must advertise logical web fetch",
+            spec.name
+        );
+        assert!(
+            spec.tags.iter().any(|tag| {
+                tag.as_str() == tau_proto::WEB_REQUESTED_TARGET_DOMAIN_ENFORCEMENT_TAG
+            }),
+            "{} must advertise requested-target domain enforcement",
+            spec.name
+        );
+    }
+}
+
 /// Ensures the production extension wiring advances interleaved search and
 /// fetch cursors independently.
 #[test]
