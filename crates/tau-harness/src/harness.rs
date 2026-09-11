@@ -1631,6 +1631,7 @@ mod extensions;
 mod interception;
 mod pending_notices;
 mod preview_requests;
+mod provider_replay_compatibility;
 mod provider_runtime;
 mod provider_runtime_state;
 mod provider_startup;

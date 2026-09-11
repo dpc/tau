@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tau_proto::ProviderName;
 use tau_provider::cache_diagnostic::CacheDiagnostics;
 
-use super::{BuiltinProviderProfile, BuiltinProviderProfiles, CodexMode, OpenAiAuth, is_false};
+use super::{BuiltinProviderProfile, BuiltinProviderProfiles, CodexMode, OpenAiAuth};
 
 /// ChatGPT/Codex provider profile.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -18,10 +18,9 @@ pub struct ChatGptProfile {
     /// OAuth credentials used for ChatGPT/Codex Responses calls.
     #[serde(default)]
     pub auth: OpenAiAuth,
-    /// Select the startup-stable Responses Lite route, not
-    /// authentication.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub responses_lite_compatibility: bool,
+    /// Startup-stable wire selection, shared with harness replay admission.
+    #[serde(flatten)]
+    pub responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings,
     /// Enables the provider-owned, prompt-only image tool for this account.
     /// Startup declaration alone never dispatches a generation request.
     #[serde(default = "default_image_generation", skip_serializing_if = "is_true")]
@@ -33,7 +32,7 @@ impl Default for ChatGptProfile {
         Self {
             cache_diagnostics: CacheDiagnostics::default(),
             auth: OpenAiAuth::default(),
-            responses_lite_compatibility: false,
+            responses: Default::default(),
             image_generation: default_image_generation(),
         }
     }
@@ -42,7 +41,7 @@ impl Default for ChatGptProfile {
 impl ChatGptProfile {
     /// Return the route selected by this profile's immutable settings.
     pub(crate) fn responses_mode(&self) -> CodexMode {
-        if self.responses_lite_compatibility {
+        if self.responses.responses_lite_compatibility {
             CodexMode::LiteCompatibility
         } else {
             CodexMode::Standard

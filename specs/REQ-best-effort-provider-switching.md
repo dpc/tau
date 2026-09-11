@@ -8,10 +8,23 @@ messages, tool calls, and tool results. Replay provider-owned opaque material
 and wire sidecars only when their producing provider is known compatible with
 the destination; otherwise omit them from the request projection.
 
-Compatibility means the same configured provider ID, independently of the model
-name. Different aliases are conservatively incompatible. Replacing an endpoint
-or credentials under the same ID is not detected. Missing authoritative origin
-is not evidence of compatibility.
+Compatibility normally means the same configured provider ID, independently of
+the model name. The user additionally requests account-only switching between
+private ChatGPT/Codex aliases without losing an existing opaque replacement.
+Different aliases may therefore attempt unchanged replay when both exact routes
+are currently published by the same configured Tau-owned built-in provider
+instance, their frozen profiles select the private ChatGPT adapter, and their
+exact upstream model and effective Responses mode match. Names, tags, generic
+Responses compatibility, or a third-party component cannot establish this
+exception. Missing, removed, or ambiguous source routes remain incompatible.
+
+Canonical producing model IDs are interpreted through the currently accepted
+configuration, including for old windows after cold replay. Historical profile
+settings are not recorded or backfilled. As with the existing same-provider
+rule, replacing an endpoint or credentials under an ID is not detected.
+Missing authoritative origin is not evidence of compatibility. Account-alias
+admission permits an attempt, not a guarantee of remote ciphertext portability;
+destination rejection remains explicit and leaves canonical history intact.
 
 ## Justification
 

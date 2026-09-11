@@ -6,6 +6,9 @@ use tau_proto::{ContextItem, ProviderName};
 pub(super) struct ProviderContextProjection<'a> {
     /// Configured destination provider, independent of the model name.
     pub(super) destination: &'a ProviderName,
+    /// Exact account aliases resolved from trusted frozen private route
+    /// settings.
+    pub(super) additional_compatible_sources: &'a std::collections::HashSet<tau_proto::ModelId>,
     /// Whether this projection omitted any incompatible replay material.
     pub(super) omitted: bool,
     /// Whether conversion would discard an opaque history replacement.
@@ -23,7 +26,10 @@ impl ProviderContextProjection<'_> {
     ) {
         let compatible = node
             .and_then(|node| tree.provider_model_for_node(node))
-            .is_some_and(|model| &model.provider == self.destination);
+            .is_some_and(|model| {
+                &model.provider == self.destination
+                    || self.additional_compatible_sources.contains(model)
+            });
         if compatible {
             return;
         }

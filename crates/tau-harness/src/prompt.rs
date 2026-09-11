@@ -1420,6 +1420,7 @@ pub(crate) fn assemble_prompt_context_for_provider(
     head: Option<tau_core::NodeId>,
     prefix_through: Option<tau_proto::AgentHead>,
     destination: &tau_proto::ProviderName,
+    additional_compatible_sources: &path_std_collections::HashSet<tau_proto::ModelId>,
 ) -> Result<(AssembledPromptContext, bool), &'static str> {
     if prefix_through.is_some_and(|cut| !prompt_context_cut_exists(tree, head, cut)) {
         return Err(
@@ -1428,6 +1429,7 @@ pub(crate) fn assemble_prompt_context_for_provider(
     }
     let mut projection = provider_context_projection::ProviderContextProjection {
         destination,
+        additional_compatible_sources,
         omitted: false,
         incompatible_compaction: false,
     };

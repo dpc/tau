@@ -260,7 +260,7 @@ impl BuiltinProviderProfiles {
             let BuiltinProviderProfile::Chatgpt(profile) = profile else {
                 continue;
             };
-            profile.responses_lite_compatibility = startup_modes
+            profile.responses.responses_lite_compatibility = startup_modes
                 .get(provider)
                 .copied()
                 .unwrap_or_default()
@@ -294,10 +294,6 @@ impl BuiltinProviderProfiles {
             })
             .collect()
     }
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 #[cfg(not(test))]
@@ -1204,7 +1200,9 @@ fn cmd_add_chatgpt_in(
         &name,
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
             auth,
-            responses_lite_compatibility,
+            responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+                responses_lite_compatibility,
+            },
             ..Default::default()
         }),
         ProviderSetupInput::ProfileOAuth,
@@ -1617,7 +1615,7 @@ fn cmd_list_from_store(
                     }
                     _ => String::new(),
                 };
-                let mode = if parsed.responses_lite_compatibility {
+                let mode = if parsed.responses.responses_lite_compatibility {
                     "responses-lite-compatibility"
                 } else {
                     "responses-standard"
@@ -2535,7 +2533,7 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
             image_generation: false,
             auth,
-            responses_lite_compatibility: false,
+            responses: Default::default(),
             cache_diagnostics: Default::default(),
         }),
     );

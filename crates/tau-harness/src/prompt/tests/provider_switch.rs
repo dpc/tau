@@ -105,6 +105,7 @@ fn project(tree: &tau_core::AgentTree, provider: &str) -> (tau_proto::PromptCont
         tree.head(),
         None,
         &tau_proto::ProviderName::new(provider),
+        &Default::default(),
     )
     .unwrap_or_else(|error| panic!("{error}"));
     (assembled.context, omitted)
@@ -296,9 +297,60 @@ fn provider_switch_refuses_opaque_replacement_and_preserves_compatible_raw_bytes
                 tree.head(),
                 cut,
                 &tau_proto::ProviderName::new("foreign"),
+                &Default::default(),
             );
             assert!(matches!(rejected, Err(message) if message.contains("opaque compaction")));
         }
+    }
+}
+
+/// Account compatibility is request-local: live and cold windows retain exact
+/// opaque spelling and producing provenance, and an unapproved destination
+/// still refuses the same replacement afterward.
+#[test]
+fn provider_switch_account_alias_preserves_live_and_cold_opaque_window() {
+    let raw =
+        r#"{ "z":1e+02, "encrypted_content" : "synthetic\u0020prefix", "type":"compaction" }"#;
+    let replacement = ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::from_raw_json(raw).expect("opaque item"),
+    );
+    let mut history = History::new();
+    history.append(compaction_start_event(tau_proto::AgentHead::Root));
+    history.append(compacted_event(vec![replacement.clone()]));
+    history.append(user_prompt("retained suffix"));
+    let source = tau_proto::ModelId::from("provider/model");
+    let compatible = path_std_collections::HashSet::from([source.clone()]);
+    for tree in [&history.tree, &history.cold()] {
+        let original = assemble_prompt_context_from(tree, tree.head()).context;
+        let (aliased, omitted) = assemble_prompt_context_for_provider(
+            tree,
+            tree.head(),
+            None,
+            &tau_proto::ProviderName::new("account-alias"),
+            &compatible,
+        )
+        .expect("approved alias");
+        assert!(!omitted);
+        assert_eq!(aliased.context, original);
+        let ContextItem::Compaction(item) = &aliased.context.flatten()[0] else {
+            panic!("retained replacement");
+        };
+        assert_eq!(item.raw_json(), raw);
+        assert_eq!(
+            tree.provider_model_for_node(tau_core::NodeId::new(0)),
+            Some(&source)
+        );
+        assert!(
+            assemble_prompt_context_for_provider(
+                tree,
+                tree.head(),
+                None,
+                &tau_proto::ProviderName::new("account-alias"),
+                &Default::default(),
+            )
+            .is_err()
+        );
+        assert_eq!(project(tree, "provider"), (original, false));
     }
 }
 

@@ -1889,7 +1889,6 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         select: tau_proto::UiAgentModelSelect,
     ) -> Result<bool, HarnessError> {
-        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ModelChanged);
         if !self
             .provider_runtime
             .available_models
@@ -1929,7 +1928,7 @@ impl Harness {
             .agents
             .get(&cid)
             .and_then(|conv| conv.execution.context_usage_model.clone());
-        let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) else {
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get(&cid) else {
             self.send_ui_error_response(client_id, ":model: selected agent is not loaded");
             return Ok(true);
         };
@@ -1937,6 +1936,29 @@ impl Harness {
             self.send_ui_error_response(client_id, ":model: selected agent is not in this session");
             return Ok(true);
         }
+        if let Some(tree) = conv
+            .identity
+            .agent_id
+            .as_deref()
+            .and_then(|agent| self.session_runtime.agent_store.agent(agent))
+            && let Err(message) = crate::prompt::assemble_prompt_context_for_provider(
+                tree,
+                conv.selected_prompt_context_head(),
+                None,
+                &select.model.provider,
+                &self.compatible_provider_replay_sources(&select.model),
+            )
+        {
+            self.send_ui_error_response(client_id, message);
+            return Ok(true);
+        }
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ModelChanged);
+        let conv = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("selected agent remains loaded");
         conv.identity.model_override = Some(select.model.clone());
         let agent_name = conv
             .identity

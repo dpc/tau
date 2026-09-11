@@ -1182,6 +1182,7 @@ impl Harness {
                     head,
                     cut,
                     &model.provider,
+                    &self.compatible_provider_replay_sources(&model),
                 ) {
                     Ok(projected) => projected,
                     Err(message) => {

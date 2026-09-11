@@ -4597,6 +4597,36 @@ fn apply_raw_json_event_preserves_compaction_item_raw_json_for_replay() {
     );
 }
 
+/// Changing only the account route must not gratuitously reserialize retained
+/// opaque input or alter the existing request/cache identity within either
+/// mode.
+#[test]
+fn account_alias_replay_preserves_exact_request_body_and_opaque_bytes() {
+    let raw = r#"{ "z":1.2300,"encrypted_content":"synthetic\u0020prefix","type":"compaction","a":1e+03 }"#;
+    let items = vec![ContextItem::Compaction(
+        OpaqueProviderItem::from_raw_json(raw).expect("opaque replacement"),
+    )];
+    let request = request_for_items(&items);
+    for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+        let mut config = chain_test_config();
+        config.model_id = "gpt-5.6-luna".to_owned();
+        config.mode = mode;
+        config.supports_prompt_cache_key = true;
+        config.profile_namespace = tau_proto::ProviderName::new("chatgpt");
+        config.api_key = "synthetic-account-a-token".to_owned();
+        config.account_id = Some("synthetic-account-a".to_owned());
+        let original = serde_json::to_string(&build_request(&config, &request, None))
+            .expect("original request");
+        config.profile_namespace = tau_proto::ProviderName::new("chatgpt-fedi");
+        config.api_key = "synthetic-account-b-token".to_owned();
+        config.account_id = Some("synthetic-account-b".to_owned());
+        let aliased = serde_json::to_string(&build_request(&config, &request, None))
+            .expect("aliased request");
+        assert_eq!(aliased, original);
+        assert!(aliased.contains(raw), "opaque JSON must remain byte-exact");
+    }
+}
+
 /// Unknown Responses output items must not disappear from durable history. The
 /// parser reserves their provider index on `added`, stores the raw `done` item,
 /// and replay emits that provider-owned JSON before later indexed items.

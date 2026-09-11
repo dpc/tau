@@ -12,6 +12,7 @@
 //! live in `tau-harness` — this crate just owns the on-disk schema.
 
 pub mod atomic;
+pub mod chatgpt_responses_settings;
 pub mod provider_debug_capture;
 pub mod provider_settings;
 pub mod secret_sources;

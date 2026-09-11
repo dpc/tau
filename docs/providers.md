@@ -1342,6 +1342,19 @@ causes one prompt-cache/WebSocket cold start for both modes so prior Lite and
 current standard threads cannot collide; quota and retry identity remain shared
 by account/provider.
 
+An existing opaque-compacted conversation can continue across account aliases
+such as `chatgpt/gpt-5.6-luna` and `chatgpt-fedi/gpt-5.6-luna` when both routes
+are published by the same built-in provider instance and their frozen private
+ChatGPT profiles select the same exact model and effective Responses mode.
+Tau replays the original opaque bytes without changing their producing
+provenance. This allows an attempt, not a guarantee that the destination account
+accepts the ciphertext; rejection leaves history intact, with no stripping or
+account fallback. Old windows use the currently accepted source configuration:
+Tau does not record historical profile settings. Missing source routes, other
+adapters, different models, and different effective modes remain incompatible.
+`:model` rejects an incompatible retained replacement before changing the
+selected model; admission does not guarantee upstream acceptance.
+
 It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `provider-builtin` extension.
 It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/OpenRouter model metadata before `Ready` during extension startup.
 It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.

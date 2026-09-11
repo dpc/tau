@@ -127,7 +127,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
                 expires_at_ms: u64::MAX,
                 account_id: Some("fixture-account".to_owned()),
             },
-            responses_lite_compatibility: false,
+            responses: Default::default(),
             cache_diagnostics: Default::default(),
         }),
     );

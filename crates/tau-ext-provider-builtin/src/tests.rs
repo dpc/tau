@@ -302,7 +302,7 @@ fn provider_list_shows_actionable_chatgpt_login_remediation() {
                 expires_at_ms: now_ms().saturating_add(86_400_000),
                 account_id: None,
             },
-            responses_lite_compatibility: false,
+            responses: Default::default(),
             cache_diagnostics: Default::default(),
         }),
         ProviderSetupInput::ProfileOAuth,
@@ -395,7 +395,7 @@ fn provider_add_chatgpt_noninteractive_preflight_preserves_collision_safety() {
                 expires_at_ms: u64::MAX,
                 account_id: None,
             },
-            responses_lite_compatibility: false,
+            responses: Default::default(),
             cache_diagnostics: Default::default(),
         }),
         ProviderSetupInput::ProfileOAuth,
@@ -737,7 +737,7 @@ fn chatgpt_setup_keeps_oauth_credential_publication() {
                 expires_at_ms: 1,
                 account_id: None,
             },
-            responses_lite_compatibility: false,
+            responses: Default::default(),
             cache_diagnostics: Default::default(),
         }),
         ProviderSetupInput::ProfileOAuth,
@@ -2644,7 +2644,7 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
     let BuiltinProviderProfile::Chatgpt(missing) = missing else {
         panic!("chatgpt profile");
     };
-    assert!(!missing.responses_lite_compatibility);
+    assert!(!missing.responses.responses_lite_compatibility);
 
     let standard = serde_json::to_value(BuiltinProviderProfile::Chatgpt(ChatGptProfile::default()))
         .expect("standard profile");
@@ -2653,7 +2653,9 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
     let lite = BuiltinProviderProfile::Chatgpt(ChatGptProfile {
         image_generation: false,
         auth: OpenAiAuth::default(),
-        responses_lite_compatibility: true,
+        responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+            responses_lite_compatibility: true,
+        },
         cache_diagnostics: Default::default(),
     });
     let value = serde_json::to_value(&lite).expect("lite profile");
@@ -2661,7 +2663,9 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
     assert!(matches!(
         serde_json::from_value::<BuiltinProviderProfile>(value).expect("round trip"),
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            responses_lite_compatibility: true,
+            responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+                responses_lite_compatibility: true,
+            },
             ..
         })
     ));
@@ -2747,7 +2751,9 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
     let mut profile = ChatGptProfile {
         image_generation: false,
         auth: OpenAiAuth::default(),
-        responses_lite_compatibility: true,
+        responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+            responses_lite_compatibility: true,
+        },
         cache_diagnostics: Default::default(),
     };
     profile.replace_auth(OpenAiAuth {
@@ -2764,7 +2770,9 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
     assert!(matches!(
         reloaded,
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            responses_lite_compatibility: true,
+            responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+                responses_lite_compatibility: true,
+            },
             auth: OpenAiAuth { access_token, .. },
             ..
         }) if access_token == "fresh"
@@ -3158,7 +3166,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
                     image_generation: false,
                     auth: expired.clone(),
-                    responses_lite_compatibility: false,
+                    responses: Default::default(),
                     cache_diagnostics: Default::default(),
                 }),
             ),
@@ -3167,7 +3175,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
                     image_generation: false,
                     auth: expired,
-                    responses_lite_compatibility: false,
+                    responses: Default::default(),
                     cache_diagnostics: Default::default(),
                 }),
             ),
@@ -3351,7 +3359,9 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
                 BuiltinProviderProfile::Chatgpt(ChatGptProfile {
                     image_generation: false,
                     auth: OpenAiAuth::default(),
-                    responses_lite_compatibility: true,
+                    responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+                        responses_lite_compatibility: true,
+                    },
                     cache_diagnostics: Default::default(),
                 }),
             ),
@@ -3376,18 +3386,19 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
         let BuiltinProviderProfile::Chatgpt(profile) = profile else {
             unreachable!()
         };
-        profile.responses_lite_compatibility = !profile.responses_lite_compatibility;
+        profile.responses.responses_lite_compatibility =
+            !profile.responses.responses_lite_compatibility;
     }
     startup.apply_startup_responses_modes(&modes);
     assert!(matches!(
         startup.providers.get(&standard),
         Some(BuiltinProviderProfile::Chatgpt(profile))
-            if !profile.responses_lite_compatibility
+            if !profile.responses.responses_lite_compatibility
     ));
     assert!(matches!(
         startup.providers.get(&lite),
         Some(BuiltinProviderProfile::Chatgpt(profile))
-            if profile.responses_lite_compatibility
+            if profile.responses.responses_lite_compatibility
     ));
 }
 
@@ -3420,16 +3431,24 @@ fn responses_add_omits_effort_override() {
 fn provider_profiles_reject_unknown_fields() {
     // Provider profiles are user-authored persistent config. Unknown fields are
     // usually misspellings or stale schema, so accepting them hides mistakes.
-    let error = serde_json::from_value::<BuiltinProviderProfile>(serde_json::json!({
-        "kind": "chatgpt",
-        "auth": {
-            "access_token": "token",
+    for profile in [
+        serde_json::json!({
+            "kind": "chatgpt",
+            "auth": {
+                "access_token": "token",
+                "extra": true,
+            },
+        }),
+        serde_json::json!({
+            "kind": "chatgpt",
+            "responses_lite_compatibility": true,
             "extra": true,
-        },
-    }))
-    .expect_err("profile auth should reject unknown fields");
-
-    assert!(error.to_string().contains("unknown field"), "got: {error}");
+        }),
+    ] {
+        let error = serde_json::from_value::<BuiltinProviderProfile>(profile)
+            .expect_err("profile and nested auth must reject unknown fields");
+        assert!(error.to_string().contains("unknown field"), "got: {error}");
+    }
 }
 
 fn test_chat_model(id: &str) -> ChatCompletionsModel {

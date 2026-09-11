@@ -52,6 +52,17 @@ after a cold restart.
 
 ## Provider retries
 
+Opaque-compacted conversations may attempt unchanged replay across private
+ChatGPT account aliases with the same exact upstream model and effective
+Responses mode. Both routes must be currently published by one configured
+Tau-owned built-in provider instance, with matching frozen private profiles.
+This includes old retained windows after restart: canonical source model IDs
+are interpreted through current configuration, not historical profile settings.
+Missing source routes, other adapters, or different models/modes do not qualify.
+`:model` preflights retained opaque history before installing an override.
+Remote acceptance is not guaranteed; rejection preserves the original bytes and
+provenance without stripping, history loss, or account fallback.
+
 Required ChatGPT/Codex Responses, Chat Completions, and OpenRouter inference
 keeps retrying during the running session until success or explicit
 cancellation, unless Tau can positively prove the unchanged request is

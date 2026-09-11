@@ -1882,8 +1882,12 @@ fn effective_context_window_for_model(model: &str) -> tau_proto::TokenCount {
 }
 
 fn effective_mode(model: &str, requested: responses::ResponsesMode) -> responses::ResponsesMode {
-    if is_gpt_5_6(model) {
-        requested
+    if (tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+        responses_lite_compatibility: requested.is_lite_compatibility(),
+    })
+    .uses_lite(model)
+    {
+        responses::ResponsesMode::LiteCompatibility
     } else {
         responses::ResponsesMode::Standard
     }

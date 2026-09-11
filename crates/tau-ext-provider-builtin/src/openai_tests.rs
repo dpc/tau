@@ -4833,7 +4833,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
     else {
         unreachable!()
     };
-    startup_profile.responses_lite_compatibility = true;
+    startup_profile.responses.responses_lite_compatibility = true;
     let mutable_profiles = Arc::new(Mutex::new(startup_profiles.clone()));
     let profiles_for_loader = Arc::clone(&mutable_profiles);
     let profiles_for_executor = Arc::clone(&mutable_profiles);

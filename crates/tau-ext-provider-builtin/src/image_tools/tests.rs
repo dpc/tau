@@ -174,7 +174,9 @@ fn image_declarations_default_on_but_remain_role_authorized() {
             ProviderName::new(name),
             BuiltinProviderProfile::Chatgpt(crate::ChatGptProfile {
                 image_generation: enabled,
-                responses_lite_compatibility: lite,
+                responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
+                    responses_lite_compatibility: lite,
+                },
                 ..Default::default()
             }),
         );

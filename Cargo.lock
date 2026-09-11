@@ -1159,6 +1159,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "blake3",
+ "dpc-tau-config",
  "dpc-tau-proto",
  "dpc-tau-provider",
  "dpc-tau-vcr",
