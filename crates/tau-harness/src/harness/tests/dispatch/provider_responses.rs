@@ -1492,6 +1492,211 @@ fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
     }
 }
 
+/// A completed background call restored before an ordinary uncertain inference
+/// must remain waitable without impersonating active tool work and blocking the
+/// authenticated HumanUI Stale recovery path.
+#[test]
+fn restored_background_completion_does_not_block_human_ui_uncertain_supersession() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_background_placeholder(&state, "completed-before-uncertain", "slow_bg");
+    seed_background_result(
+        &state,
+        "completed-before-uncertain",
+        "slow_bg",
+        "durable background output",
+    );
+
+    let (durable_agent_id, old_prompt_id, old_outer_turn_id, crash_cut) = {
+        let mut first =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume completed background state");
+        let cid = ensure_test_user_agent(&mut first);
+        let durable_agent_id = durable_agent_id_for_conversation(&first, &cid);
+        first
+            .dispatch_prompt_for_agent(&cid, PendingPrompt::user("old uncertain owner".to_owned()))
+            .expect("dispatch old owner");
+        let old_prompt_id = read_nth_prompt_created(&first, 0).agent_prompt_id;
+        let old_outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&old_prompt_id);
+        let crash_cut = first
+            .session_runtime
+            .agent_store
+            .agent_events(durable_agent_id.as_str())
+            .expect("pre-crash records")
+            .to_vec();
+        first.shutdown().expect("release seed session");
+        (
+            durable_agent_id,
+            old_prompt_id,
+            old_outer_turn_id,
+            crash_cut,
+        )
+    };
+    wait_for_session_unlock(&state, "s1");
+
+    let journal_path = state
+        .join("agents")
+        .join(durable_agent_id.as_str())
+        .join("events.cbor");
+    let mut journal = File::create(&journal_path).expect("rewrite uncertain crash cut");
+    for record in &crash_cut {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(record, &mut encoded).expect("encode crash-cut record");
+        journal
+            .write_all(&(encoded.len() as u64).to_le_bytes())
+            .expect("write record length");
+        journal.write_all(&encoded).expect("write record");
+    }
+    journal.sync_all().expect("sync uncertain crash cut");
+
+    let mut restored =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("cold restore uncertain owner");
+    let cid = restored
+        .agent_runtime
+        .agent_registry
+        .agent_routes
+        .get(durable_agent_id.as_str())
+        .cloned()
+        .expect("restored route");
+    let background_call = ToolCallId::from("completed-before-uncertain");
+    let source_call = restored
+        .persisted_tool_call_ref(&cid, &background_call)
+        .expect("restored background declaration");
+    let source_terminal = persisted_background_terminal(&restored, &cid, background_call.as_str());
+    assert_eq!(
+        restored.wait_tool_call_ref(&background_call),
+        Some(source_call)
+    );
+    assert_eq!(
+        restored.wait_tool_terminal_observation(&background_call),
+        Some(source_terminal)
+    );
+    assert!(
+        !restored
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key(&background_call),
+        "completed background work must not remain an active supersession guard"
+    );
+    assert!(matches!(
+        restored.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .activation_dispatch,
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            owner: crate::agent::InferenceCheckpointOwner::Inference,
+            ref agent_prompt_id,
+            ..
+        } if agent_prompt_id == &old_prompt_id
+    ));
+
+    submit_authenticated_ui_prompt(
+        &mut restored,
+        durable_agent_id.clone(),
+        "recover after cold restore",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit HumanUI recovery prompt");
+
+    let records = restored
+        .session_runtime
+        .agent_store
+        .agent_events(durable_agent_id.as_str())
+        .expect("post-recovery records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+            ))
+            .count(),
+        1,
+        "the uncertain owner must close through one canonical Stale"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.outer_turn_id == old_outer_turn_id
+            ))
+            .count(),
+        1,
+        "cold recovery must not duplicate the old outer-turn start"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == old_outer_turn_id
+            ))
+            .count(),
+        0,
+        "Stale recovery must not invent a finish for the pre-crash outer turn"
+    );
+    let successor_checkpoints = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentInferenceDispatchStarted(checkpoint)
+                if checkpoint.agent_prompt_id != old_prompt_id =>
+            {
+                Some(checkpoint)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        successor_checkpoints.len(),
+        1,
+        "HumanUI recovery must mint exactly one successor dispatch"
+    );
+    let successor_prompt_id = &successor_checkpoints[0].agent_prompt_id;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.agent_prompt_id == *successor_prompt_id
+            ))
+            .count(),
+        1,
+        "the successor dispatch must own one outer-turn start"
+    );
+    assert!(
+        restored
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        restored
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty(),
+        "successful supersession must leave no retained publication completion"
+    );
+    assert_eq!(
+        restored.wait_tool_call_ref(&background_call),
+        Some(source_call),
+        "supersession must not consume the restored background result"
+    );
+    assert_eq!(
+        restored.wait_tool_terminal_observation(&background_call),
+        Some(source_terminal)
+    );
+    restored.shutdown().expect("shutdown restored harness");
+}
+
 /// A retained manual-compaction start installed after HumanUI Stale
 /// interception gains priority before semantic admission.
 #[test]

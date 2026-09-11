@@ -1331,9 +1331,11 @@ impl Harness {
                 match state.completion {
                     Some(tau_core::BackgroundToolCompletion::Result(result)) => {
                         self.record_wait_background_result(result, terminal);
+                        self.clear_tool_call_tracking(call_id.as_str());
                     }
                     Some(tau_core::BackgroundToolCompletion::Error(error)) => {
                         self.record_wait_background_error(error, terminal, error_outcome);
+                        self.clear_tool_call_tracking(call_id.as_str());
                     }
                     None => {}
                 }

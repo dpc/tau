@@ -5936,6 +5936,24 @@ fn resume_keeps_existing_background_completions() {
     assert_eq!(background_result_count(&h, "finished-bg"), 1);
     assert_eq!(background_error_count(&h, "finished-bg"), 0);
     assert_eq!(background_error_count(&h, "failed-bg"), 1);
+    assert!(
+        ["finished-bg", "failed-bg"].iter().all(|call_id| {
+            !h.tool_routing
+                .tool_runtime
+                .tool_agents
+                .contains_key(*call_id)
+        }),
+        "durable completions must not restore as active tool ownership"
+    );
+    assert!(
+        ["finished-bg", "failed-bg"].iter().all(|call_id| {
+            h.tool_routing
+                .tool_runtime
+                .completed_tool_calls
+                .contains(*call_id)
+        }),
+        "restored terminals retain same-session completion tombstones"
+    );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolBackgroundError(error)
