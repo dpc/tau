@@ -44,6 +44,9 @@ pub struct Hello {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub declaration_inspection: bool,
     /// Protocol version understood by the connecting peer.
+    ///
+    /// Admission and revision selection follow
+    /// `SPEC-extension-protocol-versioning`.
     pub protocol_version: ProtocolVersion,
     /// Stable name used to identify the connecting peer.
     pub client_name: ExtensionName,

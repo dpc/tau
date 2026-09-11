@@ -158,6 +158,9 @@ pub struct MessageParty {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_auth: Option<MessageSenderAuth>,
     /// Optional model-facing qualification of how to interpret this sender.
+    ///
+    /// Older peers may omit or ignore this additive field and remain workable
+    /// in a degraded state under `SPEC-extension-protocol-versioning`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_trust: Option<MessageSenderTrust>,
 }

@@ -3,11 +3,15 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Harness-peer wire and extension-visible event contract revision.
+///
+/// `SPEC-extension-protocol-versioning` defines the major/minor policy.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct ProtocolVersion {
-    /// Lockstep compatibility generation.
+    /// Compatibility generation, advanced for changes whose mixed versions
+    /// cannot operate even in a workable degraded state.
     pub major: u32,
-    /// Best-effort compatible revision within a generation.
+    /// Best-effort revision. Different values within one generation permit
+    /// some workable degraded operation.
     pub minor: u32,
 }
 

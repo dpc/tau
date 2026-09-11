@@ -1525,6 +1525,9 @@ fn validate_protocol_version_against(
 /// Validates one peer version with the identity shown in its terminal-facing
 /// diagnostic.
 ///
+/// Configured-extension rejection and best-effort admission follow
+/// `SPEC-extension-protocol-versioning`.
+///
 /// Keep mismatch diagnostics built here short and to the point because they
 /// consume scarce terminal space; use existing concise diagnostics as a guide
 /// while retaining the identity, versions, and outcome.

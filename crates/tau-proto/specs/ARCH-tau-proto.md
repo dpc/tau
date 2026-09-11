@@ -1,9 +1,13 @@
 # ARCH-tau-proto: tau-proto architecture
 
 Protocol 7.0 adds the optional typed sender-trust qualification to external
-message parties. Major-skew admission prevents a protocol 7 extension's
-`untrusted` marker from being silently discarded by an older harness before
-canonical persistence and model projection. The contract is
+message parties. The published revision remains 7.0 and therefore rejects a
+configured 6.x extension, although an older harness could ignore the optional
+field and continue in a workable degraded state. Under the current revision
+policy, omission of an additive optional field alone does not require a new
+major revision. The contracts are
+[SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md)
+and
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 
 Protocol 6.0 adds directed, non-event Artifact request/result transfers for

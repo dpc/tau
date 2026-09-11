@@ -9,11 +9,12 @@ extension-visible event behavior.
 ## Revision scope
 
 Protocol 7.0 adds the optional typed `MessageParty.sender_trust` qualification
-to external-message reports and canonical facts. An older harness would
-otherwise accept the additive field and silently discard an `untrusted` marker
-before persistence and model projection, so configured extensions must rebuild
-together and major-skew admission rejects before Configure/Ready. Stored
-records without the optional field retain the normal/default treatment.
+to external-message reports and canonical facts. The published revision remains
+7.0, so configured 6.x extensions are rejected before Configure/Ready. The
+optional field itself would permit workable degraded operation with an older
+harness that ignores it, and under the policy below that omission alone would
+not require a major revision. Stored records without the optional field retain
+the normal/default treatment.
 See [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
 
 Protocol 6.0 adds the directed shared Artifact RPC. Configured peers must rebuild
@@ -26,8 +27,13 @@ The explicit `{major, minor}` protocol revision covers the shared harness-peer
 wire contract and extension-visible event schemas and behavior. It is independent
 of Cargo, package, release, journal physical-format, and every other version.
 Implementation-only changes do not bump it. Boundary changes bump the minor
-revision only when best-effort continuation is deliberate; when in doubt, they
-bump the major revision and reset the minor revision to zero.
+revision when mixed versions can still operate in any workable best-effort or
+degraded state. This includes additive optional fields that an older peer may
+ignore, even when omission loses the new behavior. A boundary change bumps the
+major revision and resets the minor revision to zero only when mixed versions
+cannot work together even in such a degraded state. Uncertainty alone is not a
+reason to choose a major revision; determine the concrete mixed-version behavior
+before selecting the revision.
 
 Protocol 5.0 removes the obsolete `tool.delegate_progress` event schema and adds
 the closed `provider_attempt_timing` private capture class. Major skew rejection
