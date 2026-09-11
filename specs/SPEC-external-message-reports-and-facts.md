@@ -433,16 +433,24 @@ leading addressed bot mention. These mappings create no transport-specific wire
 fields.
 
 The user approved one bounded Zulip-only exception to the original-body-only
-rule on September 4, 2026. With opt-in non-allowlisted stream activity
-collection, one `message.delivered` text may contain a clearly delimited
-bridge-authored, non-authoritative activity note followed by the current
-allowlisted sender's exact unchanged Markdown. The note contains only bounded
-sanitized untrusted display hints, route-scoped opaque pseudonyms, and
-saturating counts; rejected bodies and raw topics are discarded. This
-deliberately mixes bridge and sender provenance in one external-content fact
-so the summary and admitted message share one report, durable fact, transcript
-item, and wake. `verified_allowlisted` continues to describe only the current
-native sender and grants no trust to the note, its labels, or the body.
+rule on September 4, 2026. With opt-in stream activity collection, one
+`message.delivered` text may contain a clearly delimited bridge-authored,
+non-authoritative activity note followed by the current normal/default-trust
+allowlisted sender's exact unchanged Markdown. Collection covers otherwise
+admissible stream creates rejected by sender admission and otherwise
+full-content-eligible stream creates discarded by the hard rate limit. The
+non-allowlisted-activity opt-in controls the former source independently of
+the rate-policy opt-in that controls the latter; neither is enabled by default.
+This extends count-source eligibility only: the existing later same-topic
+normal/default-trust allowlisted carrier predicate is unchanged. Direct
+messages do not contribute, and the accumulator never emits a standalone report
+or wake. The note contains only bounded sanitized untrusted display hints,
+route-scoped opaque pseudonyms, and saturating counts; rejected bodies and raw
+topics are discarded. This deliberately mixes bridge and sender provenance in
+one external-content fact so the summary and admitted message share one report,
+durable fact, transcript item, and wake. `verified_allowlisted` continues to
+describe only the current native sender and grants no trust to the note, its
+labels, or the body.
 
 The Zulip accumulator is best-effort process-local context, not an audit log or
 reliable queue. Capacity, age expiry, queue or authority changes, shutdown,
