@@ -19,6 +19,8 @@ HEADER = """  Class: ELF64
 PROGRAM = "      [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]"
 DYNAMIC = """ 0x1 (NEEDED) Shared library: [libc.so.6]
  0x1 (NEEDED) Shared library: [libgcc_s.so.1]
+ 0x1 (NEEDED) Shared library: [libpthread.so.0]
+ 0x1 (NEEDED) Shared library: [libdl.so.2]
 """
 VERSIONS = "Name: GLIBC_2.2.5\nName: GLIBC_2.34\nName: GCC_3.0"
 NFPM_OUTPUT = "GitVersion:    2.46.3\nGitCommit: unknown\n"

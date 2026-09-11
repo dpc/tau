@@ -49,9 +49,10 @@ candidate; Radicle remains canonical. Older Cargo metadata naming
 
 `audit-elf` never runs the binary or `ldd`. It requires ELF64 little-endian, the
 architecture's standard GNU loader, no Nix-store interpreter/dynamic references,
-no RPATH/RUNPATH, only libc/libm/libgcc/loader dependencies, and required GLIBC
-symbols no newer than 2.34. It rejects unresolved Tau build placeholders.
-Additional dynamic libraries require an explicit dependency-policy review.
+no RPATH/RUNPATH, only libc/libm/libgcc plus the baseline glibc pthread/dl
+compatibility libraries and loader dependencies, and required GLIBC symbols no
+newer than 2.34. It rejects unresolved Tau build placeholders. Additional
+dynamic libraries require an explicit dependency-policy review.
 Passing this filter **does not establish source identity, kernel compatibility,
 libgcc symbol compatibility, TLS/CA behavior, or successful startup**.
 
@@ -101,10 +102,10 @@ Before release authority or download links are added:
   Only then add verified asset links to the site/docs. No links are added here.
 
 Local investigation found that the available Nix-built `result/bin/tau` has a
-Nix-store loader and RUNPATH and therefore fails the baseline filter. The agent
-sandbox has no Docker socket and cannot create rootless Podman UID mappings;
-native container/runtime qualification is blocked there. No alternate host has
-been qualified or activated by this work.
+Nix-store loader and RUNPATH and therefore fails the baseline filter. Local
+rootless-Docker native execution has begun, but no complete architecture build
+or runtime qualification has passed. No alternate host has been qualified or
+activated by this work.
 
 See `docs/release-builds.md` for the existing build profile and Nix distribution;
 see `docs/extensions.md` for explicit extension configuration and restrictions.

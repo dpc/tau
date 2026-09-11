@@ -1,11 +1,11 @@
 # Native core builds and manual Actions artifacts
 
-The driver is implemented; **native builds and the Actions workflow have not
-been executed or qualified**. Local tests verify orchestration, immutable
-inputs, metadata stamping and workflow policy, not compilation or portability.
-The agent sandbox cannot use Docker or rootless Podman. No alternate host,
-remote push, workflow dispatch, or release publication was used to bypass that
-limit.
+The driver has begun local native execution, but **neither a complete local
+architecture build nor the Actions workflow is qualified**. Local tests verify
+orchestration, immutable inputs, metadata stamping and workflow policy, not
+compilation or portability. A successful compilation or candidate assembly
+would still leave the install, runtime and cross-architecture gates below. No
+release publication or activation is part of this tooling.
 
 ## Local invocation
 
@@ -71,14 +71,18 @@ Trusted builder images/layers remain in the local Docker cache for reuse;
 ordinary Docker cache maintenance is the operator's responsibility. Untrusted
 source compilation runs in discarded containers, not cached Docker build layers.
 
-Build containers run as the caller's non-root UID with a read-only root and
-source, no capabilities, no-new-privileges, a 512-process limit, two CPUs and
-12 GiB memory. Only scratch storage is writable; no Docker socket, host home,
-Actions credentials or runtime authorization files are mounted. Cargo can
-fetch locked dependencies over the network. Package assembly uses a **fresh,
-network-disabled container** with build output read-only. A third fresh
-network-disabled container probes the packaged `tau --version`; candidate
-code never executes in the host or assembly process.
+Build containers use the caller's non-root UID on a rootful Docker daemon. On
+a rootless daemon they use container UID 0, which the daemon's user namespace
+maps to the caller's unprivileged host identity; using the caller's numeric UID
+inside that namespace would instead map bind-mount writes to a subordinate UID.
+Both modes use a read-only root and source, no capabilities, no-new-privileges,
+a 512-process limit, two CPUs and 12 GiB memory. Only scratch storage is
+writable; no Docker socket, host home, Actions credentials or runtime
+authorization files are mounted. Cargo can fetch locked dependencies over the
+network. Package assembly uses a **fresh, network-disabled container** with
+build output read-only. A third fresh network-disabled container probes the
+packaged `tau --version`; candidate code never executes in the host or assembly
+process.
 
 The driver limits build/probe time and captured output, and attempts to
 force-remove its named container after failure or timeout. It requires at least 8 GiB free after

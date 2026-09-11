@@ -117,6 +117,20 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "commas"):
             build.container_command("image", "name", [(Path("/tmp/a,b"), "/work", False)])
 
+    def test_rootless_docker_uses_namespaced_root_for_bind_ownership(self):
+        with patch.object(native, "run", return_value=json.dumps([
+                "name=seccomp,profile=builtin", "name=rootless", "name=cgroupns"
+        ])):
+            self.assertEqual(build.docker_container_user(), "0:0")
+        with patch.object(native, "run", return_value=json.dumps(["name=seccomp"])), \
+                patch.object(build.os, "getuid", return_value=123), \
+                patch.object(build.os, "getgid", return_value=456):
+            self.assertEqual(build.docker_container_user(), "123:456")
+        for invalid in ("not JSON", "{}", '["name=rootless", 1]'):
+            with self.subTest(invalid=invalid), patch.object(native, "run", return_value=invalid), \
+                    self.assertRaisesRegex(ValueError, "security options"):
+                build.docker_container_user()
+
     def test_timeout_removes_container(self):
         with patch.object(build, "execute", side_effect=subprocess.TimeoutExpired("docker", 1)), \
                 patch.object(subprocess, "run") as run:
@@ -154,8 +168,10 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
         real_run = native.run
 
         def tool_run(*args):
-            if args[:2] == ("docker", "info"):
+            if args == ("docker", "info", "--format", "{{.Architecture}}"):
                 return "x86_64"
+            if args == ("docker", "info", "--format", "{{json .SecurityOptions}}"):
+                return '["name=rootless"]'
             if args[:3] == ("docker", "image", "inspect"):
                 self.fail("a concurrently mutated tag must never select the builder")
             return real_run(*args)
@@ -215,6 +231,7 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                     self.assertEqual(digest, native.sha256((output / name).read_bytes()))
         self.assertFalse(list(self.repo.glob(".tau-native-*")))
         self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call[2]["user"] == "0:0" for call in calls))
         self.assertTrue(calls[1][2]["network"] is False)
         self.assertTrue(calls[2][2]["network"] is False)
         self.assertFalse(any(dst == "/output" for _, dst, _ in calls[2][0]))

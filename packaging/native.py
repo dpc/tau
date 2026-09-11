@@ -123,7 +123,10 @@ def inspect_elf(header, program, dynamic, versions, arch):
     if re.search(r"\((?:RPATH|RUNPATH)\)", dynamic):
         raise ValueError("RPATH/RUNPATH not allowed in baseline candidates")
     needed = re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", dynamic)
-    allowed = {"libc.so.6", "libm.so.6", "libgcc_s.so.1", Path(interpreter).name}
+    allowed = {
+        "libc.so.6", "libm.so.6", "libgcc_s.so.1",
+        "libpthread.so.0", "libdl.so.2", Path(interpreter).name,
+    }
     if not needed or not set(needed) <= allowed or "libc.so.6" not in needed:
         raise ValueError(f"unreviewed dynamic dependencies: {needed}")
     if "GLIBC_PRIVATE" in versions or "GLIBC_ABI_" in versions:

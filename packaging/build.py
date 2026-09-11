@@ -80,10 +80,30 @@ def image_command(pins, selected, iidfile):
     return [*command, "--file", str(TOOLS / "Dockerfile"), str(TOOLS)]
 
 
-def container_command(image, name, mounts, network=True):
+def docker_container_user():
+    try:
+        security_options = json.loads(
+            native.run("docker", "info", "--format", "{{json .SecurityOptions}}")
+        )
+    except json.JSONDecodeError as error:
+        raise ValueError("Docker returned invalid security options") from error
+    if (not isinstance(security_options, list)
+            or any(not isinstance(option, str) for option in security_options)):
+        raise ValueError("Docker returned invalid security options")
+    # A rootless daemon maps container root to its unprivileged host owner.
+    # Using the host numeric UID inside that user namespace instead maps to a
+    # subordinate host UID, which cannot write caller-owned bind mounts.
+    if "name=rootless" in security_options:
+        return "0:0"
+    return f"{os.getuid()}:{os.getgid()}"
+
+
+def container_command(image, name, mounts, network=True, user=None):
+    if user is None:
+        user = f"{os.getuid()}:{os.getgid()}"
     command = [
         "docker", "run", "--rm", "--init", "--name", name,
-        "--read-only", "--user", f"{os.getuid()}:{os.getgid()}",
+        "--read-only", "--user", user,
         "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "--pids-limit=512", "--cpus=2", "--memory=12g",
         "--tmpfs", "/tmp:rw,nosuid,nodev,size=1073741824",
@@ -109,10 +129,11 @@ def execute(command, log, timeout, log_limit=64 * 1024 * 1024):
                        timeout=timeout, preexec_fn=limit_output)
 
 
-def container(image, mounts, command, log, timeout, network=True, log_limit=64 * 1024 * 1024):
+def container(image, mounts, command, log, timeout, network=True,
+              log_limit=64 * 1024 * 1024, user=None):
     name = f"tau-native-{uuid.uuid4().hex}"
     try:
-        execute([*container_command(image, name, mounts, network), *command],
+        execute([*container_command(image, name, mounts, network, user), *command],
                 log, timeout, log_limit)
     finally:
         # Killing a timed-out Docker client does not necessarily stop its container.
@@ -150,6 +171,7 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
             server_arch = native.run("docker", "info", "--format", "{{.Architecture}}").strip()
             if server_arch not in (arch, selected["machine"]):
                 raise ValueError("Docker server must match the native source architecture")
+            container_user = docker_container_user()
             # The image ID comes from this invocation, never a shared mutable tag.
             iidfile = root / "builder.iid"
             execute(image_command(pins, selected, iidfile), logs / "image.log", 1800)
@@ -161,9 +183,9 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
             work = root / "build"
             work.mkdir()
             container(image_id, [(source, "/source", True), (work, "/work", False)],
-                      ["env", f"SOURCE_DATE_EPOCH={manifest['source_date_epoch']}",
-                       "/opt/rust/bin/cargo", "build", "--locked", "--release", "-p", "dpc-tau"],
-                      logs / "cargo.log", 5400)
+                       ["env", f"SOURCE_DATE_EPOCH={manifest['source_date_epoch']}",
+                        "/opt/rust/bin/cargo", "build", "--locked", "--release", "-p", "dpc-tau"],
+                       logs / "cargo.log", 5400, user=container_user)
             assembly = root / "assembly"
             assembly.mkdir()
             package_work = root / "package-work"
@@ -173,13 +195,13 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                 (TOOLS, "/tooling", True), (package_work, "/work", False),
                 (assembly, "/output", False),
             ], ["python3", "/tooling/inside.py", "--source-sha", source_sha,
-                "--arch", arch, "--maintainer", maintainer],
-                      logs / "package.log", 300, network=False)
+                 "--arch", arch, "--maintainer", maintainer],
+                       logs / "package.log", 300, network=False, user=container_user)
             probe_work = root / "probe-work"
             probe_work.mkdir()
             container(image_id, [(assembly, "/probe", True), (probe_work, "/work", False)],
-                      ["/probe/tau", "--version"], logs / "version.log", 30,
-                      network=False, log_limit=8192)
+                       ["/probe/tau", "--version"], logs / "version.log", 30,
+                       network=False, log_limit=8192, user=container_user)
             version = (logs / "version.log").read_text()
             verify_version(version, manifest["core"]["version"], source_sha,
                            manifest["source_date_epoch"])

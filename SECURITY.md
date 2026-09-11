@@ -14,11 +14,15 @@ authenticity. See the packaging README for qualification and publication limits.
 The [manual native build workflow](packaging/native-builds.md) separately pins
 trusted workflow tooling and selected source identity. Arbitrary source builds
 receive no release/signing/OIDC authority, persisted checkout credentials, host
-home or Docker socket. They run as non-root in disposable restricted containers;
-assembly and the version probe run in separate fresh containers without network.
-These build containers are not proof of Tau's own default restricted-supervisor
-startup. Only expiring, explicitly unqualified manual artifacts are uploaded;
-there is no release publisher or artifact promotion path in this lane.
+home or Docker socket. On rootful Docker they run as the caller's non-root
+UID/GID; on rootless Docker they use namespaced container root, which maps to
+the unprivileged daemon/caller identity rather than host root. Both modes drop
+all capabilities, set no-new-privileges and use read-only root/source mounts in
+disposable restricted containers. Assembly and the version probe run in
+separate fresh containers without network. These build containers are not proof
+of Tau's own default restricted-supervisor startup. Only expiring, explicitly
+unqualified manual artifacts are uploaded; there is no release publisher or
+artifact promotion path in this lane.
 
 ## Runtime boundaries
 
