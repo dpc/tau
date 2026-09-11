@@ -895,17 +895,23 @@ fn built_in_skill_sources_load_with_matching_frontmatter_names() {
     }
 }
 
-/// Keep the concise Zulip operational skill synchronized with the bounded
-/// activity-summary capability and its process-local deadline boundary.
+/// Keep the concise Zulip operational skill synchronized with sender tiers and
+/// the bounded activity-summary capability.
 #[test]
-fn zulip_self_knowledge_retains_activity_summary_contract_tokens() {
+fn zulip_self_knowledge_retains_sender_tier_and_activity_contract_tokens() {
     let source = BUILT_IN_SKILL_SOURCES
         .iter()
         .find(|source| source.diagnostic_path == "tau-self-knowledge-ext-zulip.md")
         .expect("embedded Zulip self-knowledge");
     for token in [
+        "untrusted_user_ids",
+        "verified_allowlisted",
+        "sender_trust=untrusted",
+        "supplied mutation\nactors use the union",
+        "top-level numeric actor in the union",
         "non_allowlisted_activity",
         "message bodies",
+        "normal-tier",
         "process state",
         "deadline",
     ] {

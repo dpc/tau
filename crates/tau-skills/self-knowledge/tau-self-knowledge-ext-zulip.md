@@ -13,9 +13,10 @@ starts it through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd)
 owns its source and detailed operational documentation. The bridge uses bot
 email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
-`GET /api/v1/events`; it does not use webhooks. The current executable requires
-Tau protocol 6.0 and registry SDK 0.3.0. Its configuration schema, snake_case
-keys, secret bindings, and catch-up checkpoint format remain unchanged.
+`GET /api/v1/events`; it does not use webhooks. The sender-trust-capable
+extension revision requires Tau protocol 7.0 and registry SDK 0.4.0; configured
+6.x bridges are rejected before Configure/Ready. Its snake_case keys, secret
+bindings, and catch-up checkpoint format otherwise remain unchanged.
 
 An immediate reply for an already queued event, or a non-blocking poll reply,
 may omit the queue-ID echo. The bridge accepts that omission only for its
@@ -24,19 +25,43 @@ requested queue. Events from either reply follow ordinary admission,
 report-before-cursor, and backlog handling; omission never resets the queue or
 drops queued messages.
 
-Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_secret`, a nonempty numeric `allowed_user_ids`, optional sender aliases, optional `direct_messages: { receive: all_messages }`, optional `proactive_direct_messages` aliases with one fixed recipient each, and name-based stream/topic routes. Keep the identity key stable across API-key rotation; changing it deliberately starts a new opaque sender/conversation/message namespace. `allowed_user_ids` admits inbound senders only; it does not authorize proactive DMs. Routes independently select `receive: mentions_only|all_messages` and `proactive_send`; every configured channel name resolves to a private native ID before queue registration, and `all_messages` subscribes the bot idempotently before that registration without later unsubscribing. Exact proactive stream names remain the default, while `agent_chosen_topic: true` on a proactive name without `topic` explicitly grants agent topic choice within that configured channel. Production requires HTTPS.
+Configure `site`, `bot_email_secret`, `api_key_secret`, a stable
+`identity_key_secret`, a nonempty numeric `allowed_user_ids`, and, if wanted, a
+numeric `untrusted_user_ids` list disjoint from it. Also configure optional sender
+aliases, optional `direct_messages: { receive: all_messages }`, optional
+`proactive_direct_messages` aliases with one fixed recipient each, and name-based
+stream/topic routes. Eligible content from an `untrusted_user_ids` sender is admitted with
+`sender_trust=untrusted` and no sender authentication qualification. Eligible
+content from an `allowed_user_ids` sender is admitted with
+`sender_auth=verified_allowlisted` and no sender-trust qualification. The two
+qualifications are independent: the extension does not synthesize authentication
+for the untrusted tier. Direct-message participant admission and supplied mutation
+actors use the union of these full-content tiers. The agent prompt owns the policy
+for responding to, or taking actions from, untrusted content.
+
+Keep the identity key stable across API-key rotation; changing it deliberately
+starts a new opaque sender/conversation/message namespace. Full-content sender
+lists admit inbound senders only; they do not authorize proactive DMs. Routes
+independently select `receive: mentions_only|all_messages` and `proactive_send`;
+every configured channel name resolves to a private native ID before queue
+registration, and `all_messages` subscribes the bot idempotently before that
+registration without later unsubscribing. Exact proactive stream names remain the
+default, while `agent_chosen_topic: true` on a proactive name without `topic`
+explicitly grants agent topic choice within that configured channel. Production
+requires HTTPS.
 
 Set `non_allowlisted_activity: {}` to collect bounded stream activity that
-passes every receive predicate except the numeric sender allowlist.
-Unauthorized message bodies are discarded. The next allowlisted message in
-the same exact stream/topic may prepend one bridge-authored note with sanitized
-untrusted display hints, route-scoped opaque pseudonyms, and post counts; its
-own Markdown remains the exact suffix, and the pair uses one fact and wake.
-This is best effort, not a reliable queue: bounded process state can expire or
-disappear after 24 hours, authority changes, or restart. Capacity can omit new
-activity, duplicate-cache eviction can permit duplicate observations, and
-nothing is delivered without a later eligible message. Direct messages and
-autonomous deadline delivery are not supported.
+passes every receive predicate but belongs to neither full-content sender list.
+Those third-tier message bodies are discarded. The next normal-tier message in the
+same exact stream/topic may prepend one bridge-authored note with sanitized
+untrusted display hints, route-scoped opaque pseudonyms, and post counts; its own
+Markdown remains the exact suffix, and the pair uses one fact and wake. Untrusted
+full-content senders neither add to nor consume this summary. This is best effort,
+not a reliable queue: bounded process state can expire or disappear after 24
+hours, authority changes, or restart. Capacity can omit new activity,
+duplicate-cache eviction can permit duplicate observations, and nothing is
+delivered without a later normal-tier message. Direct messages and autonomous
+deadline delivery are not supported.
 
 For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all inbound fields, and configure exactly one `proactive_direct_messages` alias. This mode declares only scoped `zulip_send` without a tool group; sending uses `message` plus that sole alias and needs no registration. It never registers or polls a queue, publishes Zulip-originated events, installs reply/reaction authority, or activates an agent. Mode changes require extension restart.
 
@@ -85,10 +110,11 @@ the conversation first. Send-only mode remains text-only.
 
 The extension emits generic message reports for creates, edits, deletes,
 reactions, and successful sends. Edits, reactions, and deletes with a supplied
-actor require a top-level numeric allowlisted actor. Zulip's singular delete may
-omit its actor only when its top-level message ID, message type, and stream/topic
-fields match one exact current source owner; the checked report records no actor
-and successful publication revokes only that owner. Bulk, nested-ID,
+actor require a top-level numeric actor in the union of `allowed_user_ids` and
+`untrusted_user_ids`. Zulip's singular delete may omit its actor only when its
+top-level message ID, message type, and stream/topic fields match one exact current
+source owner; the checked report records no actor and successful publication
+revokes only that owner. Bulk, nested-ID,
 incomplete, contradictory, unknown-owner, and stale-authority deletes fail
 closed. `offline_message_catch_up` defaults to false, preserving live-only
 reconnect behavior. When enabled, it registers a fresh live queue, retrieves
