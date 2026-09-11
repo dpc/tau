@@ -63,6 +63,62 @@ duplicate-cache eviction can permit duplicate observations, and nothing is
 delivered without a later normal-tier message. Direct messages and autonomous
 deadline delivery are not supported.
 
+To rate-limit eligible live ingress, configure the optional strict object:
+
+```yaml
+ingress_rate_limit:
+  soft_limit: 5
+  hard_limit: 20
+  window_seconds: 60
+  flush_delay_seconds: 30
+```
+
+Omitting it disables this policy. All four integer fields are required and
+unknown fields fail closed: `1 <= soft_limit <= hard_limit <= 1024`,
+`window_seconds` is 1–86,400, and `flush_delay_seconds` is 1–3,600. The normal
+and untrusted full-content lists together may contain at most 256 configured
+senders when the policy is enabled; send-only mode rejects it. Exact native
+sender windows cover every eligible conversation for this extension instance,
+independently of sender trust. Each unique eligible live create spends its
+sender's window, including creates discarded above the hard limit: the first
+`soft_limit` creates prompt normally, the next through `hard_limit` enter a
+volatile queue, and later bodies are discarded before reports or source
+ownership. Invalid, duplicate, self, wrong-route/topic/mention, unregistered,
+and rejected-sender traffic spends no budget or flushes the queue.
+
+The first queued create fixes that sender's oldest-pending timer; later arrivals
+do not extend it. An independent worker emits separate exact-body reports when
+the timer expires. A valid below-soft create can flush pending content for the
+same agent across topics: its own bounded sender prefix precedes it, while other
+senders are background work. This is not an atomic turn, deadline, or
+concatenation guarantee. The queue is deliberately volatile: it holds at most
+256 creates or 4 MiB of logical variable data globally, and 16 creates or
+256 KiB per sender. A newest candidate that exceeds a cap silently loses its
+body and produces no activity summary; queue loss or counter reset can also
+follow re-registration, configuration, shutdown, restart, or crash.
+
+A queued base has no reply owner before its report. A valid queued edit replaces
+its body without moving the deadline; a rejected hard-limit or cap edit retains
+the last accepted body. A delete cancels the queued base and reactions to it
+are discarded. Valid live edits and reactions share the actor's hard sender
+budget without a soft delay; above-hard activity is dropped without a summary.
+Deletes retain their strict actor and frozen-route checks but do not spend rate
+budget. This policy separately enables body-free hard-drop activity counts for
+otherwise eligible stream creates; `non_allowlisted_activity` independently
+counts other rejected senders. Queue-capacity rejection is not hard-drop
+activity and creates no summary count. The existing later same-topic
+normal/default-trust carrier remains the only summary delivery path, including
+normal deferred creates; untrusted below-soft creates can flush pending work but
+cannot carry a summary. There is no DM count, standalone summary wake, wrapper,
+or trust reclassification.
+
+Volatile acceptance advances only the local catch-up position: it is not
+canonical delivery or an ACK and creates no later checkpoint debt. History API
+results bypass the rate policy so compressed backlog cannot be destructively
+hard-filtered; they spend no live budget and trigger no queue flush, but retain
+the ordinary canonical-ACK checkpoint requirement. Existing duplicate
+suppression handles live/history overlap.
+
 For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all inbound fields, and configure exactly one `proactive_direct_messages` alias. This mode declares only scoped `zulip_send` without a tool group; sending uses `message` plus that sole alias and needs no registration. It never registers or polls a queue, publishes Zulip-originated events, installs reply/reaction authority, or activates an agent. Mode changes require extension restart.
 
 In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the text tool group. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.

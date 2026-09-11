@@ -895,10 +895,10 @@ fn built_in_skill_sources_load_with_matching_frontmatter_names() {
     }
 }
 
-/// Keep the concise Zulip operational skill synchronized with sender tiers and
-/// the bounded activity-summary capability.
+/// Keep the concise Zulip operational skill synchronized with sender tiers,
+/// activity summaries, and ingress-rate boundary.
 #[test]
-fn zulip_self_knowledge_retains_sender_tier_and_activity_contract_tokens() {
+fn zulip_self_knowledge_retains_sender_tier_activity_and_rate_contract_tokens() {
     let source = BUILT_IN_SKILL_SOURCES
         .iter()
         .find(|source| source.diagnostic_path == "tau-self-knowledge-ext-zulip.md")
@@ -914,6 +914,21 @@ fn zulip_self_knowledge_retains_sender_tier_and_activity_contract_tokens() {
         "normal-tier",
         "process state",
         "deadline",
+        "ingress_rate_limit",
+        "soft_limit",
+        "hard_limit",
+        "window_seconds",
+        "flush_delay_seconds",
+        "independently of sender trust",
+        "volatile queue",
+        "256 creates or 4 MiB",
+        "queued edit replaces",
+        "share the actor's hard sender",
+        "hard-drop activity counts",
+        "Queue-capacity rejection is not hard-drop",
+        "Volatile acceptance advances only",
+        "bypass the rate policy",
+        "canonical-ACK checkpoint requirement",
     ] {
         assert!(
             source.content.contains(token),
