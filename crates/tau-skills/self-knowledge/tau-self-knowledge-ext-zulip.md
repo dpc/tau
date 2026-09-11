@@ -48,6 +48,18 @@ shared `blake3:<64 lowercase hex>` Artifact `key`, a safe ASCII basename
 and contain only letters, digits, `.`, `_`, and `-`. `topic` follows the same
 explicit agent-chosen-topic authority as text sends.
 
+That revision also accepts optional `content_type`. When supplied, it must be
+exactly one of `image/avif`, `image/gif`, `image/heic`, `image/jpeg`,
+`image/png`, `image/tiff`, or `image/webp`, and becomes the multipart file-part
+`Content-Type`. When it is omitted, the file part remains
+`application/octet-stream`. It is an unverified caller declaration: the
+extension neither infers it from the filename, Artifact metadata, or artifact
+bytes, nor validates the bytes against it. A non-string or unsupported value
+fails before Artifact RPC or provider effects. Use `image/png` for a generated
+PNG. The outbound Markdown remains the same `[filename](/user_uploads/...)`
+link. A supported image MIME can let Zulip, its server, or clients process a
+preview, but does not force inline display.
+
 The tool verifies at most 16 MiB of original binary bytes through Artifact
 RPC, uploads once, then sends to the frozen route. It accepts files as well as
 images; Zulip selects previews and can impose a lower file-size limit. It never
