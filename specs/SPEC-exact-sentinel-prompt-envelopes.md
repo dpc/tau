@@ -32,7 +32,7 @@ model-facing payload families:
 | --- | --- | --- |
 | `user` | Generic user-role text | Fieldless; authenticated interactive UI prompt |
 | `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
-| `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes |
+| `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including optional `sender_trust` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Canonical background-preview attributes |
 

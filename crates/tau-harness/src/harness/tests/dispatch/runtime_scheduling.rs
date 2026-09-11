@@ -3669,6 +3669,7 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
                     stable_id: "external".to_owned(),
                     display_name: None,
                     sender_auth: None,
+                    sender_trust: None,
                 },
                 None,
                 "raw fact deferred Q",

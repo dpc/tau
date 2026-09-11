@@ -38,6 +38,7 @@ fn extension_message_report(message_id: &str) -> Event {
             stable_id: "sender-1".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         "hello",

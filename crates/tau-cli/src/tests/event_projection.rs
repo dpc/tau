@@ -445,6 +445,7 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
                 stable_id: "sender-1".to_owned(),
                 display_name: None,
                 sender_auth: None,
+                sender_trust: None,
             },
             None,
             text,

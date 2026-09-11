@@ -315,6 +315,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                         stable_id: "external".to_owned(),
                         display_name: None,
                         sender_auth: None,
+                        sender_trust: None,
                     },
                     None,
                     "provider-loss deferred Q",

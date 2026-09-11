@@ -57,6 +57,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
                 "sender_ref",
                 "sender_display",
                 "sender_auth",
+                "sender_trust",
                 "recipient_ref",
                 "recipient_display",
                 "conversation",

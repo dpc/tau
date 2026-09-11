@@ -161,6 +161,7 @@ pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloa
         "sender_ref",
         "sender_display",
         "sender_auth",
+        "sender_trust",
         "recipient_ref",
         "recipient_display",
         "conversation",

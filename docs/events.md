@@ -26,6 +26,9 @@ publisher-scoped message IDs; edit, delete, and reaction facts carry opaque
 references to a base fact. Generic consumers do not resolve those references or
 interpret extension data. Transport authentication, admission, deduplication,
 native routing, reply authority, and send/retry policy remain extension-local.
+Message parties may independently carry optional `sender_auth` evidence and the
+explicit `sender_trust: untrusted` model qualification. Absence preserves the
+normal/default treatment; neither field grants authority or implies the other.
 
 Valid committed canonical incoming facts immediately request one payload-free
 live activation and project as escaped `<message event="…">` user context

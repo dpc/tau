@@ -590,6 +590,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             stable_id: "sender-1".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         "message-debug-secret",

@@ -694,6 +694,7 @@ fn deferred_initial_discovery_final_uses_atomic_publication_cut() {
             stable_id: "deferred-sender".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         "deferred owned fact once",
@@ -2577,6 +2578,7 @@ fn compact_message_fact_wraps_at_narrow_width_with_code_styled_publisher() {
             stable_id: "slack-sender:opaque".to_owned(),
             display_name: Some("Dawid (dpc)".to_owned()),
             sender_auth: None,
+            sender_trust: None,
         },
         Some(tau_proto::MessageConversation {
             stable_id: "D123".to_owned(),

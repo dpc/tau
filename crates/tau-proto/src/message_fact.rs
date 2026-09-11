@@ -157,6 +157,9 @@ pub struct MessageParty {
     /// Optional publisher-established authentication and admission outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_auth: Option<MessageSenderAuth>,
+    /// Optional model-facing qualification of how to interpret this sender.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_trust: Option<MessageSenderTrust>,
 }
 
 /// Publisher-established sender authentication and admission outcome.
@@ -169,6 +172,14 @@ pub enum MessageSenderAuth {
     VerifiedConversationAuthorized,
     /// Configured room membership admitted the sender without individual proof.
     TrustedMembership,
+}
+
+/// Model-facing qualification of how to interpret an external sender.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageSenderTrust {
+    /// The sender's content should be interpreted as explicitly untrusted.
+    Untrusted,
 }
 
 /// Descriptive conversation provenance supplied by a message publisher.
@@ -829,6 +840,11 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
         {
             push_attribute(&mut output, "sender_auth", sender_auth.as_str());
         }
+        if !matches!(view, MessageFactView::Sent(_))
+            && let Some(sender_trust) = party.sender_trust
+        {
+            push_attribute(&mut output, "sender_trust", sender_trust.as_str());
+        }
     }
     if let Some(alias) = view
         .conversation()
@@ -861,6 +877,15 @@ impl MessageSenderAuth {
             Self::VerifiedAllowlisted => "verified_allowlisted",
             Self::VerifiedConversationAuthorized => "verified_conversation_authorized",
             Self::TrustedMembership => "trusted_membership",
+        }
+    }
+}
+
+impl MessageSenderTrust {
+    /// Return the stable model-facing trust qualification.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
         }
     }
 }

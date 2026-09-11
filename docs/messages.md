@@ -34,6 +34,10 @@ result or synchronous commit acknowledgement. Transport admission, duplicate
 suppression, native routing, replies, proactive destinations, remote-send
 policy, and retries remain inside the bridge extension.
 
+External parties may carry independent optional `sender_auth` evidence and an
+explicit `sender_trust: untrusted` model qualification. Omitting sender trust
+preserves the normal/default treatment; neither field grants authority.
+
 For a successful remote send, an extension normally emits
 `message.sent_reported` before its transient `tool.result_reported`; the harness
 later derives both canonical facts. Remote acceptance, canonical fact

@@ -3699,6 +3699,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
             stable_id: "u1".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: Some(tau_proto::MessageSenderTrust::Untrusted),
         },
         conversation: None,
         text: "hello".to_owned(),
@@ -3715,6 +3716,9 @@ fn extension_message_report_produces_stamped_durable_fact() {
         canonical,
         Event::MessageDelivered(prepared)
             if prepared.publisher_extension_id.as_str() == configured_name
+                && prepared.sender.sender_auth.is_none()
+                && prepared.sender.sender_trust
+                    == Some(tau_proto::MessageSenderTrust::Untrusted)
     ));
 
     h.handle_extension_event_inner_with_persist(
@@ -3734,9 +3738,11 @@ fn extension_message_report_produces_stamped_durable_fact() {
             event: Event::MessageDelivered(fact),
             ..
         }] if source.connection_id().is_some_and(|source| {
-            source == crate::harness::harness_connection_id()
-        })
+             source == crate::harness::harness_connection_id()
+         })
             && fact.publisher_extension_id.as_str() == configured_name
+            && fact.sender.sender_auth.is_none()
+            && fact.sender.sender_trust == Some(tau_proto::MessageSenderTrust::Untrusted)
     ));
     assert!(event_log_contains_source_event(
         &h,
@@ -3823,6 +3829,7 @@ fn extension_message_report_requires_exact_authenticated_publisher_claim() {
                 stable_id: "u1".to_owned(),
                 display_name: None,
                 sender_auth: None,
+                sender_trust: None,
             },
             conversation: None,
             text: "hello".to_owned(),
@@ -3874,6 +3881,7 @@ fn extension_cannot_emit_canonical_message_fact() {
             stable_id: "u1".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         "hello",
@@ -3927,6 +3935,7 @@ fn ordinary_tool_and_provider_extensions_cannot_emit_message_reports() {
                     stable_id: "u1".to_owned(),
                     display_name: None,
                     sender_auth: None,
+                    sender_trust: None,
                 },
                 None,
                 "hello",
@@ -7695,11 +7704,11 @@ fn hello_protocol_version_admission_matrix_is_explicit() {
     }
 }
 
-/// Configured extension kinds remain major-incompatible after the current
-/// protocol-six shared Artifact RPC addition.
+/// Configured extension kinds remain major-incompatible after protocol seven
+/// makes sender-trust preservation mandatory.
 #[test]
 fn configured_extension_admission_rejects_protocol_three_peers() {
-    assert_eq!(tau_proto::PROTOCOL_VERSION.major, 6);
+    assert_eq!(tau_proto::PROTOCOL_VERSION.major, 7);
     for client_kind in [
         tau_proto::ClientKind::Provider,
         tau_proto::ClientKind::Tool,
@@ -7778,7 +7787,10 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
         &crate::test_connection_id("configured-minor-skew"),
         TestMessage::Hello(tau_proto::Hello {
             declaration_inspection: false,
-            protocol_version: tau_proto::ProtocolVersion::new(6, 1),
+            protocol_version: tau_proto::ProtocolVersion::new(
+                tau_proto::PROTOCOL_VERSION.major,
+                tau_proto::PROTOCOL_VERSION.minor + 1,
+            ),
             client_name: crate::test_extension_name("hello-minor-skew-peer"),
             client_kind: tau_proto::ClientKind::Tool,
             expected_session_id: None,
@@ -7808,7 +7820,10 @@ fn extension_minor_protocol_skew_warns_once_and_configures_normally() {
         notice.message,
         format!(
             "`configured-minor-skew`, minor protocol mismatch {} vs harness {}",
-            tau_proto::ProtocolVersion::new(6, 1),
+            tau_proto::ProtocolVersion::new(
+                tau_proto::PROTOCOL_VERSION.major,
+                tau_proto::PROTOCOL_VERSION.minor + 1,
+            ),
             tau_proto::PROTOCOL_VERSION,
         )
     );

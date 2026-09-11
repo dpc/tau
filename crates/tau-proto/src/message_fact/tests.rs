@@ -30,6 +30,42 @@ fn sender_auth_outcomes_round_trip_with_stable_spellings() {
     }
 }
 
+/// Sender trust has one explicit wire spelling while omitted historical fields
+/// decode to the normal/default `None` treatment in both JSON and journal CBOR.
+#[test]
+fn sender_trust_round_trips_and_absence_defaults_to_normal_treatment() {
+    let encoded =
+        serde_json::to_string(&MessageSenderTrust::Untrusted).expect("encode sender trust");
+    assert_eq!(encoded, "\"untrusted\"");
+    assert_eq!(
+        serde_json::from_str::<MessageSenderTrust>(&encoded).expect("decode sender trust"),
+        MessageSenderTrust::Untrusted
+    );
+
+    #[derive(Serialize)]
+    struct PriorMessageParty<'a> {
+        stable_id: &'a str,
+        display_name: Option<&'a str>,
+        sender_auth: Option<MessageSenderAuth>,
+    }
+
+    let prior = PriorMessageParty {
+        stable_id: "u1",
+        display_name: Some("Alice"),
+        sender_auth: None,
+    };
+    let json = serde_json::to_value(&prior).expect("encode prior JSON party");
+    let decoded_json: MessageParty =
+        serde_json::from_value(json).expect("decode prior JSON party without sender trust");
+    assert_eq!(decoded_json.sender_trust, None);
+
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&prior, &mut cbor).expect("encode prior journal party");
+    let decoded_cbor: MessageParty =
+        ciborium::from_reader(cbor.as_slice()).expect("decode prior party without sender trust");
+    assert_eq!(decoded_cbor.sender_trust, None);
+}
+
 /// All client constructors emit the required opaque field as CBOR null while
 /// retaining each fact's distinct current wire shape.
 #[test]
@@ -45,6 +81,7 @@ fn constructors_default_required_extension_data_to_null() {
         stable_id: "u1".to_owned(),
         display_name: Some("Alice".to_owned()),
         sender_auth: None,
+        sender_trust: None,
     };
     let conversation = Some(MessageConversation {
         stable_id: "c1".to_owned(),
@@ -104,6 +141,23 @@ fn constructors_default_required_extension_data_to_null() {
     for fact in facts {
         let json = serde_json::to_value(&fact).expect("serialize constructor result");
         assert_eq!(json["payload"]["extension_data"], serde_json::Value::Null);
+        let party = match &fact {
+            Event::MessageDelivered(fact) => Some(&fact.sender),
+            Event::MessageEdited(fact) => fact.actor.as_ref(),
+            Event::MessageDeleted(fact) => fact.actor.as_ref(),
+            Event::MessageReactionAdded(fact) => fact.actor.as_ref(),
+            Event::MessageReactionRemoved(fact) => fact.actor.as_ref(),
+            Event::MessageSent(fact) => fact.recipient.as_ref(),
+            _ => unreachable!("fixture contains only message facts"),
+        };
+        assert_eq!(party.and_then(|party| party.sender_trust), None);
+        assert!(
+            !json["payload"]
+                .as_object()
+                .expect("message payload object")
+                .values()
+                .any(|value| value.get("sender_trust").is_some())
+        );
         let encoded = encode_message_to_vec(&HarnessInputMessage::emit(fact.clone()))
             .expect("encode constructor result");
         assert_eq!(
@@ -128,6 +182,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         stable_id: "u\"1".to_owned(),
         display_name: Some("Ali\u{202e}ce".to_owned()),
         sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
+        sender_trust: Some(MessageSenderTrust::Untrusted),
     };
     let conversation = Some(MessageConversation {
         stable_id: "c1".to_owned(),
@@ -186,6 +241,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
                 stable_id: "recipient-1".to_owned(),
                 display_name: Some("Recipient".to_owned()),
                 sender_auth: None,
+                sender_trust: None,
             }),
             None,
             "sent",
@@ -258,11 +314,11 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     assert_eq!(
         rendered,
         vec![
-            "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\"><hello></message>",
-            "<message event=\"edited\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
-            "<message event=\"deleted\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\"/>",
-            "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
-            "<message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\"><hello></message>",
+            "<message event=\"edited\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
+            "<message event=\"deleted\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\"/>",
+            "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
             "<message event=\"sent\" publisher=\"bridge-main\" message_ref=\"m2\" recipient_ref=\"recipient-1\" recipient_display=\"Recipient\">sent</message>",
         ]
     );
@@ -281,6 +337,7 @@ fn message_fact_body_uses_exact_close_framing() {
             stable_id: "sender\"&".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         "Don't &apos; <user>x</user> </MESSAGE> </message > 雪\n</message></message>",
@@ -314,6 +371,7 @@ fn message_projection_failure_precedence_is_stable() {
             stable_id: String::new(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         "",
@@ -392,6 +450,7 @@ fn message_projection_classifies_operation_metadata_failures() {
             stable_id: "u1".to_owned(),
             display_name: Some("x".repeat(257)),
             sender_auth: None,
+            sender_trust: None,
         }),
         None,
     ));
@@ -449,6 +508,7 @@ fn operation_message_projection_failure_precedence_is_stable() {
             stable_id: String::new(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         }),
         Some(MessageConversation {
             stable_id: String::new(),
@@ -520,6 +580,7 @@ fn telegram_and_xmpp_fit_delivered_schema() {
                 stable_id: "123456".to_owned(),
                 display_name: Some("alice".to_owned()),
                 sender_auth: None,
+                sender_trust: None,
             },
             conversation: Some(MessageConversation {
                 stable_id: "-100".to_owned(),
@@ -538,6 +599,7 @@ fn telegram_and_xmpp_fit_delivered_schema() {
                 stable_id: "room@example.test/alice".to_owned(),
                 display_name: Some("alice".to_owned()),
                 sender_auth: None,
+                sender_trust: None,
             },
             conversation: Some(MessageConversation {
                 stable_id: "room@example.test".to_owned(),

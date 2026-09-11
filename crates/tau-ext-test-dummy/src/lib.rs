@@ -804,6 +804,7 @@ where
             stable_id: "provider-context-raw-sender".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         text,

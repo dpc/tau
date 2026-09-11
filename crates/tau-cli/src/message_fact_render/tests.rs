@@ -17,6 +17,7 @@ fn representative_facts() -> [Event; 6] {
         stable_id: "user-1".to_owned(),
         display_name: Some("Ali\u{202e}ce".to_owned()),
         sender_auth: None,
+        sender_trust: None,
     };
     let conversation = Some(MessageConversation {
         stable_id: "conversation-1".to_owned(),
@@ -130,6 +131,7 @@ fn delivered_message_matches_compact_primary_shape() {
             stable_id: "slack-sender:opaque".to_owned(),
             display_name: Some("Dawid (dpc)".to_owned()),
             sender_auth: None,
+            sender_trust: None,
         },
         Some(MessageConversation {
             stable_id: "D123".to_owned(),

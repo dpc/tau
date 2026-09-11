@@ -1455,6 +1455,7 @@ fn representative_events() -> Vec<Event> {
                 stable_id: "u1".to_owned(),
                 display_name: Some("Alice".to_owned()),
                 sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
+                sender_trust: None,
             },
             conversation: Some(MessageConversation {
                 stable_id: "c1".to_owned(),
@@ -1476,6 +1477,7 @@ fn representative_events() -> Vec<Event> {
                 stable_id: "u2".to_owned(),
                 display_name: None,
                 sender_auth: Some(MessageSenderAuth::VerifiedConversationAuthorized),
+                sender_trust: None,
             }),
             conversation: None,
             text: "edited".to_owned(),
@@ -1493,6 +1495,7 @@ fn representative_events() -> Vec<Event> {
                 stable_id: "u3".to_owned(),
                 display_name: None,
                 sender_auth: Some(MessageSenderAuth::TrustedMembership),
+                sender_trust: None,
             }),
             conversation: None,
             extension_data: MessageExtensionData::default(),
@@ -4318,7 +4321,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 6, "minor": 0})
+        serde_json::json!({"major": 7, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4410,7 +4413,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 6, "minor": 0})
+        serde_json::json!({"major": 7, "minor": 0})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 7.0 adds the optional typed `MessageParty.sender_trust` qualification
+to external-message reports and canonical facts. An older harness would
+otherwise accept the additive field and silently discard an `untrusted` marker
+before persistence and model projection, so configured extensions must rebuild
+together and major-skew admission rejects before Configure/Ready. Stored
+records without the optional field retain the normal/default treatment.
+See [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
+
 Protocol 6.0 adds the directed shared Artifact RPC. Configured peers must rebuild
 together: a 5.x harness cannot answer a 6.0 client's new operations, and no
 best-effort silent-ignore fallback is provided. Major-skew admission rejects

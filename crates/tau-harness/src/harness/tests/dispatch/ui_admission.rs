@@ -139,6 +139,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
                 stable_id: "external-user".to_owned(),
                 display_name: None,
                 sender_auth: None,
+                sender_trust: None,
             },
             None,
             "raw message fact before prompt",

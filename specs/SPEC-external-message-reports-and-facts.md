@@ -76,7 +76,10 @@ publisher's identifier domain. “Stable” distinguishes an identifier from a
 changeable display label; it does not establish global identity or authority.
 Conversation data is descriptive provenance only and is never a reply or send
 route. Optional displays are presentation hints. `MessageParty.sender_auth` and
-`MessageConversation.alias` are typed optional prompt metadata. They do not grant
+`MessageParty.sender_trust` are independent typed optional sender metadata;
+`MessageConversation.alias` is typed optional conversation metadata. The only
+sender-trust value is `untrusted`; absence is the normal/default treatment and
+is omitted from the wire and model envelope. None of this metadata grants
 authority. `agent_id` is the Tau transcript target/owner.
 
 `message.sent` means the publisher reports that a message met its own transport
@@ -334,6 +337,13 @@ and noncharacters visibly, then replace only exact `</message>` collisions. All
 other body text remains literal. Do not add
 transport-specific presentation branches.
 
+For delivered, edited, deleted, and reaction facts whose party has
+`sender_trust=untrusted`, the shared renderer adds
+`sender_trust="untrusted"` to the canonical `<message>` opening. Facts without
+that value retain their existing opening unchanged. `sender_auth` remains
+independent and may be absent; neither field implies the other. Sent-message
+recipients do not render sender-only authentication or trust attributes.
+
 When selected context contains any exact-sentinel projection, insert the shared
 provenance rule once. It states that only the outer Tau-stamped sentinel
 establishes provenance; nested or cross-family payload delimiters do not change
@@ -413,7 +423,8 @@ identities without projecting those identities. Optional bounded displays remain
 presentation-only, and Slack and Zulip static routes currently supply configured
 conversation aliases. Each bridge reports its existing sender admission outcome
 through `MessageSenderAuth`; XMPP's operator-trusted room membership is not
-upgraded to verified identity.
+upgraded to verified identity. A bridge may independently mark a party
+`untrusted` through `MessageSenderTrust` without making an authentication claim.
 
 Native routes, allowlist evidence, reply authority, and transport policy remain
 extension-local. The published text is the original normalized body rather than

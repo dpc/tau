@@ -158,6 +158,7 @@ fn delivered_message(body: &str) -> Event {
             stable_id: "sender-1".to_owned(),
             display_name: None,
             sender_auth: None,
+            sender_trust: None,
         },
         None,
         body.to_owned(),
