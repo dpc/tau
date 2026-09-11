@@ -260,3 +260,99 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
     );
     h.shutdown().expect("shutdown");
 }
+
+/// Cold resume must preserve semantic history while rebuilding the next
+/// ordinary provider request from the current system template and live tool
+/// declaration. This prevents a restarted harness from replaying stale prompt
+/// authority merely to retain a provider cache or continuation hit.
+#[test]
+fn resumed_prompt_uses_current_system_prompt_and_tool_definition() {
+    const TOOL_NAME: &str = "resume_surface";
+    const OLD_SYSTEM_PROMPT: &str = "old resumed-agent system prompt";
+    const NEW_SYSTEM_PROMPT: &str = "current resumed-agent system prompt";
+    const OLD_TOOL_DESCRIPTION: &str = "old resumed-agent tool description";
+    const NEW_TOOL_DESCRIPTION: &str = "current resumed-agent tool description";
+
+    fn configure_surface(h: &mut Harness, system_prompt: &str, tool_description: &str) {
+        let role = h.config.selected_role.clone();
+        let template = format!("{role}-resume-surface");
+        h.prompt_coordination
+            .context_discovery
+            .system_prompt_templates
+            .insert(template.clone(), system_prompt.to_owned());
+        h.config
+            .available_roles
+            .get_mut(&role)
+            .expect("selected role")
+            .prompt_override = Some(template);
+        let connection_id = crate::test_connection_id("resume-surface-tool");
+        let _sink = connect_ready_configured_extension(
+            h,
+            connection_id.as_str(),
+            "resume-surface-tool",
+            tau_proto::ClientKind::Tool,
+        );
+        h.tool_routing.registry.register(
+            &connection_id,
+            ToolSpec {
+                description: Some(tool_description.to_owned()),
+                ..shared_test_tool_spec(TOOL_NAME)
+            },
+        );
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    {
+        let mut h = echo_harness(&state).expect("start");
+        h.config.selected_model = Some("test/model".into());
+        configure_surface(&mut h, OLD_SYSTEM_PROMPT, OLD_TOOL_DESCRIPTION);
+        h.submit_user_prompt(test_session_id("s1"), "remember this".to_owned())
+            .expect("submit initial prompt");
+        let prompt = read_nth_prompt_created(&h, 0);
+        assert_eq!(prompt.system_prompt, OLD_SYSTEM_PROMPT);
+        assert!(prompt.tools.iter().any(|tool| {
+            tool.name.as_str() == TOOL_NAME
+                && tool.description.as_deref() == Some(OLD_TOOL_DESCRIPTION)
+        }));
+        h.handle_provider_response_finished(provider_text_response(
+            &prompt.agent_prompt_id,
+            prompt.agent_id,
+            "remembered",
+        ))
+        .expect("finish initial response");
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    resumed.config.selected_model = Some("test/model".into());
+    configure_surface(&mut resumed, NEW_SYSTEM_PROMPT, NEW_TOOL_DESCRIPTION);
+    resumed
+        .submit_user_prompt(test_session_id("s1"), "continue".to_owned())
+        .expect("submit resumed prompt");
+    let prompt = read_nth_prompt_created(&resumed, 0);
+
+    assert_eq!(prompt.operation, tau_proto::PromptOperation::Inference);
+    assert_eq!(prompt.system_prompt, NEW_SYSTEM_PROMPT);
+    assert_ne!(prompt.system_prompt, OLD_SYSTEM_PROMPT);
+    let tool = prompt
+        .tools
+        .iter()
+        .find(|tool| tool.name.as_str() == TOOL_NAME)
+        .expect("current tool definition");
+    assert_eq!(tool.description.as_deref(), Some(NEW_TOOL_DESCRIPTION));
+    assert_ne!(tool.description.as_deref(), Some(OLD_TOOL_DESCRIPTION));
+    let context = serde_json::to_string(&prompt.context.flatten()).expect("serialize context");
+    assert!(context.contains("remember this"));
+    assert!(context.contains("remembered"));
+    assert!(context.contains("continue"));
+    assert!(!event_log_contains_any_source(&resumed, |event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(_) | Event::AgentCompacted(_)
+    )));
+
+    resumed.shutdown().expect("shutdown");
+}

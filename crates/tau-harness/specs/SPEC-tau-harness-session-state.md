@@ -87,10 +87,16 @@ Agent stores also fold the latest `agent.initialization_context_set` as
 replaceable side state. It carries frozen effective skills and the optional
 rendered AGENTS.md bootstrap block but creates no transcript node and does not
 advance the branch head. Cold resume refreshes every loaded agent before prompt
-dispatch, and every finalization records its fresh process-unique initialization
-ID as a durable replacement even when effective content is unchanged. Branching
-and compaction still materialize the latest active bootstrap exactly once rather than
-compacting stale ordinary history. See
+dispatch. Each resumed ordinary inference rebuilds its provider-visible system
+prompt and tool definitions from the current process configuration and live
+extension declarations; historical transcript and opaque provider context remain
+unchanged. Prompt materialization never substitutes stale authority to preserve
+reuse. Cold restart independently discards process-local continuation state, while
+provider cache reuse or misses remain content- and provider-dependent. Every
+finalization records its fresh process-unique initialization ID as a durable
+replacement even when effective content is unchanged. Branching and compaction
+still materialize the latest active bootstrap exactly once rather than compacting
+stale ordinary history. See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
 Loading an existing durable agent into a session that has not previously
