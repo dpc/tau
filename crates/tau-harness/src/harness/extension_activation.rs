@@ -1520,6 +1520,10 @@ impl Harness {
                         | (HarnessInputMessage::Disconnect(_), _)
                         | (HarnessInputMessage::Ready(_), ExtensionState::Handshaking)
                         | (
+                            HarnessInputMessage::ArtifactRequest(_),
+                            ExtensionState::Ready,
+                        )
+                        | (
                             HarnessInputMessage::Subscribe(_)
                                 | HarnessInputMessage::Intercept(_)
                                 | HarnessInputMessage::Emit(_)

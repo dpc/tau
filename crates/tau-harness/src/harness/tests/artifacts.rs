@@ -5,7 +5,7 @@ use tau_proto::{ArtifactError, ArtifactOp, ArtifactRequest, ArtifactValue};
 use super::*;
 use crate::event::ChannelSink;
 use crate::event_log::EventLog;
-use crate::harness::ExtensionFrameAdmission;
+use crate::harness::{ExtensionActivationStage, ExtensionFrameAdmission};
 
 /// A stalled configured recipient is disconnected on artifact egress overflow;
 /// other connections remain live and late completions cannot revive the peer.
@@ -84,9 +84,15 @@ fn rpc(
     sink: &Arc<Mutex<Vec<RoutedFrame>>>,
     op: ArtifactOp,
 ) -> Result<ArtifactValue, ArtifactError> {
-    h.extensions
-        .ready_received
-        .insert(crate::test_connection_id("artifact-test"));
+    assert_eq!(
+        h.extensions.entries["artifact-test"].state,
+        path_crate_extension::ExtensionState::Ready
+    );
+    assert!(
+        !h.extensions
+            .ready_received
+            .contains(&crate::test_connection_id("artifact-test"))
+    );
     let request = request(h, op);
     h.handle_extension_message(
         &crate::test_connection_id("artifact-test"),
@@ -119,22 +125,87 @@ fn rpc(
     }
 }
 
-/// Real configured-extension admission, bounded worker completion, and directed
-/// sink routing compose with the client state machines without journaling
-/// bytes.
+/// Complete a configured extension's real Ready transition for artifact RPC
+/// admission tests.
+fn connect_activated_artifact_extension(h: &mut Harness) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    let connection_id = crate::test_connection_id("artifact-test");
+    let sink = connect_test_client(h, "artifact-test", tau_proto::ClientKind::Tool);
+    mark_connected_test_extension_configured(
+        h,
+        "artifact-test",
+        "artifact-tool",
+        tau_proto::ClientKind::Tool,
+    );
+    h.extensions
+        .entries
+        .get_mut(&connection_id)
+        .expect("configured artifact extension")
+        .state = path_crate_extension::ExtensionState::Handshaking;
+    h.extensions
+        .activation_staging
+        .insert(connection_id.clone(), ExtensionActivationStage::default());
+    h.extensions.initial_tool_preflight_complete = true;
+    h.handle_extension_message(&connection_id, TestMessage::Ready(Default::default()))
+        .expect("Ready activation");
+    sink
+}
+
+/// Artifact RPC remains illegal before Ready and isolates the configured peer
+/// without starting artifact storage work or returning a directed result.
 #[test]
-fn artifact_rpc_roundtrip_is_directed_and_allows_persistent_ephemeral_sessions() {
+fn artifact_request_before_ready_remains_a_protocol_failure() {
     let temp = TempDir::new().expect("private root");
-    let mut h = quiet_provider_harness_ephemeral(temp.path()).expect("ephemeral harness");
-    let sink = connect_ready_configured_extension(
+    let mut h = quiet_provider_harness(temp.path()).expect("harness");
+    let connection_id = crate::test_connection_id("artifact-test");
+    let sink = connect_test_client(&mut h, "artifact-test", tau_proto::ClientKind::Tool);
+    mark_connected_test_extension_configured(
         &mut h,
         "artifact-test",
         "artifact-tool",
         tau_proto::ClientKind::Tool,
     );
+    h.extensions
+        .entries
+        .get_mut(&connection_id)
+        .expect("configured artifact extension")
+        .state = path_crate_extension::ExtensionState::Handshaking;
+
+    h.handle_extension_message(
+        &connection_id,
+        HarnessInputMessage::ArtifactRequest(request(&h, ArtifactOp::Available)),
+    )
+    .expect("protocol failure is isolated");
+
+    assert_eq!(
+        h.extensions.entries["artifact-test"].state,
+        path_crate_extension::ExtensionState::Disconnected
+    );
+    assert!(h.runtime_io.artifacts.is_none());
+    assert!(
+        sink.lock()
+            .expect("response sink")
+            .iter()
+            .all(|frame| { !matches!(frame.frame, HarnessOutputMessage::ArtifactResult(_)) })
+    );
+}
+
+/// Real Ready activation must admit Artifact RPC in steady state without
+/// disconnecting its configured extension; bounded worker completion and
+/// directed sink routing then compose without journaling bytes.
+#[test]
+fn artifact_rpc_roundtrip_is_directed_and_allows_persistent_ephemeral_sessions() {
+    let temp = TempDir::new().expect("private root");
+    let mut h = quiet_provider_harness_ephemeral(temp.path()).expect("ephemeral harness");
+    let sink = connect_activated_artifact_extension(&mut h);
     assert_eq!(
         rpc(&mut h, &sink, ArtifactOp::Available),
         Ok(ArtifactValue::Done)
+    );
+    assert!(
+        h.runtime_io
+            .bus
+            .connection(&crate::test_connection_id("artifact-test"))
+            .is_some()
     );
     let bytes = b"original binary\0\xff".to_vec();
     let mut upload = tau_client::ArtifactUpload::new(bytes.clone()).expect("bounded original");
