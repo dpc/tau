@@ -5191,6 +5191,58 @@ profiles:
     );
 }
 
+/// Receiver validation must see roles introduced by the selected profile before
+/// a final `--harness-config` layer selects that role as the session receiver.
+#[test]
+fn inter_session_receiver_accepts_role_enabled_only_by_selected_profile() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  bot:
+    agents:
+      role_groups:
+        bots:
+          roles:
+            zulip-bot: {}
+"#,
+    )
+    .expect("write profile");
+    let profile = profile_selection("bot");
+    let overrides = [
+        HarnessConfigCliOverride::from_str("inter_session.receiver.role=zulip-bot")
+            .expect("receiver override"),
+    ];
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &overrides,
+    )
+    .expect("load selected profile receiver");
+
+    assert!(settings.roles.contains_key("zulip-bot"));
+    assert_eq!(
+        settings.inter_session.receiver.expect("receiver").role,
+        "zulip-bot"
+    );
+
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        None,
+        &[],
+        &overrides,
+    )
+    .expect_err("unselected profile role must stay unavailable");
+    assert!(
+        error
+            .to_string()
+            .contains("inter-session receiver role `zulip-bot` is not enabled")
+    );
+}
+
 /// Removed multi-role and superseded flat schemas fail explicitly.
 #[test]
 fn inter_session_configuration_rejects_removed_receiver_schemas() {

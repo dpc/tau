@@ -1339,9 +1339,10 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             .map_err(D::Error::custom)?;
         validate_custom_prompts(&settings.custom_prompts).map_err(D::Error::custom)?;
         settings.remove_disabled_roles();
-        settings
-            .validate_inter_session_receiver()
-            .map_err(D::Error::custom)?;
+        // The layered loader replays role sources with domain-specific merge
+        // semantics after this generic deserialization step. Validate the
+        // receiver only after that replay has produced the final effective
+        // roles.
         settings
             .validate_context_size_alerts()
             .map_err(D::Error::custom)?;
