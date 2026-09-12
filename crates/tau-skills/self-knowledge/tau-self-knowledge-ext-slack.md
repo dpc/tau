@@ -9,8 +9,8 @@ advertise: false
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
 `slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`; `tool_prefix` scopes
 all four tools and their group for multiple accounts. Slack text is always
-untrusted external content. The current executable speaks Tau protocol 5.0
-only and requires a protocol-5-compatible harness.
+untrusted external content. The current executable speaks Tau protocol 7.0
+only and requires a protocol-7-compatible harness.
 
 Configuration requires app/bot token secrets, nonempty exact U/W
 `allowed_user_ids`, and an active `conversations` and/or

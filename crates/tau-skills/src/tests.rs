@@ -895,6 +895,23 @@ fn built_in_skill_sources_load_with_matching_frontmatter_names() {
     }
 }
 
+/// Ensures the bundled Slack guidance keeps the published protocol-7 harness
+/// compatibility boundary instead of regressing to a previous extension
+/// release.
+#[test]
+fn slack_self_knowledge_retains_published_protocol_seven_boundary() {
+    let source = BUILT_IN_SKILL_SOURCES
+        .iter()
+        .find(|source| source.diagnostic_path == "tau-self-knowledge-ext-slack.md")
+        .expect("embedded Slack self-knowledge");
+    assert!(
+        source.content.contains(
+            "The current executable speaks Tau protocol 7.0\nonly and requires a protocol-7-compatible harness."
+        ),
+        "Slack self-knowledge must describe the published protocol-7 boundary"
+    );
+}
+
 /// Keep the concise Zulip operational skill synchronized with sender tiers,
 /// activity summaries, and ingress-rate boundary.
 #[test]
