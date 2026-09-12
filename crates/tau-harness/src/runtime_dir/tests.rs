@@ -1,7 +1,7 @@
 use std::fs::Permissions;
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixListener;
-use std::sync::Barrier;
+use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
 
 use tempfile::TempDir;
@@ -27,6 +27,13 @@ fn bounded_runtime_root() -> TempDir {
         }
     }
     panic!("no bounded runtime root");
+}
+
+fn wait_for_target_capture_jobs_to_drain(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn spawn_peer_daemon(
@@ -1111,6 +1118,269 @@ fn peer_discovery_requires_opt_in_and_redacts_project_path() {
     ));
     live_daemon.join().expect("live daemon");
     drop((live_claim, quiet_claim));
+}
+
+/// Ensures discovery applies the caller's explicit empty allowlist before
+/// probing a remote target.
+#[test]
+fn peer_discovery_filters_denied_project_roots_before_probe() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let denied_id = session("peer-policy-denied");
+    let mut denied_claim =
+        claim_session(Path::new("/srv/denied"), &denied_id).expect("claim denied peer");
+    denied_claim
+        .reclaim_stale_socket()
+        .expect("reclaim denied peer socket");
+    let denied_listener =
+        UnixListener::bind(denied_claim.socket_path()).expect("bind denied peer socket");
+    denied_listener
+        .set_nonblocking(true)
+        .expect("denied listener nonblocking");
+    denied_claim.publish(true).expect("publish denied peer");
+    let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        allow_project_roots: Some(Vec::new()),
+        deny_project_roots: None,
+    };
+
+    let snapshot = discover_peer_sessions_with_policy(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "peer-policy-current",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+        &policy,
+    );
+
+    assert!(snapshot.sessions.is_empty());
+    assert!(!snapshot.truncated);
+    assert!(!snapshot.scan_truncated);
+    assert!(matches!(
+        denied_listener.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
+    drop(denied_claim);
+}
+
+/// Ensures slow target snapshot capture remains inside the per-candidate and
+/// whole-call discovery deadlines rather than serially delaying the caller.
+#[test]
+fn peer_discovery_bounds_slow_target_capture() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    assert_eq!(ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire), 0);
+    let id = session("peer-slow-policy-capture");
+    let mut claim = claim_session(root.path(), &id).expect("claim slow-capture peer");
+    claim
+        .reclaim_stale_socket()
+        .expect("reclaim slow-capture socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind slow-capture socket");
+    listener
+        .set_nonblocking(true)
+        .expect("slow-capture listener nonblocking");
+    claim.publish(true).expect("publish slow-capture claim");
+    TEST_TARGET_CAPTURE_DELAY_MS.store(1_000, Ordering::Release);
+    let started = Instant::now();
+
+    let snapshot = discover_peer_sessions_with_policy(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+        &InterSessionPolicy::default(),
+    );
+    let returned_after = started.elapsed();
+
+    TEST_TARGET_CAPTURE_DELAY_MS.store(0, Ordering::Release);
+    wait_for_target_capture_jobs_to_drain(Duration::from_secs(2));
+    assert_eq!(ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire), 0);
+    assert!(returned_after < Duration::from_secs(1));
+    assert!(snapshot.sessions.is_empty());
+    assert!(snapshot.scan_truncated);
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
+    drop(claim);
+}
+
+/// Ensures timed-out detached target captures retain process-wide admission
+/// until their filesystem work actually exits, then restore full capacity.
+#[test]
+fn timed_out_target_captures_remain_charged_until_worker_exit() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    assert_eq!(ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire), 0);
+    let id = session("target-capture-admission");
+    let mut claim = claim_session(root.path(), &id).expect("claim capture target");
+    claim
+        .reclaim_stale_socket()
+        .expect("reclaim capture target socket");
+    let _listener = UnixListener::bind(claim.socket_path()).expect("bind capture target socket");
+    claim.publish(true).expect("publish capture target");
+    let claim_path = claim_path(&id);
+    let harness_path = harness_path_for_session(&id);
+    let barrier = Arc::new(Barrier::new(MAX_TARGET_CAPTURE_JOBS + 1));
+    TEST_TARGET_CAPTURE_DELAY_STARTED.store(0, Ordering::Release);
+    TEST_TARGET_CAPTURE_DELAY_MS.store(2_000, Ordering::Release);
+    let callers = (0..MAX_TARGET_CAPTURE_JOBS)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let id = id.clone();
+            let claim_path = claim_path.clone();
+            let harness_path = harness_path.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                stable_claim_and_socket(
+                    &claim_path,
+                    &id,
+                    &harness_path,
+                    Instant::now() + Duration::from_millis(500),
+                    &AtomicBool::new(false),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let started_deadline = Instant::now() + Duration::from_secs(1);
+    while TEST_TARGET_CAPTURE_DELAY_STARTED.load(Ordering::Acquire) < MAX_TARGET_CAPTURE_JOBS
+        && Instant::now() < started_deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        TEST_TARGET_CAPTURE_DELAY_STARTED.load(Ordering::Acquire),
+        MAX_TARGET_CAPTURE_JOBS
+    );
+    for caller in callers {
+        assert!(caller.join().expect("capture caller").is_err());
+    }
+    assert_eq!(
+        ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire),
+        MAX_TARGET_CAPTURE_JOBS
+    );
+    assert!(TargetCapturePermit::try_acquire().is_none());
+    TEST_TARGET_CAPTURE_DELAY_MS.store(0, Ordering::Release);
+    wait_for_target_capture_jobs_to_drain(Duration::from_secs(3));
+    assert_eq!(ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire), 0);
+    assert!(TargetCapturePermit::try_acquire().is_some());
+    TEST_TARGET_CAPTURE_DELAY_STARTED.store(0, Ordering::Release);
+    drop(claim);
+}
+
+/// Ensures an exact known session id cannot bypass the outbound project-root
+/// denylist and the hidden target resolves like an absent daemon.
+#[test]
+fn exact_message_lookup_cannot_bypass_project_root_policy() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let denied_id = session("message-policy-denied");
+    let mut denied_claim =
+        claim_session(Path::new("/srv/denied"), &denied_id).expect("claim denied target");
+    denied_claim
+        .reclaim_stale_socket()
+        .expect("reclaim denied target socket");
+    let denied_listener =
+        UnixListener::bind(denied_claim.socket_path()).expect("bind denied target socket");
+    denied_listener
+        .set_nonblocking(true)
+        .expect("denied target nonblocking");
+    denied_claim.publish(true).expect("publish denied target");
+    let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        allow_project_roots: None,
+        deny_project_roots: Some(vec![
+            tau_config::inter_session_policy::ProjectRootGlob::new("/srv/denied".to_owned())
+                .expect("project-root deny glob"),
+        ]),
+    };
+
+    assert_eq!(
+        find_permitted_message_target_until(
+            denied_id.as_str(),
+            Instant::now() + Duration::from_secs(1),
+            &AtomicBool::new(false),
+            &policy,
+        ),
+        Ok(None)
+    );
+    assert!(matches!(
+        denied_listener.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
+    drop(denied_claim);
+}
+
+/// Ensures a same-session daemon restart cannot reuse an earlier allowed
+/// claim/socket snapshot to appear in discovery.
+#[test]
+fn peer_discovery_rechecks_live_project_root_after_restart() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("peer-policy-restarted");
+    let mut claim = claim_session(Path::new("/srv/allowed"), &id).expect("claim allowed peer");
+    claim
+        .reclaim_stale_socket()
+        .expect("reclaim allowed peer socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind restarted peer socket");
+    let socket_path = claim.socket_path().to_path_buf();
+    claim.publish(true).expect("publish allowed claim snapshot");
+    let server_id = id.clone();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept restarted peer");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set restarted peer timeout");
+        let reader_stream = stream.try_clone().expect("clone restarted peer stream");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(reader_stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
+        assert!(matches!(
+            reader.read_message().expect("read restarted peer hello"),
+            Some(tau_proto::HarnessInputMessage::Hello(_))
+        ));
+        std::fs::remove_file(&socket_path).expect("replace restarted peer socket");
+        let _replacement =
+            UnixListener::bind(&socket_path).expect("bind replacement restarted peer socket");
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: server_id.clone(),
+                    harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
+                },
+            ))
+            .expect("write restarted peer acceptance");
+        writer.flush().expect("flush restarted peer acceptance");
+        assert!(
+            reader
+                .read_message()
+                .expect("read post-policy connection state")
+                .is_none(),
+            "changed live socket must close before peer probing"
+        );
+    });
+    let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        allow_project_roots: Some(vec![
+            tau_config::inter_session_policy::ProjectRootGlob::new("/srv/allowed".to_owned())
+                .expect("allowed project-root glob"),
+        ]),
+        deny_project_roots: None,
+    };
+
+    let snapshot = discover_peer_sessions_with_policy(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+        &policy,
+    );
+
+    assert!(snapshot.sessions.is_empty());
+    assert!(!snapshot.scan_truncated);
+    server.join().expect("restarted peer server");
+    drop(claim);
 }
 
 /// Claim decoding accepts the exact byte limit and rejects one byte more.

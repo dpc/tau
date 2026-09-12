@@ -25,6 +25,13 @@ rest of Tau. Config mistakes must fail explicitly with path/key context; do not
 silently ignore unreadable files, invalid names, duplicate aliases, or malformed
 overrides.
 
+`inter_session.allow_project_roots` and `deny_project_roots` are optional
+absolute globset path patterns matched against a target session's immutable
+canonical startup project root. A configured allowlist runs first and an empty
+allowlist admits nothing; deny matches then veto. Omitted or null lists preserve
+the unrestricted default. The accepted policy is part of the immutable harness
+settings snapshot rather than a hot-reloaded runtime input.
+
 ## Load order and layering
 
 - Built-in `cli.yaml`, `cli-bindings.yaml`, and `harness.yaml` are the lowest

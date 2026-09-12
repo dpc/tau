@@ -21,6 +21,7 @@ use tau_proto::{
     ModelId, ModelName, ModelTag, PromptContent, PromptPriority, ProviderName, ToolName, ToolTag,
 };
 
+use crate::inter_session_policy::InterSessionPolicy;
 use crate::web_tools::*;
 
 // ---------------------------------------------------------------------------
@@ -1104,6 +1105,9 @@ pub struct HarnessSettings {
     /// Optional lifetime of shared original-byte artifacts since last explicit
     /// put.
     pub artifact_retention: Option<RetentionDuration>,
+    /// Outbound remote-session access policy matched against canonical project
+    /// roots.
+    pub inter_session: InterSessionPolicy,
     /// Whether a newly spawned interactive harness greets its initial UI with
     /// the Tau onboarding notice.
     pub show_introduction_notice: bool,
@@ -1192,6 +1196,9 @@ struct HarnessSettingsWire {
     diagnostic_retention: Option<RetentionDuration>,
     /// Independent original-byte artifact retention policy.
     artifact_retention: Option<RetentionDuration>,
+    /// Outbound remote-session project-root policy.
+    #[serde(default)]
+    inter_session: InterSessionPolicy,
     /// Whether to show Tau's onboarding notice to the initial UI.
     show_introduction_notice: bool,
     /// Lowest effective activating-input wait timeout in whole minutes.
@@ -1302,6 +1309,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             agent_retention: wire.agent_retention,
             diagnostic_retention: wire.diagnostic_retention,
             artifact_retention: wire.artifact_retention,
+            inter_session: wire.inter_session,
             show_introduction_notice: wire.show_introduction_notice,
             wait_timeout_bounds,
             agent_watch_retry_notification_threshold: AgentWatchRetryNotificationPolicy::from_raw(

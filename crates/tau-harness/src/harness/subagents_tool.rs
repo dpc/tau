@@ -2315,6 +2315,7 @@ impl Harness {
             message,
         };
         let tx = self.runtime_io.tx.clone();
+        let inter_session_policy = self.config.accepted_harness_settings.inter_session.clone();
         let cancellation = Arc::new(path_std_sync_atomic::AtomicBool::new(false));
         self.peer_messaging
             .peer_io_cancellations
@@ -2325,8 +2326,11 @@ impl Harness {
         thread::spawn(move || {
             let _permit = permit;
             let auth_message_id = request.message_id.clone();
-            let (result, protocol_warning) =
-                send_external_agent_message_request(request.clone(), &cancellation);
+            let (result, protocol_warning) = send_external_agent_message_request(
+                request.clone(),
+                &cancellation,
+                &inter_session_policy,
+            );
             if let Some(completion) = completion {
                 let _ = tx.send(HarnessEvent::Command(
                     HarnessCommand::ExternalMessageToolCompleted(Box::new(
@@ -3745,11 +3749,12 @@ fn authenticate_external_agent_message_sender(
 fn send_external_agent_message_request(
     request: tau_proto::ExternalAgentMessageRequest,
     cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
 ) -> (
     Result<(AgentId, bool), ExternalMessageDeliveryError>,
     Option<String>,
 ) {
-    let result = send_external_agent_message_request_inner(request, cancelled);
+    let result = send_external_agent_message_request_inner(request, cancelled, policy);
     match result {
         Ok(success) => (
             Ok((success.recipient_id, success.started)),
@@ -3790,26 +3795,31 @@ fn external_message_delivery_failure(
 fn send_external_agent_message_request_inner(
     request: tau_proto::ExternalAgentMessageRequest,
     cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
 ) -> Result<ExternalMessageDeliverySuccess, ExternalMessageDeliveryFailure> {
     let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
-    let harness_path =
-        bounded_runtime_lookup(request.recipient_session_id.as_str(), deadline, cancelled)
-            .map_err(|err| {
-                external_message_delivery_failure(
-                    ExternalMessageDeliveryError::Local(err.to_string()),
-                    None,
-                )
-            })?
-            .ok_or_else(|| {
-                external_message_delivery_failure(
-                    ExternalMessageDeliveryError::Local(format!(
-                        "no running daemon for session `{}`",
-                        request.recipient_session_id
-                    )),
-                    None,
-                )
-            })?;
-    let socket = crate::runtime_dir::socket_path(&harness_path);
+    let harness_target = bounded_permitted_message_target(
+        request.recipient_session_id.as_str(),
+        deadline,
+        cancelled,
+        policy,
+    )
+    .map_err(|err| {
+        external_message_delivery_failure(
+            ExternalMessageDeliveryError::Local(err.to_string()),
+            None,
+        )
+    })?
+    .ok_or_else(|| {
+        external_message_delivery_failure(
+            ExternalMessageDeliveryError::Local(format!(
+                "no running daemon for session `{}`",
+                request.recipient_session_id
+            )),
+            None,
+        )
+    })?;
+    let socket = crate::runtime_dir::socket_path(harness_target.harness_path());
     check_peer_io_active(deadline, cancelled).map_err(|error| {
         external_message_delivery_failure(ExternalMessageDeliveryError::Local(error), None)
     })?;
@@ -3874,6 +3884,20 @@ fn send_external_agent_message_request_inner(
     })?;
     let protocol_warning =
         external_message_protocol_warning(peer_protocol_version, tau_proto::PROTOCOL_VERSION);
+    if !crate::runtime_dir::message_target_still_permitted(
+        &harness_target,
+        policy,
+        deadline,
+        cancelled,
+    ) {
+        return Err(external_message_delivery_failure(
+            ExternalMessageDeliveryError::Local(format!(
+                "no running daemon for session `{}`",
+                request.recipient_session_id
+            )),
+            protocol_warning,
+        ));
+    }
     check_peer_io_active(deadline, cancelled).map_err(|error| {
         external_message_delivery_failure(
             ExternalMessageDeliveryError::Local(error),
@@ -4041,6 +4065,68 @@ fn bounded_runtime_lookup(
             &worker_session_id,
             deadline,
             &worker_cancelled,
+        );
+        let _ = tx.send(result);
+    });
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(
+                path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                    session_id: owned_session_id,
+                },
+            );
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(
+                path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                    session_id: owned_session_id,
+                },
+            );
+        };
+        match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(result) => return result,
+            Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {}
+            Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(
+                    path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                        session_id: owned_session_id,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Isolates exact outbound target resolution and returns a claim/root decision
+/// bound to the observed socket pathname identity.
+fn bounded_permitted_message_target(
+    session_id: &str,
+    deadline: Instant,
+    cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
+) -> Result<
+    Option<crate::runtime_dir::PermittedMessageTarget>,
+    crate::runtime_dir::FindHarnessForSessionError,
+> {
+    let Some(permit) = RuntimeLookupPermit::try_acquire() else {
+        return Err(
+            path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                session_id: session_id.to_owned(),
+            },
+        );
+    };
+    let (tx, rx) = path_std_sync::mpsc::sync_channel(1);
+    let owned_session_id = session_id.to_owned();
+    let worker_session_id = owned_session_id.clone();
+    let worker_cancelled = Arc::clone(cancelled);
+    let worker_policy = policy.clone();
+    std::thread::spawn(move || {
+        let _permit = permit;
+        let result = crate::runtime_dir::find_permitted_message_target_until(
+            &worker_session_id,
+            deadline,
+            &worker_cancelled,
+            &worker_policy,
         );
         let _ = tx.send(result);
     });

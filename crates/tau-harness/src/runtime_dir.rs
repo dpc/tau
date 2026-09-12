@@ -22,6 +22,8 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use tau_config::inter_session_policy::InterSessionPolicy;
 
 #[cfg(test)]
 mod tests;
@@ -40,11 +42,13 @@ const MESSAGE_DELIVERY_CANCELLATION_POLL_TIMEOUT: Duration = Duration::from_mill
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_DISCOVERY_CALLS: usize = 8;
 const MAX_DISCOVERY_PROBES: usize = 8;
+const MAX_TARGET_CAPTURE_JOBS: usize = 64;
 
 /// Maximum number of sessions returned by one peer-discovery request.
 pub const SESSION_DISCOVERY_MAX_RESULTS: usize = 50;
 
 static ACTIVE_DISCOVERY_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_TARGET_CAPTURE_JOBS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static ACTIVE_DISCOVERY_WORKERS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
@@ -52,6 +56,10 @@ static TEST_DISCOVERY_SCAN_DELAY: LazyLock<Mutex<Option<(PathBuf, u64)>>> =
     LazyLock::new(|| Mutex::new(None));
 #[cfg(test)]
 static TEST_CANCEL_AFTER_CLAIM_READ: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TEST_TARGET_CAPTURE_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_TARGET_CAPTURE_DELAY_STARTED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_DISCOVERY_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -82,6 +90,28 @@ pub(crate) struct DiscoveryCallPermit {
 }
 
 struct DiscoveryCallLease;
+
+/// Non-queued process-wide admission retained by a detached target-capture
+/// helper until its filesystem operation actually terminates.
+struct TargetCapturePermit;
+
+impl TargetCapturePermit {
+    fn try_acquire() -> Option<Self> {
+        #[allow(deprecated, reason = "workspace MSRV predates AtomicUsize::try_update")]
+        ACTIVE_TARGET_CAPTURE_JOBS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_TARGET_CAPTURE_JOBS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for TargetCapturePermit {
+    fn drop(&mut self) {
+        ACTIVE_TARGET_CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 impl DiscoveryCallPermit {
     /// Acquires one process-wide discovery slot or rejects immediately.
@@ -149,7 +179,7 @@ impl std::fmt::Display for FindHarnessForSessionError {
 
 impl std::error::Error for FindHarnessForSessionError {}
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ClaimRecord {
     /// Runtime-claim schema version.
     version: u32,
@@ -235,6 +265,41 @@ struct FileIdentity {
     device: u64,
     /// Filesystem inode number.
     inode: u64,
+}
+
+/// One permitted exact target bound to the socket pathname identity observed
+/// after runtime admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PermittedMessageTarget {
+    /// Exact immutable session identity.
+    session_id: tau_proto::SessionId,
+    /// Deterministic socket stem.
+    harness_path: PathBuf,
+    /// Exact claim pathname used for local revalidation.
+    claim_path: PathBuf,
+    /// Device/inode identity of the admitted socket pathname.
+    socket_identity: FileIdentity,
+}
+
+/// One discovery candidate bound to a stable claim and socket pathname.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PeerDiscoveryTarget {
+    /// Stable live claim record.
+    record: ClaimRecord,
+    /// Deterministic socket stem.
+    harness_path: PathBuf,
+    /// Exact claim pathname used for local revalidation.
+    claim_path: PathBuf,
+    /// Device/inode identity of the candidate socket pathname.
+    socket_identity: FileIdentity,
+}
+
+impl PermittedMessageTarget {
+    /// Returns the deterministic socket stem for connection.
+    #[must_use]
+    pub(crate) fn harness_path(&self) -> &Path {
+        &self.harness_path
+    }
 }
 
 impl FileIdentity {
@@ -619,6 +684,7 @@ pub(crate) fn find_harness_for_session_until(
         deadline,
         cancelled,
         ExactProbeTiming::FastStages,
+        None,
     )
 }
 
@@ -634,7 +700,195 @@ pub(crate) fn find_harness_for_message_delivery_until(
         deadline,
         cancelled,
         ExactProbeTiming::MessageDelivery,
+        None,
     )
+}
+
+/// Resolves one targeted outbound message only when its canonical project root
+/// is admitted by the caller's session-wide policy.
+pub(crate) fn find_permitted_message_target_until(
+    session_id: &str,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
+) -> Result<Option<PermittedMessageTarget>, FindHarnessForSessionError> {
+    #[cfg(test)]
+    if let Some(target) = test_permitted_message_target(session_id, policy) {
+        return Ok(Some(target));
+    }
+    let Some(harness_path) = find_harness_for_session_with_timing(
+        session_id,
+        deadline,
+        cancelled,
+        ExactProbeTiming::MessageDelivery,
+        Some(policy),
+    )?
+    else {
+        return Ok(None);
+    };
+    let claim_path =
+        claim_path(&tau_proto::SessionId::parse(session_id).map_err(|_| incomplete(session_id))?);
+    permitted_message_target(
+        session_id,
+        harness_path,
+        claim_path,
+        policy,
+        deadline,
+        cancelled,
+    )
+}
+
+/// Revalidates the exact claim/root and socket pathname identity after target
+/// admission and before message bytes are submitted.
+pub(crate) fn message_target_still_permitted(
+    target: &PermittedMessageTarget,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> bool {
+    #[cfg(test)]
+    if let Some(current) = test_permitted_message_target(target.session_id.as_str(), policy) {
+        return current == *target;
+    }
+    permitted_message_target(
+        target.session_id.as_str(),
+        target.harness_path.clone(),
+        target.claim_path.clone(),
+        policy,
+        deadline,
+        cancelled,
+    )
+    .is_ok_and(|current| current.as_ref() == Some(target))
+}
+
+fn permitted_message_target(
+    session_id: &str,
+    harness_path: PathBuf,
+    claim_path: PathBuf,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Option<PermittedMessageTarget>, FindHarnessForSessionError> {
+    let session_id = tau_proto::SessionId::parse(session_id).map_err(|_| incomplete(session_id))?;
+    let Some((record, socket_identity)) =
+        stable_claim_and_socket(&claim_path, &session_id, &harness_path, deadline, cancelled)?
+    else {
+        return Ok(None);
+    };
+    if !policy.allows(&record.project_root) {
+        return Ok(None);
+    }
+    Ok(Some(PermittedMessageTarget {
+        session_id,
+        harness_path,
+        claim_path,
+        socket_identity,
+    }))
+}
+
+fn stable_claim_and_socket(
+    claim_path: &Path,
+    session_id: &tau_proto::SessionId,
+    harness_path: &Path,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Option<(ClaimRecord, FileIdentity)>, FindHarnessForSessionError> {
+    ensure_lookup_active(session_id, deadline, cancelled)?;
+    let Some(permit) = TargetCapturePermit::try_acquire() else {
+        return Err(incomplete(session_id.as_str()));
+    };
+    let claim_path = claim_path.to_path_buf();
+    let session_id = session_id.clone();
+    let worker_session_id = session_id.clone();
+    let harness_path = harness_path.to_path_buf();
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _permit = permit;
+        #[cfg(test)]
+        {
+            let delay = TEST_TARGET_CAPTURE_DELAY_MS.load(Ordering::Acquire);
+            if delay != 0 {
+                TEST_TARGET_CAPTURE_DELAY_STARTED.fetch_add(1, Ordering::AcqRel);
+                std::thread::sleep(Duration::from_millis(delay as u64));
+            }
+        }
+        let result = stable_claim_and_socket_raw(&claim_path, &worker_session_id, &harness_path);
+        let _ = tx.send(result);
+    });
+    loop {
+        ensure_lookup_active(&session_id, deadline, cancelled)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining.min(Duration::from_millis(25))) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(incomplete(session_id.as_str()));
+            }
+        }
+    }
+}
+
+fn stable_claim_and_socket_raw(
+    claim_path: &Path,
+    session_id: &tau_proto::SessionId,
+    harness_path: &Path,
+) -> Result<Option<(ClaimRecord, FileIdentity)>, FindHarnessForSessionError> {
+    let Some(before) = read_exact_claim(claim_path, session_id)? else {
+        return Ok(None);
+    };
+    let socket_path = socket_path(harness_path);
+    let metadata =
+        std::fs::symlink_metadata(&socket_path).map_err(|_| incomplete(session_id.as_str()))?;
+    if !metadata.file_type().is_socket() || metadata.uid() != current_euid() {
+        return Err(incomplete(session_id.as_str()));
+    }
+    let socket_identity = FileIdentity::from_metadata(&metadata);
+    let Some(after) = read_exact_claim(claim_path, session_id)? else {
+        return Ok(None);
+    };
+    if before != after {
+        return Err(incomplete(session_id.as_str()));
+    }
+    Ok(Some((after, socket_identity)))
+}
+
+fn read_exact_claim(
+    path: &Path,
+    session_id: &tau_proto::SessionId,
+) -> Result<Option<ClaimRecord>, FindHarnessForSessionError> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(incomplete(session_id.as_str())),
+    };
+    validate_claim_file(&file, path).map_err(|_| incomplete(session_id.as_str()))?;
+    let identity = FileIdentity::from_metadata(
+        &file
+            .metadata()
+            .map_err(|_| incomplete(session_id.as_str()))?,
+    );
+    validate_path_identity(path, identity).map_err(|_| incomplete(session_id.as_str()))?;
+    let record = read_claim(&mut file).map_err(|_| incomplete(session_id.as_str()))?;
+    if record.session_id != *session_id {
+        return Err(incomplete(session_id.as_str()));
+    }
+    Ok(Some(record))
+}
+
+fn ensure_lookup_active(
+    session_id: &tau_proto::SessionId,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<(), FindHarnessForSessionError> {
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(incomplete(session_id.as_str()));
+    }
+    Ok(())
 }
 
 fn find_harness_for_session_with_timing(
@@ -642,6 +896,7 @@ fn find_harness_for_session_with_timing(
     deadline: Instant,
     cancelled: &AtomicBool,
     probe_timing: ExactProbeTiming,
+    policy: Option<&tau_config::inter_session_policy::InterSessionPolicy>,
 ) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
     #[cfg(test)]
     if let Some(path) = TEST_SESSION_HARNESSES
@@ -705,6 +960,9 @@ fn find_harness_for_session_with_timing(
                 || session_key(&record.session_id) != session_key(&parsed)
             {
                 return Err(incomplete(session_id));
+            }
+            if policy.is_some_and(|policy| !policy.allows(&record.project_root)) {
+                return Ok(None);
             }
             let stem = harness_path_for_session(&parsed);
             probe_exact_session(&stem, &parsed, deadline, cancelled, probe_timing)
@@ -996,15 +1254,34 @@ pub fn list_running_sessions_tolerant() -> io::Result<RunningSessionSnapshot> {
 }
 
 /// Discovers exact live sessions that advertise an inter-harness entrypoint.
+#[cfg(test)]
 pub(crate) fn discover_peer_sessions(
     query: Option<&str>,
     limit: usize,
     current_session_id: &str,
     permit: DiscoveryCallPermit,
 ) -> PeerSessionSnapshot {
+    discover_peer_sessions_with_policy(
+        query,
+        limit,
+        current_session_id,
+        permit,
+        &InterSessionPolicy::default(),
+    )
+}
+
+/// Discovers exact live sessions admitted by the caller's project-root policy.
+pub(crate) fn discover_peer_sessions_with_policy(
+    query: Option<&str>,
+    limit: usize,
+    current_session_id: &str,
+    permit: DiscoveryCallPermit,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
+) -> PeerSessionSnapshot {
     let deadline = Instant::now() + DISCOVERY_TIMEOUT;
     let cancelled = Arc::new(AtomicBool::new(false));
     let scan_dir = claims_dir();
+    let claim_dir_for_capture = scan_dir.clone();
     let socket_dir = sockets_dir();
     let scan_cancelled = Arc::clone(&cancelled);
     let scan_permit = permit.clone();
@@ -1029,10 +1306,17 @@ pub(crate) fn discover_peer_sessions(
     let queue = Arc::new(Mutex::new(
         records
             .into_iter()
-            .filter(|record| record.peer_entrypoint)
+            .filter(|record| {
+                record.peer_entrypoint
+                    && (record.session_id.as_str() == current_session_id
+                        || policy.allows(&record.project_root))
+            })
             .map(|record| {
-                let stem = socket_dir.join(session_key(&record.session_id));
-                (record, stem)
+                let harness_path = socket_dir.join(session_key(&record.session_id));
+                let claim_path = claim_dir_for_capture
+                    .join(session_key(&record.session_id))
+                    .with_extension(CLAIM_EXTENSION);
+                (record, harness_path, claim_path)
             })
             .collect::<std::collections::VecDeque<_>>(),
     ));
@@ -1060,16 +1344,37 @@ pub(crate) fn discover_peer_sessions(
                         break;
                     }
                     let candidate = queue.lock().expect("queue poisoned").pop_front();
-                    let Some((record, stem)) = candidate else {
+                    let Some((scanned, harness_path, claim_path)) = candidate else {
                         break;
                     };
                     let probe_deadline = candidate_probe_deadline(deadline);
-                    let outcome = probe_peer_entrypoint(
-                        &stem,
-                        &record.session_id,
+                    let current = scanned.session_id.as_str() == current_session_id;
+                    let captured = stable_claim_and_socket(
+                        &claim_path,
+                        &scanned.session_id,
+                        &harness_path,
                         probe_deadline,
                         &cancelled,
                     );
+                    let (record, outcome) = match captured {
+                        Ok(Some((record, socket_identity)))
+                            if record.peer_entrypoint
+                                && (current || policy.allows(&record.project_root)) =>
+                        {
+                            let target = PeerDiscoveryTarget {
+                                record,
+                                harness_path,
+                                claim_path,
+                                socket_identity,
+                            };
+                            let outcome =
+                                probe_peer_entrypoint(&target, probe_deadline, &cancelled);
+                            (target.record, outcome)
+                        }
+                        Ok(Some((record, _))) => (record, PeerProbeOutcome::Unavailable),
+                        Ok(None) => (scanned, PeerProbeOutcome::Unavailable),
+                        Err(_) => (scanned, PeerProbeOutcome::Incomplete),
+                    };
                     if tx.send((record, outcome)).is_err() {
                         break;
                     }
@@ -1157,8 +1462,7 @@ enum PeerProbeOutcome {
 }
 
 fn probe_peer_entrypoint(
-    stem: &Path,
-    session_id: &tau_proto::SessionId,
+    target: &PeerDiscoveryTarget,
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> PeerProbeOutcome {
@@ -1169,7 +1473,7 @@ fn probe_peer_entrypoint(
         return PeerProbeOutcome::Incomplete;
     };
     let Ok(mut peer) = tau_socket::SocketPeer::connect_with_io_timeout(
-        socket_path(stem),
+        socket_path(&target.harness_path),
         timeout.min(PROBE_TIMEOUT),
     ) else {
         return PeerProbeOutcome::Incomplete;
@@ -1194,7 +1498,7 @@ fn probe_peer_entrypoint(
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name,
             client_kind: tau_proto::ClientKind::External,
-            expected_session_id: Some(session_id.clone()),
+            expected_session_id: Some(target.record.session_id.clone()),
             capabilities: Vec::new(),
         }))
         .is_err()
@@ -1209,10 +1513,13 @@ fn probe_peer_entrypoint(
         peer.recv_timeout(receive_timeout),
         Ok(tau_socket::SocketReceive::Message {
             message: tau_proto::HarnessOutputMessage::SessionAccepted(accepted),
-        }) if accepted.session_id == *session_id
+        }) if accepted.session_id == target.record.session_id
     ) || cancelled.load(Ordering::Acquire)
     {
         return PeerProbeOutcome::Incomplete;
+    }
+    if !peer_discovery_target_still_current(target, deadline, cancelled) {
+        return PeerProbeOutcome::Unavailable;
     }
     let request_id = format!("peer-probe-{}", std::process::id());
     let Some(write_timeout) = probe_remaining(deadline, cancelled) else {
@@ -1225,7 +1532,7 @@ fn probe_peer_entrypoint(
         .send(&tau_proto::HarnessInputMessage::PeerSessionProbe(
             tau_proto::PeerSessionProbe {
                 request_id: request_id.clone(),
-                session_id: session_id.clone(),
+                session_id: target.record.session_id.clone(),
             },
         ))
         .is_err()
@@ -1245,6 +1552,25 @@ fn probe_peer_entrypoint(
         }) if result.request_id == request_id => PeerProbeOutcome::Unavailable,
         _ => PeerProbeOutcome::Incomplete,
     }
+}
+
+fn peer_discovery_target_still_current(
+    target: &PeerDiscoveryTarget,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> bool {
+    stable_claim_and_socket(
+        &target.claim_path,
+        &target.record.session_id,
+        &target.harness_path,
+        deadline,
+        cancelled,
+    )
+    .is_ok_and(|current| {
+        current.is_some_and(|(record, socket_identity)| {
+            record == target.record && socket_identity == target.socket_identity
+        })
+    })
 }
 
 fn probe_remaining(deadline: Instant, cancelled: &AtomicBool) -> Option<Duration> {
@@ -1447,6 +1773,31 @@ impl Drop for DiscoveryWorkerGuard {
 #[cfg(test)]
 static TEST_SESSION_HARNESSES: LazyLock<Mutex<HashMap<String, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+#[cfg(test)]
+static TEST_PERMITTED_SESSION_HARNESSES: LazyLock<Mutex<HashMap<String, (PathBuf, PathBuf)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+fn test_permitted_message_target(
+    session_id: &str,
+    policy: &tau_config::inter_session_policy::InterSessionPolicy,
+) -> Option<PermittedMessageTarget> {
+    let (harness_path, project_root) = TEST_PERMITTED_SESSION_HARNESSES
+        .lock()
+        .expect("permitted test registry")
+        .get(session_id)
+        .cloned()?;
+    if !policy.allows(&project_root) {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(socket_path(&harness_path)).ok()?;
+    Some(PermittedMessageTarget {
+        session_id: tau_proto::SessionId::parse(session_id).ok()?,
+        claim_path: PathBuf::new(),
+        harness_path,
+        socket_identity: FileIdentity::from_metadata(&metadata),
+    })
+}
 
 /// Registers one exact test-only session socket stem until the guard drops.
 #[cfg(test)]
@@ -1461,6 +1812,29 @@ pub(crate) fn register_test_session_harness(session_id: &str, path: PathBuf) -> 
             TEST_SESSION_HARNESSES
                 .lock()
                 .expect("test registry")
+                .remove(&self.0);
+        }
+    }
+    Guard(session_id.to_owned())
+}
+
+/// Registers one test-only permitted target with an authoritative project root.
+#[cfg(test)]
+pub(crate) fn register_test_permitted_session_harness(
+    session_id: &str,
+    path: PathBuf,
+    project_root: PathBuf,
+) -> impl Drop + use<> {
+    TEST_PERMITTED_SESSION_HARNESSES
+        .lock()
+        .expect("permitted test registry")
+        .insert(session_id.to_owned(), (path, project_root));
+    struct Guard(String);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_PERMITTED_SESSION_HARNESSES
+                .lock()
+                .expect("permitted test registry")
                 .remove(&self.0);
         }
     }

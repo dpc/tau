@@ -1040,6 +1040,31 @@ fn diagnostic_retention_has_independent_default_and_disable() {
     assert_eq!(disabled.diagnostic_retention(), None);
 }
 
+/// Ensures the whole-session outbound policy loads through the ordinary harness
+/// schema and preserves the explicit empty-allowlist deny-all distinction.
+#[test]
+fn inter_session_project_root_policy_loads_with_empty_allowlist_semantics() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+inter_session:
+  allow_project_roots: []
+  deny_project_roots: [/srv/private/**]
+"#,
+    )
+    .expect("write inter-session policy");
+
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load inter-session policy");
+    assert!(!settings.inter_session.allows(Path::new("/srv/public")));
+    assert!(
+        !settings
+            .inter_session
+            .allows(Path::new("/srv/private/repository"))
+    );
+}
+
 /// Every supported unit maps to its exact checked number of seconds.
 #[test]
 fn retention_duration_accepts_exact_single_unit_grammar() {

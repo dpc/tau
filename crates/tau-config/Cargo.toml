@@ -21,6 +21,7 @@ workspace = true
 config.workspace = true
 dirs.workspace = true
 fs2.workspace = true
+globset.workspace = true
 indexmap.workspace = true
 libc.workspace = true
 rand.workspace = true

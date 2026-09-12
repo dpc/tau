@@ -857,6 +857,7 @@ dependencies = [
  "dirs",
  "dpc-tau-proto",
  "fs2",
+ "globset",
  "indexmap",
  "libc",
  "rand 0.8.6",

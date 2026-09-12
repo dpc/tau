@@ -475,6 +475,14 @@ The harness also owns bounded, redacted peer and local-agent discovery
 snapshots. A deterministic session-keyed runtime claim identifies the only
 candidate socket; an exact admission handshake confirms the daemon's immutable
 session and effective policy.
+The caller's accepted `inter_session` settings snapshot filters outbound peer
+discovery and exact message lookup against each target claim's canonical
+project root before connection. The caller binds that local decision to stable
+claim contents and the socket pathname's device/inode identity, then rechecks
+both after exact-session admission and before discovery projection or message
+submission so a same-id restart cannot reuse an earlier allowed snapshot. The
+current session bypasses that remote policy; inbound peer authentication and
+local-agent messaging remain separate.
 The same event loop owns inter-session receiver admission, fair live selection,
 and configured-order role auto-start. It admits bounded count/bytes/rate before
 creation, treats accepted startup placeholders and busy eligible agents as

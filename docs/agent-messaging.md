@@ -184,6 +184,27 @@ remote agents. The independent `agent_discovery` group enables
 pending, live, restored-unavailable, and stopped agents in the caller's current
 session.
 
+The top-level `inter_session` harness setting can restrict outbound discovery
+and messaging by each target's immutable canonical startup project root:
+
+```yaml
+inter_session:
+  allow_project_roots:
+    - /home/me/work/**
+  deny_project_roots:
+    - /home/me/work/private/**
+```
+
+Patterns use globset path syntax: `*` does not cross `/`, while `**` can.
+Patterns must be absolute. An omitted or `null` allowlist permits every remote
+root; an explicit empty allowlist permits none. An omitted, `null`, or empty
+denylist vetoes nothing. Tau applies the allowlist first and then lets any
+denylist match veto it. The policy filters both `session_list` and exact
+cross-session `message` targets, so knowing a hidden session id does not bypass
+it. The caller's own session and local-agent messaging remain available. Like
+the rest of harness configuration, the policy is fixed at startup and does not
+hot-reload.
+
 External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection. In contrast, the fixed `target

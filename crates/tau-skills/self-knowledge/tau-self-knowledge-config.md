@@ -97,6 +97,17 @@ to a newly spawned interactive UI.
 {harness_config}
 ```
 
+`inter_session` restricts which remote sessions this harness may discover or
+message by matching their immutable canonical startup project roots. Patterns
+must be absolute and use globset path syntax: `*` does not cross `/`, while
+`**` can. An omitted or `null` allowlist permits every remote root; an explicit
+empty allowlist permits none. An omitted, `null`, or empty denylist vetoes
+nothing. Tau evaluates the allowlist first and then lets any denylist match
+veto it. The policy applies to both `session_list` and exact cross-session
+`message` targets, but not the current session, local agents, or inbound peer
+messages. It is fixed in the startup configuration snapshot and does not
+hot-reload.
+
 `tool_policy.rules` is harness-owned declarative tool-surface policy. Rules are
 keyed so a user can disable built-ins such as `builtin.chatgpt-shell` with
 `enable: false`; matching rules run `disable_tool_tags` before

@@ -687,6 +687,12 @@ impl<'a> InternalToolHost<'a> {
         };
         let tx = self.harness.runtime_io.tx.clone();
         let current_session_id = self.harness.session_runtime.current_session_id.clone();
+        let inter_session_policy = self
+            .harness
+            .config
+            .accepted_harness_settings
+            .inter_session
+            .clone();
         let command = crate::event::SessionDiscoveryCompletedCommand {
             conversation_id: conversation_id.clone(),
             session_generation: self.harness.session_runtime.current_session_generation,
@@ -696,11 +702,12 @@ impl<'a> InternalToolHost<'a> {
             result: CborValue::Null,
         };
         std::thread::spawn(move || {
-            let snapshot = crate::runtime_dir::discover_peer_sessions(
+            let snapshot = crate::runtime_dir::discover_peer_sessions_with_policy(
                 query.as_deref(),
                 limit,
                 current_session_id.as_str(),
                 permit,
+                &inter_session_policy,
             );
             let sessions = snapshot
                 .sessions
