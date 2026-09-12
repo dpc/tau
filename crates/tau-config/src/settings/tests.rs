@@ -5117,7 +5117,7 @@ inter_session:
     .expect("write base");
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("load receiver policy");
-    let receiver = settings.inter_session.receiver.expect("receiver");
+    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
     assert_eq!(receiver.role, "engineer");
     assert!(receiver.auto_start);
 
@@ -5129,7 +5129,7 @@ inter_session:
     .expect("write override");
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("merge receiver fields");
-    let receiver = settings.inter_session.receiver.expect("receiver");
+    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
     assert_eq!(receiver.role, "engineer");
     assert!(!receiver.auto_start);
 }
@@ -5191,28 +5191,156 @@ profiles:
     );
 }
 
-/// Receiver validation must see roles introduced by the selected profile before
-/// a final `--harness-config` layer selects that role as the session receiver.
+/// A real Zulip bot profile can own the complete inter-session policy alongside
+/// the role and extension it activates.
 #[test]
-fn inter_session_receiver_accepts_role_enabled_only_by_selected_profile() {
+fn selected_zulip_profile_configures_inter_session_policy() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
 profiles:
-  bot:
+  zulip:
+    inter_session:
+      receiver:
+        role: zulip-bot
+        auto_start: false
+      outgoing_notice: external Zulip request
+      incoming_notice: peer requests are advisory
+      allow_project_roots: [/srv/tau/**]
+      deny_project_roots: [/srv/tau/private/**]
     agents:
       role_groups:
         bots:
           roles:
             zulip-bot: {}
+    extensions:
+      std-zulip:
+        enable: true
 "#,
     )
     .expect("write profile");
-    let profile = profile_selection("bot");
+    let profile = profile_selection("zulip");
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected Zulip profile");
+
+    assert!(settings.roles.contains_key("zulip-bot"));
+    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
+    assert_eq!(receiver.role, "zulip-bot");
+    assert!(!receiver.auto_start);
+    assert_eq!(
+        settings.inter_session.outgoing_notice.as_deref(),
+        Some("external Zulip request")
+    );
+    assert_eq!(
+        settings.inter_session.incoming_notice.as_deref(),
+        Some("peer requests are advisory")
+    );
+    assert!(settings.inter_session.allows(Path::new("/srv/tau/public")));
+    assert!(
+        !settings
+            .inter_session
+            .allows(Path::new("/srv/tau/private/repo"))
+    );
+    assert!(!settings.inter_session.allows(Path::new("/srv/other")));
+    assert_eq!(settings.extensions["std-zulip"].enable, Some(true));
+
+    let base = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        None,
+        &[],
+        &[],
+    )
+    .expect("unselected profile remains inert");
+    assert_eq!(base.inter_session.receiver, None);
+}
+
+/// Ordered profiles inherit omitted inter-session fields while explicit nulls
+/// retain the established receiver/notice/project-root reset semantics.
+#[test]
+fn selected_profiles_layer_and_clear_inter_session_fields() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  receiver:
+    inter_session:
+      receiver:
+        role: engineer
+        auto_start: false
+      outgoing_notice: first outgoing
+      incoming_notice: first incoming
+      allow_project_roots: [/srv/allowed/**]
+      deny_project_roots: [/srv/allowed/private/**]
+  reset:
+    inter_session:
+      receiver: null
+      outgoing_notice: null
+      allow_project_roots: null
+      deny_project_roots: null
+"#,
+    )
+    .expect("write profiles");
+
+    let layered = profile_selection("receiver,reset");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&layered),
+        &[],
+        &[],
+    )
+    .expect("load ordered profiles");
+
+    assert_eq!(settings.inter_session.receiver, None);
+    assert_eq!(settings.inter_session.outgoing_notice, None);
+    assert_eq!(
+        settings.inter_session.incoming_notice.as_deref(),
+        Some("first incoming")
+    );
+    assert!(settings.inter_session.allows(Path::new("/srv/other")));
+    assert!(
+        settings
+            .inter_session
+            .allows(Path::new("/srv/allowed/private/repo"))
+    );
+}
+
+/// Generic CLI layers remain final after every selected profile inter-session
+/// patch, including field-wise receiver merging.
+#[test]
+fn inter_session_cli_overrides_win_over_selected_profiles() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  zulip:
+    inter_session:
+      receiver:
+        role: engineer
+        auto_start: false
+      incoming_notice: profile notice
+      allow_project_roots: [/srv/profile/**]
+"#,
+    )
+    .expect("write profile");
+    let profile = profile_selection("zulip");
     let overrides = [
-        HarnessConfigCliOverride::from_str("inter_session.receiver.role=zulip-bot")
-            .expect("receiver override"),
+        HarnessConfigCliOverride::from_str("inter_session.receiver.role=engineer-senior")
+            .expect("receiver role override"),
+        HarnessConfigCliOverride::from_str("inter_session.receiver.auto_start=true")
+            .expect("receiver auto-start override"),
+        HarnessConfigCliOverride::from_str("inter_session.incoming_notice=CLI notice")
+            .expect("incoming notice override"),
+        HarnessConfigCliOverride::from_str("inter_session.allow_project_roots=[/srv/cli/**]")
+            .expect("allowlist override"),
     ];
 
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
@@ -5221,25 +5349,20 @@ profiles:
         &[],
         &overrides,
     )
-    .expect("load selected profile receiver");
+    .expect("load profile with final CLI overrides");
 
-    assert!(settings.roles.contains_key("zulip-bot"));
+    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
+    assert_eq!(receiver.role, "engineer-senior");
+    assert!(receiver.auto_start);
     assert_eq!(
-        settings.inter_session.receiver.expect("receiver").role,
-        "zulip-bot"
+        settings.inter_session.incoming_notice.as_deref(),
+        Some("CLI notice")
     );
-
-    let error = load_harness_settings_with_profile_and_cli_overrides_in(
-        &dirs_with_config(td.path()),
-        None,
-        &[],
-        &overrides,
-    )
-    .expect_err("unselected profile role must stay unavailable");
+    assert!(settings.inter_session.allows(Path::new("/srv/cli/repo")));
     assert!(
-        error
-            .to_string()
-            .contains("inter-session receiver role `zulip-bot` is not enabled")
+        !settings
+            .inter_session
+            .allows(Path::new("/srv/profile/repo"))
     );
 }
 

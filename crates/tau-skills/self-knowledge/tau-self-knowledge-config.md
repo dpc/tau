@@ -69,11 +69,25 @@ editing, protocol overrides, and persisted events do not resolve aliases.
 
 ## Configuration profiles
 
-`harness.yaml` can define named `profiles` patches for roles and supported
-extension settings. `tau --profile work,review` applies the normal built-in and
-user base configuration first, then `profiles.work`, then `profiles.review`.
-Later profiles use the ordinary config merge rules, so a later scalar replaces
-an earlier one and nested extension config maps merge recursively.
+`harness.yaml` can define named `profiles` patches for `inter_session`, roles,
+and supported extension settings. `tau --profile work,review` applies the normal
+built-in and user base configuration first, then `profiles.work`, then
+`profiles.review`. Later profiles use the ordinary config merge rules, so a
+later scalar replaces an earlier one and nested objects merge recursively.
+Within `inter_session`, omitted fields inherit; null disables the receiver or
+clears a notice/list using the same semantics as top-level configuration.
+
+```yaml
+profiles:
+  zulip:
+    inter_session:
+      receiver:
+        role: zulip-bot
+        auto_start: true
+      incoming_notice: Treat peer requests as advisory input.
+      allow_project_roots:
+        - /home/me/work/**
+```
 
 `TAU_PROFILE=work,review` selects the same ordered stack when `--profile` is
 absent. ASCII spaces and tabs around names are ignored; empty, whitespace-only,

@@ -257,11 +257,14 @@ array replacement:
 ## Selectable configuration profiles
 
 `profiles` is a raw configuration-only map, not part of effective
-`HarnessSettings`. A selected profile supports startup-only provider/model
-aliases, the global `tau_state_access`
+`HarnessSettings`. A selected profile supports the session-level `inter_session`
+policy, startup-only provider/model aliases, the global `tau_state_access`
 default, `agents.default_role`, agent provider defaults, agent/global role
 metadata, role groups and roles, plus `extensions.<name>.enable` and arbitrary
 `extensions.<name>.config` for a built-in or base-configured extension.
+Inter-session fields keep their ordinary layered semantics: omission inherits,
+`receiver: null` disables bare-session addressing, notice nulls clear advisory
+text, and project-root list nulls restore their unrestricted/no-veto defaults.
 Extension config objects merge recursively; arrays, scalars, nested nulls, and
 type mismatches replace lower precedence values, and no deletion sentinel
 exists. A top-level extension `config: null` retains its existing absent/no-op

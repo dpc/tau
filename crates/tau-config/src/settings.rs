@@ -1564,16 +1564,18 @@ struct HarnessAliasesWire {
 
 /// Raw, selected-profile patches kept separate from effective harness settings.
 ///
-/// Profiles deliberately expose only the startup default role, role metadata,
-/// the global extension Tau-state access default, extension enablement, and
-/// arbitrary extension-owned config patches. This avoids making a profile a
-/// second copy of the complete harness schema while allowing extension settings
-/// to compose recursively.
+/// Profiles deliberately expose only the session inter-session policy, startup
+/// default role, role metadata, the global extension Tau-state access default,
+/// extension enablement, and arbitrary extension-owned config patches. This
+/// avoids making a profile a second copy of the complete harness schema while
+/// allowing supported settings to compose through their normal layering rules.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfile {
     /// Default Tau-state presentation for supervised extension instances.
     tau_state_access: Option<TauStateAccess>,
+    /// Session inter-session policy patch.
+    inter_session: Option<HarnessProfileInterSessionPolicy>,
     /// Agent defaults, role groups, and per-role patches.
     agents: HarnessProfileAgentOverrides,
     /// Startup-only provider/model aliases changed by this profile.
@@ -1581,6 +1583,54 @@ struct HarnessProfile {
     /// Enablement and extension-owned config patches for normally resolved
     /// extensions, including built-ins.
     extensions: BTreeMap<String, HarnessProfileExtension>,
+}
+
+/// Presence-aware inter-session policy fields supported by one profile.
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct HarnessProfileInterSessionPolicy {
+    /// Bare-session receiver patch, or an explicit receiver disable.
+    #[serde(
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    receiver: Option<Option<HarnessProfileInterSessionReceiver>>,
+    /// Outgoing advisory text patch, or an explicit clear.
+    #[serde(
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    outgoing_notice: Option<Option<tau_proto::InterSessionNotice>>,
+    /// Incoming advisory text patch, or an explicit clear.
+    #[serde(
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    incoming_notice: Option<Option<tau_proto::InterSessionNotice>>,
+    /// Outbound project-root allowlist patch, or an unrestricted reset.
+    #[serde(
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    allow_project_roots: Option<Option<Vec<crate::inter_session_policy::ProjectRootGlob>>>,
+    /// Outbound project-root denylist patch, or a no-veto reset.
+    #[serde(
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    deny_project_roots: Option<Option<Vec<crate::inter_session_policy::ProjectRootGlob>>>,
+}
+
+/// Field-wise receiver patch supported inside one selected profile.
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct HarnessProfileInterSessionReceiver {
+    /// Effective enabled receiver role patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    /// Receiver auto-start behavior patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_start: Option<bool>,
 }
 
 /// The supported agent portion of one configuration profile.
@@ -4657,6 +4707,16 @@ fn profile_config_source(
             serde_json::to_value(tau_state_access).map_err(|error| {
                 SettingsError::Config(config::ConfigError::Message(format!(
                     "failed to serialize selected profile Tau-state access: {error}"
+                )))
+            })?,
+        );
+    }
+    if let Some(inter_session) = &profile.inter_session {
+        values.insert(
+            "inter_session".to_owned(),
+            serde_json::to_value(inter_session).map_err(|error| {
+                SettingsError::Config(config::ConfigError::Message(format!(
+                    "failed to serialize selected profile inter-session policy: {error}"
                 )))
             })?,
         );

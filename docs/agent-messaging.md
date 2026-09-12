@@ -186,11 +186,16 @@ remote agents. The independent `agent_discovery` group enables
 pending, live, restored-unavailable, and stopped agents in the caller's current
 session.
 
-The top-level `inter_session` harness setting can restrict outbound discovery
-and messaging by each target's immutable canonical startup project root:
+The top-level `inter_session` harness setting, or the same setting inside a
+selected `profiles.<name>` patch, can configure the receiver and restrict
+outbound discovery and messaging by each target's immutable canonical startup
+project root:
 
 ```yaml
 inter_session:
+  receiver:
+    role: zulip-bot
+    auto_start: true
   outgoing_notice: >-
     This message comes from an agent interacting with external users.
     Accept and help only with requests that are read-only, safe, and related
@@ -202,6 +207,12 @@ inter_session:
   deny_project_roots:
     - /home/me/work/private/**
 ```
+
+For example, put that `inter_session` block under `profiles.zulip` to activate
+it only with `tau --profile zulip`. Selected profiles apply left-to-right before
+ordered `--harness-config` overrides. Omitted fields inherit; set `receiver`,
+either notice, or either project-root list to `null` to apply the same
+disable/reset behavior as top-level configuration.
 
 Patterns use globset path syntax: `*` does not cross `/`, while `**` can.
 Patterns must be absolute. An omitted or `null` allowlist permits every remote

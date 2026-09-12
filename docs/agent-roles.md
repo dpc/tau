@@ -383,6 +383,9 @@ inter_session:
 it to false to accept bare messages only while an instance of that role is
 already live. Omitting `receiver`, or setting it to `null` in a later layer,
 disables bare-session addressing. Exact agent addresses remain available.
+The same block may be nested under `profiles.<name>.inter_session`; receiver
+validation runs only after all selected profiles and final CLI layers establish
+the effective enabled role set.
 
 Live routing keeps idle/least-recently-routed fairness across eligible instances
 of the configured role. If none is live and auto-start is enabled, Tau starts
