@@ -67,8 +67,8 @@ struct StartupRoles {
     selected_role: String,
     /// Role groups visible to clients.
     available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Receiver-capable roles in deterministic configured order.
-    inter_session_receivers: Vec<crate::model::InterSessionReceiverRole>,
+    /// Optional single role used by bare inter-session routing.
+    inter_session_receiver: Option<tau_config::inter_session_policy::InterSessionReceiver>,
     /// Warning emitted when the configured default role was unavailable.
     missing_default_role: Option<MissingDefaultRole>,
     /// Model selected for the startup role before provider metadata arrives.
@@ -369,7 +369,7 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
-            inter_session_receivers,
+            inter_session_receiver,
             missing_default_role,
         } = load_roles(&harness_settings);
         let custom_prompts = harness_settings
@@ -470,7 +470,7 @@ impl Harness {
                 available_roles,
                 disabled_role_reasons: HashMap::new(),
                 available_role_groups,
-                inter_session_receivers,
+                inter_session_receiver,
                 custom_prompts,
                 role_overrides,
                 tool_policy: harness_settings.tool_policy.clone(),
@@ -978,7 +978,7 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
-            inter_session_receivers,
+            inter_session_receiver,
             missing_default_role,
         } = load_roles(harness_settings);
         if available_roles.is_empty() {
@@ -993,7 +993,7 @@ impl Harness {
             role_overrides,
             selected_role,
             available_role_groups,
-            inter_session_receivers,
+            inter_session_receiver,
             missing_default_role,
             selected_model,
         })
@@ -1080,7 +1080,7 @@ impl Harness {
                 available_roles: parts.roles.available_roles,
                 disabled_role_reasons: HashMap::new(),
                 available_role_groups: parts.roles.available_role_groups,
-                inter_session_receivers: parts.roles.inter_session_receivers,
+                inter_session_receiver: parts.roles.inter_session_receiver,
                 custom_prompts,
                 role_overrides: parts.roles.role_overrides,
                 tool_policy: parts.harness_settings.tool_policy.clone(),

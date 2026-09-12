@@ -71,6 +71,7 @@ fn external_message_rechecks_live_project_root_after_lookup() {
         );
     });
     let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        receiver: None,
         allow_project_roots: Some(vec![
             tau_config::inter_session_policy::ProjectRootGlob::new("/srv/allowed".to_owned())
                 .expect("allowed project-root glob"),

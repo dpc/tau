@@ -151,7 +151,7 @@ one targeted worker follow-up, and combines the narrow VT evidence with directed
 rosters, replay metadata, exact fake-provider consumption, typed multi-agent
 store prefixes/suffixes, and bounded process/socket cleanup.
 An independent PTY case keeps a fresh target session agentless until one
-authenticated bare inter-session message auto-starts its first receiver. It
+authenticated bare inter-session message auto-starts the configured receiver role. It
 requires the new recipient's live `active/running` snapshot and the correlated hold-ready
 notice rendered later by the target PTY, uses the ordinary Ctrl-J binding once
 to select the exact recipient, then explicitly cancels the provider hold.

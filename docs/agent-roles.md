@@ -370,42 +370,27 @@ a restart; only a delivery that already committed remains in history. Alerts
 only advise the model; they do not grant `compact` if role policy disables the
 tool.
 
-Roles opt into bare inter-session messages with ordinary inherited capabilities.
-`inter_session_receiver` allows a role's agents to receive them, while
-`inter_session_auto_start` also allows Tau to start that role when no live
-receiver exists:
+Bare inter-session messages use one session-level receiver role:
 
 ```yaml
-agents:
-  role_groups:
-    coordination:
-      inter_session_receiver: true
-      inter_session_auto_start: true
-      roles:
-        project-manager:
-          order: 0
-        task-manager:
-          order: 10
-          inter_session_auto_start: false
-    engineer:
-      roles:
-        engineer:
-          inter_session_receiver: true
-          inter_session_auto_start: true
+inter_session:
+  receiver:
+    role: coordinator
+    # auto_start: true
 ```
 
-Group values are defaults and role values override them with normal role
-layering; `null` clears an inherited value.
-Auto-start requires receiver capability. Multiple groups and multiple
-auto-start roles are valid.
+`role` must name an enabled effective role. `auto_start` defaults to true; set
+it to false to accept bare messages only while an instance of that role is
+already live. Omitting `receiver`, or setting it to `null` in a later layer,
+disables bare-session addressing. Exact agent addresses remain available.
 
-Live routing keeps idle/least-recently-routed fairness across all eligible
-receiver roles. If none is live, Tau walks roles in configured group order and
-then within-group `order`/name order, skipping disabled or currently unavailable
-roles and models. The new endpoint uses that role's normal model, skill, prompt,
-and tool policy and does not inherit the remote sender's parent, cwd, transcript,
-or watches. Busy eligible receivers are reused instead of creating more agents.
-The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
+Live routing keeps idle/least-recently-routed fairness across eligible instances
+of the configured role. If none is live and auto-start is enabled, Tau starts
+one when that role's model is available. The new endpoint uses the role's normal
+model, skill, prompt, and tool policy and does not inherit the remote sender's
+parent, cwd, transcript, or watches. Busy eligible receivers are reused instead
+of creating more agents. The removed per-role receiver keys and superseded flat
+receiver schema are not accepted.
 
 ```json5
 {

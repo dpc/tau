@@ -483,10 +483,12 @@ both after exact-session admission and before discovery projection or message
 submission so a same-id restart cannot reuse an earlier allowed snapshot. The
 current session bypasses that remote policy; inbound peer authentication and
 local-agent messaging remain separate.
-The same event loop owns inter-session receiver admission, fair live selection,
-and configured-order role auto-start. It admits bounded count/bytes/rate before
-creation, treats accepted startup placeholders and busy eligible agents as
-reusable endpoints, and
+The same event loop owns inter-session receiver admission and fair live
+selection restricted to instances of the single configured session receiver
+role. When its session-level auto-start switch is enabled, Tau may start only
+that role. The event loop admits bounded count/bytes/rate before creation,
+treats accepted startup placeholders and busy eligible agents as reusable
+endpoints, and
 releases sender success only from the receive projection's post-commit
 continuation. This state is generation-bound and in-memory; crash ambiguity
 follows best-effort at-least-once semantics.

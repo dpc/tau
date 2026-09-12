@@ -2614,8 +2614,8 @@ impl Harness {
         else {
             return self
                 .config
-                .inter_session_receivers
-                .first()
+                .inter_session_receiver
+                .as_ref()
                 .map(|_| ())
                 .ok_or(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver);
         };
@@ -2651,14 +2651,11 @@ impl Harness {
     }
 
     fn select_peer_entrypoint_recipient(&self) -> Result<AgentId, String> {
-        if self.config.inter_session_receivers.is_empty() {
+        let Some(receiver) = self.config.inter_session_receiver.as_ref() else {
             return Err(INTER_SESSION_UNAVAILABLE.to_owned());
-        }
+        };
         let role_available = |role: &str| {
-            self.config
-                .inter_session_receivers
-                .iter()
-                .any(|receiver| receiver.role == role)
+            receiver.role == role
                 && self.config.available_roles.contains_key(role)
                 && crate::model::model_for_role(
                     &self.provider_runtime.model_info,
@@ -2739,25 +2736,25 @@ impl Harness {
                 .map_err(PeerEntrypointResolutionError::Rejected)?;
             return Ok((recipient_id, false, admitted_at));
         }
+        let receiver = self
+            .config
+            .inter_session_receiver
+            .as_ref()
+            .filter(|receiver| receiver.auto_start)
+            .ok_or(PeerEntrypointResolutionError::NoReceiver)?;
         let role = self
             .config
-            .inter_session_receivers
-            .iter()
-            .filter(|receiver| receiver.auto_start)
-            .find_map(|receiver| {
-                self.config
-                    .available_roles
-                    .contains_key(&receiver.role)
-                    .then(|| {
-                        crate::model::model_for_role(
-                            &self.provider_runtime.model_info,
-                            &self.config.available_roles,
-                            &receiver.role,
-                        )
-                    })
-                    .flatten()
-                    .map(|_| receiver.role.clone())
+            .available_roles
+            .contains_key(&receiver.role)
+            .then(|| {
+                crate::model::model_for_role(
+                    &self.provider_runtime.model_info,
+                    &self.config.available_roles,
+                    &receiver.role,
+                )
             })
+            .flatten()
+            .map(|_| receiver.role.clone())
             .ok_or(PeerEntrypointResolutionError::NoReceiver)?;
         // Resolve role, model, required skills, and the ordinary endpoint shape
         // before spending. `prepare_start_agent_request` mints identity but
@@ -2881,14 +2878,11 @@ impl Harness {
     /// Revalidate one concrete endpoint against current receiver-role,
     /// provider/model, skill, and termination authority.
     pub(crate) fn peer_entrypoint_recipient_is_eligible(&self, recipient_id: &AgentId) -> bool {
-        if self.config.inter_session_receivers.is_empty() {
+        let Some(receiver) = self.config.inter_session_receiver.as_ref() else {
             return false;
-        }
+        };
         let role_available = |role: &str| {
-            self.config
-                .inter_session_receivers
-                .iter()
-                .any(|receiver| receiver.role == role)
+            receiver.role == role
                 && self.config.available_roles.contains_key(role)
                 && crate::model::model_for_role(
                     &self.provider_runtime.model_info,

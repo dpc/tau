@@ -255,43 +255,22 @@ fn role_groups_sort_roles_by_order_then_name() {
     );
 }
 
-/// Inter-session receiver candidates follow configured group-major navigation
-/// order rather than the role hash map's iteration order.
+/// The session-level inter-session receiver is retained independently of role
+/// group ordering.
 #[test]
-fn inter_session_receivers_preserve_configured_role_order_across_groups() {
+fn inter_session_receiver_uses_session_policy() {
     let mut settings = path_tau_config_settings::HarnessSettings::built_in();
-    let engineer = settings.roles.get_mut("engineer").expect("engineer role");
-    engineer.inter_session_receiver = Some(true);
-    engineer.inter_session_auto_start = Some(true);
-    settings.roles.insert(
-        "project-manager".to_owned(),
-        tau_config::settings::AgentRole {
-            inter_session_receiver: Some(true),
-            inter_session_auto_start: Some(true),
-            ..Default::default()
-        },
-    );
-    settings.role_groups.push(tau_config::settings::RoleGroup {
-        name: "project".to_owned(),
-        roles: vec!["project-manager".to_owned()],
-    });
+    settings.inter_session.receiver =
+        Some(tau_config::inter_session_policy::InterSessionReceiver {
+            role: "engineer".to_owned(),
+            auto_start: false,
+        });
 
     let loaded = load_roles(&settings);
 
-    assert_eq!(
-        loaded
-            .inter_session_receivers
-            .iter()
-            .map(|receiver| receiver.role.as_str())
-            .collect::<Vec<_>>(),
-        vec!["engineer", "project-manager"]
-    );
-    assert!(
-        loaded
-            .inter_session_receivers
-            .iter()
-            .all(|receiver| receiver.auto_start)
-    );
+    let receiver = loaded.inter_session_receiver.expect("receiver");
+    assert_eq!(receiver.role, "engineer");
+    assert!(!receiver.auto_start);
 }
 
 /// Provider snapshots are runtime registry input, not just private extension
@@ -2063,7 +2042,7 @@ fn load_roles_ignores_stale_harness_state() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        inter_session_receivers: _,
+        inter_session_receiver: _,
     } = load_roles(&harness_settings);
     assert!(role_overrides.is_empty());
     assert_eq!(selected_role, "engineer");
@@ -2217,7 +2196,7 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        inter_session_receivers: _,
+        inter_session_receiver: _,
     } = load_roles(&harness_settings);
     assert!(!role_overrides.contains_key("default"));
     assert!(!roles.contains_key("default"));
@@ -2279,7 +2258,7 @@ fn role_missing_model_uses_model_defaults_and_effort_inherits_agent_default() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        inter_session_receivers: _,
+        inter_session_receiver: _,
     } = load_roles(&harness_settings);
     let available = ["local/aaa".into(), "local/engineer".into()];
     let available_provider_models = provider_models(

@@ -7241,7 +7241,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
 /// the terminal's ordinary tool-error presentation.
 #[test]
 fn message_tool_receiver_rejection_renders_actionable_detail() {
-    let (_term, handle, vt) = setup(120, 24);
+    let (_term, handle, vt) = setup(160, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
@@ -7258,7 +7258,7 @@ fn message_tool_receiver_rejection_renders_actionable_detail() {
             call_id: "message-no-receiver".into(),
             tool_name: tau_proto::ToolName::new("message"),
             tool_type: tau_proto::ToolType::Function,
-            message: "target live; no receiver; set `inter_session_receiver`".to_owned(),
+            message: "target live; no receiver; set `inter_session.receiver.role`".to_owned(),
             details: None,
             originator: tau_proto::PromptOriginator::User,
             display: None,
@@ -7267,14 +7267,14 @@ fn message_tool_receiver_rejection_renders_actionable_detail() {
     );
     sync(&handle);
 
-    let text = vt.screen_text(120).join("\n");
+    let text = vt.screen_text(160).join("\n");
     assert!(
         text.contains("target live; no receiv"),
         "terminal did not retain the receiver diagnosis: {text}"
     );
     assert!(
-        text.contains("inter_session_receiver"),
-        "terminal did not retain the configuration key: {text}"
+        text.contains("session.receiver.role"),
+        "terminal did not retain the actionable configuration-key suffix: {text}"
     );
 }
 

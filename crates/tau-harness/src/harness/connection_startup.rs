@@ -11,7 +11,7 @@ use crate::event::StartupFrameKind;
 impl Harness {
     /// Return whether this harness accepts bare inter-session messages.
     pub(crate) fn has_peer_entrypoint(&self) -> bool {
-        !self.config.inter_session_receivers.is_empty()
+        self.config.inter_session_receiver.is_some()
     }
 
     pub(super) fn accept_initial_client(

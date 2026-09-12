@@ -109,8 +109,9 @@ its selected role and tool profile but not the parent's transcript, so the
 delegating prompt must include the context it needs.
 
 Messaging works within a session and can use an exact known address across
-cooperating local Tau sessions. Cross-session discovery, bare session routing,
-and authority to auto-start an entrypoint agent are separately opt-in. Watchers
+cooperating local Tau sessions. Cross-session discovery is separately opt-in.
+Configuring one bare-session receiver role also permits Tau to auto-start it by
+default; `auto_start: false` restricts routing to an already-live instance. Watchers
 can see self-reported semantic work status and sanitized provider retry progress without
 receiving another agent's hidden prompts or raw provider data. The session-local
 watch graph is acyclic; an enable that would close a cycle is rejected without

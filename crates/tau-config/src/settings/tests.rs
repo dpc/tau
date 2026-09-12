@@ -764,6 +764,8 @@ fn removed_harness_config_spellings_are_rejected() {
         ("sessionRetention", "1d"),
         ("agentRetention", "1d"),
         ("diagnosticRetention", "1d"),
+        ("interSession", "{}"),
+        ("inter_session.receiver.autoStart", "false"),
         ("customPrompts", "{}"),
         ("toolPolicy", "{}"),
         ("showIntroductionNotice", "false"),
@@ -5099,137 +5101,106 @@ fn harness_role_groups_reject_duplicate_role_names() {
     assert!(err.to_string().contains("appears in multiple role_groups"));
 }
 
-/// Inter-session capabilities inherit as ordinary role fields and retain the
-/// scalar absent/null/value layering contract.
+/// The nested receiver merges field-by-field across layers and defaults
+/// auto-start on.
 #[test]
-fn inter_session_capabilities_inherit_and_override_per_role() {
+fn inter_session_receiver_merges_and_defaults_auto_start() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
-agents:
-  role_groups:
-    manager:
-      inter_session_receiver: true
-      inter_session_auto_start: true
-      roles:
-        project-manager: {}
-        task-manager:
-          inter_session_auto_start: false
+inter_session:
+  receiver:
+    role: engineer
 "#,
     )
     .expect("write base");
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("load receiver policy");
-    assert_eq!(
-        settings.roles["task-manager"].inter_session_receiver,
-        Some(true)
-    );
-    assert_eq!(
-        settings.roles["task-manager"].inter_session_auto_start,
-        Some(false)
-    );
-    assert_eq!(
-        settings.roles["project-manager"].inter_session_auto_start,
-        Some(true)
-    );
+    let receiver = settings.inter_session.receiver.expect("receiver");
+    assert_eq!(receiver.role, "engineer");
+    assert!(receiver.auto_start);
 
     std::fs::create_dir(td.path().join("harness.d")).expect("drop-in dir");
     std::fs::write(
-        td.path().join("harness.d/10-clear.yaml"),
-        "agents: { role_groups: { manager: { inter_session_receiver: null, inter_session_auto_start: null } } }",
+        td.path().join("harness.d/10-auto-start.yaml"),
+        "inter_session: { receiver: { auto_start: false } }",
     )
-    .expect("write clear");
+    .expect("write override");
     let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("clear inherited fields");
-    assert_eq!(
-        settings.roles["project-manager"].inter_session_receiver,
-        None
-    );
-    assert_eq!(
-        settings.roles["project-manager"].inter_session_auto_start,
-        None
-    );
-    assert_eq!(settings.roles["task-manager"].inter_session_receiver, None);
-    assert_eq!(
-        settings.roles["task-manager"].inter_session_auto_start,
-        Some(false),
-        "role override remains effective over the later group clear"
-    );
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("merge receiver fields");
+    let receiver = settings.inter_session.receiver.expect("receiver");
+    assert_eq!(receiver.role, "engineer");
+    assert!(!receiver.auto_start);
 }
 
-/// Receiver and auto-start capabilities may be enabled across multiple groups.
+/// Explicit null disables bare-session receiver addressing.
 #[test]
-fn inter_session_capabilities_allow_multiple_groups() {
+fn inter_session_receiver_null_disables_receiver() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "inter_session: { receiver: { role: engineer } }",
+    )
+    .expect("write base");
+    std::fs::create_dir(td.path().join("harness.d")).expect("drop-in dir");
+    std::fs::write(
+        td.path().join("harness.d/10-disable.yaml"),
+        "inter_session: { receiver: null }",
+    )
+    .expect("write disable");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("disable receiver");
+    assert_eq!(settings.inter_session.receiver, None);
+}
+
+/// Receiver role validation uses the final enabled role set after layered role
+/// and profile processing.
+#[test]
+fn inter_session_receiver_requires_enabled_effective_role() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
+inter_session:
+  receiver:
+    role: project-manager
+default_profile: no-manager
 agents:
   role_groups:
-    engineer:
-      inter_session_receiver: true
-      inter_session_auto_start: true
     manager:
-      inter_session_receiver: true
-      inter_session_auto_start: true
       roles:
         project-manager: {}
-"#,
-    )
-    .expect("write");
-    let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("multiple receiver groups");
-    assert!(
-        settings.roles["engineer"]
-            .inter_session_auto_start
-            .unwrap_or(false)
-    );
-    assert!(
-        settings.roles["project-manager"]
-            .inter_session_auto_start
-            .unwrap_or(false)
-    );
-}
-
-/// Auto-start spending authority without receiver authority is rejected after
-/// role inheritance, while disabled incoherent roles are irrelevant.
-#[test]
-fn inter_session_auto_start_requires_receiver_on_enabled_roles() {
-    let td = TempDir::new().expect("tempdir");
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        r#"
-agents:
-  role_groups:
-    manager:
-      roles:
-        project-manager:
-          inter_session_auto_start: true
+profiles:
+  no-manager:
+    agents:
+      role_groups:
+        manager:
+          roles:
+            project-manager:
+              enable: false
 "#,
     )
     .expect("write");
     let error =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("incoherent role");
-    assert!(error.to_string().contains(
-        "role `project-manager` enables `inter_session_auto_start` without `inter_session_receiver`"
-    ));
-
-    std::fs::write(
-        td.path().join("harness.yaml"),
-        "agents: { role_groups: { manager: { roles: { project-manager: { enable: false, inter_session_auto_start: true } } } } }",
-    )
-    .expect("disable incoherent role");
-    load_harness_settings_in(&dirs_with_config(td.path())).expect("disabled role is removed first");
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("disabled receiver role");
+    assert!(
+        error
+            .to_string()
+            .contains("inter-session receiver role `project-manager` is not enabled")
+    );
 }
 
-/// Removed peer-entrypoint keys fail explicitly instead of being silently
-/// ignored or mixed with role capabilities.
+/// Removed multi-role and superseded flat schemas fail explicitly.
 #[test]
-fn inter_session_configuration_rejects_removed_peer_entrypoint_schema() {
+fn inter_session_configuration_rejects_removed_receiver_schemas() {
     for yaml in [
         "agents: { role_groups: { manager: { peer_entrypoint: {} } } }",
         "agents: { role_groups: { manager: { peerEntryPoint: { autoStartRole: project-manager } } } }",
+        "agents: { role_groups: { manager: { inter_session_receiver: true } } }",
+        "agents: { role_groups: { manager: { roles: { project-manager: { inter_session_auto_start: true } } } } }",
+        "inter_session: { receiver_role: coordinator }",
+        "inter_session: { auto_start: true }",
     ] {
         let td = TempDir::new().expect("tempdir");
         std::fs::write(td.path().join("harness.yaml"), yaml).expect("write removed schema");

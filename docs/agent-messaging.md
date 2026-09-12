@@ -131,22 +131,22 @@ Use `&<session-id>` to send a message to another session:
 message({"recipient_id":"&01JZ...","message":"Please compare this with your session."})
 ```
 
-The target session chooses one eligible receiving agent, preferring idle over
-running and least-recently routed then agent id. A busy eligible agent is reused;
-sending to a session is never enumeration or broadcast. Success returns the
-resolved canonical `session/agent` address and delivery status. If no eligible
-agent exists, the target walks roles with
-`inter_session_auto_start` in deterministic configured order, skipping disabled
-or unavailable roles/models. Otherwise sending to the session fails. A live
+The target session chooses one eligible live or pending instance of its
+configured `inter_session.receiver.role`, preferring idle over running and
+least-recently routed then agent id. A busy eligible agent is reused; sending to
+a session is never enumeration or broadcast. Success returns the resolved
+canonical `session/agent` address and delivery status. If no eligible agent
+exists and `receiver.auto_start` is enabled (the default), Tau starts that role
+when its model is available. Otherwise sending to the session fails. A live
 target with no configured or eligible receiver is distinct from a target that
 cannot be discovered or reached: the caller sees `target live; no receiver; set
-\`inter_session_receiver\``. Target-local diagnostic text is not relayed across
-the inter-session boundary. Multiple receiving roles may span role groups;
-concurrent live sends coalesce onto one newly created endpoint.
+\`inter_session.receiver.role\``. Target-local diagnostic text is not relayed
+across the inter-session boundary. Concurrent live sends coalesce onto one newly
+created endpoint.
 
 Use `&<session-id>/@<agent-id>` or `<session-id>/<agent-id>` to send to a
-specific agent in another session. This known-address behavior works even when
-the target role is not an inter-session receiver.
+specific agent in another session. This known-address behavior works regardless
+of the target session's receiver configuration.
 
 Use `<session-id>/<agent_id>` as `recipient_id` to address an agent owned by
 another running harness daemon:
@@ -208,7 +208,7 @@ hot-reload.
 External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection. In contrast, the fixed `target
-live; no receiver; set \`inter_session_receiver\`` error means discovery and
+live; no receiver; set \`inter_session.receiver.role\`` error means discovery and
 transport reached a live harness, but its bare receiver policy cannot accept
 the message. Tau does not relay target-local diagnostic text.
 

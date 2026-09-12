@@ -208,13 +208,11 @@ impl GateFixture {
                     "deterministic-peer": {
                         "model": "fake/test",
                         "tools": ["restart_test_dummy"],
-                        "inter_session_receiver": true,
-                        "inter_session_auto_start": true,
                     }
                 }),
             ),
         };
-        let harness = serde_json::json!({
+        let mut harness = serde_json::json!({
             "agents": {
                 "default_role": default_role,
                 "id_template": "main",
@@ -226,6 +224,13 @@ impl GateFixture {
             },
             "extensions": extensions,
         });
+        if mode == FixtureMode::PeerEntrypoint {
+            harness["inter_session"] = serde_json::json!({
+                "receiver": {
+                    "role": "deterministic-peer"
+                }
+            });
+        }
         let harness_json = serde_json::to_string_pretty(&harness)?;
         std::fs::write(
             tau_config.join("harness.yaml"),

@@ -1455,7 +1455,7 @@ fn tools_drift_invalidates_chain_anchor() {
 fn peer_auto_start_handover_dispatches_tool_without_human_ui_prompt() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+    configure_inter_session_receiver(&mut h, "engineer", true);
     let _tool = connect_test_tool(&mut h, "peer-tool-owner");
     h.tool_routing.registry.register(
         &crate::test_connection_id("peer-tool-owner"),

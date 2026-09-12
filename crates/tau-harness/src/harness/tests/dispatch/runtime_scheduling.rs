@@ -3032,7 +3032,7 @@ fn activating_wait_settlement_dispatches_once_and_preserves_next_input() {
 fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+    configure_inter_session_receiver(&mut h, "engineer", true);
     let received = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "peer-activating-wait".to_owned(),
@@ -3235,7 +3235,7 @@ fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
     let state = td.path().join("state");
     let agent_id = {
         let mut h = quiet_provider_harness(&state).expect("start");
-        configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+        configure_inter_session_receiver(&mut h, "engineer", true);
         let received = h.handle_external_agent_message_request_without_auth_for_test(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "peer-activating-wait-restart".to_owned(),

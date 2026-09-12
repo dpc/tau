@@ -108,6 +108,14 @@ veto it. The policy applies to both `session_list` and exact cross-session
 messages. It is fixed in the startup configuration snapshot and does not
 hot-reload.
 
+`inter_session.receiver.role` selects the one enabled effective role that
+handles messages addressed to the bare session. `receiver.auto_start` defaults
+to `true`; set it to `false` to require an already-live instance. Tau reuses an
+eligible live or pending instance of that role and otherwise starts one when
+allowed and its model is available. Omitting `receiver`, or clearing it with
+`receiver: null`, disables bare-session addressing without affecting exact
+cross-session agent addresses.
+
 `tool_policy.rules` is harness-owned declarative tool-surface policy. Rules are
 keyed so a user can disable built-ins such as `builtin.chatgpt-shell` with
 `enable: false`; matching rules run `disable_tool_tags` before

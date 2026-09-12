@@ -1105,8 +1105,8 @@ pub struct HarnessSettings {
     /// Optional lifetime of shared original-byte artifacts since last explicit
     /// put.
     pub artifact_retention: Option<RetentionDuration>,
-    /// Outbound remote-session access policy matched against canonical project
-    /// roots.
+    /// Session-level bare-message receiver and outbound remote-session access
+    /// policy.
     pub inter_session: InterSessionPolicy,
     /// Whether a newly spawned interactive harness greets its initial UI with
     /// the Tau onboarding notice.
@@ -1340,7 +1340,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         validate_custom_prompts(&settings.custom_prompts).map_err(D::Error::custom)?;
         settings.remove_disabled_roles();
         settings
-            .validate_inter_session_roles()
+            .validate_inter_session_receiver()
             .map_err(D::Error::custom)?;
         settings
             .validate_context_size_alerts()
@@ -1808,10 +1808,6 @@ struct RawRoleGroup {
     #[serde(deserialize_with = "present_option")]
     order: Option<Option<i64>>,
     #[serde(deserialize_with = "present_option")]
-    inter_session_receiver: Option<Option<bool>>,
-    #[serde(deserialize_with = "present_option")]
-    inter_session_auto_start: Option<Option<bool>>,
-    #[serde(deserialize_with = "present_option")]
     description: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
@@ -2060,10 +2056,6 @@ struct AgentRolePatch {
     #[serde(deserialize_with = "present_option")]
     order: Option<Option<i64>>,
     #[serde(deserialize_with = "present_option")]
-    inter_session_receiver: Option<Option<bool>>,
-    #[serde(deserialize_with = "present_option")]
-    inter_session_auto_start: Option<Option<bool>>,
-    #[serde(deserialize_with = "present_option")]
     description: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
@@ -2110,8 +2102,6 @@ impl RawRoleGroup {
             enable: self.enable,
             visible: self.visible,
             order: self.order,
-            inter_session_receiver: self.inter_session_receiver,
-            inter_session_auto_start: self.inter_session_auto_start,
             description: self.description.clone(),
             model: self.model.clone(),
             effort: self.effort,
@@ -2339,20 +2329,17 @@ impl HarnessSettings {
         Ok(())
     }
 
-    fn validate_inter_session_roles(&self) -> Result<(), SettingsError> {
-        let mut role_names = self.roles.keys().collect::<Vec<_>>();
-        role_names.sort();
-        for role_name in role_names {
-            let role = &self.roles[role_name];
-            if role.inter_session_auto_start.unwrap_or(false)
-                && !role.inter_session_receiver.unwrap_or(false)
-            {
-                return Err(SettingsError::InvalidInterSessionAutoStart {
-                    role: role_name.to_owned(),
-                });
-            }
+    fn validate_inter_session_receiver(&self) -> Result<(), SettingsError> {
+        let Some(receiver) = &self.inter_session.receiver else {
+            return Ok(());
+        };
+        if self.roles.contains_key(&receiver.role) {
+            Ok(())
+        } else {
+            Err(SettingsError::UnknownInterSessionReceiverRole {
+                role: receiver.role.clone(),
+            })
         }
-        Ok(())
     }
 
     fn validate_context_size_alerts(&self) -> Result<(), SettingsError> {
@@ -2818,20 +2805,6 @@ pub struct AgentRole {
     /// roles with the same order, or without an order, are sorted by role name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
-    /// Whether agents created with this role may receive bare inter-session
-    /// messages. Unset effective values are disabled.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        alias = "interSessionReceiver"
-    )]
-    pub inter_session_receiver: Option<bool>,
-    /// Whether this role may be started when a bare inter-session message has
-    /// no live receiver. This requires [`Self::inter_session_receiver`].
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        alias = "interSessionAutoStart"
-    )]
-    pub inter_session_auto_start: Option<bool>,
     /// Short free-form summary shown in role-selection completion menus.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -3579,12 +3552,6 @@ impl AgentRole {
         if let Some(order) = patch.order {
             self.order = order;
         }
-        if let Some(inter_session_receiver) = patch.inter_session_receiver {
-            self.inter_session_receiver = inter_session_receiver;
-        }
-        if let Some(inter_session_auto_start) = patch.inter_session_auto_start {
-            self.inter_session_auto_start = inter_session_auto_start;
-        }
         if let Some(description) = &patch.description {
             self.description = description.clone();
         }
@@ -3697,9 +3664,9 @@ pub enum SettingsError {
         /// Later group that attempted to contain the same role.
         second_group: String,
     },
-    /// An inter-session auto-start role lacks receiver authority.
-    InvalidInterSessionAutoStart {
-        /// Incoherently configured role name.
+    /// The configured inter-session receiver role is not enabled.
+    UnknownInterSessionReceiverRole {
+        /// Missing effective role name.
         role: String,
     },
     /// A command-line role override named a role absent from effective config.
@@ -3750,10 +3717,9 @@ impl fmt::Display for SettingsError {
                 f,
                 "configuration profile `{profile}` changes unknown extension `{extension}`"
             ),
-            Self::InvalidInterSessionAutoStart { role } => write!(
-                f,
-                "role `{role}` enables `inter_session_auto_start` without `inter_session_receiver`"
-            ),
+            Self::UnknownInterSessionReceiverRole { role } => {
+                write!(f, "inter-session receiver role `{role}` is not enabled")
+            }
             Self::InvalidHarnessConfigCliOverride(message) => {
                 write!(f, "invalid harness config CLI override: {message}")
             }
@@ -3782,7 +3748,7 @@ impl std::error::Error for SettingsError {
         match self {
             Self::Config(source) => Some(source),
             Self::DuplicateGroupedRole { .. }
-            | Self::InvalidInterSessionAutoStart { .. }
+            | Self::UnknownInterSessionReceiverRole { .. }
             | Self::UnknownRoleCliOverride(_)
             | Self::UnknownProfile(_)
             | Self::UnknownProfileExtension { .. }
@@ -4348,7 +4314,6 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     }
     role_settings.apply_role_cli_overrides(role_overrides)?;
     role_settings.remove_disabled_roles();
-    role_settings.validate_inter_session_roles()?;
     role_settings.apply_agent_globals_to_roles();
     role_settings.validate_context_size_alerts()?;
     role_settings.validate_web_tools()?;
@@ -4357,6 +4322,7 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     settings.context_size_alerts = role_settings.context_size_alerts;
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
+    settings.validate_inter_session_receiver()?;
     resolve_model_references(&mut settings, &aliases.aliases)?;
     Ok(settings)
 }

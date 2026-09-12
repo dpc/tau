@@ -1,4 +1,4 @@
-//! Outbound inter-session visibility and communication policy.
+//! Session-level inbound receiver and outbound access policy.
 
 use std::path::Path;
 
@@ -6,10 +6,13 @@ use globset::{GlobBuilder, GlobMatcher};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Session-wide policy for selecting remote sessions by canonical project root.
+/// Session-wide policy for bare-message receiving and remote-session access.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InterSessionPolicy {
+    /// Optional bare-session receiver. Omission disables bare-session
+    /// addressing.
+    pub receiver: Option<InterSessionReceiver>,
     /// Optional allowlist evaluated before the denylist.
     ///
     /// `None` permits every project root, while an explicit empty list permits
@@ -17,6 +20,21 @@ pub struct InterSessionPolicy {
     pub allow_project_roots: Option<Vec<ProjectRootGlob>>,
     /// Optional denylist whose matches always veto access.
     pub deny_project_roots: Option<Vec<ProjectRootGlob>>,
+}
+
+/// Single role authorized to receive bare inter-session messages.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterSessionReceiver {
+    /// Effective enabled role used for existing and auto-started recipients.
+    pub role: String,
+    /// Whether Tau may start the role when no eligible live instance exists.
+    #[serde(default = "default_receiver_auto_start")]
+    pub auto_start: bool,
+}
+
+const fn default_receiver_auto_start() -> bool {
+    true
 }
 
 impl InterSessionPolicy {

@@ -2,6 +2,20 @@ use std::path::Path;
 
 use super::InterSessionPolicy;
 
+/// Receiver auto-start defaults on while an omitted receiver remains disabled.
+#[test]
+fn receiver_is_optional_and_defaults_auto_start_on() {
+    let omitted = serde_yaml_ng::from_str::<InterSessionPolicy>("{}").expect("omitted receiver");
+    assert_eq!(omitted.receiver, None);
+
+    let configured =
+        serde_yaml_ng::from_str::<InterSessionPolicy>("receiver:\n  role: coordinator\n")
+            .expect("configured receiver");
+    let receiver = configured.receiver.expect("receiver");
+    assert_eq!(receiver.role, "coordinator");
+    assert!(receiver.auto_start);
+}
+
 /// Ensures an absent allowlist remains unrestricted while deny matches veto
 /// access after the allow decision.
 #[test]

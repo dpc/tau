@@ -126,7 +126,7 @@ impl ExternalMessageDeliveryError {
                 "target session changed before message delivery; retry".to_owned()
             }
             Self::Target(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver) => {
-                "target live; no receiver; set `inter_session_receiver`".to_owned()
+                "target live; no receiver; set `inter_session.receiver.role`".to_owned()
             }
             Self::Target(tau_proto::ExternalAgentMessageFailure::RecipientStopped) => {
                 "target recipient is stopped; start a replacement and retry".to_owned()

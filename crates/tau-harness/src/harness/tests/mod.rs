@@ -45,8 +45,8 @@ use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::harness::SessionGeneration;
 use crate::model::{
-    InterSessionReceiverRole, load_roles, role_infos, select_model_for_role,
-    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
+    load_roles, role_infos, select_model_for_role, selected_params_for_role,
+    thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::pending_agent_discovery::PendingAgentDiscovery;
 use crate::tool_turn::ToolTurnCategories;
@@ -95,14 +95,12 @@ enum TestMessage {
 
 /// Configure deterministic receiver authority directly for focused harness
 /// tests that do not load user role configuration.
-fn configure_inter_session_receivers(harness: &mut Harness, receivers: &[(&str, bool)]) {
-    harness.config.inter_session_receivers = receivers
-        .iter()
-        .map(|(role, auto_start)| InterSessionReceiverRole {
-            role: (*role).to_owned(),
-            auto_start: *auto_start,
-        })
-        .collect();
+fn configure_inter_session_receiver(harness: &mut Harness, role: &str, auto_start: bool) {
+    harness.config.inter_session_receiver =
+        Some(tau_config::inter_session_policy::InterSessionReceiver {
+            role: role.to_owned(),
+            auto_start,
+        });
 }
 
 impl TestProtocolItem {

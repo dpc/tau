@@ -238,9 +238,10 @@ array replacement:
   identity edges terminate, while any other cycle (including an unused cycle)
   fails startup. The resulting `HarnessSettings` contains only canonical model
   IDs and does not retain alias maps.
-- `inter_session_receiver` and `inter_session_auto_start` are ordinary scalar
-  role fields. Group defaults and role overrides can grant them across any
-  number of groups. Auto-start without effective receiver capability is invalid.
+- `inter_session.receiver` is a session-level optional object. Its required
+  `role` names one enabled effective role; `auto_start` defaults to true.
+  Ordinary layered object merging permits a later auto-start override to retain
+  the inherited role, while `receiver: null` disables bare-session addressing.
 - `visible` is ordinary inherited role metadata. Effective `false` suppresses
   only the built-in available-sub-task-role prompt catalog; it neither removes a
   role nor changes its authorization, diagnostics, UI lists, or other role

@@ -425,7 +425,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
             .ensure_agent_id_for_agent(&sender_cid)
             .expect("sender id"),
     );
-    configure_inter_session_receivers(&mut target, &[("engineer", true)]);
+    configure_inter_session_receiver(&mut target, "engineer", true);
     let ui_frames =
         connect_test_client(&mut target, "peer-auto-start-ui", tau_proto::ClientKind::Ui);
     target
@@ -785,7 +785,7 @@ fn external_message_no_receiver_failure_is_actionable_to_caller() {
         .expect("caller-visible tool error");
     assert_eq!(
         error,
-        "target live; no receiver; set `inter_session_receiver`"
+        "target live; no receiver; set `inter_session.receiver.role`"
     );
     assert!(session_agent_message_sent_events(&h).is_empty());
 
@@ -841,7 +841,7 @@ fn external_message_major_skew_warning_headers_real_failure() {
         .expect("caller-visible tool error");
     assert_eq!(
         error,
-        format!("{warning}\n\ntarget live; no receiver; set `inter_session_receiver`")
+        format!("{warning}\n\ntarget live; no receiver; set `inter_session.receiver.role`")
     );
     h.shutdown().expect("shutdown");
 }
@@ -1019,20 +1019,13 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
     h.shutdown().expect("shutdown");
 }
 
-/// Bare routing applies established idle-first fairness across receiver roles
-/// from different configured groups.
+/// Bare routing applies established idle-first fairness across live instances
+/// of the configured receiver role.
 #[test]
 fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    let reviewer_role = h.config.available_roles["engineer"].clone();
-    h.config
-        .available_roles
-        .insert("cross-group-reviewer".to_owned(), reviewer_role);
-    configure_inter_session_receivers(
-        &mut h,
-        &[("engineer", false), ("cross-group-reviewer", false)],
-    );
+    configure_inter_session_receiver(&mut h, "engineer", false);
     let busy = ensure_test_user_agent(&mut h);
     let busy_id = h.ensure_agent_id_for_agent(&busy).expect("busy id");
     h.agent_runtime
@@ -1042,7 +1035,7 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
         .expect("busy agent")
         .turn
         .published_runtime_state = tau_proto::AgentRuntimeState::Running;
-    let idle = h.create_durable_user_agent(test_session_id("s1"), "cross-group-reviewer");
+    let idle = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     let idle_id = h.ensure_agent_id_for_agent(&idle).expect("idle id");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "bare-select".to_owned(),
@@ -1077,7 +1070,7 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
 fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
+    configure_inter_session_receiver(&mut h, "engineer", false);
     h.create_durable_user_agent(test_session_id("s1"), "engineer");
     h.provider_runtime.model_info.clear();
     let request = tau_proto::ExternalAgentMessageRequest {
@@ -1102,14 +1095,14 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     assert!(durable_agent_message_received_events(&h).is_empty());
 }
 
-/// The separate auto-start role grant creates one ordinary role-backed endpoint
-/// when no eligible endpoint exists and uses the peer input as its first
-/// prompt.
+/// The configured receiver's auto-start policy creates one ordinary role-backed
+/// endpoint when no eligible endpoint exists and uses the peer input as its
+/// first prompt.
 #[test]
 fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+    configure_inter_session_receiver(&mut h, "engineer", true);
     let agents_before = h.agent_runtime.agent_registry.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auto-start".to_owned(),
@@ -1182,23 +1175,16 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     );
 }
 
-/// Multiple usable auto-start grants choose the first configured role without
-/// warning or hash-map iteration.
+/// Auto-start uses the one configured receiver role.
 #[test]
-fn bare_peer_auto_start_uses_first_configured_candidate() {
+fn bare_peer_auto_start_uses_configured_role() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let role = h.config.available_roles["engineer"].clone();
     h.config
         .available_roles
         .insert("preferred-receiver".to_owned(), role.clone());
-    h.config
-        .available_roles
-        .insert("fallback-receiver".to_owned(), role);
-    configure_inter_session_receivers(
-        &mut h,
-        &[("preferred-receiver", true), ("fallback-receiver", true)],
-    );
+    configure_inter_session_receiver(&mut h, "preferred-receiver", true);
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
@@ -1232,11 +1218,10 @@ fn bare_peer_auto_start_uses_first_configured_candidate() {
     );
 }
 
-/// Auto-start walks past a role pruned from runtime availability and a receiver
-/// whose explicitly configured model is unavailable, then selects the next
-/// usable grant.
+/// Auto-start fails without spawning when the configured role's model is
+/// unavailable.
 #[test]
-fn bare_peer_auto_start_skips_unavailable_role_model() {
+fn bare_peer_auto_start_rejects_unavailable_role_model() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let mut unavailable = h.config.available_roles["engineer"].clone();
@@ -1244,14 +1229,7 @@ fn bare_peer_auto_start_skips_unavailable_role_model() {
     h.config
         .available_roles
         .insert("unavailable-receiver".to_owned(), unavailable);
-    configure_inter_session_receivers(
-        &mut h,
-        &[
-            ("required-skill-pruned-receiver", true),
-            ("unavailable-receiver", true),
-            ("engineer", true),
-        ],
-    );
+    configure_inter_session_receiver(&mut h, "unavailable-receiver", true);
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
@@ -1268,21 +1246,12 @@ fn bare_peer_auto_start_skips_unavailable_role_model() {
         },
     );
 
-    assert_eq!(result.failure, None);
-    let recipient = result.recipient_id.expect("fallback recipient");
-    let cid = h
-        .agent_runtime
-        .agent_registry
-        .agent_routes
-        .get(recipient.as_str())
-        .expect("recipient route");
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[cid]
-            .identity
-            .role
-            .as_deref(),
-        Some("engineer")
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver)
     );
+    assert_eq!(result.recipient_id, None);
+    assert!(!result.started);
 }
 
 /// The explicit durable peer-purpose marker survives a cold resume before any
@@ -1303,7 +1272,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
             })),
         )
         .expect("register metadata interceptor");
-        configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+        configure_inter_session_receiver(&mut h, "engineer", true);
         let result = h.handle_external_agent_message_request_without_auth_for_test(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "restore-peer".to_owned(),
@@ -1389,7 +1358,7 @@ fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
 fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+    configure_inter_session_receiver(&mut h, "engineer", true);
     let target_session = h.session_runtime.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("single-flight-{suffix}"),
@@ -1436,7 +1405,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
 fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+    configure_inter_session_receiver(&mut h, "engineer", true);
     let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     for index in 0..32 {
         h.agent_runtime
@@ -1489,7 +1458,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
 fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
+    configure_inter_session_receiver(&mut h, "engineer", false);
     let _interceptor = connect_test_tool(&mut h, "pending-endpoint-interceptor");
     h.handle_extension_event(
         "pending-endpoint-interceptor",
@@ -1578,7 +1547,7 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
 fn peer_input_rate_limit_bounds_live_burst() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
+    configure_inter_session_receiver(&mut h, "engineer", false);
     let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     let recipient =
         crate::parse_agent_id(h.ensure_agent_id_for_agent(&cid).expect("public agent id"));

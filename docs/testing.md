@@ -341,7 +341,7 @@ bounded condition-driven waits, process-group cleanup, and runtime-artifact
 cleanup remain independent oracles.
 A third topology starts the universal PTY agentless and tool-free, then uses a
 private exact same-process sender callback to authorize one bare external
-message. That message auto-starts the first receiver. Typed socket stats prove
+message. That message auto-starts the configured receiver role. Typed socket stats prove
 `active/running`; the correlated hold-ready notice is broadcast later, so
 its target-PTY projection proves that UI consumed the update before one real
 Ctrl-J selects the exact recipient. The test then cancels and reaps its correlated

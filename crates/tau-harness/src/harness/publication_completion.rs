@@ -1945,7 +1945,7 @@ impl Harness {
                     pending.recipient,
                     tau_proto::ExternalAgentMessageRecipient::BareEntrypoint
                 ) {
-                    if self.config.inter_session_receivers.is_empty() {
+                    if self.config.inter_session_receiver.is_none() {
                         tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver
                     } else {
                         tau_proto::ExternalAgentMessageFailure::Rejected

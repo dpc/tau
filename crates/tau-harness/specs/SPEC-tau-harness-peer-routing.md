@@ -8,19 +8,19 @@ The harness-owned `message` tool accepts bare `&<session-id>` and the exact-agen
 forms `&<session-id>/@<agent-id>` and `<session-id>/<agent-id>`. A bare address
 sends to the session, whose harness selects exactly one eligible loaded or
 pending receiving agent. Bare and exact authority are distinct protocol values.
-Session selection prefers idle over running and
-least-recently-routed then agent id; busy eligible agents are reused. If none
-exists, roles with effective `inter_session_auto_start` are checked in
-deterministic configured role order, skipping unavailable roles and models.
-Absence or unavailability of a grant fails without spawn. The result reports the
-resolved recipient. Successful model tool results report only delivery status and
-that resolved recipient; they do not expose recipient selection or auto-start
-mechanics.
+Session selection considers only live or pending instances of the single
+configured `inter_session.receiver.role`, prefers idle over running and
+least-recently-routed then agent id, and reuses busy eligible agents. If none
+exists and `receiver.auto_start` is enabled, Tau starts that role when its model
+is available. An omitted receiver, disabled auto-start, or unavailable model
+fails without spawn. The result reports the resolved recipient. Successful model
+tool results report only delivery status and that resolved recipient; they do
+not expose recipient selection or auto-start mechanics.
 Target rejections report only a fixed `ExternalAgentMessageFailure`
 classification. In particular, a reached bare target with no available
 inter-session receiver reports that condition separately from a target that
 cannot be reached. The sender renders a compact fixed diagnostic that directs
-the caller to set `inter_session_receiver`, and never exposes arbitrary
+the caller to set `inter_session.receiver.role`, and never exposes arbitrary
 target-local errors.
 
 Remote routing uses cooperative same-UID Tau IPC. Callback correlation proves
