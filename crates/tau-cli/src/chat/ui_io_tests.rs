@@ -15,6 +15,13 @@ const TEST_DELIVERY_ID_ONE: RendererDeliveryId = RendererDeliveryId::new(1);
 const TEST_DELIVERY_ID_TWO: RendererDeliveryId = RendererDeliveryId::new(2);
 const TEST_DELIVERY_ID_THREE: RendererDeliveryId = RendererDeliveryId::new(3);
 
+/// The interactive terminal identifies its executable, so harness warnings name
+/// `tau-cli` rather than its former chat-mode label.
+#[test]
+fn chat_ui_client_name_is_tau_cli() {
+    assert_eq!(CHAT_UI_CLIENT_NAME, "tau-cli");
+}
+
 /// Renderer delivery allocation starts at one and keeps each normal delivery
 /// distinct instead of sharing a counter with queue sizes or timestamps.
 #[test]
@@ -1642,8 +1649,8 @@ fn handshake_write_error_reads_pending_startup_disconnect() {
         &writer,
         &mut read_stream,
         &crate::ui_client::hello_message(
-            tau_proto::ExtensionName::parse("tau-chat")
-                .expect("chat UI name must satisfy the extension identifier grammar"),
+            tau_proto::ExtensionName::parse(CHAT_UI_CLIENT_NAME)
+                .expect("terminal UI name must satisfy the extension identifier grammar"),
             None,
         ),
     )

@@ -204,6 +204,7 @@ static NEXT_PROMPT_SUBMISSION_DIAGNOSTIC_SEQ: AtomicU64 = AtomicU64::new(1);
 
 const RENDERER_QUEUE_MAX_ITEMS: usize = 1_024;
 const RENDERER_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const CHAT_UI_CLIENT_NAME: &str = "tau-cli";
 static LAST_QUEUE_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
     path_std_sync::OnceLock::new();
 
@@ -1297,8 +1298,8 @@ pub(crate) fn run_chat(
         &writer,
         &mut read_stream,
         &crate::ui_client::hello_message(
-            tau_proto::ExtensionName::parse("tau-chat")
-                .expect("chat UI name must satisfy the extension identifier grammar"),
+            tau_proto::ExtensionName::parse(CHAT_UI_CLIENT_NAME)
+                .expect("terminal UI name must satisfy the extension identifier grammar"),
             Some(session_id),
         ),
     )?;

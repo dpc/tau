@@ -91,7 +91,7 @@ fn write_initial_ui_handshake(writer: &mut PeerOutputWriter<BufWriter<std::proce
         .write_message(&HarnessInputMessage::Hello(Hello {
             declaration_inspection: false,
             protocol_version: PROTOCOL_VERSION,
-            client_name: "tau-chat".parse().expect("valid chat client name"),
+            client_name: "tau-cli".parse().expect("valid terminal UI client name"),
             client_kind: ClientKind::Ui,
             expected_session_id: None,
             capabilities: Vec::new(),
@@ -556,7 +556,7 @@ fn late_startup_failure_does_not_emit_introduction_notice() {
     let _ = writer.write_message(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-chat".parse().expect("valid chat client name"),
+        client_name: "tau-cli".parse().expect("valid terminal UI client name"),
         client_kind: ClientKind::Ui,
         expected_session_id: None,
         capabilities: Vec::new(),
