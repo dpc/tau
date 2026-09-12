@@ -4523,6 +4523,247 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
     );
 }
 
+/// File-backed prompt fragments resolve relative to the Tau config directory
+/// and keep the same resolved-content de-duplication as inline fragments.
+#[test]
+fn harness_prompt_fragment_text_files_resolve_and_deduplicate() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(dir.join("shared.hbs"), "Use {{role.name}} carefully.").expect("write fragment");
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+agents:
+  prompt_fragments:
+    - { name: shared.policy, priority: 65, textFile: shared.hbs }
+  role_groups:
+    custom:
+      roles:
+        custom:
+          prompt_fragments:
+            - { name: custom.file, priority: 70, textFile: shared.hbs }
+"#,
+    )
+    .expect("write harness");
+    std::fs::create_dir(dir.join("harness.d")).expect("create drop-in directory");
+    std::fs::write(
+        dir.join("harness.d/10-inline.yaml"),
+        r#"
+agents:
+  prompt_fragments:
+    - { name: shared.policy, priority: 65, text: "Use {{role.name}} carefully." }
+"#,
+    )
+    .expect("write drop-in");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load config");
+    assert_eq!(
+        settings
+            .prompt_fragments
+            .iter()
+            .filter(|fragment| fragment.name == "shared.policy")
+            .count(),
+        1
+    );
+    assert_eq!(
+        settings.roles["custom"]
+            .prompt_fragments
+            .iter()
+            .find(|fragment| fragment.name == "custom.file")
+            .map(|fragment| fragment.text.as_str()),
+        Some("Use {{role.name}} carefully.")
+    );
+}
+
+/// Absolute file-backed prompt fragments do not require a configured Tau
+/// directory, including when supplied through a one-shot CLI config layer.
+#[test]
+fn harness_prompt_fragment_absolute_text_file_works_without_config_dir() {
+    let td = TempDir::new().expect("tempdir");
+    let fragment_path = td.path().join("absolute.hbs");
+    std::fs::write(&fragment_path, "Absolute fragment.").expect("write fragment");
+    let override_ = HarnessConfigCliOverride::from_str(&format!(
+        "agents.prompt_fragments=[{{name: absolute, priority: 66, textFile: {:?}}}]",
+        fragment_path.display().to_string()
+    ))
+    .expect("parse override");
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &TauDirs {
+            config_dir: None,
+            state_dir: None,
+        },
+        None,
+        &[],
+        &[override_],
+    )
+    .expect("load absolute fragment");
+    assert!(settings.prompt_fragments.iter().any(|fragment| {
+        fragment.name == "absolute" && fragment.text.as_str() == "Absolute fragment."
+    }));
+}
+
+/// Conflicting prompt text sources and unreadable files fail configuration
+/// without echoing inline prompt contents into the diagnostic.
+#[test]
+fn harness_prompt_fragment_text_file_errors_are_fatal_and_content_safe() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    disabled:
+      enable: false
+      prompt_fragments:
+        - name: disabled.private
+          priority: 70
+          textFile: missing-private.hbs
+      roles:
+        disabled: {}
+"#,
+    )
+    .expect("write unreadable fixture");
+    let error = load_harness_settings_in(&dirs_with_config(dir))
+        .expect_err("disabled role file must still be read");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("disabled.private") || diagnostic.contains("textFile"));
+    assert!(diagnostic.contains("missing-private.hbs"));
+
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+agents:
+  prompt_fragments:
+    - name: conflicting.private
+      priority: 70
+      text: "MILDLY PRIVATE INLINE CONTENT"
+      textFile: private.hbs
+"#,
+    )
+    .expect("write conflict fixture");
+    let error =
+        load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflict must be rejected");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("mutually exclusive"));
+    assert!(!diagnostic.contains("MILDLY PRIVATE INLINE CONTENT"));
+}
+
+/// Only selected profile prompt files are loaded; dormant profiles must not
+/// make an otherwise valid harness fail because their local files are absent.
+#[test]
+fn harness_prompt_fragment_text_files_only_load_for_selected_profiles() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+profiles:
+  dormant:
+    agents:
+      prompt_fragments:
+        - { name: dormant.private, priority: 70, textFile: absent.hbs }
+"#,
+    )
+    .expect("write profile fixture");
+
+    load_harness_settings_in(&dirs_with_config(dir)).expect("ignore dormant profile file");
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(dir),
+        Some(&profile_selection("dormant")),
+        &[],
+        &[],
+    )
+    .expect_err("selected profile file must be read");
+    assert!(error.to_string().contains("absent.hbs"));
+}
+
+/// Selected profiles resolve file-backed fragments before replaying every
+/// profile source layer, preserving additive and full-equality de-duplication.
+#[test]
+fn selected_profile_prompt_fragment_text_files_replay_across_layers() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(dir.join("shared.hbs"), "Selected shared fragment.").expect("write shared");
+    std::fs::write(dir.join("extra.hbs"), "Selected extra fragment.").expect("write extra");
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+profiles:
+  selected:
+    agents:
+      prompt_fragments:
+        - { name: selected.shared, priority: 70, textFile: shared.hbs }
+"#,
+    )
+    .expect("write base profile");
+    std::fs::create_dir(dir.join("harness.d")).expect("create drop-in directory");
+    std::fs::write(
+        dir.join("harness.d/10-selected.yaml"),
+        r#"
+profiles:
+  selected:
+    agents:
+      prompt_fragments:
+        - { name: selected.shared, priority: 70, text: "Selected shared fragment." }
+        - { name: selected.extra, priority: 71, textFile: extra.hbs }
+"#,
+    )
+    .expect("write profile drop-in");
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(dir),
+        Some(&profile_selection("selected")),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert_eq!(
+        settings
+            .prompt_fragments
+            .iter()
+            .filter(|fragment| fragment.name == "selected.shared")
+            .count(),
+        1
+    );
+    assert!(settings.prompt_fragments.iter().any(|fragment| {
+        fragment.name == "selected.extra" && fragment.text.as_str() == "Selected extra fragment."
+    }));
+}
+
+/// Dormant profiles remain schema-validated even though Tau does not read their
+/// file paths, preventing invalid source shapes from hiding until selection.
+#[test]
+fn unselected_profile_prompt_fragment_text_files_are_schema_validated_without_reads() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    for (fragment, expected) in [
+        (
+            r#"{ name: invalid.type, priority: 70, textFile: [must-not-read] }"#,
+            "must be a path string",
+        ),
+        (
+            r#"{ name: invalid.conflict, priority: 70, text: "PRIVATE CONTENT", textFile: must-not-read.hbs }"#,
+            "mutually exclusive",
+        ),
+    ] {
+        std::fs::write(
+            dir.join("harness.yaml"),
+            format!(
+                "profiles:\n  dormant:\n    agents:\n      prompt_fragments:\n        - {fragment}\n"
+            ),
+        )
+        .expect("write dormant profile");
+        let error = load_harness_settings_in(&dirs_with_config(dir))
+            .expect_err("invalid dormant profile source must fail");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(expected), "{diagnostic}");
+        assert!(!diagnostic.contains("PRIVATE CONTENT"));
+        assert!(!diagnostic.contains("failed to read"), "{diagnostic}");
+    }
+}
+
 /// Ensures the embedded built-in role catalog contains only engineer roles,
 /// gives each role the capability-gated delegate-role fragment, and resolves
 /// its relative effort presets from the shared default.

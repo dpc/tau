@@ -43,6 +43,28 @@ agents:
             If your task involved code changes to a larger project, consider them work in progress until they pass review.
 ```
 
+Set `textFile` instead of `text` to load the same Handlebars template source
+from a UTF-8 file:
+
+```yaml
+agents:
+  prompt_fragments:
+    - name: user.long-policy
+      priority: 65
+      textFile: prompt-fragments/long-policy.hbs
+```
+
+The two fields are mutually exclusive. Absolute paths are unchanged; relative
+paths start at Tau's config directory containing `harness.yaml`, including for
+fragments declared in `harness.d` files or command-line config layers. An
+unreadable or non-UTF-8 selected file is a fatal config error. Tau also loads
+fragments attached to disabled roles, but does not read files referenced only
+by unselected profiles. Loaded text has exactly the existing inline rendering,
+additive layering, and full-fragment de-duplication behavior.
+
+This is configuration organization, not secret storage or redaction. Fragment
+content still enters rendered model prompts and any applicable diagnostics.
+
 `agents.prompt_fragments` apply to every role in every role group, including fragments supplied by one-shot harness config overrides. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
 
 Tau's built-in global fragment lists available agent roles for `agent_start`

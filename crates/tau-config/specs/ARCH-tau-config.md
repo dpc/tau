@@ -189,6 +189,13 @@ array replacement:
 - Role `order` is ordinary role metadata: lower values sort first within a
   group, with role name as the stable tie-breaker.
 - Prompt fragments and required skill names are additive and de-duplicated.
+- A prompt fragment has exactly one template source: inline `text` or
+  `textFile`. File paths may be absolute or relative to the Tau config
+  directory, independent of the declaring file or process working directory.
+  Selected file sources resolve to ordinary fragment text before additive
+  replay and full-fragment de-duplication. Read and UTF-8 failures are explicit
+  config errors, including for disabled roles; unselected profile file sources
+  are schema-validated but not read.
 - Named `context_size_alerts` merge field-by-field from agent-global defaults
   through role-group defaults to role overrides. Each inherited alert can
   therefore be customized or disabled without repeating its threshold and

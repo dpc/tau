@@ -1652,15 +1652,6 @@ struct HarnessProfileExtension {
     config: Option<serde_json::Value>,
 }
 
-/// Named role and extension patches discovered from built-in and user
-/// configuration files.
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct HarnessProfiles {
-    /// Raw profile patches keyed by the selectable profile name.
-    profiles: BTreeMap<String, HarnessProfile>,
-}
-
 /// Top-level base configuration used only to select a fallback profile.
 ///
 /// This intentionally does not deserialize the effective harness schema:
@@ -4320,7 +4311,10 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     role_layers.extend(profiles.into_iter().map(|profile| HarnessRoleOverrides {
         agents: profile.agents.into(),
     }));
-    role_layers.extend(harness_role_cli_override_layers(harness_config_overrides)?);
+    role_layers.extend(harness_role_cli_override_layers(
+        harness_config_overrides,
+        dirs.config_dir.as_deref(),
+    )?);
     let mut effective_agent_defaults = AgentRole {
         enable: Some(true),
         visible: Some(true),
@@ -4424,11 +4418,172 @@ where
 fn normalize_harness_config_value(
     value: &mut serde_json::Value,
     source: &str,
+    config_dir: Option<&Path>,
 ) -> Result<(), SettingsError> {
     let serde_json::Value::Object(map) = value else {
         return Ok(());
     };
-    validate_retention_config_values(map, source)
+    validate_retention_config_values(map, source)?;
+    normalize_prompt_fragment_text_files(map, source, config_dir)
+}
+
+/// Replaces configured prompt-fragment `textFile` paths with their UTF-8 text.
+///
+/// The public effective schema continues to contain only inline fragment text,
+/// so file-backed fragments retain the existing additive role-layer semantics.
+fn normalize_prompt_fragment_text_files(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    source: &str,
+    config_dir: Option<&Path>,
+) -> Result<(), SettingsError> {
+    if let Some(agents) = root.get_mut("agents") {
+        normalize_agent_prompt_fragment_text_files(
+            agents,
+            "agents",
+            source,
+            PromptFragmentTextFileResolution::Load(config_dir),
+        )?;
+    }
+    if let Some(serde_json::Value::Object(profiles)) = root.get_mut("profiles") {
+        for (profile_name, profile) in profiles {
+            let serde_json::Value::Object(profile) = profile else {
+                continue;
+            };
+            if let Some(agents) = profile.get_mut("agents") {
+                normalize_agent_prompt_fragment_text_files(
+                    agents,
+                    &format!("profiles.{profile_name}.agents"),
+                    source,
+                    PromptFragmentTextFileResolution::ValidateOnly,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a prompt-fragment file is loaded or only schema-validated.
+#[derive(Clone, Copy)]
+enum PromptFragmentTextFileResolution<'a> {
+    /// Read the file, resolving relative paths against the optional config dir.
+    Load(Option<&'a Path>),
+    /// Validate the source shape without reading an unselected profile's file.
+    ValidateOnly,
+}
+
+/// Resolves prompt-fragment text sources at agent, group, and role scopes.
+fn normalize_agent_prompt_fragment_text_files(
+    agents: &mut serde_json::Value,
+    path: &str,
+    source: &str,
+    resolution: PromptFragmentTextFileResolution<'_>,
+) -> Result<(), SettingsError> {
+    let serde_json::Value::Object(agents) = agents else {
+        return Ok(());
+    };
+    if let Some(fragments) = agents.get_mut("prompt_fragments") {
+        normalize_prompt_fragment_list(
+            fragments,
+            &format!("{path}.prompt_fragments"),
+            source,
+            resolution,
+        )?;
+    }
+    let Some(serde_json::Value::Object(groups)) = agents.get_mut("role_groups") else {
+        return Ok(());
+    };
+    for (group_name, group) in groups {
+        let serde_json::Value::Object(group) = group else {
+            continue;
+        };
+        let group_path = format!("{path}.role_groups.{group_name}");
+        if let Some(fragments) = group.get_mut("prompt_fragments") {
+            normalize_prompt_fragment_list(
+                fragments,
+                &format!("{group_path}.prompt_fragments"),
+                source,
+                resolution,
+            )?;
+        }
+        let Some(serde_json::Value::Object(roles)) = group.get_mut("roles") else {
+            continue;
+        };
+        for (role_name, role) in roles {
+            let serde_json::Value::Object(role) = role else {
+                continue;
+            };
+            if let Some(fragments) = role.get_mut("prompt_fragments") {
+                normalize_prompt_fragment_list(
+                    fragments,
+                    &format!("{group_path}.roles.{role_name}.prompt_fragments"),
+                    source,
+                    resolution,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolves every `textFile` in one prompt-fragment list.
+fn normalize_prompt_fragment_list(
+    fragments: &mut serde_json::Value,
+    path: &str,
+    source: &str,
+    resolution: PromptFragmentTextFileResolution<'_>,
+) -> Result<(), SettingsError> {
+    let serde_json::Value::Array(fragments) = fragments else {
+        return Ok(());
+    };
+    for (index, fragment) in fragments.iter_mut().enumerate() {
+        let serde_json::Value::Object(fragment) = fragment else {
+            continue;
+        };
+        let fragment_path = format!("{path}.{index}");
+        if fragment.contains_key("text") && fragment.contains_key("textFile") {
+            return Err(SettingsError::Config(config::ConfigError::Message(
+                format!(
+                    "{source}: `{fragment_path}.text` and `{fragment_path}.textFile` are mutually exclusive"
+                ),
+            )));
+        }
+        let Some(text_file) = fragment.remove("textFile") else {
+            continue;
+        };
+        let serde_json::Value::String(text_file) = text_file else {
+            return Err(SettingsError::Config(config::ConfigError::Message(
+                format!("{source}: `{fragment_path}.textFile` must be a path string"),
+            )));
+        };
+        if matches!(resolution, PromptFragmentTextFileResolution::ValidateOnly) {
+            fragment.insert("text".to_owned(), serde_json::Value::String(String::new()));
+            continue;
+        }
+        let PromptFragmentTextFileResolution::Load(config_dir) = resolution else {
+            unreachable!("validate-only resolution handled above");
+        };
+        let configured_path = Path::new(&text_file);
+        let path = if configured_path.is_absolute() {
+            configured_path.to_owned()
+        } else {
+            let Some(config_dir) = config_dir else {
+                return Err(SettingsError::Config(config::ConfigError::Message(
+                    format!(
+                        "{source}: relative `{fragment_path}.textFile` requires a Tau config directory"
+                    ),
+                )));
+            };
+            config_dir.join(configured_path)
+        };
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            SettingsError::Config(config::ConfigError::Message(format!(
+                "{source}: failed to read `{fragment_path}.textFile` {}: {error}",
+                path.display()
+            )))
+        })?;
+        fragment.insert("text".to_owned(), serde_json::Value::String(text));
+    }
+    Ok(())
 }
 
 fn validate_retention_config_values(
@@ -4473,6 +4628,7 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
     let mut builder = config::Config::builder().add_source(normalized_harness_yaml_source(
         built_in_text,
         "built-in harness config",
+        dir,
     )?);
     for path in yaml_layer_paths(dir, name)? {
         let text = std::fs::read_to_string(&path).map_err(|err| {
@@ -4484,6 +4640,7 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
         builder = builder.add_source(normalized_harness_yaml_source(
             &text,
             &format!("harness config {}", path.display()),
+            dir,
         )?);
     }
     for profile in profiles {
@@ -4491,7 +4648,7 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
     }
     let normalized_overrides = normalized_harness_config_overrides(overrides)?;
     for override_ in &normalized_overrides {
-        builder = builder.add_source(harness_config_override_source(override_)?);
+        builder = builder.add_source(harness_config_override_source(override_, dir)?);
     }
     let config = builder.build()?;
     let value: serde_json::Value = config.try_deserialize()?;
@@ -4582,9 +4739,12 @@ fn load_harness_profile_layers_for_name(
     name: &ProfileName,
 ) -> Result<Vec<HarnessProfile>, SettingsError> {
     let mut profiles = Vec::new();
-    let mut built_in =
-        load_harness_profile_layer(BUILT_IN_HARNESS_YAML, "built-in harness config")?;
-    if let Some(profile) = built_in.profiles.remove(name.as_str()) {
+    if let Some(profile) = load_harness_profile_layer_for_name(
+        BUILT_IN_HARNESS_YAML,
+        "built-in harness config",
+        dirs.config_dir.as_deref(),
+        name,
+    )? {
         profiles.push(profile);
     }
     for path in yaml_layer_paths(dirs.config_dir.as_deref(), "harness")? {
@@ -4594,9 +4754,12 @@ fn load_harness_profile_layers_for_name(
                 path.display()
             )))
         })?;
-        let mut layer =
-            load_harness_profile_layer(&text, &format!("harness config {}", path.display()))?;
-        if let Some(profile) = layer.profiles.remove(name.as_str()) {
+        if let Some(profile) = load_harness_profile_layer_for_name(
+            &text,
+            &format!("harness config {}", path.display()),
+            dirs.config_dir.as_deref(),
+            name,
+        )? {
             profiles.push(profile);
         }
     }
@@ -4620,21 +4783,52 @@ pub fn profile_extension_names_in(
         .collect())
 }
 
-/// Parses the profile map from one normalized harness configuration source.
-fn load_harness_profile_layer(
+/// Parses one selected profile from a harness configuration source.
+///
+/// Unselected profile bodies remain inert, including their `textFile` paths.
+fn load_harness_profile_layer_for_name(
     text: &str,
     description: &str,
-) -> Result<HarnessProfiles, SettingsError> {
-    config::Config::builder()
-        .add_source(normalized_harness_yaml_source(text, description)?)
-        .build()?
-        .try_deserialize()
-        .map_err(SettingsError::from)
+    config_dir: Option<&Path>,
+    name: &ProfileName,
+) -> Result<Option<HarnessProfile>, SettingsError> {
+    let mut root: serde_json::Value = serde_yaml_ng::from_str(text).map_err(|error| {
+        SettingsError::Config(config::ConfigError::Message(format!(
+            "failed to parse {description}: {error}"
+        )))
+    })?;
+    let Some(profile) = root
+        .as_object_mut()
+        .and_then(|root| root.get_mut("profiles"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|profiles| profiles.remove(name.as_str()))
+    else {
+        return Ok(None);
+    };
+    let mut profile = profile;
+    if let Some(agents) = profile
+        .as_object_mut()
+        .and_then(|profile| profile.get_mut("agents"))
+    {
+        normalize_agent_prompt_fragment_text_files(
+            agents,
+            &format!("profiles.{}.agents", name.as_str()),
+            description,
+            PromptFragmentTextFileResolution::Load(config_dir),
+        )?;
+    }
+    serde_json::from_value(profile).map(Some).map_err(|error| {
+        SettingsError::Config(config::ConfigError::Message(format!(
+            "failed to parse profile `{}` in {description}: {error}",
+            name.as_str()
+        )))
+    })
 }
 
 fn normalized_harness_yaml_source(
     text: &str,
     description: &str,
+    config_dir: Option<&Path>,
 ) -> Result<config::File<config::FileSourceString, config::FileFormat>, SettingsError> {
     let mut value: serde_json::Value = serde_yaml_ng::from_str(text).map_err(|err| {
         SettingsError::Config(config::ConfigError::Message(format!(
@@ -4644,7 +4838,7 @@ fn normalized_harness_yaml_source(
     if value.is_null() {
         value = serde_json::Value::Object(serde_json::Map::new());
     }
-    normalize_harness_config_value(&mut value, description)?;
+    normalize_harness_config_value(&mut value, description, config_dir)?;
     let normalized = serde_yaml_ng::to_string(&value).map_err(|err| {
         SettingsError::Config(config::ConfigError::Message(format!(
             "failed to normalize {description}: {err}"
@@ -4655,12 +4849,13 @@ fn normalized_harness_yaml_source(
 
 fn harness_role_cli_override_layers(
     overrides: &[HarnessConfigCliOverride],
+    config_dir: Option<&Path>,
 ) -> Result<Vec<HarnessRoleOverrides>, SettingsError> {
     let normalized_overrides = normalized_harness_config_overrides(overrides)?;
     let mut layers = Vec::new();
     for override_ in &normalized_overrides {
         let layer: HarnessRoleOverrides = config::Config::builder()
-            .add_source(harness_config_override_source(override_)?)
+            .add_source(harness_config_override_source(override_, config_dir)?)
             .build()?
             .try_deserialize()?;
         layers.push(layer);
@@ -4670,6 +4865,7 @@ fn harness_role_cli_override_layers(
 
 fn harness_config_override_source(
     override_: &HarnessConfigCliOverride,
+    config_dir: Option<&Path>,
 ) -> Result<config::File<config::FileSourceString, config::FileFormat>, SettingsError> {
     let yaml: serde_json::Value = serde_yaml_ng::from_str(&override_.raw_value).map_err(|err| {
         SettingsError::InvalidHarnessConfigCliOverride(format!(
@@ -4678,7 +4874,11 @@ fn harness_config_override_source(
         ))
     })?;
     let mut value = nested_harness_override_value(&override_.key, yaml);
-    normalize_harness_config_value(&mut value, &format!("CLI override `{}`", override_.key))?;
+    normalize_harness_config_value(
+        &mut value,
+        &format!("CLI override `{}`", override_.key),
+        config_dir,
+    )?;
     let normalized = serde_yaml_ng::to_string(&value).map_err(|err| {
         SettingsError::Config(config::ConfigError::Message(format!(
             "failed to normalize CLI override `{}`: {err}",
@@ -4736,6 +4936,7 @@ fn load_yaml_layer_files<T: for<'de> Deserialize<'de>>(
                 .add_source(normalized_harness_yaml_source(
                     &text,
                     &path.display().to_string(),
+                    dir,
                 )?)
                 .build()?
                 .try_deserialize()

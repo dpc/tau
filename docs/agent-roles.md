@@ -117,6 +117,26 @@ agents:
       text: Keep answers short and plain, using only simple words.
 ```
 
+Use `textFile` instead of `text` to keep a fragment template in a separate
+UTF-8 file:
+
+```yaml
+agents:
+  prompt_fragments:
+    - name: user.long-policy
+      priority: 65
+      textFile: prompt-fragments/long-policy.hbs
+```
+
+`text` and `textFile` are mutually exclusive. Absolute paths are used directly;
+relative paths start at Tau's config directory (the directory containing
+`harness.yaml`), not the process working directory or the `harness.d` directory.
+Tau reads selected file-backed fragments during configuration loading and fails
+startup if a file cannot be read as UTF-8. Fragments on disabled roles are still
+loaded, while files referenced only by unselected profiles are not. The loaded
+text follows the same Handlebars rendering, layering, and full-fragment
+de-duplication rules as inline `text`.
+
 Use the same top-level `agents` scope for model defaults shared by every role.
 `agents.enable` defaults to `true`; set it to `false` to disable every role,
 then use a group or role `enable: true` override to retain the roles you need.
