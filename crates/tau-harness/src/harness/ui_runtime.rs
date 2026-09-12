@@ -1729,6 +1729,9 @@ impl Harness {
             Event::UiAgentModelSelect(select) => self
                 .handle_ui_agent_model_select(client_id, select)
                 .map(|keep_going| (keep_going, None)),
+            Event::UiAgentEffortSelect(select) => self
+                .handle_ui_agent_effort_select(client_id, select)
+                .map(|keep_going| (keep_going, None)),
             Event::UiRoleUpdate(req) => self
                 .handle_ui_role_update(client_id, req)
                 .map(|keep_going| (keep_going, None)),
@@ -1973,6 +1976,69 @@ impl Harness {
             client_id,
             format!("agent `{agent_name}` model set to {}", select.model),
         );
+        Ok(true)
+    }
+
+    pub(super) fn handle_ui_agent_effort_select(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        select: tau_proto::UiAgentEffortSelect,
+    ) -> Result<bool, HarnessError> {
+        if select.effort.is_some_and(|effort| !effort.is_nominal()) {
+            self.send_ui_error_response(
+                client_id,
+                ":effort: absolute reasoning intensity must be between 0.0 and 1.0",
+            );
+            return Ok(true);
+        }
+        let cid = if let Some(target_agent_id) = select.target_agent_id.as_deref() {
+            self.runtime_agent_id_for_target_agent(Some(target_agent_id))
+        } else {
+            let mut matches =
+                self.agent_runtime
+                    .agent_registry
+                    .agents
+                    .iter()
+                    .filter_map(|(cid, conv)| {
+                        (conv.identity.session_id == select.session_id
+                            && conv.identity.originator.is_user()
+                            && conv.identity.agent_id.is_some())
+                        .then_some(cid.clone())
+                    });
+            let first = matches.next();
+            if matches.next().is_some() {
+                None
+            } else {
+                first
+            }
+        };
+        let Some(cid) = cid else {
+            self.send_ui_error_response(client_id, ":effort: no selected agent to update");
+            return Ok(true);
+        };
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) else {
+            self.send_ui_error_response(client_id, ":effort: selected agent is not loaded");
+            return Ok(true);
+        };
+        if conv.identity.session_id != select.session_id {
+            self.send_ui_error_response(
+                client_id,
+                ":effort: selected agent is not in this session",
+            );
+            return Ok(true);
+        }
+        conv.identity.effort_override = select.effort;
+        let agent_name = conv
+            .identity
+            .display_name
+            .clone()
+            .or_else(|| conv.identity.agent_id.as_ref().map(ToString::to_string))
+            .unwrap_or_else(|| cid.to_string());
+        let message = select.effort.map_or_else(
+            || format!("agent `{agent_name}` effort reset to its role default"),
+            |effort| format!("agent `{agent_name}` effort set to {effort}"),
+        );
+        self.send_ui_response(client_id, message);
         Ok(true)
     }
 

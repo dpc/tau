@@ -491,6 +491,19 @@ without changing the role. After `:new`, when no current agent is selected yet,
 `:model <provider>/<model>` stages a one-shot override for the next agent
 created by the first prompt.
 
+Use `:effort <provider_default|disabled|0.0..1.0>` to set a reasoning-effort
+override for the selected agent, or `:effort reset` to return to its current
+role effort. After `:new`, the same command stages a one-shot override for the
+next created agent. It is hidden and rejected in the non-creating overview.
+The agent override outranks runtime role effort, which in turn outranks the
+normally resolved configuration defaults; provider/model mapping still selects
+the effective native value. It applies to subsequently started prompts while
+that agent remains loaded, including after suspend/resume, but never changes an
+already-running prompt. It is runtime-only, like an agent model selection: a
+daemon restart or cold reload returns to the persisted role and its
+then-current effort. Concrete model parameters already persisted on prompt
+facts remain unchanged.
+
 
 ## Editing roles
 

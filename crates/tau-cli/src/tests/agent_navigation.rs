@@ -3,7 +3,7 @@
 use super::*;
 use crate::agent_navigation::AgentNavigation;
 use crate::chat::InputRoutingState;
-use crate::event_renderer::selection_intent::{SelectionIntent, UiTarget};
+use crate::event_renderer::selection_intent::{EmptyUiTarget, SelectionIntent, UiTarget};
 
 /// Agent-trace help must advertise the compact-overview semantics and both
 /// default values so generated help cannot drift from parser behavior.
@@ -41,6 +41,90 @@ fn role_cycling_only_enabled_in_explicit_creation_mode() {
         .expect("current agent")
         .set_target(UiTarget::Creating);
     assert!(role_cycling_enabled(&current_agent_state));
+}
+
+/// `:effort` completion is advertised for a new or selected agent, but never
+/// from the non-creating overview.
+#[test]
+fn effort_completion_tracks_new_agent_state() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let completion_data = tau_cli_term::CompletionData::new();
+    let mut renderer = EventRenderer::new(handle, completion_data.clone(), cli_test_theme());
+    renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
+        roles: vec![HarnessRoleInfo {
+            name: "engineer".to_owned(),
+            description: String::new(),
+            role_description: None,
+            details: None,
+        }],
+        groups: Vec::new(),
+        custom_prompts: Vec::new(),
+    }));
+    let candidates = |buffer: &str| {
+        tau_cli_term::completion::build_candidates(&[], &completion_data, buffer, buffer.len())
+    };
+    assert!(candidates(":eff").is_empty());
+
+    renderer.set_harness_protocol_version(Some(tau_proto::ProtocolVersion::new(7, 1)));
+    assert!(candidates(":eff").is_empty());
+    renderer.set_harness_protocol_version(Some(tau_proto::ProtocolVersion::new(7, 2)));
+
+    let intent = renderer.current_agent_state();
+    let epoch = intent
+        .lock()
+        .expect("selection intent")
+        .set_target(UiTarget::Creating);
+    renderer.apply_claimed_empty_target(epoch, EmptyUiTarget::Creating);
+    assert_eq!(candidates(":eff")[0].replacement, ":effort");
+    let effort_values = candidates(":effort ");
+    assert_eq!(
+        effort_values
+            .iter()
+            .map(|candidate| (candidate.label.as_str(), candidate.description.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("reset", "clear this agent effort override"),
+            (
+                "provider_default",
+                "omit effort and use the provider default"
+            ),
+            ("disabled", "request disabled reasoning"),
+            ("0.0", "minimum portable reasoning intensity"),
+            ("0.25", "light portable reasoning intensity"),
+            ("0.5", "medium-like portable reasoning intensity"),
+            ("0.75", "strong portable reasoning intensity"),
+            ("1.0", "maximum portable reasoning intensity"),
+        ]
+    );
+    let role_effort_values = tau_cli_term::completion::build_candidates(
+        &[tau_cli_term::CommandCompletion::new(
+            ":role",
+            "configure role",
+        )],
+        &completion_data,
+        ":role engineer effort ",
+        ":role engineer effort ".len(),
+    );
+    for candidate in effort_values
+        .iter()
+        .filter(|candidate| candidate.label != "reset")
+    {
+        let role_candidate = role_effort_values
+            .iter()
+            .find(|role_candidate| role_candidate.label == candidate.label)
+            .expect("agent effort suggestion must exist in role effort suggestions");
+        assert_eq!(
+            candidate.description, role_candidate.description,
+            "{} must use the role-effort description",
+            candidate.label
+        );
+    }
+
+    renderer.switch_agent(agent_id("existing"));
+    assert_eq!(candidates(":eff")[0].replacement, ":effort");
+
+    renderer.clear_selected_agent();
+    assert!(candidates(":eff").is_empty());
 }
 
 /// A cold attach boundary must select its unique restored runtime target from

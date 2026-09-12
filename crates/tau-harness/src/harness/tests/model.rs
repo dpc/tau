@@ -1072,6 +1072,7 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some("initial prompt".to_owned()),
             literal: false,
@@ -1289,6 +1290,85 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     );
 }
 
+/// Agent effort selection must update only future materialization for the
+/// target loaded agent, and reset must restore the current role's effort.
+#[test]
+fn ui_agent_effort_select_sets_and_resets_loaded_override() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let role = h.config.selected_role.clone();
+    let model: ModelId = "test/effort".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![provider_model(model.clone(), 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+    h.config
+        .available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .effort = Some("0.25".parse().expect("role effort"));
+    let cid = h.create_durable_user_agent(
+        "s1".parse::<tau_proto::SessionId>().expect("session id"),
+        &role,
+    );
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .agent_id
+        .clone()
+        .expect("agent id");
+    let already_started =
+        h.params_for_agent_model(&h.agent_runtime.agent_registry.agents[&cid], &model);
+
+    h.handle_ui_agent_effort_select(
+        &crate::test_connection_id("ui-client"),
+        tau_proto::UiAgentEffortSelect {
+            session_id: "s1".parse().expect("session id"),
+            target_agent_id: Some(agent_id),
+            effort: Some("0.75".parse().expect("agent effort")),
+        },
+    )
+    .expect("set effort");
+    assert_eq!(
+        already_started.effort.requested,
+        "0.25".parse().expect("role effort"),
+        "parameters already selected for a running prompt remain unchanged"
+    );
+    assert_eq!(
+        h.params_for_agent_model(&h.agent_runtime.agent_registry.agents[&cid], &model)
+            .effort
+            .requested,
+        "0.75".parse().expect("agent effort")
+    );
+    assert_eq!(
+        h.config.available_roles[&role].effort,
+        Some("0.25".parse().expect("role effort"))
+    );
+
+    h.handle_ui_agent_effort_select(
+        &crate::test_connection_id("ui-client"),
+        tau_proto::UiAgentEffortSelect {
+            session_id: "s1".parse().expect("session id"),
+            target_agent_id: h.agent_runtime.agent_registry.agents[&cid]
+                .identity
+                .agent_id
+                .clone(),
+            effort: None,
+        },
+    )
+    .expect("reset effort");
+    assert_eq!(
+        h.params_for_agent_model(&h.agent_runtime.agent_registry.agents[&cid], &model)
+            .effort
+            .requested,
+        "0.25".parse().expect("role effort")
+    );
+}
+
 /// Creating an agent may include the model override staged by the interactive
 /// `:new` + `:model` flow; the harness must apply it before the first prompt is
 /// routed so the initial provider request uses the requested model.
@@ -1323,6 +1403,7 @@ fn ui_create_agent_applies_initial_model_override() {
                 .expect("known-safe SessionId must be valid"),
             role,
             model_override: Some(selected_model.clone()),
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some("hello".to_owned()),
             message_class: tau_proto::PromptMessageClass::User,
@@ -1339,6 +1420,148 @@ fn ui_create_agent_applies_initial_model_override() {
     assert_eq!(h.model_for_agent_role(conv), Some(selected_model));
     let created = read_nth_prompt_created(&h, 0);
     assert_eq!(created.model, "test/selected".parse().expect("model id"));
+}
+
+/// A create-time effort override must outrank the role for every prompt while
+/// the agent is loaded without mutating that role or leaking to another agent.
+#[test]
+fn ui_create_agent_effort_override_is_loaded_agent_local() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let role = h.config.selected_role.clone();
+    let model: ModelId = "test/effort".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![provider_model(model.clone(), 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+    h.config
+        .available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .effort = Some("0.2".parse().expect("role effort"));
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "effort-override".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: "s1".parse().expect("session id"),
+            role: role.clone(),
+            model_override: None,
+            effort_override: Some("0.8".parse().expect("agent effort")),
+            metadata: Vec::new(),
+            initial_prompt: Some("use override".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("effort-override-prompt".to_owned()),
+            ephemeral: false,
+        },
+    )
+    .expect("create overridden agent");
+
+    let overridden_cid = test_user_agent(&h);
+    let overridden = &h.agent_runtime.agent_registry.agents[&overridden_cid];
+    assert_eq!(
+        h.params_for_agent_model(overridden, &model)
+            .effort
+            .requested,
+        "0.8".parse().expect("agent effort")
+    );
+    assert_eq!(
+        h.config.available_roles[&role].effort,
+        Some("0.2".parse().expect("role effort"))
+    );
+    assert_eq!(
+        read_nth_prompt_created(&h, 0).model_params.effort.requested,
+        "0.8".parse().expect("agent effort")
+    );
+
+    h.config
+        .available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .effort = Some("0.1".parse().expect("updated role effort"));
+    assert_eq!(
+        h.params_for_agent_model(overridden, &model)
+            .effort
+            .requested,
+        "0.8".parse().expect("agent effort"),
+        "loaded-agent override must continue to outrank later role changes"
+    );
+
+    let plain_cid = h.create_durable_user_agent(
+        "s1".parse::<tau_proto::SessionId>().expect("session id"),
+        &role,
+    );
+    let plain = &h.agent_runtime.agent_registry.agents[&plain_cid];
+    assert_eq!(plain.identity.effort_override, None);
+    assert_eq!(
+        h.params_for_agent_model(plain, &model).effort.requested,
+        "0.1".parse().expect("updated role effort"),
+        "override must not leak to another agent"
+    );
+}
+
+/// Cold replay restores the durable creation role but not the runtime-only
+/// effort override.
+#[test]
+fn ui_create_agent_effort_override_is_not_restored() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let agent_id = {
+        let mut h = echo_harness(&state).expect("harness");
+        let role = h.config.selected_role.clone();
+        h.handle_ui_create_agent_from(
+            &crate::test_connection_id("ui-create-test"),
+            tau_proto::UiCreateAgent {
+                request_id: "effort-restart".to_owned(),
+                literal: false,
+                parent_agent: None,
+                session_id: "s1".parse().expect("session id"),
+                role,
+                model_override: None,
+                effort_override: Some("0.8".parse().expect("agent effort")),
+                metadata: Vec::new(),
+                initial_prompt: None,
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+                ephemeral: false,
+            },
+        )
+        .expect("create agent");
+        let cid = test_user_agent(&h);
+        let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .agent_id
+            .clone()
+            .expect("agent id");
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .identity
+                .effort_override,
+            Some("0.8".parse().expect("agent effort"))
+        );
+        h.shutdown().expect("shutdown");
+        agent_id
+    };
+
+    let h = echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+        .expect("resume harness");
+    let cid = h
+        .agent_runtime
+        .agent_registry
+        .agent_routes
+        .get(agent_id.as_str())
+        .expect("restored route");
+    let restored = &h.agent_runtime.agent_registry.agents[cid];
+    assert_eq!(restored.identity.effort_override, None);
 }
 
 /// A model staged by `:new` + `:model` must survive the supported cold-provider
@@ -1368,6 +1591,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
                 .expect("known-safe SessionId must be valid"),
             role,
             model_override: Some(selected_model.clone()),
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some("hello cold".to_owned()),
             message_class: tau_proto::PromptMessageClass::User,
@@ -1456,6 +1680,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
                 .expect("known-safe SessionId must be valid"),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(":skill same args".to_owned()),
             message_class: tau_proto::PromptMessageClass::User,

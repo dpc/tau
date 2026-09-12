@@ -472,6 +472,7 @@ fn create_direct_repair_worker(
                     .expect("known-safe SessionId must be valid"),
                 role: REPAIR_ROLE.to_owned(),
                 model_override: None,
+                effort_override: None,
                 metadata: Vec::new(),
                 initial_prompt: Some(REPAIR_PROMPT.to_owned()),
                 message_class: tau_proto::PromptMessageClass::User,

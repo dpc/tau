@@ -3774,6 +3774,21 @@ pub struct UiAgentModelSelect {
     pub model: ModelId,
 }
 
+/// The user sets or clears the reasoning effort used by one loaded agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiAgentEffortSelect {
+    /// Session whose agent should be updated.
+    pub session_id: SessionId,
+    /// Agent to update. `None` asks the harness to use the session's only
+    /// unambiguous loaded user agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<AgentId>,
+    /// Runtime effort override for future prompts, or `None` to return to the
+    /// current role's resolved effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<crate::ReasoningIntent>,
+}
+
 /// The user changes or deletes an agent role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRoleUpdate {
@@ -3919,6 +3934,13 @@ pub struct UiCreateAgent {
     /// dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_override: Option<ModelId>,
+    /// Portable reasoning effort to apply to the loaded agent instead of its
+    /// role's effort.
+    ///
+    /// This runtime-only override applies to every prompt while the agent
+    /// remains loaded. It is not part of the durable agent identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_override: Option<crate::ReasoningIntent>,
     /// Initial metadata facts to publish for the new agent.
     ///
     /// The harness fills in the newly-created agent id when publishing these
@@ -3979,6 +4001,8 @@ pub enum UiCreateAgentRejection {
     StaleSession,
     /// The requested role is unknown or disabled.
     RoleUnavailable,
+    /// The requested effort is not a legal absolute portable value.
+    InvalidEffort,
     /// Initial metadata failed structural or size validation.
     InvalidMetadata,
     /// The requested parent is not loaded in the current session.
@@ -3996,6 +4020,7 @@ impl UiCreateAgentRejection {
             Self::InvalidRequestId => "invalid_request_id",
             Self::StaleSession => "stale_session",
             Self::RoleUnavailable => "role_unavailable",
+            Self::InvalidEffort => "invalid_effort",
             Self::InvalidMetadata => "invalid_metadata",
             Self::ParentNotLoaded => "parent_not_loaded",
             Self::CreationFailed => "creation_failed",
@@ -6987,6 +7012,8 @@ pub enum Event {
     UiRoleSelect(UiRoleSelect),
     #[serde(rename = "ui.agent_model_select")]
     UiAgentModelSelect(UiAgentModelSelect),
+    #[serde(rename = "ui.agent_effort_select")]
+    UiAgentEffortSelect(UiAgentEffortSelect),
     #[serde(rename = "ui.role_update")]
     UiRoleUpdate(UiRoleUpdate),
     #[serde(rename = "ui.shell_command")]
@@ -7463,6 +7490,7 @@ impl Event {
             Self::UiFocusChanged(_) => EventName::UI_FOCUS_CHANGED,
             Self::UiRoleSelect(_) => EventName::UI_ROLE_SELECT,
             Self::UiAgentModelSelect(_) => EventName::UI_AGENT_MODEL_SELECT,
+            Self::UiAgentEffortSelect(_) => EventName::UI_AGENT_EFFORT_SELECT,
             Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
@@ -7675,6 +7703,7 @@ impl Event {
                 | Self::ShellCommandProgress(_)
                 | Self::ShellCommandFinishedReported(_)
                 | Self::UiPromptSubmitted(_)
+                | Self::UiAgentEffortSelect(_)
                 | Self::AgentPromptQueued(_)
                 | Self::AgentPromptRecalled(_)
                 | Self::AgentPromptRejected(_)

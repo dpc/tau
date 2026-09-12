@@ -763,6 +763,7 @@ impl Agent {
                 delegate_input_stats: ToolUseStats::default(),
                 role: None,
                 model_override: None,
+                effort_override: None,
                 agent_id: None,
                 persistence: AgentPersistenceMode::Durable,
                 peer_entrypoint_endpoint: false,

@@ -88,10 +88,17 @@ fn send_message(
         CliError::Participant(format!("no running daemon for session `{session_id}`"))
     })?;
     let socket_path = tau_harness::runtime_dir::socket_path(&harness_path);
-    if matches!(
-        message,
-        HarnessInputMessage::UiTreeRequest(_) | HarnessInputMessage::UiRetryExtensionRequest(_)
-    ) {
+    let effort_command = matches!(
+        &message,
+        HarnessInputMessage::Emit(tau_proto::Emit { event, .. })
+            if matches!(event.as_ref(), Event::UiAgentEffortSelect(_))
+    );
+    if effort_command
+        || matches!(
+            message,
+            HarnessInputMessage::UiTreeRequest(_) | HarnessInputMessage::UiRetryExtensionRequest(_)
+        )
+    {
         let deadline = Instant::now() + COMMAND_RESPONSE_TIMEOUT;
         let (mut reader, mut writer, harness_protocol_version) =
             crate::ui_client::connect_ui_client_until_with_version(
@@ -106,6 +113,11 @@ fn send_message(
             return Err(CliError::Participant(
                 ":retry-extension requires a harness with protocol 4.1 or newer".to_owned(),
             ));
+        }
+        if effort_command
+            && let Some(error) = crate::chat::agent_effort_support_error(harness_protocol_version)
+        {
+            return Err(CliError::Participant(error.to_owned()));
         }
         crate::ui_client::send_message(&mut writer, &message)?;
         print!(
@@ -172,6 +184,12 @@ fn event_for_line(session_id: &tau_proto::SessionId, text: &str) -> Option<Event
             ));
         }
         return None;
+    }
+    if let Some(value) = text.strip_prefix(":effort ") {
+        let effort = crate::ui_commands::parse_effort_override(value.trim()).ok()?;
+        return Some(crate::ui_events::agent_effort_select(
+            session_id, None, effort,
+        ));
     }
     if let Some(command) = text.strip_prefix("!!") {
         let command = command.trim();

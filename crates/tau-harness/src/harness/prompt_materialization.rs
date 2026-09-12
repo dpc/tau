@@ -726,10 +726,13 @@ impl Harness {
         else {
             return false;
         };
-        let model_params = self.params_for_role_model(
-            &self.role_name_for_agent_id(cid),
-            &continuation.plan.dispatch.model,
-        );
+        let model_params = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .map(|agent| self.params_for_agent_model(agent, &continuation.plan.dispatch.model))
+            .unwrap_or_default();
         let started = tau_proto::AgentPromptStarted {
             agent_prompt_id: continuation.plan.agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
@@ -1090,7 +1093,7 @@ impl Harness {
         };
         let prompt_params = prompt_model
             .as_ref()
-            .map(|model| self.params_for_role_model(&role_name, model))
+            .map(|model| self.params_for_agent_model(conv, model))
             .unwrap_or_default();
         let Some(model) = prompt_model else {
             self.emit_info(&format!(
@@ -1622,6 +1625,30 @@ impl Harness {
             role_name,
             model,
         )
+    }
+
+    /// Resolves model parameters for one loaded agent, applying its
+    /// runtime-only effort override after the current role defaults.
+    pub(super) fn params_for_agent_model(
+        &self,
+        agent: &Agent,
+        model: &ModelId,
+    ) -> tau_proto::ModelParams {
+        let mut params = self.params_for_role_model(&self.role_name_for_agent(agent), model);
+        if let Some(effort) = agent.identity.effort_override {
+            let capability = self
+                .provider_runtime
+                .model_info
+                .get(model)
+                .map(|info| &info.efforts)
+                .cloned()
+                .unwrap_or_default();
+            params.effort = tau_proto::ReasoningSelection {
+                requested: effort,
+                effective: capability.select(effort),
+            };
+        }
+        params
     }
 
     #[cfg(test)]

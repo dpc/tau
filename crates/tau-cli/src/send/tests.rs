@@ -252,8 +252,8 @@ fn local_configuration_commands_are_ignored() {
     );
 }
 
-/// Role selection and model selection commands are forwarded to their distinct
-/// control events. `:model` targets an agent model id, not a role name.
+/// Role, model, and effort selection commands are forwarded to their distinct
+/// control events.
 #[test]
 fn role_and_model_selection_commands_are_distinct() {
     assert_eq!(event(":role"), None);
@@ -274,6 +274,24 @@ fn role_and_model_selection_commands_are_distinct() {
 
     assert_eq!(event(":model reviewer"), None);
     assert_eq!(event(":model "), None);
+
+    match event(":effort 0.75").expect("agent effort select") {
+        Event::UiAgentEffortSelect(select) => {
+            assert_eq!(select.session_id, SESSION_ID);
+            assert_eq!(select.target_agent_id, None);
+            assert_eq!(select.effort, Some("0.75".parse().expect("effort")));
+        }
+        other => panic!("expected UiAgentEffortSelect, got {other:?}"),
+    }
+    assert_eq!(
+        event(":effort reset"),
+        Some(crate::ui_events::agent_effort_select(
+            &SESSION_ID.parse().expect("session id"),
+            None,
+            None,
+        ))
+    );
+    assert_eq!(event(":effort 1.1"), None);
 }
 
 /// `:role <role> delete` is the headless spelling for deleting a runtime

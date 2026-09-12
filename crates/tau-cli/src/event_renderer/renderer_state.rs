@@ -285,6 +285,8 @@ pub(super) struct AgentUiState {
 /// Session-wide extension and presentation state.
 #[derive(Default)]
 pub(super) struct SessionPresentationState {
+    /// Admitted harness revision used to hide unsupported UI controls.
+    pub(super) harness_protocol_version: Option<tau_proto::ProtocolVersion>,
     /// Historical shell terminals that must not consume current lifecycles.
     pub(super) standalone_shell_terminals: HashSet<tau_proto::ShellCommandId>,
     /// Live extension blocks.

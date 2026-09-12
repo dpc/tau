@@ -1340,6 +1340,7 @@ fn peer_internal_ephemeral_lifecycle_is_suppressed_from_debug_log() {
                     .expect("known-safe SessionId must be valid"),
                 role: "engineer".to_owned(),
                 model_override: None,
+                effort_override: None,
                 metadata: Vec::new(),
                 initial_prompt: None,
                 message_class: tau_proto::PromptMessageClass::User,

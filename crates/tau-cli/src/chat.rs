@@ -699,6 +699,19 @@ pub(crate) fn supports_retry_extension(
     harness_protocol_version >= Some(tau_proto::ProtocolVersion::new(4, 1))
 }
 
+pub(crate) fn supports_agent_effort(
+    harness_protocol_version: Option<tau_proto::ProtocolVersion>,
+) -> bool {
+    harness_protocol_version >= Some(tau_proto::ProtocolVersion::new(7, 2))
+}
+
+pub(crate) fn agent_effort_support_error(
+    harness_protocol_version: Option<tau_proto::ProtocolVersion>,
+) -> Option<&'static str> {
+    (!supports_agent_effort(harness_protocol_version))
+        .then_some(":effort requires a harness with protocol 7.2 or newer")
+}
+
 pub(crate) fn parse_retry_extension_command(
     text: &str,
 ) -> Option<Result<Option<tau_proto::ExtensionName>, &'static str>> {
@@ -814,6 +827,11 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
         "Request cumulative protocol byte/count counters for an extension",
     ),
 ];
+
+pub(crate) const EFFORT_COMMAND: (&str, &str) = (
+    ":effort",
+    "Set selected or next new agent effort (`:effort <value|reset>`)",
+);
 
 /// Single-slot mailbox the input loop pushes the latest prompt
 /// snapshot into; the debounce thread drains it. `pending = None` +
@@ -1410,7 +1428,12 @@ fn run_chat_session(
         .iter()
         .map(|(name, description)| CommandCompletion::new(*name, *description))
         .collect();
-    let action_state = ActionCommandState::new(BUILTIN_COMMANDS.iter().map(|(name, _)| *name));
+    let action_state = ActionCommandState::new(
+        BUILTIN_COMMANDS
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once(EFFORT_COMMAND.0)),
+    );
     // Fail fast on a malformed `cli.yaml`. The fields here drive
     // keybindings, prompt symbol, cursor shape, and theme — silently
     // falling back to defaults would leave the user with broken
@@ -1500,6 +1523,7 @@ fn run_chat_session(
     );
     renderer.set_cold_attach_redraw(cold_attach_redraw);
     renderer.set_started_session(!attach);
+    renderer.set_harness_protocol_version(harness_protocol_version);
     renderer.set_startup_profile_selection(startup_profile);
     renderer.set_osc8_links(settings.osc8_links);
     renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
@@ -2956,6 +2980,8 @@ struct PendingNewAgentOptions {
     role: Option<String>,
     /// Optional model override for the next created agent.
     model: Option<tau_proto::ModelId>,
+    /// Optional reasoning effort override for the next created agent.
+    effort: Option<tau_proto::ReasoningIntent>,
     /// Whether the next created agent should be memory-only.
     ephemeral: bool,
 }
@@ -2999,6 +3025,14 @@ impl PendingNewAgentOptions {
         self.model.take()
     }
 
+    fn set_effort(&mut self, effort: Option<tau_proto::ReasoningIntent>) {
+        self.effort = effort;
+    }
+
+    fn take_effort(&mut self) -> Option<tau_proto::ReasoningIntent> {
+        self.effort.take()
+    }
+
     fn take_ephemeral(&mut self) -> bool {
         std::mem::take(&mut self.ephemeral)
     }
@@ -3014,6 +3048,7 @@ impl PendingNewAgentOptions {
     fn clear(&mut self) {
         self.role = None;
         self.model = None;
+        self.effort = None;
         self.ephemeral = false;
     }
 }
@@ -3210,6 +3245,53 @@ fn apply_ephemeral_staging_command(
     true
 }
 
+fn apply_effort_staging_command(
+    text: &str,
+    is_creating_agent: bool,
+    pending: &mut PendingNewAgentOptions,
+    mut command_feedback: impl FnMut(&str),
+) -> bool {
+    let Some(result) = parse_effort_command(text) else {
+        return false;
+    };
+    if !is_creating_agent {
+        command_feedback("Use :new first; :effort controls only the next new agent.");
+        return true;
+    }
+    match result {
+        Ok(effort) => {
+            pending.set_effort(effort);
+            match effort {
+                Some(effort) => {
+                    command_feedback(&format!("next agent effort set to {effort}"));
+                }
+                None => command_feedback("next agent effort reset to its role default"),
+            }
+        }
+        Err(error) => command_feedback(&error),
+    }
+    true
+}
+
+fn parse_effort_command(text: &str) -> Option<Result<Option<tau_proto::ReasoningIntent>, String>> {
+    if text != ":effort" && !text.starts_with(":effort ") {
+        return None;
+    }
+    let mut parts = text.split_whitespace();
+    let _command = parts.next();
+    let Some(value) = parts.next() else {
+        return Some(Err(
+            ":effort <provider_default|disabled|0.0..1.0|reset>".to_owned()
+        ));
+    };
+    if parts.next().is_some() {
+        return Some(Err(
+            ":effort <provider_default|disabled|0.0..1.0|reset>".to_owned()
+        ));
+    }
+    Some(crate::ui_commands::parse_effort_override(value))
+}
+
 impl<'a> TerminalInputSession<'a> {
     fn run(&mut self) -> Result<InputLoopExit, CliError> {
         loop {
@@ -3404,10 +3486,42 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_utility_or_shell_shortcut(&mut self, text: &str) -> bool {
-        self.handle_ephemeral_command(text)
+        self.handle_effort_command(text)
+            || self.handle_ephemeral_command(text)
             || self.handle_utility_command(text)
             || self.handle_role_selection_command(text)
             || self.handle_shell_shortcut(text)
+    }
+
+    fn handle_effort_command(&mut self, text: &str) -> bool {
+        if parse_effort_command(text).is_none() {
+            return false;
+        }
+        if let Some(error) = agent_effort_support_error(self.ctx.harness_protocol_version) {
+            self.output.command_feedback(error);
+            return true;
+        }
+        if let Some(agent_id) = self.selected_agent_id() {
+            let result = parse_effort_command(text).expect("checked effort command");
+            match result {
+                Ok(effort) => {
+                    let event = crate::ui_events::agent_effort_select(
+                        self.session_id,
+                        Some(agent_id),
+                        effort,
+                    );
+                    let _ = send_event(self.writer, &event);
+                }
+                Err(error) => self.output.command_feedback(&error),
+            }
+            return true;
+        }
+        apply_effort_staging_command(
+            text,
+            matches!(self.ctx.routing.target(), UiTarget::Creating),
+            &mut self.pending_new_agent_options,
+            |message| self.output.command_feedback(message),
+        )
     }
 
     fn handle_ephemeral_command(&mut self, text: &str) -> bool {
@@ -4212,6 +4326,7 @@ impl<'a> TerminalInputSession<'a> {
                     let role =
                         take_new_agent_role(&mut self.pending_new_agent_options, current_role);
                     let model_override = self.pending_new_agent_options.take_model();
+                    let effort_override = self.pending_new_agent_options.take_effort();
                     let ephemeral = self.pending_new_agent_options.take_ephemeral();
                     create_user_agent_prompt(
                         self.session_id,
@@ -4219,6 +4334,7 @@ impl<'a> TerminalInputSession<'a> {
                         text,
                         CreateUserAgentPromptOptions {
                             model_override,
+                            effort_override,
                             ephemeral,
                             command_handling,
                         },
@@ -5287,6 +5403,7 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
             | ":edit-prompt"
             | ":edit-prompt-chat"
             | ":model"
+            | ":effort"
             | ":version"
             | ":debug-show-ui-event-stats"
             | ":debug-show-event-stats"

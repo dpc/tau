@@ -597,6 +597,7 @@ fn literal_new_agent_skill_text_bypasses_skill_expansion() {
                 .expect("known-safe SessionId must be valid"),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(":skill definitely-not-installed".to_owned()),
             message_class: tau_proto::PromptMessageClass::User,

@@ -663,17 +663,11 @@ impl RoleCompletionDetails {
 }
 
 fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::CompletionItem {
+    if setting == "effort" {
+        return effort_completion::value(value, "clear this role setting");
+    }
     let description = match (setting, value) {
         (_, "reset") => "clear this role setting",
-        ("effort", "provider_default") => "omit effort and use the provider default",
-        ("effort", "disabled") => "request disabled reasoning",
-        ("effort", "0.0") => "minimum portable reasoning intensity",
-        ("effort", "0.25") => "light portable reasoning intensity",
-        ("effort", "0.5") => "medium-like portable reasoning intensity",
-        ("effort", "0.75") => "strong portable reasoning intensity",
-        ("effort", "1.0") => "maximum portable reasoning intensity",
-        ("effort", "increase:0.25") => "increase portable intensity by 0.25",
-        ("effort", "decrease:0.25") => "decrease portable intensity by 0.25",
         ("verbosity", "low") => "terse responses",
         ("verbosity", "medium") => "normal responses",
         ("verbosity", "high") => "detailed responses",
@@ -1651,6 +1645,16 @@ impl EventRenderer {
         self.session.started_session = started;
     }
 
+    /// Records the admitted harness revision used to hide controls that an
+    /// older peer cannot decode.
+    pub(crate) fn set_harness_protocol_version(
+        &mut self,
+        harness_protocol_version: Option<tau_proto::ProtocolVersion>,
+    ) {
+        self.session.harness_protocol_version = harness_protocol_version;
+        self.refresh_action_completions();
+    }
+
     /// Configures the filesystem context rendered beside the current session.
     pub(crate) fn set_right_prompt_paths(
         &mut self,
@@ -1768,6 +1772,7 @@ impl EventRenderer {
                 );
                 self.render_model_status();
                 self.refresh_prompt_placeholder();
+                self.refresh_action_completions();
                 handle.redraw();
             }
             self.flush_pending_initial_discovery();
@@ -1850,6 +1855,7 @@ impl EventRenderer {
                     self.render_model_status();
                 }
                 self.refresh_prompt_placeholder();
+                self.refresh_action_completions();
                 handle.redraw();
             });
         });
@@ -9323,7 +9329,28 @@ impl EventRenderer {
     }
 
     fn refresh_action_completions(&self) {
-        let (commands, arg_completers) = self.resources.action_state.dynamic_completions();
+        let (mut commands, mut arg_completers) = self.resources.action_state.dynamic_completions();
+        if crate::chat::supports_agent_effort(self.session.harness_protocol_version)
+            && self
+                .selection
+                .current_agent_state
+                .lock()
+                .is_ok_and(|intent| intent.is_creating() || intent.selected_agent_id().is_some())
+        {
+            commands.push(tau_cli_term::CommandCompletion::new(
+                crate::chat::EFFORT_COMMAND.0,
+                crate::chat::EFFORT_COMMAND.1,
+            ));
+            arg_completers.push((
+                tau_cli_term::CommandName::new(crate::chat::EFFORT_COMMAND.0),
+                path_std_sync::Arc::new(move |args: &[&str]| {
+                    if args.len() != 1 {
+                        return Vec::new();
+                    }
+                    effort_completion::absolute_values(args[0])
+                }),
+            ));
+        }
         self.resources
             .completion_data
             .set_dynamic_commands_and_arg_completers(commands, arg_completers);
@@ -9939,6 +9966,7 @@ impl EventRenderer {
 }
 
 mod attach_presentation;
+mod effort_completion;
 mod finished_response_projection;
 mod inner_turns;
 mod prepared_renderer_event;

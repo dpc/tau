@@ -888,6 +888,7 @@ fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: "engineer".to_owned(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some("hello".to_owned()),
             literal: false,

@@ -193,6 +193,7 @@ impl Harness {
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
             conv.dispatch.next_ctx_id = prompt_ctx_id.clone();
             conv.identity.model_override = req.model_override;
+            conv.identity.effort_override = req.effort_override;
         }
         if let Some(text) = initial_prompt {
             self.admit_created_initial_prompt(
@@ -384,6 +385,17 @@ impl Harness {
                 self,
                 tau_proto::UiCreateAgentRejection::RoleUnavailable,
                 message,
+            );
+        }
+        if req
+            .effort_override
+            .is_some_and(|effort| !effort.is_nominal())
+        {
+            return reject(
+                self,
+                tau_proto::UiCreateAgentRejection::InvalidEffort,
+                "create-agent effort must be provider_default, disabled, or between 0.0 and 1.0"
+                    .to_owned(),
             );
         }
         if let Err(error) = self.validate_initial_agent_metadata(&req.metadata) {

@@ -490,6 +490,7 @@ fn create_agent_without_prompt(
                 .expect("known-safe SessionId must be valid"),
             role: "deterministic-e2e".to_owned(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: None,
             message_class: PromptMessageClass::User,

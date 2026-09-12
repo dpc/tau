@@ -5595,6 +5595,7 @@ fn duplicate_tool_surface_does_not_resurrect_failed_create_prompt() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some("initial prompt".to_owned()),
             literal: false,

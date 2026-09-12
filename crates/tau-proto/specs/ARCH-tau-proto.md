@@ -1,5 +1,9 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 7.2 adds transient loaded-agent effort selection and an optional
+create-time effort override. Both are runtime-only UI controls; they do not
+change durable agent identity or journal replay.
+
 Protocol 7.1 adds optional inter-session sender notices to the message/auth RPC
 and optional typed sender/recipient notice snapshots to directional durable
 message facts. Missing fields preserve prior behavior, so best-effort

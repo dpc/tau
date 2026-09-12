@@ -404,6 +404,34 @@ fn retry_extension_support_requires_advertised_protocol_4_1() {
     )));
 }
 
+/// Agent effort controls must be withheld when admission omits the harness
+/// revision or reports a pre-7.2 peer that cannot decode the new event.
+#[test]
+fn agent_effort_support_requires_advertised_protocol_7_2() {
+    assert!(!supports_agent_effort(None));
+    assert!(!supports_agent_effort(Some(
+        tau_proto::ProtocolVersion::new(7, 1)
+    )));
+    assert!(supports_agent_effort(Some(
+        tau_proto::ProtocolVersion::new(7, 2)
+    )));
+    assert!(supports_agent_effort(Some(
+        tau_proto::ProtocolVersion::new(7, 3)
+    )));
+    assert_eq!(
+        agent_effort_support_error(None),
+        Some(":effort requires a harness with protocol 7.2 or newer")
+    );
+    assert_eq!(
+        agent_effort_support_error(Some(tau_proto::ProtocolVersion::new(7, 1))),
+        Some(":effort requires a harness with protocol 7.2 or newer")
+    );
+    assert_eq!(
+        agent_effort_support_error(Some(tau_proto::ProtocolVersion::new(7, 2))),
+        None
+    );
+}
+
 /// Both history-aware editor commands must remain discoverable and keep
 /// malformed argument variants inside local command handling.
 #[test]
@@ -703,7 +731,12 @@ impl TestEphemeralCommandHandlers {
 
 impl RecordedLineHandlers for TestEphemeralCommandHandlers {
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        let handled = apply_ephemeral_staging_command(
+        let handled = apply_effort_staging_command(
+            text,
+            !self.has_selected_agent,
+            &mut self.pending,
+            |message| self.outputs.push(format!("notice:{message}")),
+        ) || apply_ephemeral_staging_command(
             text,
             self.has_selected_agent,
             &mut self.pending,
@@ -722,6 +755,7 @@ impl RecordedLineHandlers for TestEphemeralCommandHandlers {
 
     fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
         let model_override = self.pending.take_model();
+        let effort_override = self.pending.take_effort();
         let ephemeral = self.pending.take_ephemeral();
         let req = create_user_agent_prompt(
             &tau_proto::SessionId::parse("s1").expect("test session id"),
@@ -729,14 +763,16 @@ impl RecordedLineHandlers for TestEphemeralCommandHandlers {
             text,
             CreateUserAgentPromptOptions {
                 model_override,
+                effort_override,
                 ephemeral,
                 command_handling: PromptCommandHandling::Interpret,
             },
         );
         self.outputs.push(format!(
-            "create:ephemeral={} model={:?} prompt={}",
+            "create:ephemeral={} model={:?} effort={:?} prompt={}",
             req.ephemeral,
             req.model_override,
+            req.effort_override,
             req.initial_prompt.unwrap_or_default()
         ));
         None
@@ -841,6 +877,7 @@ impl RecordedLineHandlers for TestNewRoleCommandHandlers {
         }
         let role = take_new_agent_role(&mut self.pending, self.current_role.clone());
         let model_override = self.pending.take_model();
+        let effort_override = self.pending.take_effort();
         let ephemeral = self.pending.take_ephemeral();
         let req = create_user_agent_prompt(
             &tau_proto::SessionId::parse("s1").expect("test session id"),
@@ -848,6 +885,7 @@ impl RecordedLineHandlers for TestNewRoleCommandHandlers {
             text,
             CreateUserAgentPromptOptions {
                 model_override,
+                effort_override,
                 ephemeral,
                 command_handling: PromptCommandHandling::Interpret,
             },
@@ -1346,4 +1384,99 @@ fn pending_new_agent_model_clear_discards_staged_override() {
     pending.clear();
 
     assert_eq!(pending.take_model(), None);
+}
+
+/// `:effort` is a local one-shot creation command rather than prompt text.
+#[test]
+fn effort_command_is_local() {
+    assert!(is_known_static_command(":effort 0.8"));
+    assert!(is_known_static_command(":effort reset"));
+    assert!(!is_known_static_command("/effort"));
+}
+
+/// A valid effort is carried by exactly the next create request and does not
+/// leak into a later new agent.
+#[test]
+fn effort_command_stages_one_shot_new_agent_override() {
+    let outputs = route_ephemeral_lines(&[":effort 0.8", "first", "second"], false, |_| {});
+
+    assert!(
+        outputs
+            .iter()
+            .any(|line| line == "notice:next agent effort set to 0.8")
+    );
+    assert!(
+        outputs.iter().any(|line| {
+            line.contains("effort=Some(Intensity") && line.contains("prompt=first")
+        })
+    );
+    assert!(
+        outputs
+            .iter()
+            .any(|line| { line.contains("effort=None") && line.contains("prompt=second") })
+    );
+}
+
+/// Reset clears a previously staged effort so role defaults remain
+/// authoritative.
+#[test]
+fn effort_reset_clears_pending_override() {
+    let outputs = route_ephemeral_lines(&[":effort reset", "default effort"], false, |pending| {
+        pending.set_effort(Some("0.9".parse().expect("effort")));
+    });
+
+    assert!(
+        outputs
+            .iter()
+            .any(|line| line == "notice:next agent effort reset to its role default")
+    );
+    assert!(
+        outputs
+            .iter()
+            .any(|line| line.contains("effort=None") && line.contains("prompt=default effort"))
+    );
+}
+
+/// New-agent effort accepts only the existing nominal absolute effort grammar.
+#[test]
+fn effort_command_rejects_invalid_or_relative_values() {
+    for value in ["-0.1", "1.1", "increase:0.1", "unknown"] {
+        let outputs = route_ephemeral_lines(&[&format!(":effort {value}")], false, |_| {});
+        assert!(
+            outputs.iter().any(|line| line.starts_with("notice:")),
+            "{value} should report a validation error"
+        );
+        assert_eq!(outputs.len(), 1);
+    }
+}
+
+/// Overview and selected-agent states reject `:effort`; it is available only
+/// after the UI enters explicit new-agent creation.
+#[test]
+fn effort_command_rejects_outside_new_agent_state() {
+    let mut pending = PendingNewAgentOptions::default();
+    let mut notices = Vec::new();
+    assert!(apply_effort_staging_command(
+        ":effort 0.7",
+        false,
+        &mut pending,
+        |message| notices.push(message.to_owned()),
+    ));
+    assert_eq!(
+        notices,
+        ["Use :new first; :effort controls only the next new agent."]
+    );
+    assert_eq!(pending.take_effort(), None);
+}
+
+/// Switching to an existing agent clears effort together with the other
+/// pending new-agent options.
+#[test]
+fn pending_new_agent_clear_discards_staged_effort() {
+    let mut pending = PendingNewAgentOptions::default();
+    pending.set_effort(Some("0.75".parse().expect("effort")));
+
+    pending.clear();
+
+    assert_eq!(pending.take_effort(), None);
 }

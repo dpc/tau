@@ -33,6 +33,8 @@ impl PromptCommandHandling {
 pub(crate) struct CreateUserAgentPromptOptions {
     /// Model override installed before the first prompt is dispatched.
     pub(crate) model_override: Option<tau_proto::ModelId>,
+    /// Reasoning effort override installed for the loaded agent.
+    pub(crate) effort_override: Option<tau_proto::ReasoningIntent>,
     /// Whether the new agent should be memory-only for the daemon lifetime.
     pub(crate) ephemeral: bool,
     /// Controls whether harness-owned prompt commands may interpret the text.
@@ -55,6 +57,7 @@ pub(crate) fn create_user_agent_prompt(
         session_id: session_id.clone(),
         role: role.into(),
         model_override: options.model_override,
+        effort_override: options.effort_override,
         metadata: Vec::new(),
         initial_prompt: Some(prompt.into()),
         literal: options.command_handling.is_literal_escape(),

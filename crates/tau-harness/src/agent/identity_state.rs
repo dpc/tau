@@ -2,7 +2,8 @@
 
 use tau_core::{AgentPersistenceMode, NodeId};
 use tau_proto::{
-    AgentId, ConnectionId, ModelId, PromptOriginator, SessionId, ToolCallId, ToolUseStats,
+    AgentId, ConnectionId, ModelId, PromptOriginator, ReasoningIntent, SessionId, ToolCallId,
+    ToolUseStats,
 };
 
 /// Load-scoped identity, mutable transcript position, routing, and metadata.
@@ -65,6 +66,8 @@ pub(crate) struct AgentIdentityState {
     /// prompts for this loaded agent use it instead of resolving the model
     /// from the role.
     pub(crate) model_override: Option<ModelId>,
+    /// Loaded-runtime reasoning effort used instead of the role's effort.
+    pub(crate) effort_override: Option<ReasoningIntent>,
     /// Stable id assigned when this conversation first starts a turn.
     pub(crate) agent_id: Option<AgentId>,
     /// Whether this agent's semantic transcript is durable or memory-only.

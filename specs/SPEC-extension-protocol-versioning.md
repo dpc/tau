@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 7.2 adds the transient `ui.agent_effort_select` request and the
+optional `UiCreateAgent.effort_override` field. Older peers can continue all
+other UI behavior but cannot apply the new per-agent effort control, so the
+change uses a minor revision. A UI advertises or sends `:effort` only after
+admission reports protocol 7.2 or newer; missing or older revision state produces
+a local unsupported-control diagnostic instead of sending either wire shape.
+Neither request changes durable agent identity or journal schemas.
+
 Protocol 7.1 adds optional sender-configured notice text to the cross-harness
 message and authentication RPCs, plus optional sender- and recipient-configured
 notice snapshots to durable directional message facts. A mixed older peer may

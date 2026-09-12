@@ -701,6 +701,7 @@ fn create_agent_rejection_isolated_to_requester_socket() {
                 session_id: tau_proto::SessionId::parse("s1").expect("session id"),
                 role: "missing-role".to_owned(),
                 model_override: None,
+                effort_override: None,
                 metadata: Vec::new(),
                 initial_prompt: Some("never admitted".to_owned()),
                 literal: false,

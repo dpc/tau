@@ -223,6 +223,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
             session_id: test_session_id("s1"),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: vec![tau_proto::AgentInitialMetadata {
                 key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                 value: CborValue::Text(cwd.display().to_string()),
@@ -293,6 +294,7 @@ fn registered_bootstrap_create_installs_exact_restart_marker() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(prompt_text.to_owned()),
             literal: true,
@@ -387,6 +389,7 @@ fn bootstrap_prompt_exact_content_and_role_survive_cold_replay() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(prompt_text.to_owned()),
             literal: true,
@@ -462,6 +465,7 @@ fn bootstrap_prompt_debug_sensitivity_is_exact_through_interception() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(bootstrap_secret.to_owned()),
             literal: true,
@@ -1257,6 +1261,7 @@ fn ui_create_agent_validates_correlations_and_accepts_promptless_creation() {
                 session_id: session_id.clone(),
                 role: "engineer".to_owned(),
                 model_override: None,
+                effort_override: None,
                 metadata: Vec::new(),
                 initial_prompt: Some("hello".to_owned()),
                 literal: false,
@@ -1306,6 +1311,7 @@ fn ui_create_agent_validates_correlations_and_accepts_promptless_creation() {
                 session_id: request_session,
                 role: "engineer".to_owned(),
                 model_override: None,
+                effort_override: None,
                 metadata,
                 initial_prompt: None,
                 literal: false,
@@ -1327,6 +1333,7 @@ fn ui_create_agent_validates_correlations_and_accepts_promptless_creation() {
             session_id,
             role: "engineer".to_owned(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: None,
             literal: false,
@@ -2749,6 +2756,7 @@ fn prompt_acceptance_traces_exclude_non_ui_prompt_and_metadata_traffic() {
                     session_id: harness.session_runtime.current_session_id.clone(),
                     role: harness.config.selected_role.clone(),
                     model_override: None,
+                    effort_override: None,
                     metadata: Vec::new(),
                     initial_prompt: Some("AGENT-CREATE-CANARY".to_owned()),
                     message_class: tau_proto::PromptMessageClass::User,
@@ -2863,6 +2871,7 @@ fn new_agent_initial_human_ui_prompt_is_wrapped_only_in_provider_context() {
             session_id: test_session_id("s1"),
             role: h.config.selected_role.clone(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(raw.to_owned()),
             message_class: tau_proto::PromptMessageClass::User,
@@ -2940,6 +2949,7 @@ fn ui_create_agent_rejection_is_correlated_and_point_to_point() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: "missing-role".to_owned(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some("never admitted".to_owned()),
             literal: false,
@@ -2984,6 +2994,54 @@ fn ui_create_agent_rejection_is_correlated_and_point_to_point() {
     assert!(h.agent_runtime.agent_registry.session_loaded.is_empty());
 }
 
+/// Create admission rejects out-of-range absolute effort before allocating an
+/// agent so protocol callers cannot bypass the CLI's shared validation.
+#[test]
+fn ui_create_agent_rejects_invalid_effort_override() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let requester = connect_test_client(&mut h, "create-requester", tau_proto::ClientKind::Ui);
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("create-requester"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-invalid-effort".to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            role: h.config.selected_role.clone(),
+            model_override: None,
+            effort_override: Some("1.1".parse().expect("representable relative state")),
+            metadata: Vec::new(),
+            initial_prompt: None,
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("reject invalid effort");
+
+    let outcome = requester
+        .lock()
+        .expect("requester frames")
+        .iter()
+        .find_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::UiCreateAgentResult(result)) => Some(result.outcome.clone()),
+            _ => None,
+        })
+        .expect("create result");
+    assert!(matches!(
+        outcome,
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::InvalidEffort,
+            agent_id: None,
+            ..
+        }
+    ));
+    assert!(h.agent_runtime.agent_registry.session_loaded.is_empty());
+}
+
 /// Ensures preprocessing failure follows successful queued admission as a
 /// separately correlated prompt terminal.
 #[test]
@@ -2999,6 +3057,7 @@ fn ui_create_agent_skill_rejection_reports_partial_creation() {
             session_id: h.session_runtime.current_session_id.clone(),
             role: "engineer".to_owned(),
             model_override: None,
+            effort_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(":skill missing-skill".to_owned()),
             literal: false,

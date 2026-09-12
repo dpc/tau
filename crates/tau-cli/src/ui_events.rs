@@ -91,6 +91,18 @@ pub(crate) fn agent_model_select(
     })
 }
 
+pub(crate) fn agent_effort_select(
+    session_id: &tau_proto::SessionId,
+    target_agent_id: Option<tau_proto::AgentId>,
+    effort: Option<tau_proto::ReasoningIntent>,
+) -> Event {
+    Event::UiAgentEffortSelect(tau_proto::UiAgentEffortSelect {
+        session_id: session_id.clone(),
+        target_agent_id,
+        effort,
+    })
+}
+
 pub(crate) fn set_agent_display_name(
     session_id: &tau_proto::SessionId,
     agent_id: tau_proto::AgentId,

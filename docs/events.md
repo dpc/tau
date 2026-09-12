@@ -814,6 +814,11 @@ intent.
 - **`ui.agent_model_select`** — User requests a model override for a loaded
   agent. `agent_id` may be omitted only when the harness can unambiguously infer
   the target from session selection/default state.
+- **`ui.agent_effort_select`** — User sets or clears a runtime-only effort
+  override for a loaded agent. It affects subsequently started prompts, never
+  an already-running prompt. Clearing it returns to the current role effort;
+  cold reload discards it. `agent_id` has the same target inference rule as
+  `ui.agent_model_select`.
 - **`ui.role_update`** — User changes or deletes a role. Wire actions are
    `delete`, `set_model`, `set_effort`, `adjust_effort`, `set_verbosity`,
    `adjust_verbosity`, `set_thinking_summary`, `adjust_thinking_summary`,
@@ -844,10 +849,13 @@ intent.
 - **`ui.create_agent`** — UI requests creation of a user-owned agent, optionally
   with the first prompt to append after context loads. The request carries the
   request correlation id, role, initial metadata, optional parent agent, optional prompt correlation id,
-  optional `model_override`, and optional `ephemeral`; when present,
-  `model_override` is installed on the new agent before its first prompt is
-  queued or routed, and `ephemeral: true` keeps the agent transcript and session
-  membership memory-only for the daemon lifetime.
+  optional `model_override`, optional `effort_override`, and optional
+  `ephemeral`; when present, model and effort overrides are installed on the
+  loaded agent before its first prompt is queued or routed and apply to all
+  prompts for that loaded runtime. They are not durable creation identity and
+  disappear on cold reload; persisted prompt parameters continue to record the
+  exact effort used by each already-started prompt. `ephemeral: true` keeps the
+  agent transcript and session membership memory-only for the daemon lifetime.
 - **`ui.create_agent_result`** — Transient requester-directed terminal admission
   result for `ui.create_agent`. It echoes the request and session ids and reports
   either the created agent plus `Absent`/`Queued` initial-prompt admission state

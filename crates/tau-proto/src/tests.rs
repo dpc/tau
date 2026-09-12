@@ -2254,6 +2254,11 @@ fn representative_events() -> Vec<Event> {
             target_agent_id: Some(agent_id("agent-1")),
             model: "openai/gpt-4.1".parse().expect("model id"),
         }),
+        Event::UiAgentEffortSelect(UiAgentEffortSelect {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(agent_id("agent-1")),
+            effort: Some("0.8".parse().expect("effort")),
+        }),
         Event::UiRoleUpdate(UiRoleUpdate {
             role: "engineer".to_owned(),
             action: UiRoleUpdateAction::SetVerbosity {
@@ -2274,6 +2279,7 @@ fn representative_events() -> Vec<Event> {
             session_id: test_session_id("s1"),
             role: "engineer".to_owned(),
             model_override: Some("openai/gpt-4.1".parse().expect("model id")),
+            effort_override: Some("0.8".parse().expect("effort")),
             metadata: vec![AgentInitialMetadata {
                 key: "cwd".into(),
                 value: CborValue::Text("/tmp".to_owned()),
@@ -3022,6 +3028,7 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::ShellCommandProgress(_)
                 | Event::ShellCommandFinishedReported(_)
                 | Event::UiPromptSubmitted(_)
+                | Event::UiAgentEffortSelect(_)
                 | Event::AgentPromptQueued(_)
                 | Event::AgentPromptRecalled(_)
                 | Event::AgentPromptRejected(_)
@@ -3168,6 +3175,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "tool.unregistration_declared",
         "tool.unregister",
         "ui.agent_model_select",
+        "ui.agent_effort_select",
         "ui.cancel_prompt",
         "ui.compact_request",
         "ui.create_agent",
@@ -4359,7 +4367,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 7, "minor": 1})
+        serde_json::json!({"major": 7, "minor": 2})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4451,7 +4459,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 7, "minor": 1})
+        serde_json::json!({"major": 7, "minor": 2})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

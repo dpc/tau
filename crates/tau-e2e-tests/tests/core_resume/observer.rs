@@ -239,6 +239,7 @@ impl SideObserver {
                     session_id: session_id.clone(),
                     role: "deterministic-main".to_owned(),
                     model_override: None,
+                    effort_override: None,
                     metadata: Vec::new(),
                     initial_prompt: Some(prompt.to_owned()),
                     message_class: tau_proto::PromptMessageClass::User,

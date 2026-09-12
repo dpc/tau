@@ -150,11 +150,20 @@ fn parse_effort_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, Str
                 .expect("parsed effort delta is nonzero"),
         });
     }
+    let effort = parse_effort_override(value)?;
+    Ok(tau_proto::UiRoleUpdateAction::SetEffort { effort })
+}
+
+/// Parses one resettable absolute effort using the same validation as role
+/// effort updates.
+pub(crate) fn parse_effort_override(
+    value: &str,
+) -> Result<Option<tau_proto::ReasoningIntent>, String> {
     let effort = parse_resettable(value)?;
     if effort.is_some_and(|intent: tau_proto::ReasoningIntent| !intent.is_nominal()) {
         return Err("absolute reasoning intensity must be between 0.0 and 1.0".to_owned());
     }
-    Ok(tau_proto::UiRoleUpdateAction::SetEffort { effort })
+    Ok(effort)
 }
 
 fn parse_verbosity_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {

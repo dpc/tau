@@ -20,10 +20,27 @@ the request's exact local intent epoch still owns creation. Navigation or newer
 editing wins over a delayed result. Draft, request, and selection state remain
 process-local and are neither published nor persisted.
 
-Options such as `:model <provider>/<model>` and `:ephemeral [on|off]` stage
-one-shot properties for that next `ui.create_agent`; they are consumed by the
-first prompt that creates the agent and cleared when the UI switches to an
-existing agent. Bare `:new` clears only a stale staged role,
-while preserving staged model and ephemeral options. Bare `:ephemeral` toggles
-the staged memory-only flag, while `:ephemeral on` and `:ephemeral off` set it
+Options such as `:model <provider>/<model>`, `:effort <value>`, and
+`:ephemeral [on|off]` stage one-shot properties for that next
+`ui.create_agent`; they are consumed by the first prompt that creates the agent
+and cleared when the UI switches to an existing agent. Bare `:new` clears only
+a stale staged role, while preserving staged model, effort, and ephemeral
+options. `:effort reset` clears the staged effort. Bare `:ephemeral` toggles the
+staged memory-only flag, while `:ephemeral on` and `:ephemeral off` set it
 explicitly. These commands do not convert existing agents in place.
+
+The created agent's model and effort overrides apply to all of its prompts
+while it remains loaded, including after suspend/resume. They are
+loaded-runtime identity, not durable creation facts: a daemon restart or cold
+reload restores the persisted role and resolves its then-current model and
+effort. Each already-started prompt retains its exact persisted model
+parameters as historical facts.
+
+With an existing agent selected, `:effort <value>` updates that loaded agent's
+runtime override and `:effort reset` clears it. The update affects only prompts
+whose parameters are selected afterward; an in-flight prompt retains its
+already-selected parameters. The per-agent override outranks the current
+runtime role effort, which outranks normally resolved configuration defaults.
+Provider/model capability mapping remains responsible for the effective native
+effort. The command is neither completed nor accepted from the non-creating
+overview.
