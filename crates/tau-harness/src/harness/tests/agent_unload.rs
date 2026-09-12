@@ -23,6 +23,8 @@ fn received_event(recipient_id: tau_proto::AgentId) -> Event {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "accepted before unload".to_owned(),
     })
 }

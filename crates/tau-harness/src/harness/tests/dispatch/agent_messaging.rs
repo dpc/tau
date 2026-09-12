@@ -164,6 +164,10 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
     h.peer_messaging.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
+            sender_notice: Some(
+                tau_proto::InterSessionNotice::new("sender guidance".to_owned())
+                    .expect("valid notice"),
+            ),
             capability: "secret-capability".to_owned(),
             sender_session_id: h.session_runtime.current_session_id.clone(),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -171,7 +175,7 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 "recipient_agent",
             )),
-            kind: tau_proto::AgentMessageKind::WatchResponse,
+            kind: tau_proto::AgentMessageKind::Message,
             message: "authorized body".to_owned(),
         },
     );
@@ -186,41 +190,166 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
         recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
             "recipient_agent",
         )),
-        kind: tau_proto::AgentMessageKind::WatchResponse,
+        kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: Some(
+            tau_proto::InterSessionNotice::new("sender guidance".to_owned()).expect("valid notice"),
+        ),
         message: "authorized body".to_owned(),
     };
-    let result = h.handle_external_agent_message_auth_request(valid.clone());
+    let result =
+        h.handle_external_agent_message_auth_request(valid.clone(), tau_proto::PROTOCOL_VERSION);
     assert!(result.authorized);
     assert_eq!(result.error, None);
 
     let forged_kind = tau_proto::ExternalAgentMessageAuthRequest {
         request_id: "auth-forged-kind".to_owned(),
-        kind: tau_proto::AgentMessageKind::Message,
+        kind: tau_proto::AgentMessageKind::WatchResponse,
         ..valid.clone()
     };
-    let result = h.handle_external_agent_message_auth_request(forged_kind);
+    let result =
+        h.handle_external_agent_message_auth_request(forged_kind, tau_proto::PROTOCOL_VERSION);
     assert!(!result.authorized);
     assert!(result.error.expect("error").contains("does not match"));
+
+    let omitted_notice = tau_proto::ExternalAgentMessageAuthRequest {
+        request_id: "auth-legacy-omitted-notice".to_owned(),
+        sender_notice: None,
+        ..valid.clone()
+    };
+    let result = h.handle_external_agent_message_auth_request(
+        omitted_notice.clone(),
+        tau_proto::ProtocolVersion::new(7, 0),
+    );
+    assert!(
+        result.authorized,
+        "an older target may omit the additive optional notice"
+    );
+    let result =
+        h.handle_external_agent_message_auth_request(omitted_notice, tau_proto::PROTOCOL_VERSION);
+    assert!(
+        !result.authorized,
+        "a current target must return the exact authenticated notice"
+    );
 
     let forged_sender = tau_proto::ExternalAgentMessageAuthRequest {
         request_id: "auth-forged-sender".to_owned(),
         sender_id: crate::parse_agent_id("attacker"),
         ..valid.clone()
     };
-    let result = h.handle_external_agent_message_auth_request(forged_sender);
+    let result =
+        h.handle_external_agent_message_auth_request(forged_sender, tau_proto::PROTOCOL_VERSION);
+    assert!(!result.authorized);
+    assert!(result.error.expect("error").contains("does not match"));
+
+    let forged_notice = tau_proto::ExternalAgentMessageAuthRequest {
+        request_id: "auth-forged-notice".to_owned(),
+        sender_notice: Some(
+            tau_proto::InterSessionNotice::new("altered guidance".to_owned())
+                .expect("valid notice"),
+        ),
+        ..valid.clone()
+    };
+    let result =
+        h.handle_external_agent_message_auth_request(forged_notice, tau_proto::PROTOCOL_VERSION);
     assert!(!result.authorized);
     assert!(result.error.expect("error").contains("does not match"));
 
     let forged_body = tau_proto::ExternalAgentMessageAuthRequest {
         request_id: "auth-forged-body".to_owned(),
+        sender_notice: None,
         message: "altered body".to_owned(),
         ..valid
     };
-    let result = h.handle_external_agent_message_auth_request(forged_body);
+    let result =
+        h.handle_external_agent_message_auth_request(forged_body, tau_proto::PROTOCOL_VERSION);
     assert!(!result.authorized);
     assert!(result.error.expect("error").contains("does not match"));
 
     h.shutdown().expect("shutdown");
+}
+
+/// External-message Hello admission retains the exact negotiated revision used
+/// to distinguish current exact notice authentication from pre-7.1 omission.
+#[test]
+fn external_message_hello_records_revision_for_notice_authentication() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let peers = [
+        (
+            crate::test_connection_id("external-current"),
+            tau_proto::PROTOCOL_VERSION,
+        ),
+        (
+            crate::test_connection_id("external-legacy"),
+            tau_proto::ProtocolVersion::new(7, 0),
+        ),
+    ];
+    for (peer, version) in &peers {
+        h.handle_client_message(
+            peer,
+            tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+                declaration_inspection: false,
+                protocol_version: *version,
+                client_name: crate::test_extension_name(
+                    crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+                ),
+                client_kind: tau_proto::ClientKind::External,
+                expected_session_id: None,
+                capabilities: Default::default(),
+            }),
+        )
+        .expect("external hello");
+        assert_eq!(
+            h.peer_messaging.external_message_peer_versions.get(peer),
+            Some(version)
+        );
+    }
+    h.shutdown().expect("shutdown");
+}
+
+/// An accepted external message snapshots both sender-configured and
+/// recipient-local notices into the durable receive projection.
+#[test]
+fn external_receive_persists_sender_and_recipient_notice_snapshots() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+    h.config
+        .accepted_harness_settings
+        .inter_session
+        .incoming_notice = Some(
+        tau_proto::InterSessionNotice::new("recipient guidance".to_owned()).expect("valid notice"),
+    );
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "notice-snapshot".to_owned(),
+        message_id: tau_proto::AgentMessageId::parse("notice-snapshot-message")
+            .expect("message id"),
+        capability: "test-only".to_owned(),
+        sender_session_id: test_session_id("sender-session"),
+        sender_id: crate::parse_agent_id("sender-agent"),
+        recipient_session_id: h.session_runtime.current_session_id.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id),
+        kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: Some(
+            tau_proto::InterSessionNotice::new("sender guidance".to_owned()).expect("valid notice"),
+        ),
+        message: "body".to_owned(),
+    };
+
+    let result = h.handle_external_agent_message_request_without_auth_for_test(request);
+
+    assert_eq!(result.failure, None);
+    let received = durable_agent_message_received_events(&h);
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].sender_notice.as_deref(),
+        Some("sender guidance")
+    );
+    assert_eq!(
+        received[0].recipient_notice.as_deref(),
+        Some("recipient guidance")
+    );
 }
 
 /// Generic clients and extensions must not be able to forge external-message
@@ -245,6 +374,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
             &recipient_id,
         )),
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "forged".to_owned(),
     };
 
@@ -355,6 +485,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
                 &recipient_id,
             )),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "hello over socket".to_owned(),
         },
     ))
@@ -451,11 +582,13 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         recipient_session_id: target.session_runtime.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "hello between harnesses".to_owned(),
     };
     sender.peer_messaging.pending_external_message_auth.insert(
         message_id,
         crate::harness::PendingExternalAgentMessageAuth {
+            sender_notice: None,
             capability: request.capability.clone(),
             sender_session_id: request.sender_session_id.clone(),
             sender_id,
@@ -647,6 +780,7 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
                     &recipient_id,
                 )),
                 kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: None,
                 message: "hello".to_owned(),
             },
         ),
@@ -736,6 +870,40 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     h.shutdown().expect("shutdown");
 }
 
+/// The immutable sender settings snapshot supplies the outgoing notice before
+/// peer I/O so callback authentication covers the exact configured text.
+#[test]
+fn external_send_snapshots_configured_outgoing_notice_for_authentication() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.config
+        .accepted_harness_settings
+        .inter_session
+        .outgoing_notice = Some(
+        tau_proto::InterSessionNotice::new("sender guidance".to_owned()).expect("valid notice"),
+    );
+
+    h.publish_external_agent_message_from_agent(
+        &cid,
+        test_session_id("missing-session"),
+        tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id("recipient")),
+        "body".to_owned(),
+        tau_proto::AgentMessageKind::Message,
+        None,
+    )
+    .expect("queue external delivery");
+
+    let pending = h
+        .peer_messaging
+        .pending_external_message_auth
+        .values()
+        .next()
+        .expect("pending authentication");
+    assert_eq!(pending.sender_notice.as_deref(), Some("sender guidance"));
+    h.shutdown().expect("shutdown");
+}
+
 /// A reachable target without an inter-session receiver must show the caller a
 /// configuration action rather than the generic unavailable-session failure.
 #[test]
@@ -770,6 +938,7 @@ fn external_message_no_receiver_failure_is_actionable_to_caller() {
                 sender_id: crate::parse_agent_id("sender_agent"),
                 recipient_session_id: test_session_id("reachable-session"),
                 kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: None,
                 message: "hello".to_owned(),
             },
         )),
@@ -826,6 +995,7 @@ fn external_message_major_skew_warning_headers_real_failure() {
                 sender_id: crate::parse_agent_id("sender_agent"),
                 recipient_session_id: test_session_id("skewed-session"),
                 kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: None,
                 message: "hello".to_owned(),
             },
         )),
@@ -878,6 +1048,10 @@ fn external_message_major_skew_warning_headers_success() {
                 sender_id: crate::parse_agent_id("sender_agent"),
                 recipient_session_id: test_session_id("skewed-session"),
                 kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: Some(
+                    tau_proto::InterSessionNotice::new("sender guidance".to_owned())
+                        .expect("valid notice"),
+                ),
                 message: "hello".to_owned(),
             },
         )),
@@ -904,6 +1078,9 @@ fn external_message_major_skew_warning_headers_success() {
             "{warning}\n\nMessage committed: skew-success-message; recipient was live; response not guaranteed"
         ))
     );
+    let sent = session_agent_message_sent_events(&h);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].sender_notice.as_deref(), Some("sender guidance"));
     h.shutdown().expect("shutdown");
 }
 
@@ -954,6 +1131,7 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                     sender_id: crate::parse_agent_id("sender_agent"),
                     recipient_session_id: test_session_id("other-session"),
                     kind: tau_proto::AgentMessageKind::Message,
+                    sender_notice: None,
                     message: "delivered".to_owned(),
                 },
             )),
@@ -1047,6 +1225,7 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
         recipient_session_id: h.session_runtime.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "hello peer".to_owned(),
     };
 
@@ -1083,6 +1262,7 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
         recipient_session_id: h.session_runtime.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "hello peer".to_owned(),
     };
 
@@ -1114,6 +1294,7 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
         recipient_session_id: h.session_runtime.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "hello peer".to_owned(),
     };
 
@@ -1197,6 +1378,7 @@ fn bare_peer_auto_start_uses_configured_role() {
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "choose deterministically".to_owned(),
         },
     );
@@ -1242,6 +1424,7 @@ fn bare_peer_auto_start_rejects_unavailable_role_model() {
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "fall back".to_owned(),
         },
     );
@@ -1284,6 +1467,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
                 recipient_session_id: h.session_runtime.current_session_id.clone(),
                 recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
                 kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: None,
                 message: "persist purpose before response".to_owned(),
             },
         );
@@ -1370,6 +1554,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
         recipient_session_id: target_session.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: format!("hello {suffix}"),
     };
 
@@ -1439,6 +1624,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
         recipient_session_id: h.session_runtime.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "rejected".to_owned(),
     };
 
@@ -1579,6 +1765,7 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
     h.peer_messaging.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
+            sender_notice: None,
             capability: "typed-capability".to_owned(),
             sender_session_id: h.session_runtime.current_session_id.clone(),
             sender_id: sender_id.clone(),
@@ -1588,8 +1775,8 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
             message: "same body".to_owned(),
         },
     );
-    let result =
-        h.handle_external_agent_message_auth_request(tau_proto::ExternalAgentMessageAuthRequest {
+    let result = h.handle_external_agent_message_auth_request(
+        tau_proto::ExternalAgentMessageAuthRequest {
             request_id: "typed-auth".to_owned(),
             message_id,
             capability: "typed-capability".to_owned(),
@@ -1600,8 +1787,11 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
                 "known_agent",
             )),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "same body".to_owned(),
-        });
+        },
+        tau_proto::PROTOCOL_VERSION,
+    );
     assert!(!result.authorized);
 }
 
@@ -1652,6 +1842,7 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
                 &recipient_id,
             )),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "hello".to_owned(),
         },
     );
@@ -2434,6 +2625,8 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "branch-owned input".to_owned(),
         }),
     );
@@ -3065,6 +3258,7 @@ fn inbound_agent_message_events_are_ignored() {
             agent_id: crate::parse_agent_id("victim"),
         },
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "forged".to_owned(),
     });
     let forged_received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
@@ -3078,6 +3272,8 @@ fn inbound_agent_message_events_are_ignored() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "forged received".to_owned(),
     });
     for forged in [forged_sent, forged_received] {
@@ -4082,6 +4278,7 @@ fn external_agent_message_request_publishes_received_projection() {
                 &recipient_id,
             )),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "hello from outside".to_owned(),
         },
     );
@@ -4155,6 +4352,7 @@ fn external_agent_message_request_rejects_wrong_active_session() {
                 &recipient_id,
             )),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "hello from outside".to_owned(),
         },
     );
@@ -4190,6 +4388,7 @@ fn external_agent_message_request_rejects_unknown_recipient() {
                 "missing_agent",
             )),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "hello from outside".to_owned(),
         },
     );
@@ -4227,6 +4426,7 @@ fn external_agent_message_request_rejects_empty_message() {
                 &recipient_id,
             )),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: " \n\t ".to_owned(),
         },
     );
@@ -4266,6 +4466,7 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
             &recipient_id,
         )),
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "hello".to_owned(),
     };
 
@@ -4281,6 +4482,7 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
         (
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "external-preauth-empty".to_owned(),
+                sender_notice: None,
                 message: " \n\t ".to_owned(),
                 ..base.clone()
             },
@@ -4364,6 +4566,8 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "branch B wake".to_owned(),
         }),
     );
@@ -4496,6 +4700,8 @@ fn agent_message_interrupts_recipient_active_wait() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "please stop waiting".to_owned(),
         }),
     );
@@ -4604,6 +4810,8 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "queued manager message".to_owned(),
         }),
     );
@@ -4689,6 +4897,8 @@ fn wait_start_cites_selected_branch_activation_after_off_branch_wake() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: body.to_owned(),
         })
     };
@@ -4795,6 +5005,8 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: "continue before completion".to_owned(),
             }),
         );
@@ -5135,6 +5347,8 @@ fn durable_message_wake_extends_session_retention() {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: "MESSAGE-WAKE-CANARY".to_owned(),
             }),
         );

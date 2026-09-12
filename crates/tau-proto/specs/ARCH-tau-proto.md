@@ -1,9 +1,17 @@
 # ARCH-tau-proto: tau-proto architecture
 
-Protocol 7.0 adds the optional typed sender-trust qualification to external
-message parties. The published revision remains 7.0 and therefore rejects a
-configured 6.x extension, although an older harness could ignore the optional
-field and continue in a workable degraded state. Under the current revision
+Protocol 7.1 adds optional inter-session sender notices to the message/auth RPC
+and optional typed sender/recipient notice snapshots to directional durable
+message facts. Missing fields preserve prior behavior, so best-effort
+cross-harness mixed versions can degrade by omitting the notice while retaining
+message delivery. Each notice is bounded to 64 KiB UTF-8. The contracts are
+[SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md)
+and [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
+
+Protocol 7.0 added the optional typed sender-trust qualification to external
+message parties. Protocol 7.x rejects a configured 6.x extension, although an
+older harness could ignore the optional field and continue in a workable
+degraded state. Under the current revision
 policy, omission of an additive optional field alone does not require a new
 major revision. The contracts are
 [SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md)

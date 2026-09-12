@@ -269,6 +269,8 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "external message".to_owned(),
         }),
     );

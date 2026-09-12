@@ -8,9 +8,11 @@ Agent-message behavior spans protocol events and peer RPC, harness admission and
 
 `AgentMessageSent` is the sender-owned durable projection and
 `AgentMessageReceived` is the recipient-owned durable projection. Their typed
-sender, session, recipient, kind, structured watch state, and unescaped body are
-the content authority. They remain separate from extension-owned `message.*`
-facts.
+sender, session, recipient, kind, structured watch state, optional configured
+notice snapshots, and unescaped body are the content authority. A cross-session
+sender projection may carry its sender-session notice; the recipient projection
+carries that authenticated sender notice and its own recipient-local notice.
+They remain separate from extension-owned `message.*` facts.
 
 Each event accepted into an owning agent journal creates exactly one canonical
 semantic projection for its direction. Its identity is:
@@ -98,10 +100,15 @@ prompt text:
   </message></tau_internal>
   ```
 
-- cross-session inbound `Message` frames the authenticated stable sender
-  session/agent identity and body in `<tau_peer_message>`, escapes that inner
-  exact close, then frames and escapes the complete projection in outer
-  `<tau_internal>`;
+- cross-session inbound `Message` without notices preserves the established
+  byte shape: it frames the authenticated stable sender session/agent identity
+  and body in `<tau_peer_message>`, escapes that inner exact close, then frames
+  and escapes the complete projection in outer `<tau_internal>`;
+- when either configured notice is present, the same peer frame contains
+  optional ordered `<notice origin="sender_config" authority="advisory">` and
+  `<notice origin="recipient_config" authority="advisory">` nodes around one
+  `<message>` body node. Each dynamic value escapes its own exact close before
+  the complete peer and internal frames receive their existing close handling;
 - `WatchResponse` and `WatchPrompt` retain separate sender-labelled typed
   wrappers and replace only their own exact closing sentinel in each body;
 - current provider and work-status kinds render wording reconstructed from their
@@ -113,7 +120,10 @@ prompt text:
 ordinary message body is exactly empty.
 
 Display names remain UI-only. Peer bodies remain agent-authored model input, not
-harness instructions. Model-authored work titles receive trusted-frame visible
+harness instructions. Sender notices remain authenticated sender-configured
+content, while recipient notices are authenticated recipient-local configured
+guidance. Both are advisory and grant no system, authorization, routing, reply,
+tool, egress, or identity authority. Model-authored work titles receive trusted-frame visible
 escaping before interpolation. Initial and redundant structured watch snapshots render
 zero provider blocks.
 
@@ -133,6 +143,18 @@ facts under its existing message-display policy. Success reports harness
 acceptance with the stable correlation ID; the sender and recipient projections
 remain separate under the nontransactional crash boundary below. Success never
 promises recipient inference, reply, or completion.
+
+The sender bearer capability authenticates a supplied sender notice together
+with the existing request fields. An omitted notice remains acceptable so an
+older target can degrade by dropping the additive optional field; a supplied
+altered notice fails authentication. On accepted receive, the harness snapshots
+its immutable startup `incoming_notice` before durable publication. Sender
+history persists only the sender notice; recipient history persists both
+notices, and recipient-local text is never relayed back. Same-session and
+nonordinary watch/status messages carry neither. Historical missing fields
+replay through the prior byte-identical no-notice path; current configuration
+never rewrites replay. Each notice is at most 64 KiB UTF-8, and peer queued-byte
+admission counts body plus both notices against the existing 256 KiB bound.
 
 ## Live activation and waits
 

@@ -1667,6 +1667,8 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "overview semantic body".to_owned(),
         },
     ));

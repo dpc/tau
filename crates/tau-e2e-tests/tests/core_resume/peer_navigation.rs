@@ -104,6 +104,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
         recipient_session_id: target_session.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message,
     };
     let mut sender =
@@ -228,6 +229,7 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
         recipient_session_id: target_session.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message,
     };
     let mut sender =

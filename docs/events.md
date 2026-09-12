@@ -734,11 +734,13 @@ transient runtime observations and never enter semantic replay. See
 - **`agent.message_sent`** — Harness-owned immutable sender-side projection for
   a short message an agent sent to another agent. Carries stable `message_id`,
   `sender_id`, recipient (`agent_id` or
-  `external_agent { session_id, agent_id }`), and `message`.
+  `external_agent { session_id, agent_id }`), optional external
+  `sender_notice`, and `message`.
 - **`agent.message_received`** — Harness-owned immutable recipient-side
   projection for an agent-to-agent message. Carries the same stable
   `message_id`, the `sender_id`, optional `sender_session_id` for external
-  senders, the receiving `recipient_id`, and `message`. UI subscribers filter,
+  senders, the receiving `recipient_id`, optional external `sender_notice` and
+  recipient-local `recipient_notice`, and `message`. UI subscribers filter,
   summarize, or fully display agent-to-agent message projections according to
   `:set show-messages`. The received projection is the sole model payload; local
   senders render in a stable-sender-labelled escaped outer `<tau_internal>`

@@ -1307,6 +1307,8 @@ fn compact_mode_reprojects_agent_activity_without_content_leaks() {
         }),
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "COMPATIBILITY_STATUS_BODY_LEAK".to_owned(),
     });
     let message = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
@@ -1319,6 +1321,8 @@ fn compact_mode_reprojects_agent_activity_without_content_leaks() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "COMPACT_MESSAGE_LEAK Δ\nCOMPACT_SECOND_LINE 🧪".to_owned(),
     });
     let mut watch_prompt = message.clone();
@@ -1461,6 +1465,8 @@ fn external_agent_messages_render_session_agent_labels() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "hello back".to_owned(),
         },
     ));

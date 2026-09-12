@@ -5,6 +5,35 @@ use std::path::PathBuf;
 
 use super::*;
 
+/// Queue admission must retain the combined body and notice weight rather than
+/// letting either configured notice bypass the existing byte bound.
+#[test]
+fn external_message_admission_bytes_include_both_notice_snapshots() {
+    let message = tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("notice-weight").expect("message id"),
+        sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
+        sender_session_id: Some(tau_proto::SessionId::parse("sender-session").expect("session id")),
+        recipient_id: tau_proto::AgentId::parse("recipient").expect("agent id"),
+        kind: tau_proto::AgentMessageKind::Message,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        watch_lifecycle: None,
+        sender_notice: Some(
+            tau_proto::InterSessionNotice::new("sender".to_owned()).expect("valid notice"),
+        ),
+        recipient_notice: Some(
+            tau_proto::InterSessionNotice::new("recipient".to_owned()).expect("valid notice"),
+        ),
+        message: "body".to_owned(),
+    };
+
+    assert_eq!(
+        external_agent_message_admission_bytes(&message),
+        "body".len() + "sender".len() + "recipient".len()
+    );
+}
+
 /// Only cross-major target admission produces the caller-visible warning
 /// header; compatible and same-major peers retain the existing response.
 #[test]
@@ -71,6 +100,8 @@ fn external_message_rechecks_live_project_root_after_lookup() {
         );
     });
     let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        outgoing_notice: None,
+        incoming_notice: None,
         receiver: None,
         allow_project_roots: Some(vec![
             tau_config::inter_session_policy::ProjectRootGlob::new("/srv/allowed".to_owned())
@@ -89,6 +120,7 @@ fn external_message_rechecks_live_project_root_after_lookup() {
             "recipient-agent",
         )),
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "must not be delivered".to_owned(),
     };
 

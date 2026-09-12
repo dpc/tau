@@ -515,6 +515,8 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: provider_status_body.to_owned(),
         },
     ));
@@ -536,6 +538,8 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
                 threshold_minutes: 5,
             }),
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         },
     ));
@@ -1388,6 +1392,8 @@ fn watched_agent_stats_redraws_status_row() {
             }),
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         },
     ));
@@ -1694,6 +1700,8 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             }),
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         })
     };

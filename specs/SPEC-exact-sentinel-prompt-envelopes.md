@@ -97,6 +97,15 @@ Canonical message facts retain raw typed data and render through the shared
 synthesize, remove, or reinterpret a family. Historical raw/default projections,
 provider replacement windows, and payload-local wrappers retain their existing
 replay behavior until a separately approved migration.
+Cross-session agent messages remain inside authenticated `tau_internal` framing
+with payload-local `tau_peer_message` structure. When either persisted
+configured notice exists, the renderer exact-close-frames sender- and
+recipient-origin advisory `<notice>` nodes separately from the original
+`<message>` body; absent notices preserve the prior peer projection
+byte-for-byte. Nested notice/message tags establish no generic envelope family
+or authority. These notice snapshot, wire, rendering, bounds, mixed-version,
+and replay semantics were explicitly approved by the user on September 12,
+2026.
 
 The harness renders a complete `tau_background_result` envelope from typed
 background-terminal and call correlation before publishing its prompt fact. Its

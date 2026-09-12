@@ -102,6 +102,8 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     pub(crate) recipient_session_id: tau_proto::SessionId,
     /// Delivery kind.
     pub(crate) kind: tau_proto::AgentMessageKind,
+    /// Optional sender-session advisory text.
+    pub(crate) sender_notice: Option<tau_proto::InterSessionNotice>,
     /// Message body.
     pub(crate) message: String,
 }

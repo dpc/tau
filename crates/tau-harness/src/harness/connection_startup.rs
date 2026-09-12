@@ -617,6 +617,7 @@ impl Harness {
                                         agent_id: recipient_id.clone(),
                                     },
                                     kind: command.kind,
+                                    sender_notice: command.sender_notice,
                                     message: command.message,
                                 }),
                             );

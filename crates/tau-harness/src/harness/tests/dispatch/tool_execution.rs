@@ -1472,6 +1472,7 @@ fn peer_auto_start_handover_dispatches_tool_without_human_ui_prompt() {
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "use the test tool".to_owned(),
         },
     );

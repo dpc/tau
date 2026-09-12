@@ -483,6 +483,13 @@ both after exact-session admission and before discovery projection or message
 submission so a same-id restart cannot reuse an earlier allowed snapshot. The
 current session bypasses that remote policy; inbound peer authentication and
 local-agent messaging remain separate.
+For ordinary cross-session messages, the same startup snapshot supplies the
+optional outgoing sender notice. Sender callback authentication binds it to the
+body and other request fields when returned; omission remains accepted for the
+approved older-target degradation. After authentication, the target snapshots its
+optional incoming recipient notice before durable receive publication. The
+directional facts retain these distinct advisory values for exact replay;
+recipient-local text is never returned to the sender.
 The same event loop owns inter-session receiver admission and fair live
 selection restricted to instances of the single configured session receiver
 role. When its session-level auto-start switch is enabled, Tau may start only

@@ -13,6 +13,11 @@ pub struct InterSessionPolicy {
     /// Optional bare-session receiver. Omission disables bare-session
     /// addressing.
     pub receiver: Option<InterSessionReceiver>,
+    /// Optional advisory text attached to every outgoing cross-session message.
+    pub outgoing_notice: Option<tau_proto::InterSessionNotice>,
+    /// Optional recipient-local advisory text attached to every incoming
+    /// cross-session message.
+    pub incoming_notice: Option<tau_proto::InterSessionNotice>,
     /// Optional allowlist evaluated before the denylist.
     ///
     /// `None` permits every project root, while an explicit empty list permits

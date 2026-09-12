@@ -113,6 +113,7 @@ fn message_sent(id: usize, payload: &str) -> Event {
             agent_id: AgentId::parse("agent-peer").expect("agent id"),
         },
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: payload.to_owned(),
     })
 }

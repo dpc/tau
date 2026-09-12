@@ -3044,6 +3044,7 @@ fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "wait for visible input".to_owned(),
         },
     );
@@ -3249,6 +3250,7 @@ fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
                 recipient_session_id: h.session_runtime.current_session_id.clone(),
                 recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
                 kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: None,
                 message: "wait for visible input".to_owned(),
             },
         );
@@ -3575,6 +3577,8 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "target owner only".to_owned(),
         }),
     );
@@ -3599,6 +3603,8 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "waiter should resume".to_owned(),
         }),
     );
@@ -3656,6 +3662,8 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: "typed message deferred Q".to_owned(),
             }),
         ),

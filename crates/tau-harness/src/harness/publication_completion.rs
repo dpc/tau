@@ -2059,7 +2059,9 @@ impl Harness {
             return Ok(false);
         };
         let old_recipient = pending.recipient_id.clone();
-        let message_bytes = pending.expected_receive.message.len();
+        let message_bytes = super::subagents_tool::external_agent_message_admission_bytes(
+            &pending.expected_receive,
+        );
         self.release_peer_input_rate(&old_recipient, pending.rate_admitted_at);
         let (recipient_id, started, rate_admitted_at) =
             match self.resolve_peer_entrypoint_recipient(message_id, message_bytes) {
@@ -2199,6 +2201,7 @@ impl Harness {
                             agent_id: pending.recipient_id.clone(),
                         },
                         kind: tau_proto::AgentMessageKind::Message,
+                        sender_notice: None,
                         message,
                     }),
                 );

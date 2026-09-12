@@ -1930,6 +1930,7 @@ fn queue_intercepted_peer_receive(
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "peer body".to_owned(),
         },
         Ok(()),
@@ -2283,6 +2284,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "remote second".to_owned(),
         },
         Ok(()),
@@ -2330,6 +2332,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
         recipient_session_id: h.session_runtime.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "must not create".to_owned(),
     };
 
@@ -2370,6 +2373,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
         recipient_session_id: target_session.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "must not create".to_owned(),
     };
     let peer: tau_proto::ConnectionId = crate::test_connection_id("peer-client");
@@ -2446,6 +2450,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "peer body".to_owned(),
         },
         Ok(()),
@@ -2523,6 +2528,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
             recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
+            sender_notice: None,
             message: "peer body".to_owned(),
         },
         Ok(()),
@@ -5671,6 +5677,7 @@ fn agent_message_sent_event(message: &str) -> Event {
             agent_id: tau_proto::AgentId::parse("agent-message-recipient").expect("agent id"),
         },
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: message.to_owned(),
     })
 }
@@ -5687,6 +5694,8 @@ fn agent_message_received_event(sender_id: AgentId, recipient_id: AgentId) -> Ev
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "hello".to_owned(),
     })
 }

@@ -234,6 +234,10 @@ pub enum AgentEntry {
         watch_long_wait: Option<Box<tau_proto::AgentWatchLongWaitNotification>>,
         /// Structured watched-agent lifecycle terminal.
         watch_lifecycle: Option<Box<tau_proto::AgentWatchLifecycleNotification>>,
+        /// Optional advisory text configured by the sending session.
+        sender_notice: Option<tau_proto::InterSessionNotice>,
+        /// Optional advisory text configured by the receiving session.
+        recipient_notice: Option<tau_proto::InterSessionNotice>,
         /// Message body.
         message: String,
     },
@@ -3793,6 +3797,8 @@ impl AgentTree {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: message.sender_notice.clone(),
+            recipient_notice: None,
             message: message.message.clone(),
         })
     }
@@ -3816,6 +3822,8 @@ impl AgentTree {
             watch_work_status: message.watch_work_status.clone().map(Box::new),
             watch_long_wait: message.watch_long_wait.clone().map(Box::new),
             watch_lifecycle: message.watch_lifecycle.clone().map(Box::new),
+            sender_notice: message.sender_notice.clone(),
+            recipient_notice: message.recipient_notice.clone(),
             message: message.message.clone(),
         })
     }
@@ -4040,7 +4048,20 @@ impl AgentTree {
                     .agent_message_entry_from_sent(message, self.next_event_seq)
                     .is_some() =>
             {
-                Some(Ok(()))
+                let notice_valid = message.sender_notice.as_ref().is_none_or(|_| {
+                    message.kind == AgentMessageKind::Message
+                        && matches!(
+                            message.recipient,
+                            AgentMessageRecipient::ExternalAgent { .. }
+                        )
+                });
+                Some(if notice_valid {
+                    Ok(())
+                } else {
+                    Err(AgentEventValidationError::new(
+                        "sender notice requires an ordinary external agent message",
+                    ))
+                })
             }
             Event::AgentMessageReceived(message)
                 if self
@@ -4065,6 +4086,14 @@ impl AgentTree {
                     .transpose();
                 let lifecycle_body_valid =
                     message.kind != AgentMessageKind::WatchLifecycle || message.message.is_empty();
+                let notices_valid = message
+                    .sender_notice
+                    .iter()
+                    .chain(message.recipient_notice.iter())
+                    .all(|_| {
+                        message.kind == AgentMessageKind::Message
+                            && message.sender_session_id.is_some()
+                    });
                 Some(if !payload_matches_kind {
                     Err(AgentEventValidationError::new(
                         "watch payload must be present exactly for its matching watch message kind",
@@ -4072,6 +4101,10 @@ impl AgentTree {
                 } else if !lifecycle_body_valid {
                     Err(AgentEventValidationError::new(
                         "watch lifecycle messages must be content-free",
+                    ))
+                } else if !notices_valid {
+                    Err(AgentEventValidationError::new(
+                        "inter-session notices require an ordinary external message",
                     ))
                 } else if let Err(error) = work_status_validation {
                     Err(AgentEventValidationError::new(format!(

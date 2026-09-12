@@ -536,6 +536,8 @@ fn agent_message_status_activation_class_covers_watch_prompt() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: String::new(),
     };
     for kind in [

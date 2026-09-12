@@ -31,6 +31,13 @@ canonical startup project root. A configured allowlist runs first and an empty
 allowlist admits nothing; deny matches then veto. Omitted or null lists preserve
 the unrestricted default. The accepted policy is part of the immutable harness
 settings snapshot rather than a hot-reloaded runtime input.
+`inter_session.outgoing_notice` and `incoming_notice` are independent optional
+startup-only strings. Each preserves an explicitly configured empty string and
+is limited to 64 KiB UTF-8. The outgoing value accompanies ordinary
+cross-session messages as sender-configured advisory content; the incoming
+value is snapshotted locally when an ordinary cross-session message is
+accepted. Omission or null disables that direction. Neither supports templates
+or `textFile`.
 
 ## Load order and layering
 

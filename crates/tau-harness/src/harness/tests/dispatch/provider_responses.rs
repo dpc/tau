@@ -332,6 +332,8 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                     watch_work_status: None,
                     watch_long_wait: None,
                     watch_lifecycle: None,
+                    sender_notice: None,
+                    recipient_notice: None,
                     message: "provider-loss deferred Q".to_owned(),
                 })
             }
@@ -2182,6 +2184,8 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: "Q after closure".to_owned(),
             }),
         );

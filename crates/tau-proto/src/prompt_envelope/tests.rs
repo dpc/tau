@@ -239,6 +239,7 @@ fn production_xml_like_wrapper_candidates_cannot_bypass_the_registry_silently() 
         "activity_summary",
         "blocker_answer",
         "message",
+        "notice",
         "prompt",
         "response",
         "skill",

@@ -1554,6 +1554,7 @@ fn representative_events() -> Vec<Event> {
                 agent_id: agent_id("recipient_agent"),
             },
             kind: AgentMessageKind::Message,
+            sender_notice: None,
             message: "hello".to_owned(),
         }),
         Event::AgentMessageReceived(AgentMessageReceived {
@@ -1567,6 +1568,8 @@ fn representative_events() -> Vec<Event> {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "hello back".to_owned(),
         }),
         Event::AgentWatchesUpdated(AgentWatchesUpdated {
@@ -2520,6 +2523,9 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             recipient_session_id: test_session_id("recipient-session"),
             recipient: ExternalAgentMessageRecipient::Exact(agent_id("recipient_agent")),
             kind: AgentMessageKind::Message,
+            sender_notice: Some(
+                InterSessionNotice::new("sender guidance".to_owned()).expect("valid notice"),
+            ),
             message: "hello external".to_owned(),
         }),
         HarnessInputMessage::ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest {
@@ -2532,6 +2538,9 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             recipient_session_id: test_session_id("recipient-session"),
             recipient: ExternalAgentMessageRecipient::Exact(agent_id("recipient_agent")),
             kind: AgentMessageKind::Message,
+            sender_notice: Some(
+                InterSessionNotice::new("sender guidance".to_owned()).expect("valid notice"),
+            ),
             message: "hello external".to_owned(),
         }),
     ]
@@ -3200,6 +3209,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
             agent_id: agent_id("recipient_agent"),
         },
         kind: AgentMessageKind::Message,
+        sender_notice: None,
         message: "hello".to_owned(),
     });
     assert_eq!(sent.name(), EventName::AGENT_MESSAGE_SENT);
@@ -3217,6 +3227,8 @@ fn agent_message_events_have_names_and_persistence_defaults() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "hello back".to_owned(),
     });
     assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
@@ -3250,6 +3262,8 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     }))
     .expect("legacy message without kind decodes");
     assert_eq!(legacy.kind, AgentMessageKind::Message);
+    assert_eq!(legacy.sender_notice, None);
+    assert_eq!(legacy.recipient_notice, None);
 
     let explicit_message = AgentMessageReceived {
         message_id: AgentMessageId::parse("msg-message")
@@ -3262,10 +3276,34 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "hello".to_owned(),
     };
     let message_json = serde_json::to_value(&explicit_message).expect("serialize message");
     assert_eq!(message_json.get("kind"), None);
+    assert_eq!(message_json.get("sender_notice"), None);
+    assert_eq!(message_json.get("recipient_notice"), None);
+
+    let noticed_message = AgentMessageReceived {
+        sender_session_id: Some(test_session_id("sender-session")),
+        sender_notice: Some(
+            InterSessionNotice::new("sender guidance".to_owned()).expect("valid notice"),
+        ),
+        recipient_notice: Some(
+            InterSessionNotice::new("recipient guidance".to_owned()).expect("valid notice"),
+        ),
+        ..explicit_message.clone()
+    };
+    let noticed_json = serde_json::to_value(&noticed_message).expect("serialize notices");
+    assert_eq!(
+        noticed_json["sender_notice"],
+        serde_json::json!("sender guidance")
+    );
+    assert_eq!(
+        noticed_json["recipient_notice"],
+        serde_json::json!("recipient guidance")
+    );
 
     let watch_response = AgentMessageReceived {
         kind: AgentMessageKind::WatchResponse,
@@ -4321,7 +4359,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 7, "minor": 0})
+        serde_json::json!({"major": 7, "minor": 1})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4413,7 +4451,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 7, "minor": 0})
+        serde_json::json!({"major": 7, "minor": 1})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

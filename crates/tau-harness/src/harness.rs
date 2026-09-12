@@ -3108,6 +3108,9 @@ impl Harness {
                     self.peer_messaging
                         .external_message_peers
                         .insert(client_id.clone());
+                    self.peer_messaging
+                        .external_message_peer_versions
+                        .insert(client_id.clone(), hello.protocol_version);
                 }
                 if hello.client_kind == ClientKind::Ui
                     && hello.client_name.as_str() == "tau-runtime-probe"
@@ -3234,14 +3237,16 @@ impl Harness {
                 Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::ExternalAgentMessageAuth(request) => {
-                if !self
+                let Some(peer_protocol_version) = self
                     .peer_messaging
-                    .external_message_peers
-                    .contains(&client_id.clone())
-                {
+                    .external_message_peer_versions
+                    .get(client_id)
+                    .copied()
+                else {
                     return Ok(ClientMessageDisposition::Continue);
-                }
-                let result = self.handle_external_agent_message_auth_request(request);
+                };
+                let result =
+                    self.handle_external_agent_message_auth_request(request, peer_protocol_version);
                 let _ = self.runtime_io.bus.send_to(
                     client_id,
                     None,

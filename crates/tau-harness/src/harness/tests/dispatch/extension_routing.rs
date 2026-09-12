@@ -64,6 +64,8 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "please include this".to_owned(),
         }),
     );
@@ -271,6 +273,8 @@ fn side_agent_pending_message_wake_defers_automatic_decision_until_final_respons
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: "include this before finishing".to_owned(),
             }),
         );

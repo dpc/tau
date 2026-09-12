@@ -7830,7 +7830,6 @@ fn reactive_context_overflow_includes_activation_and_preserves_late_suffix() {
     assert_eq!(context.matches("suffix B").count(), 1);
     h.shutdown().expect("shutdown");
 }
-
 /// Coalesced wakes retain their original activation checkpoint while all of
 /// their eligible content participates in the next full-context compact
 /// request.
@@ -7894,6 +7893,8 @@ fn reactive_compaction_includes_coalesced_agent_message_wakes() {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: body.to_owned(),
             }),
         );
@@ -7952,7 +7953,6 @@ fn reactive_compaction_includes_coalesced_agent_message_wakes() {
         tau_proto::AgentHead::Node(captured_cut)
     );
     assert_eq!(checkpoint.through, tau_proto::AgentHead::Node(through));
-
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("start reactive compaction");
     let compact = read_nth_prompt_created(&h, 1);

@@ -458,6 +458,17 @@ tool surface so cooperative handovers can operate without a second UI prompt;
 peer payload cannot select or expand that authority and retains extension
 provenance. The hot dispatch and cold marker behavior are governed by
 [SPEC-tau-harness-prompt-dispatch](crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).
+Configured inter-session notices remain model-visible advisory content, not
+authorization. The sender notice is distinct sender-session content and the
+recipient notice is distinct recipient-local guidance. Callback authentication
+requires an exact sender-notice match from protocol 7.1 and newer peers; only a
+negotiated pre-7.1 callback may omit the additive field for best-effort
+degradation, and supplied altered text is always rejected. The recipient
+snapshots its notice after sender authentication and target admission, persists
+both notice provenances with the received fact, and never relays its local text
+back. Replay uses those persisted snapshots rather than current configuration.
+Each notice is validated to at most 64 KiB UTF-8, and body plus both notices
+consume the existing 256 KiB per-agent queued peer-input budget.
 Delivery is best-effort at-least-once: an ambiguous crash or retry can duplicate
 receive occurrences, agents, model work, and spend. Each accepted directional
 occurrence is its owning journal's sole canonical payload projection. Local

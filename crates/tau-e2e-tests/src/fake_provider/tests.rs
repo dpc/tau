@@ -1979,6 +1979,8 @@ fn watch_response(
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: content.to_owned(),
     }
 }
@@ -1999,6 +2001,8 @@ fn watch_prompt(
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: content.to_owned(),
     }
 }

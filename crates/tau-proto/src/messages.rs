@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, ConfigurePurpose, Event,
-    EventSelector, ExtensionName, HostedToolDefinition, InspectionComplete, InterceptionPriority,
-    NoticeLevel, ProtocolVersion, SessionId, ToolDefinition, ToolNamePrefix,
+    EventSelector, ExtensionName, HostedToolDefinition, InspectionComplete, InterSessionNotice,
+    InterceptionPriority, NoticeLevel, ProtocolVersion, SessionId, ToolDefinition, ToolNamePrefix,
 };
 
 // ---------------------------------------------------------------------------
@@ -416,6 +416,9 @@ pub struct ExternalAgentMessageRequest {
     /// Delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
     pub kind: AgentMessageKind,
+    /// Optional advisory text configured by the sending session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_notice: Option<InterSessionNotice>,
     /// Message body.
     pub message: String,
 }
@@ -441,6 +444,9 @@ pub struct ExternalAgentMessageAuthRequest {
     /// Claimed delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
     pub kind: AgentMessageKind,
+    /// Optional advisory text configured by the sending session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_notice: Option<InterSessionNotice>,
     /// Claimed message body. The sender harness compares this with its pending
     /// outbound message so the capability cannot be replayed with altered text.
     pub message: String,

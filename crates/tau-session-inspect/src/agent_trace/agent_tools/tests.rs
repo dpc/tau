@@ -111,6 +111,7 @@ fn semantic_items_share_global_journal_timing_and_order() {
                 agent_id: AgentId::parse("agent-b").expect("agent"),
             },
             kind: AgentMessageKind::Message,
+            sender_notice: None,
             message: "outbound".into(),
         }),
     );
@@ -130,6 +131,8 @@ fn semantic_items_share_global_journal_timing_and_order() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "outbound".into(),
         }),
     );
@@ -2627,6 +2630,7 @@ fn toon_frames_control_bearing_payload_fields() {
                 agent_id: AgentId::parse("agent-recipient").expect("agent"),
             },
             kind: AgentMessageKind::Message,
+            sender_notice: None,
             message: "secret\u{7}".into(),
         }),
         path_super_super::AgentTraceMode::Full,

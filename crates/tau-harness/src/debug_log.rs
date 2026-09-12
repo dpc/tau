@@ -802,7 +802,7 @@ enum DebugHarnessInputProjection<'message> {
     /// The original input, which has no image bytes requiring redaction.
     Borrowed(&'message tau_proto::HarnessInputMessage),
     /// A copy whose image bytes have been cleared before serialization.
-    Redacted(tau_proto::HarnessInputMessage),
+    Redacted(Box<tau_proto::HarnessInputMessage>),
 }
 
 impl DebugHarnessInputProjection<'_> {
@@ -822,7 +822,7 @@ fn debug_harness_input_projection(
     if harness_input_message_has_binary_content(message) {
         let mut redacted = message.clone();
         redact_harness_input_message_binary_content(&mut redacted);
-        DebugHarnessInputProjection::Redacted(redacted)
+        DebugHarnessInputProjection::Redacted(Box::new(redacted))
     } else {
         DebugHarnessInputProjection::Borrowed(message)
     }

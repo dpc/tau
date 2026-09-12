@@ -22,6 +22,10 @@ use super::*;
 pub(super) struct PeerMessagingState {
     /// Socket clients authenticated for the external-message RPC.
     pub(super) external_message_peers: HashSet<tau_proto::ConnectionId>,
+    /// Negotiated protocol revision for each authenticated external-message
+    /// peer.
+    pub(super) external_message_peer_versions:
+        HashMap<tau_proto::ConnectionId, tau_proto::ProtocolVersion>,
     /// Outbound messages awaiting callback authentication by logical message
     /// id.
     pub(super) pending_external_message_auth:
@@ -60,6 +64,8 @@ pub(crate) struct PendingExternalAgentMessageAuth {
     pub(crate) recipient: tau_proto::ExternalAgentMessageRecipient,
     /// Delivery kind authorized by the harness-owned source path.
     pub(crate) kind: tau_proto::AgentMessageKind,
+    /// Sender-session advisory text authorized with the message body.
+    pub(crate) sender_notice: Option<tau_proto::InterSessionNotice>,
     /// Message body authorized by the harness-owned source path.
     pub(crate) message: String,
 }
@@ -229,7 +235,7 @@ impl Harness {
             .peer_messaging
             .pending_external_receive_acks
             .contains_key(&message.message_id)
-            .then_some(message.message.len());
+            .then(|| super::subagents_tool::external_agent_message_admission_bytes(message));
         if let Some(cid) = self
             .agent_runtime
             .agent_registry

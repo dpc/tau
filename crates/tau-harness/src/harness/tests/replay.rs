@@ -1172,6 +1172,8 @@ fn received_agent_message_replay_restores_context_and_activation() {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: "persisted <message>& body".to_owned(),
             }),
         );
@@ -2107,6 +2109,8 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: "deferred behind repaired aggregate".to_owned(),
             }),
         )
@@ -2375,6 +2379,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
                     agent_id: crate::parse_agent_id("recipient-agent"),
                 },
                 kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: None,
                 message: "persisted hello".to_owned(),
             }),
         )
@@ -3760,6 +3765,132 @@ fn resumed_harness_replays_persisted_session_history() {
         "resumed prompt must include the new prompt: {serialized}",
     );
 
+    resumed.shutdown().expect("shutdown");
+}
+
+/// Cold replay renders durable sender/recipient notice snapshots rather than
+/// current startup config, while an older notice-free fact retains its exact
+/// historical peer-message byte shape.
+#[test]
+fn resumed_peer_messages_use_persisted_notice_snapshots() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let notice =
+        |text: &str| tau_proto::InterSessionNotice::new(text.to_owned()).expect("valid notice");
+    let recipient_id = {
+        let mut h = echo_harness_for("s1", &sp).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+        h.config
+            .accepted_harness_settings
+            .inter_session
+            .incoming_notice = Some(notice("persisted recipient guidance"));
+        let notice_result = h.handle_external_agent_message_request_without_auth_for_test(
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "persisted-notice".to_owned(),
+                message_id: tau_proto::AgentMessageId::parse("persisted-notice-message")
+                    .expect("message id"),
+                capability: "test-only".to_owned(),
+                sender_session_id: tau_proto::SessionId::parse("sender-session")
+                    .expect("session id"),
+                sender_id: crate::parse_agent_id("sender-agent"),
+                recipient_session_id: h.session_runtime.current_session_id.clone(),
+                recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                    &recipient_id,
+                )),
+                kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: Some(notice("persisted sender guidance")),
+                message: "notice body".to_owned(),
+            },
+        );
+        assert_eq!(notice_result.failure, None);
+
+        h.config
+            .accepted_harness_settings
+            .inter_session
+            .incoming_notice = None;
+        let legacy_result = h.handle_external_agent_message_request_without_auth_for_test(
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "persisted-legacy".to_owned(),
+                message_id: tau_proto::AgentMessageId::parse("persisted-legacy-message")
+                    .expect("message id"),
+                capability: "test-only".to_owned(),
+                sender_session_id: tau_proto::SessionId::parse("sender-session")
+                    .expect("session id"),
+                sender_id: crate::parse_agent_id("sender-agent"),
+                recipient_session_id: h.session_runtime.current_session_id.clone(),
+                recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                    &recipient_id,
+                )),
+                kind: tau_proto::AgentMessageKind::Message,
+                sender_notice: None,
+                message: "legacy body".to_owned(),
+            },
+        );
+        assert_eq!(legacy_result.failure, None);
+        h.shutdown().expect("shutdown");
+        drop(h);
+        wait_for_session_unlock(&sp, "s1");
+        recipient_id
+    };
+
+    let mut resumed = echo_harness_with_start_reason_before_session_init(
+        "s1",
+        &sp,
+        tau_proto::SessionStartReason::Resume,
+        Box::new(|h| {
+            h.config
+                .accepted_harness_settings
+                .inter_session
+                .incoming_notice = Some(
+                tau_proto::InterSessionNotice::new("replacement recipient config".to_owned())
+                    .expect("valid notice"),
+            );
+            h.config
+                .accepted_harness_settings
+                .inter_session
+                .outgoing_notice = Some(
+                tau_proto::InterSessionNotice::new("replacement sender config".to_owned())
+                    .expect("valid notice"),
+            );
+        }),
+    )
+    .expect("resume");
+    let tree = resumed
+        .session_runtime
+        .agent_store
+        .agent(recipient_id.as_str())
+        .expect("replayed recipient");
+    let context = crate::prompt::assemble_prompt_context_from(tree, tree.head())
+        .context
+        .flatten();
+    let peer_messages = context
+        .iter()
+        .filter_map(|item| match item {
+            tau_proto::ContextItem::Message(message) => message.content.first(),
+            _ => None,
+        })
+        .filter_map(|part| match part {
+            tau_proto::ContentPart::Text { text }
+                if text.contains("Authenticated peer message") =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        peer_messages,
+        [
+            "<tau_internal>Authenticated peer message\n\n<tau_peer_message sender_session=\"sender-session\" sender_agent=\"sender-agent\">\n<notice origin=\"sender_config\" authority=\"advisory\">\npersisted sender guidance\n</notice>\n<message>\nnotice body\n</message>\n<notice origin=\"recipient_config\" authority=\"advisory\">\npersisted recipient guidance\n</notice>\n</tau_peer_message></tau_internal>",
+            "<tau_internal>Authenticated peer message\n\n<tau_peer_message sender_session=\"sender-session\" sender_agent=\"sender-agent\">\nlegacy body\n</tau_peer_message></tau_internal>",
+        ]
+    );
+    assert!(
+        peer_messages
+            .iter()
+            .all(|text| !text.contains("replacement"))
+    );
     resumed.shutdown().expect("shutdown");
 }
 

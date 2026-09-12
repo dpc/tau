@@ -5,6 +5,8 @@ artifact_retention: null
 agent_retention: null
 diagnostic_retention: 30d
 inter_session:
+  outgoing_notice: null
+  incoming_notice: null
   allow_project_roots: null
   deny_project_roots: null
 # Show a one-line Tau onboarding prompt to the initial interactive UI.

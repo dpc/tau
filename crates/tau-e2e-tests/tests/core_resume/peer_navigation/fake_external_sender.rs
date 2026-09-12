@@ -327,6 +327,7 @@ fn fixture_request(sender_session: &SessionId) -> tau_proto::ExternalAgentMessag
             .expect("known-safe SessionId must be valid"),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "fixture-message".to_owned(),
     }
 }

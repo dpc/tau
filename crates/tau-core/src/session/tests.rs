@@ -3470,6 +3470,8 @@ fn validate_event_enforces_watch_payload_discriminator() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         });
         assert!(
@@ -3503,6 +3505,8 @@ fn validate_event_reuses_canonical_work_status_grammar() {
             }),
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         })
     };
@@ -3587,6 +3591,8 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
             watch_work_status,
             watch_long_wait,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         });
         assert_eq!(
@@ -3610,6 +3616,8 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle,
+            sender_notice: None,
+            recipient_notice: None,
             message,
         })
     };
@@ -3630,6 +3638,43 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
             lifecycle_event(AgentMessageKind::Message, Some(lifecycle), String::new())
         ),
         "watch payload must be present exactly for its matching watch message kind"
+    );
+}
+
+/// Configured notices are valid only on ordinary cross-session facts and stay
+/// bounded so malformed journals cannot mint notice-bearing local/watch input.
+#[test]
+fn agent_message_notices_require_bounded_external_message_facts() {
+    let id = agent_id();
+    let tree = AgentTree::from_events(id.clone(), &[]);
+    let received = |sender_session_id, kind, sender_notice| {
+        Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("notice-validation").expect("message id"),
+            sender_id: other_agent_id(),
+            sender_session_id,
+            recipient_id: id.clone(),
+            kind,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            sender_notice,
+            recipient_notice: None,
+            message: "body".to_owned(),
+        })
+    };
+    assert_eq!(
+        validation_error(
+            &tree,
+            received(
+                None,
+                AgentMessageKind::Message,
+                Some(
+                    tau_proto::InterSessionNotice::new("notice".to_owned()).expect("valid notice"),
+                ),
+            )
+        ),
+        "inter-session notices require an ordinary external message"
     );
 }
 
@@ -3801,6 +3846,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 agent_id: other_agent_id(),
             },
             kind: AgentMessageKind::Message,
+            sender_notice: None,
             message: "outbound after result".to_owned(),
         }),
     );
@@ -3844,6 +3890,8 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "inbound after fact".to_owned(),
         }),
     );
@@ -4034,6 +4082,8 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "sibling materializes now".to_owned(),
     });
     let (_, sibling_node) = apply_persisted_test_record(
@@ -4060,6 +4110,8 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "descendant waits".to_owned(),
     });
     let (_, descendant_node) = apply_persisted_test_record(
@@ -4114,6 +4166,7 @@ fn synthetic_agent_message_folds_advance_occurrence_sequence() {
                 agent_id: other_agent_id(),
             },
             kind: AgentMessageKind::Message,
+            sender_notice: None,
             message: message.to_owned(),
         }));
     }
@@ -4173,6 +4226,8 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "Q".to_owned(),
     });
     let second_input = Event::AgentMessageReceived(AgentMessageReceived {
@@ -4185,6 +4240,8 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "Q2".to_owned(),
     });
     let raw_input = Event::MessageDelivered(tau_proto::MessageDelivered::new(

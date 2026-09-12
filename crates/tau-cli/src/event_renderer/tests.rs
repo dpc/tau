@@ -2785,6 +2785,7 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::
             agent_id: agent_id(recipient),
         },
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: message.to_owned(),
     })
 }
@@ -2812,6 +2813,8 @@ fn received_agent_message(
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: message.to_owned(),
     })
 }
@@ -3459,6 +3462,7 @@ fn peer_message_names_require_endpoint_authority() {
             agent_id: agent_id("agent-b"),
         },
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: "payload".to_owned(),
     });
     assert_eq!(
@@ -3523,6 +3527,7 @@ fn watch_content_summaries_preserve_wording_with_names() {
                 agent_id: agent_id("manager"),
             },
             kind,
+            sender_notice: None,
             message: "content".to_owned(),
         });
         assert_eq!(renderer.agent_message_summary(&event), expected);
@@ -3639,6 +3644,8 @@ fn watch_work_status_renders_all_reportable_states() {
             }),
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "must not render".to_owned(),
         });
 
@@ -3689,6 +3696,8 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
             }),
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         })
     };
@@ -3778,6 +3787,8 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
         watch_work_status: None,
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: format!(
             "{}Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s){}",
             tau_proto::TAU_INTERNAL_OPEN,
@@ -3809,6 +3820,8 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
             threshold_minutes: 5,
         }),
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: String::new(),
     });
 
@@ -3934,6 +3947,8 @@ fn watch_work_status_visibly_escapes_structural_unicode() {
         }),
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: "must not render".to_owned(),
     });
 

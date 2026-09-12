@@ -718,6 +718,8 @@ fn strict_replay_rejects_framed_record_with_malformed_watch_work_status() {
             }),
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: String::new(),
         }),
         parent: AgentEventParent::InheritHead,
@@ -773,6 +775,8 @@ fn unknown_work_status_event(agent_id: &AgentId) -> Event {
         }),
         watch_long_wait: None,
         watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
         message: String::new(),
     })
 }

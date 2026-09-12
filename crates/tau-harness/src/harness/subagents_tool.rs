@@ -213,6 +213,7 @@ const MAX_EXTERNAL_AGENT_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_QUEUED_PEER_INPUTS_PER_AGENT: usize = 32;
 const MAX_QUEUED_PEER_BYTES_PER_AGENT: usize = 256 * 1024;
 const MAX_ACCEPTED_PEER_INPUTS_PER_MINUTE: usize = 60;
+
 /// Diagnostic `PromptOriginator` query prefix for peer auto-start correlation.
 const PEER_AUTO_START_QUERY_PREFIX: &str = "peer-auto-start-";
 /// Durable non-inheritable metadata key identifying peer-created endpoints.
@@ -221,6 +222,28 @@ pub(crate) const PEER_ENTRYPOINT_AGENT_METADATA_KEY: &str = "tau.peer_entrypoint
 /// generation.
 pub(crate) const BOOTSTRAP_PROMPT_AGENT_METADATA_KEY: &str = "tau.bootstrap_prompt";
 const INTER_SESSION_UNAVAILABLE: &str = "target session is unavailable for inter-session messaging";
+
+/// Returns the peer admission weight of one persisted external message.
+pub(super) fn external_agent_message_admission_bytes(
+    message: &tau_proto::AgentMessageReceived,
+) -> usize {
+    external_agent_message_parts_bytes(
+        &message.message,
+        message.sender_notice.as_deref(),
+        message.recipient_notice.as_deref(),
+    )
+}
+
+fn external_agent_message_parts_bytes(
+    message: &str,
+    sender_notice: Option<&str>,
+    recipient_notice: Option<&str>,
+) -> usize {
+    [Some(message), sender_notice, recipient_notice]
+        .into_iter()
+        .flatten()
+        .fold(0usize, |bytes, part| bytes.saturating_add(part.len()))
+}
 
 /// Select the bounded watcher-visible response for one completed delegation.
 ///
@@ -1229,6 +1252,8 @@ impl Harness {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: message.clone(),
         };
         self.peer_messaging.pending_external_receive_acks.insert(
@@ -1617,6 +1642,8 @@ impl Harness {
                     state: tau_proto::AgentWatchLifecycleState::Stopped,
                     reason,
                 }),
+                sender_notice: None,
+                recipient_notice: None,
                 message: String::new(),
             });
             let watcher_cid = self
@@ -1905,6 +1932,8 @@ impl Harness {
                 }),
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: String::new(),
             }),
         );
@@ -1940,6 +1969,8 @@ impl Harness {
                     threshold_minutes,
                 }),
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message: String::new(),
             }),
         );
@@ -2200,6 +2231,8 @@ impl Harness {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message,
             }),
         );
@@ -2246,6 +2279,7 @@ impl Harness {
                         agent_id: recipient_id.clone(),
                     },
                     kind,
+                    sender_notice: None,
                     message: message.clone(),
                 }),
             );
@@ -2262,6 +2296,8 @@ impl Harness {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
                 message,
             }),
         );
@@ -2291,6 +2327,15 @@ impl Harness {
         let capability =
             random_external_message_capability(&mut self.agent_runtime.agent_registry.id_rng);
         let publish_sent = kind == tau_proto::AgentMessageKind::Message;
+        let sender_notice = publish_sent
+            .then(|| {
+                self.config
+                    .accepted_harness_settings
+                    .inter_session
+                    .outgoing_notice
+                    .clone()
+            })
+            .flatten();
         self.peer_messaging.pending_external_message_auth.insert(
             message_id.clone(),
             PendingExternalAgentMessageAuth {
@@ -2300,6 +2345,7 @@ impl Harness {
                 recipient_session_id: recipient_session_id.clone(),
                 recipient: recipient.clone(),
                 kind,
+                sender_notice: sender_notice.clone(),
                 message: message.clone(),
             },
         );
@@ -2312,6 +2358,7 @@ impl Harness {
             recipient_session_id,
             recipient,
             kind,
+            sender_notice,
             message,
         };
         let tx = self.runtime_io.tx.clone();
@@ -2349,6 +2396,7 @@ impl Harness {
                             sender_id: request.sender_id.clone(),
                             recipient_session_id: request.recipient_session_id.clone(),
                             kind: request.kind,
+                            sender_notice: request.sender_notice.clone(),
                             message: request.message.clone(),
                         },
                     )),
@@ -2363,9 +2411,10 @@ impl Harness {
     pub(crate) fn handle_external_agent_message_auth_request(
         &mut self,
         request: tau_proto::ExternalAgentMessageAuthRequest,
+        peer_protocol_version: tau_proto::ProtocolVersion,
     ) -> tau_proto::ExternalAgentMessageAuthResult {
         let request_id = request.request_id.clone();
-        let result = self.authorize_external_agent_message(request);
+        let result = self.authorize_external_agent_message(request, peer_protocol_version);
         tau_proto::ExternalAgentMessageAuthResult {
             request_id,
             authorized: result.is_ok(),
@@ -2376,6 +2425,7 @@ impl Harness {
     fn authorize_external_agent_message(
         &self,
         request: tau_proto::ExternalAgentMessageAuthRequest,
+        peer_protocol_version: tau_proto::ProtocolVersion,
     ) -> Result<(), String> {
         let Some(pending) = self
             .peer_messaging
@@ -2384,12 +2434,15 @@ impl Harness {
         else {
             return Err("unknown external message capability".to_owned());
         };
+        let legacy_notice_omission = peer_protocol_version < tau_proto::ProtocolVersion::new(7, 1)
+            && request.sender_notice.is_none();
         if pending.capability != request.capability
             || pending.sender_session_id != request.sender_session_id
             || pending.sender_id != request.sender_id
             || pending.recipient_session_id != request.recipient_session_id
             || pending.recipient != request.recipient
             || pending.kind != request.kind
+            || (!legacy_notice_omission && pending.sender_notice != request.sender_notice)
             || pending.message != request.message
         {
             return Err("external message capability does not match request".to_owned());
@@ -2495,15 +2548,29 @@ impl Harness {
         {
             return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
         }
+        let recipient_notice = (request.kind == tau_proto::AgentMessageKind::Message)
+            .then(|| {
+                self.config
+                    .accepted_harness_settings
+                    .inter_session
+                    .incoming_notice
+                    .clone()
+            })
+            .flatten();
+        let admission_bytes = external_agent_message_parts_bytes(
+            &request.message,
+            request.sender_notice.as_deref(),
+            recipient_notice.as_deref(),
+        );
         let (recipient_id, started, rate_admitted_at) = match &request.recipient {
             tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
                 let admitted_at = self
-                    .admit_peer_input(agent_id, request.message.len())
+                    .admit_peer_input(agent_id, admission_bytes)
                     .map_err(|_| tau_proto::ExternalAgentMessageFailure::Rejected)?;
                 (agent_id.clone(), false, admitted_at)
             }
             tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => self
-                .resolve_peer_entrypoint_recipient(&request.message_id, request.message.len())
+                .resolve_peer_entrypoint_recipient(&request.message_id, admission_bytes)
                 .map_err(|error| error.failure())?,
         };
         let received = AgentMessageReceived {
@@ -2516,6 +2583,8 @@ impl Harness {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: request.sender_notice,
+            recipient_notice,
             message: request.message,
         };
         self.peer_messaging.pending_external_receive_acks.insert(
@@ -2567,15 +2636,29 @@ impl Harness {
         request: tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(AgentId, bool), tau_proto::ExternalAgentMessageFailure> {
         self.validate_external_agent_message_target(&request)?;
+        let recipient_notice = (request.kind == tau_proto::AgentMessageKind::Message)
+            .then(|| {
+                self.config
+                    .accepted_harness_settings
+                    .inter_session
+                    .incoming_notice
+                    .clone()
+            })
+            .flatten();
+        let admission_bytes = external_agent_message_parts_bytes(
+            &request.message,
+            request.sender_notice.as_deref(),
+            recipient_notice.as_deref(),
+        );
         let (recipient_id, started, _rate_admitted_at) = match &request.recipient {
             tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
                 let admitted_at = self
-                    .admit_peer_input(agent_id, request.message.len())
+                    .admit_peer_input(agent_id, admission_bytes)
                     .map_err(|_| tau_proto::ExternalAgentMessageFailure::Rejected)?;
                 (agent_id.clone(), false, admitted_at)
             }
             tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => self
-                .resolve_peer_entrypoint_recipient(&request.message_id, request.message.len())
+                .resolve_peer_entrypoint_recipient(&request.message_id, admission_bytes)
                 .map_err(|error| error.failure())?,
         };
         self.publish_event(
@@ -2590,6 +2673,8 @@ impl Harness {
                 watch_work_status: None,
                 watch_long_wait: None,
                 watch_lifecycle: None,
+                sender_notice: request.sender_notice,
+                recipient_notice,
                 message: request.message,
             }),
         );
@@ -2645,6 +2730,13 @@ impl Harness {
             return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
         }
         if request.message.len() > MAX_EXTERNAL_AGENT_MESSAGE_BYTES {
+            return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
+        }
+        if request
+            .sender_notice
+            .as_ref()
+            .is_some_and(|_| request.kind != tau_proto::AgentMessageKind::Message)
+        {
             return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
         }
         Ok(())
@@ -2829,7 +2921,7 @@ impl Harness {
             .pending_external_receive_acks
             .values()
             .filter(|pending| &pending.recipient_id == recipient_id && !pending.canceled)
-            .map(|pending| pending.expected_receive.message.len());
+            .map(|pending| external_agent_message_admission_bytes(&pending.expected_receive));
         let (queued_count, queued_bytes) = loaded_wake_bytes
             .chain(pending_start_wake_bytes)
             .chain(parked_receive_bytes)
@@ -3703,6 +3795,7 @@ fn authenticate_external_agent_message_sender(
             recipient_session_id: request.recipient_session_id.clone(),
             recipient: request.recipient.clone(),
             kind: request.kind,
+            sender_notice: request.sender_notice.clone(),
             message: request.message.clone(),
         },
     ))

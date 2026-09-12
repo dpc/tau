@@ -312,6 +312,9 @@ impl Harness {
         self.peer_messaging
             .external_message_peers
             .remove(&connection_id.clone());
+        self.peer_messaging
+            .external_message_peer_versions
+            .remove(connection_id);
         let canceled_peer_receives = self
             .peer_messaging
             .pending_external_receive_acks

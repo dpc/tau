@@ -76,6 +76,15 @@ up the live reservation instead of acknowledging.
 
 After validation and endpoint selection, the target enqueues the exact
 `AgentMessageReceived` projection but does not acknowledge it. A bounded
+sender notice, when returned, is authenticated by the existing callback
+together with the body and routing fields. Omission remains accepted for
+older-target optional-field degradation; altered supplied text is rejected.
+The target then snapshots its own configured incoming
+notice into the receive projection. Each notice is limited to 64 KiB, and body
+plus both notices consume the existing queued-byte admission budget.
+The recipient-local notice is never included in the acknowledgement or sender
+projection.
+The bounded
 in-memory, generation-bound continuation acknowledges only from the
 post-acceptance commit hook. Here commit means bounded persistence admission and
 the authoritative in-memory fold; it does not wait for filesystem I/O.

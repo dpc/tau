@@ -24,9 +24,9 @@ use crate::{
     DiffSummary, EventCategory, EventName, ExtensionAgentDiscoverySnapshotDeclared,
     ExtensionInstanceId, ExtensionName, ExtensionSessionDiscoverySnapshotDeclared,
     HarnessAgentContextInitialized, HarnessProviderQuotaChanged, HarnessSessionSkillsAvailable,
-    InternalPromptKind, MessageDeleted, MessageDelivered, MessageEdited, MessagePhase,
-    MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag, ObservationId,
-    PromptContext, PromptFragment, PromptSubmissionSource, ProviderCacheRefreshId,
+    InterSessionNotice, InternalPromptKind, MessageDeleted, MessageDelivered, MessageEdited,
+    MessagePhase, MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag,
+    ObservationId, PromptContext, PromptFragment, PromptSubmissionSource, ProviderCacheRefreshId,
     ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace, ProviderTokenUsage,
     ReasoningTextKind, SessionId, ToolCallId, ToolCallRef, ToolDefinition, ToolGroupName, ToolName,
     ToolTag,
@@ -2139,6 +2139,9 @@ pub struct AgentMessageSent {
     /// Delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
     pub kind: AgentMessageKind,
+    /// Optional advisory text configured by the sending session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_notice: Option<InterSessionNotice>,
     /// Message body.
     pub message: String,
 }
@@ -2179,6 +2182,12 @@ pub struct AgentMessageReceived {
     /// [`AgentMessageKind::WatchLifecycle`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_lifecycle: Option<AgentWatchLifecycleNotification>,
+    /// Optional advisory text configured by the sending session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_notice: Option<InterSessionNotice>,
+    /// Optional advisory text configured by the receiving session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_notice: Option<InterSessionNotice>,
     /// Message body. Must be empty for [`AgentMessageKind::WatchLifecycle`].
     pub message: String,
 }

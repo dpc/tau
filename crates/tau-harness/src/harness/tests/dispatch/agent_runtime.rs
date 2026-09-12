@@ -68,6 +68,8 @@ fn terminating_agent_route_rejects_direct_work() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "must be rejected".to_owned(),
         },
         Some(&tau_core::AgentAppendOutcome {

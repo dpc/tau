@@ -100,6 +100,8 @@ const MESSAGE_CLOSE: &str = "</message>";
 const MESSAGE_CLOSE_VISIBLE: &str = "&lt;/message&gt;";
 const PEER_MESSAGE_CLOSE: &str = "</tau_peer_message>";
 const PEER_MESSAGE_CLOSE_VISIBLE: &str = "&lt;/tau_peer_message&gt;";
+const NOTICE_CLOSE: &str = "</notice>";
+const NOTICE_CLOSE_VISIBLE: &str = "&lt;/notice&gt;";
 const WATCH_RESPONSE_CLOSE: &str = "</response>";
 const WATCH_RESPONSE_CLOSE_VISIBLE: &str = "&lt;/response&gt;";
 const WATCH_PROMPT_CLOSE: &str = "</prompt>";
@@ -1595,6 +1597,59 @@ pub(crate) fn initialization_agents_context_block(
     ))
 }
 
+fn render_peer_agent_message(
+    sender_session_id: &tau_proto::SessionId,
+    sender_id: &tau_proto::AgentId,
+    sender_notice: Option<&str>,
+    recipient_notice: Option<&str>,
+    message: &str,
+) -> String {
+    if sender_notice.is_none() && recipient_notice.is_none() {
+        let body = tau_proto::escape_exact_sentinel_close(
+            message,
+            PEER_MESSAGE_CLOSE,
+            PEER_MESSAGE_CLOSE_VISIBLE,
+        );
+        return crate::internal_envelope::frame(&format!(
+            "Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
+            xml_escape(sender_session_id.as_str()),
+            xml_escape(sender_id.as_str()),
+            body
+        ));
+    }
+
+    let sender_notice = sender_notice.map(|notice| {
+        let notice =
+            tau_proto::escape_exact_sentinel_close(notice, NOTICE_CLOSE, NOTICE_CLOSE_VISIBLE);
+        format!("<notice origin=\"sender_config\" authority=\"advisory\">\n{notice}\n</notice>\n")
+    });
+    let recipient_notice = recipient_notice.map(|notice| {
+        let notice =
+            tau_proto::escape_exact_sentinel_close(notice, NOTICE_CLOSE, NOTICE_CLOSE_VISIBLE);
+        format!(
+            "\n<notice origin=\"recipient_config\" authority=\"advisory\">\n{notice}\n</notice>"
+        )
+    });
+    let message =
+        tau_proto::escape_exact_sentinel_close(message, MESSAGE_CLOSE, MESSAGE_CLOSE_VISIBLE);
+    let body = format!(
+        "{}<message>\n{message}\n</message>{}",
+        sender_notice.as_deref().unwrap_or_default(),
+        recipient_notice.as_deref().unwrap_or_default(),
+    );
+    let body = tau_proto::escape_exact_sentinel_close(
+        &body,
+        PEER_MESSAGE_CLOSE,
+        PEER_MESSAGE_CLOSE_VISIBLE,
+    );
+    crate::internal_envelope::frame(&format!(
+        "Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
+        xml_escape(sender_session_id.as_str()),
+        xml_escape(sender_id.as_str()),
+        body
+    ))
+}
+
 fn assemble_prompt_context_window(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
@@ -1763,6 +1818,8 @@ fn assemble_prompt_context_window(
                 watch_work_status,
                 watch_long_wait,
                 watch_lifecycle,
+                sender_notice,
+                recipient_notice,
                 message,
             } => match kind {
                 tau_proto::AgentMessageKind::Message => {
@@ -1777,19 +1834,13 @@ fn assemble_prompt_context_window(
                     }
                     contains_payload_envelope_provenance_projection = true;
                     let message_text = match sender_session_id {
-                        Some(sender_session_id) => {
-                            let body = tau_proto::escape_exact_sentinel_close(
-                                message,
-                                PEER_MESSAGE_CLOSE,
-                                PEER_MESSAGE_CLOSE_VISIBLE,
-                            );
-                            crate::internal_envelope::frame(&format!(
-                                "Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
-                                xml_escape(sender_session_id.as_str()),
-                                xml_escape(sender_id.as_str()),
-                                body
-                            ))
-                        }
+                        Some(sender_session_id) => render_peer_agent_message(
+                            sender_session_id,
+                            sender_id,
+                            sender_notice.as_deref(),
+                            recipient_notice.as_deref(),
+                            message,
+                        ),
                         None => {
                             let body = tau_proto::escape_exact_sentinel_close(
                                 message,

@@ -3721,6 +3721,8 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "later durable message wake".to_owned(),
         }),
     );
@@ -3737,6 +3739,8 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
             watch_work_status: None,
             watch_long_wait: None,
             watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
             message: "second durable message wake".to_owned(),
         }),
     );

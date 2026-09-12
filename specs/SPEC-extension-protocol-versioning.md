@@ -8,9 +8,18 @@ extension-visible event behavior.
 
 ## Revision scope
 
-Protocol 7.0 adds the optional typed `MessageParty.sender_trust` qualification
-to external-message reports and canonical facts. The published revision remains
-7.0, so configured 6.x extensions are rejected before Configure/Ready. The
+Protocol 7.1 adds optional sender-configured notice text to the cross-harness
+message and authentication RPCs, plus optional sender- and recipient-configured
+notice snapshots to durable directional message facts. A mixed older peer may
+ignore the sender notice while still delivering the message body; a newer
+recipient can independently apply its local incoming notice. This workable
+optional degradation requires a minor rather than major revision. Historical
+records without notice fields retain the prior projection.
+See [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
+
+Protocol 7.0 added the optional typed `MessageParty.sender_trust` qualification
+to external-message reports and canonical facts. Protocol 7.x rejects
+configured 6.x extensions before Configure/Ready. The
 optional field itself would permit workable degraded operation with an older
 harness that ignores it, and under the policy below that omission alone would
 not require a major revision. Stored records without the optional field retain

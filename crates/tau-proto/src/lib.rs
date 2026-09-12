@@ -27,6 +27,7 @@ mod duration_format;
 mod estimated_cost;
 mod event_name;
 mod events;
+mod inter_session_notice;
 mod interception;
 mod local_summary_continuation;
 pub use local_summary_continuation::*;
@@ -70,6 +71,7 @@ pub use estimated_cost::*;
 pub use event_name::*;
 pub use events::*;
 pub use inspection::*;
+pub use inter_session_notice::*;
 pub use interception::*;
 pub use message_extension_data::*;
 pub use message_fact::*;
@@ -103,7 +105,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(7, 0);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(7, 1);
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

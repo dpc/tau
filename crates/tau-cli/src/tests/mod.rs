@@ -353,6 +353,7 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
             agent_id: agent_id(recipient),
         },
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: message.to_owned(),
     })
 }
@@ -374,6 +375,7 @@ fn external_agent_message(
             agent_id: agent_id(recipient),
         },
         kind: tau_proto::AgentMessageKind::Message,
+        sender_notice: None,
         message: message.to_owned(),
     })
 }
