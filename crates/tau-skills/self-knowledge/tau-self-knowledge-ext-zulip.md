@@ -205,6 +205,34 @@ native route, source reply reference, or reaction ownership. Catch-up remains
 independently opt-in and keeps its existing checkpoint; send-only mode never
 restores receive registration.
 
+## Diagnose receive restoration and queue recovery
+
+Zulip writes content-free diagnostics to its supervised extension stderr, which
+Tau captures in the extension log. By default, `zulip=info,warn` makes the
+extension's `info` and higher records visible, and leaves unrelated targets at
+`warn` and higher. `TAU_LOG` can override that filter; set it in the environment
+that starts the harness, then restart the harness or session so its new
+extension child inherits it, as described in
+`tau-self-knowledge-debugging-extensions`.
+
+Replay-boundary records include an `ok` or `error` outcome and bounded
+loaded/replay-complete/durable-intent/eligible flags or counts. Receive
+restoration records show candidate selection, attempt, success, or a stable
+failure category: `superseded`, `not_configured`, `send_only`, `resolve_stream`,
+`validate_routes`, `subscribe`, `register_queue`, `checkpoint_config`,
+`checkpoint_open`, `authority_changed`, `worker_start`, or
+`restore_worker_spawn`. Queue diagnostics likewise report invalidation, its
+recovery mode, setup-stage failures, and successful recovery. Existing malformed
+event-batch and long-poll warnings remain available.
+
+These records contain no message bodies, credentials, headers, queue or native
+IDs, routes, or raw remote error bodies. A positive record shows that the
+extension reached that point; an absent record is inconclusive unless the
+filter and log capture are independently known complete. Logging is best-effort
+operational evidence, not journal authority or a live probe: it neither
+preserves attempts across process loss nor establishes or fixes the root cause
+of a historical registration failure.
+
 Queue-poll failures retain content-free classifications for bounded body-read,
 JSON, result-envelope, queue, and events-shape failures. Startup and
 re-registration failures retain only the operation, HTTP status, and a bounded
