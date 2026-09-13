@@ -194,6 +194,14 @@ fails, revokes intent; rejection before retirement leaves it unchanged. A live
 configuration change retires runtime authority and defeats pending restoration;
 a later reload may resume retained intent under that new configuration.
 
+An ordinary receive-enabled startup subscribes both historically and live to
+the seven durable facts that reconstruct this intent: `tool.started`,
+`provider.tool_result`, `provider.tool_error`, `tool.background_result`,
+`tool.background_error`, `tool.cancelled`, and `session.agent_loaded`.
+`agent.replay_complete` and `session.replay_complete` remain live-only
+boundaries, so restoration waits for current replay completion. Send-only
+startup remains live-only.
+
 Restoration resumes prior explicit intent rather than synthesizing a model tool
 call or deriving authority from historical roles or UI summaries. Only paired
 accepted starts and recognized versioned effective terminal metadata establish
@@ -203,7 +211,9 @@ no fallback prompt or notification and does not retry failed restoration in the
 same load; an explicit enable remains available. It restores no old queue,
 native route, source reply reference, or reaction ownership. Catch-up remains
 independently opt-in and keeps its existing checkpoint; send-only mode never
-restores receive registration.
+restores receive registration. Historical intent replay does not fetch old
+Zulip messages; only `offline_message_catch_up` can request bounded
+created-message history.
 
 ## Diagnose receive restoration and queue recovery
 
@@ -231,7 +241,10 @@ extension reached that point; an absent record is inconclusive unless the
 filter and log capture are independently known complete. Logging is best-effort
 operational evidence, not journal authority or a live probe: it neither
 preserves attempts across process loss nor establishes or fixes the root cause
-of a historical registration failure.
+of a historical registration failure. In particular, absent restoration
+records can mean that no replay subscription supplied the necessary durable
+intent (as with older live-only startup behavior), not necessarily that a
+Zulip API request failed.
 
 Queue-poll failures retain content-free classifications for bounded body-read,
 JSON, result-envelope, queue, and events-shape failures. Startup and
