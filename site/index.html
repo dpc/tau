@@ -1825,6 +1825,29 @@ skill({"query": "deadlock", "search_content": true})</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
+        <summary><span><strong>Built-in self-knowledge skills</strong><span class="feature-teaser">Ask your agents to understand, configure, and improve Tau itself.</span></span><span class="feature-kind">Skills</span></summary>
+        <div class="feature-body">
+          <div><p>Tau ships with discoverable skills about its own architecture,
+            configuration, tools, and debugging workflows. Agents load the
+            relevant guidance on demand to help you configure the harness,
+            investigate problems, or understand how a feature works.</p>
+            <p>When documentation is not enough, the source-code skill explains
+              where to obtain Tau and keep a reusable local checkout. Agents can
+              inspect the implementation rather than guess from behavior, then
+              help you customize Tau for your needs.</p>
+            <a href="https://github.com/dpc/tau/tree/master/crates/tau-skills/self-knowledge">Explore self-knowledge skills &rarr;</a></div>
+          <div class="feature-example"><p>Example agent tool calls &middot; built-in skills</p><pre><code># Discover Tau's self-help catalog:
+skill({"query": "tau-self-knowledge"})
+
+# Load guidance for the task at hand:
+skill({"query": "tau-self-knowledge-config"})
+skill({"query": "tau-self-knowledge-debugging"})
+
+# Load guidance for obtaining Tau's source:
+skill({"query": "tau-self-knowledge-source-code"})</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
         <summary><span><strong>Prompt templates</strong><span class="feature-teaser">Put your working standards into the context.</span></span><span class="feature-kind">Config</span></summary>
         <div class="feature-body">
           <div><p>Configure how agents communicate, reason about a task, and
