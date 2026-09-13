@@ -4,16 +4,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tau — Unix-native coding agent</title>
+  <title>Tau — Powerful coding agents. Your rules.</title>
   <meta name="description"
-    content="Tau is a Unix-native LLM coding agent. Process-oriented, local-first, and built for command line nerds.">
+    content="An open-source coding agent harness for power users. Put multi-agent workflows, model choice, durable sessions, and deep configurability to work in your terminal.">
   <link rel="canonical" href="https://tau-agent.dev/">
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Tau">
-  <meta property="og:title" content="Tau — Unix-native coding agent">
+  <meta property="og:title" content="Tau — Powerful coding agents. Your rules.">
   <meta property="og:description"
-    content="A process-oriented LLM coding agent harness built for command line nerds and Linux hackers.">
+    content="An open-source coding agent harness for power users. Multi-agent workflows, model choice, durable sessions, and deep configurability.">
   <meta property="og:url" content="https://tau-agent.dev/">
   <meta property="og:image" content="https://tau-agent.dev/logo-full.png">
   <meta property="og:image:type" content="image/png">
@@ -22,9 +22,9 @@
   <meta property="og:image:alt" content="Tau logo on a Solarized dark background.">
 
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Tau — Unix-native coding agent">
+  <meta name="twitter:title" content="Tau — Powerful coding agents. Your rules.">
   <meta name="twitter:description"
-    content="A process-oriented LLM coding agent harness built for command line nerds and Linux hackers.">
+    content="An open-source coding agent harness for power users. Multi-agent workflows, model choice, durable sessions, and deep configurability.">
   <meta name="twitter:image" content="https://tau-agent.dev/logo-full.png">
   <meta name="twitter:image:alt" content="Tau logo on a Solarized dark background.">
 
@@ -172,10 +172,10 @@
     }
 
     .hero h1 {
-      font-size: 3rem;
+      font-size: clamp(1.8rem, 6vw, 3rem);
       color: var(--base2);
       font-weight: 700;
-      line-height: 1;
+      line-height: 1.15;
       margin-top: 0.25rem;
       margin-bottom: 1rem;
     }
@@ -510,6 +510,8 @@
 
     .hero-cta {
       display: inline-flex;
+      flex-wrap: wrap;
+      justify-content: center;
       gap: 1rem;
       margin-top: 1rem;
     }
@@ -582,6 +584,167 @@
       border-top: 1px solid var(--border-subtle);
       max-width: 1120px;
       margin: 0 auto;
+    }
+
+    /* Native disclosures keep examples usable without scripts or hover. */
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+    }
+
+    .feature-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.5rem;
+      margin: 1.5rem 0 2rem;
+    }
+
+    .feature-group {
+      margin-top: 2.5rem;
+      scroll-margin-top: 2rem;
+    }
+
+    .feature-detail {
+      border-top: 1px solid var(--border-subtle);
+      background: rgb(0 43 54 / 0.55);
+    }
+
+    .feature-detail:last-child {
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .feature-detail summary {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1.25rem;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .feature-detail summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .feature-detail summary::after {
+      content: "+";
+      color: var(--cyan);
+      font-size: 1.5rem;
+      flex: 0 0 1ch;
+    }
+
+    .feature-detail[open] summary::after {
+      content: "\2212";
+    }
+
+    .feature-detail summary > span:first-child {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .feature-detail summary strong {
+      color: var(--base2);
+      font-size: 1.05rem;
+    }
+
+    .feature-teaser {
+      display: block;
+      color: var(--base1);
+      font-size: 0.9rem;
+      margin-top: 0.25rem;
+    }
+
+    .feature-kind {
+      color: var(--cyan);
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
+
+    .feature-detail summary:hover,
+    .feature-detail[open] summary {
+      background: rgb(42 161 152 / 0.08);
+    }
+
+    a:focus-visible,
+    .feature-detail summary:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 3px;
+    }
+
+    .feature-body {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 2rem;
+      padding: 1.5rem 1.25rem 2rem;
+      overflow-wrap: anywhere;
+    }
+
+    .feature-body p {
+      font-size: 0.95rem;
+    }
+
+    .feature-body code,
+    #major-features > p code {
+      color: var(--cyan);
+    }
+
+    .feature-example {
+      min-width: 0;
+      align-self: start;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--base03);
+    }
+
+    .feature-example > p {
+      margin: 0;
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--border-subtle);
+      color: var(--base1);
+      font-size: 0.75rem;
+    }
+
+    .feature-example pre {
+      margin: 0;
+      padding: 1rem;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: inherit;
+      font-size: 0.85rem;
+      line-height: 1.7;
+      tab-size: 2;
+    }
+
+    .feature-next {
+      margin-top: 2.5rem;
+      padding: 1.5rem;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      background: rgb(42 161 152 / 0.08);
+    }
+
+    .feature-next .btn-primary {
+      display: inline-block;
+      padding: 0.6rem 1rem;
+      border-radius: 4px;
+      margin: 0 1rem 1rem 0;
+    }
+
+    @media (max-width: 640px) {
+      .feature-body {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1.25rem;
+      }
+
+      .feature-kind {
+        display: none;
+      }
+
+      .feature-detail summary {
+        padding: 1rem;
+      }
     }
 
     /* Feature grid */
@@ -1303,6 +1466,29 @@
       }
     }
 
+    /* Keep the main action distinct from the shared glass-button treatment. */
+    .hero-cta a.btn-primary {
+      background: var(--cyan);
+      border-color: var(--cyan);
+      color: var(--base03);
+    }
+
+    .hero-cta a.btn-primary:hover {
+      background: var(--base2);
+      border-color: var(--base2);
+      color: var(--base03);
+    }
+
+    .hero-cta a.btn-primary::before,
+    .hero-cta a.btn-primary::after {
+      content: none;
+    }
+
+    .hero p.terminal-caption {
+      margin: 0.75rem auto 0;
+      font-size: 0.8rem;
+    }
+
     /* Footer */
     footer {
       max-width: 1120px;
@@ -1323,6 +1509,16 @@
 
     /* Responsive */
     @media (max-width: 640px) {
+      header {
+        flex-wrap: wrap;
+        gap: 1rem;
+      }
+
+      .header-links {
+        flex-wrap: wrap;
+        gap: 1rem;
+      }
+
       .arch-wide {
         display: none;
       }
@@ -1346,6 +1542,24 @@
       .hero-cta {
         flex-direction: column;
         align-items: center;
+      }
+
+      .terminal-body {
+        padding: 0.85rem;
+      }
+
+      .terminal-row {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .terminal-split {
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .terminal-right {
+        text-align: left;
       }
 
       .extension-list {
@@ -1411,12 +1625,13 @@
     <div class="hero-logo">
       <img src="logo-transparent.svg" alt="Tau logo">
     </div>
-    <p style="margin-bottom: 0.25rem">There are many coding agents, but this one is</p>
-    <h1><span class="accent">Unix-native</span></h1>
-    <p>(<a href="#other-taus">dpc's</a>)
-      Tau is a process-oriented LLM coding agent harness built for
-      command&nbsp;line&nbsp;nerds and Linux&nbsp;hackers.</p>
+    <p style="margin-bottom: 0.25rem">The coding agent harness for power users</p>
+    <h1>Powerful agents.<br><span class="accent">Your rules.</span></h1>
+    <p>Tau brings multi-agent workflows, durable sessions, and a rich tool suite
+      to your terminal. Choose the models. Shape the roles. Configure how work gets done.</p>
     <div class="hero-cta">
+      <a class="btn-primary" href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/docs/getting-started.md">Try Tau</a>
+      <a class="btn-secondary" href="#major-features">Explore the features &darr;</a>
       <a class="btn-secondary" href="https://app.radicle.xyz/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4">
         <svg viewBox="0 0 44 44" aria-hidden="true">
           <path
@@ -1430,12 +1645,6 @@
             d="M12 .3a12 12 0 0 0-3.8 23.38c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49 1 .1-.78.42-1.3.76-1.6-2.67-.31-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6.02 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.62-5.48 5.92.42.36.81 1.1.81 2.22v3.29c0 .32.2.7.82.58A12 12 0 0 0 12 .3" />
         </svg>
         View on GitHub
-      </a>
-      <a class="btn-secondary" href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/docs/getting-started.md">
-        <svg viewBox="0 0 800 800" aria-hidden="true">
-          <path d="M194.63 165.29H605.38V282.65H429.34V517.36H546.7V634.72H311.99V282.65H194.63Z" />
-        </svg>
-        Start here
       </a>
     </div>
     <div class="terminal-preview" aria-label="Tau terminal preview">
@@ -1451,47 +1660,42 @@
         <span class="terminal-title"><img class="terminal-title-logo" src="logo-transparent.svg" alt="" aria-hidden="true">Tau Coding Agent</span>
       </div>
       <div class="terminal-body">
-        <div class="terminal-row"><span class="term-bright-cyan">dpc</span>@tlb:<span class="term-blue">~</span><span class="term-white">$</span> tau</div>
-        <div class="terminal-row"><span class="term-white">▝▜▛▀</span> <span class="term-white term-bold">tau</span> <span class="term-dim">0.1.0 (65c9690, 2026-09-07 10:18)</span></div>
-        <div class="terminal-row"> <span class="term-white">▐▙▖</span> <span class="term-dark-yellow">Tau-powered, Unix-native.</span></div>
-        <div class="terminal-row"><span class="term-dim">▤ ui dir: </span><span class="term-blue">~/.local/state/tau/uis/ui-1788808647504-46xqfi/</span></div>
-        <div class="terminal-row"><span class="term-dim">▤ started session: </span><span class="term-white">tau-4uerbz</span><span class="term-dim">, dir: </span><span class="term-blue">~/.local/state/tau/sessions/tau-4uerbz/</span></div>
-        <div class="terminal-row"><span class="term-dim">▤ config profile stack: codex-default,credentialed-web-all</span></div>
+        <div class="terminal-row"><span class="term-blue">~/projects/parser</span> <span class="term-white">$</span> tau --profile focused</div>
+        <div class="terminal-row"><span class="term-white">▝▜▛▀</span> <span class="term-white term-bold">tau</span></div>
+        <div class="terminal-row"><span class="term-dim">▤ config profile stack: focused</span></div>
         <div class="terminal-row"><span class="term-dim">□ extension core-shell </span><span class="term-white">ready</span></div>
         <div class="terminal-row"><span class="term-dim">□ extension provider-builtin </span><span class="term-white">ready</span></div>
-        <div class="terminal-row"><span class="term-dim">□ extension std-utils </span><span class="term-white">ready</span></div>
         <div class="terminal-row"><span class="term-dim">□ extension std-websearch </span><span class="term-white">ready</span></div>
-        <div class="terminal-row"><span class="term-dim">□ Welcome to Tau! Ask your model to introduce you to Tau.</span></div>
-        <div class="terminal-row"><span class="term-dim">▤ initialized engineer-junior-qPYY</span></div>
-        <div class="terminal-row"><span class="term-dim">skills:</span></div>
-        <div class="terminal-row"><span class="term-dim">  </span><span class="term-blue">dpc</span><span class="term-blue"> 1L, 76B</span></div>
-        <div class="terminal-row"><span class="term-dim">AGENTS.md:</span></div>
-        <div class="terminal-row"><span class="term-dim">  </span><span class="term-blue">/home/dpc/lab/tau/tau/AGENTS.md</span><span class="term-blue"> 83L, 5.0kB</span></div>
-        <div class="terminal-row"><span class="term-user">⬤ hi</span></div>
-        <div class="terminal-row"><span class="term-cyan">◆ Hi!</span></div>
+        <div class="terminal-row"><span class="term-dim">AGENTS.md: </span><span class="term-blue">~/projects/parser/AGENTS.md</span></div>
+        <div class="terminal-row"><span class="term-dim">skills: </span><span class="term-blue">review-checklist</span></div>
+        <div class="terminal-row"></div>
+        <div class="terminal-row"><span class="term-user">⬤ Handle escaped delimiters. Add tests and delegate a review.</span></div>
+        <div class="terminal-row"><span class="term-cyan">◆ I'll update the parser and ask a reviewer to check edge cases.</span></div>
+        <div class="terminal-row"><span class="term-dim">  reviewer: checking delimiter handling</span></div>
+        <div class="terminal-row"><span class="term-dim">  engineer: adding regression tests</span></div>
+        <div class="terminal-row"></div>
+        <div class="terminal-row"><span class="term-cyan">◆ Tests pass. Review complete. Here's the diff and what changed.</span></div>
         <div class="terminal-row terminal-split">
-          <span class="terminal-left"><span class="term-cyan term-bold">◯ </span><span class="term-cursor">|</span><span class="term-placeholder">Write a message to </span><span class="term-magenta">engineer-junior-qPYY</span><span class="term-placeholder">...</span></span>
-          <span class="terminal-right term-dim">~/lab/tau/tau &amp;tau-4uerbz</span>
-        </div>
-        <div class="terminal-row terminal-split">
-          <span class="terminal-left term-magenta">✅💤 @engineer-junior-qPYY Responded to greeting</span>
-          <span class="terminal-right term-dark-yellow">#11k/353k *1 $.03/$.03</span>
+          <span class="terminal-left"><span class="term-cyan term-bold">◯ </span><span class="term-cursor">|</span><span class="term-placeholder">Write a message to </span><span class="term-magenta">engineer</span><span class="term-placeholder">...</span></span>
+          <span class="terminal-right term-dim">~/projects/parser</span>
         </div>
       </div>
     </div>
+    <p class="terminal-caption">Illustrative session with a configured profile and project skill.</p>
   </div>
 
   <hr class="divider">
 
   <section id="about">
     <h2>Why Tau?</h2>
-    <h3>The power of Unix</h3>
-    <p>Tau builds on top of the most venerable, powerful, and ubiquitous
-      runtime there is: <strong style="color:var(--base1)">Unix itself.</strong>
-      It embraces the Unix philosophy to its full potential.</p>
-    <p>It is built by devoted, experienced Unix users who want coding agents to
-      become first-class modern Unix tooling: composable, inspectable,
-      scriptable, and comfortable in the terminal.</p>
+    <h3>A full toolkit, not a fixed workflow</h3>
+    <p>You should not have to choose between a capable coding agent and a
+      configurable one. Tau gives you coding tools, delegation, web research,
+      and resumable work &mdash; with controls for the models, prompts, tools,
+      and integrations behind them.</p>
+    <p>Start with the defaults. Grow into specialist roles, reusable skills,
+      named profiles, and your own extensions when the work calls for them.
+      Your setup lives in files you can read, version, and change.</p>
     <p>Follow <a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/docs/getting-started.md">Your first Tau task</a>
       for installation, authentication, one bounded repository change, review,
       and resume. It explains Tau's trust and local-data boundary before the
@@ -1500,149 +1704,355 @@
 
   <hr class="divider">
 
-  <section id="architecture">
-    <h2>Architecture</h2>
-    <h3>Processes over plugins</h3>
-    <p>All components (UI, harness, LLM API, extensions) run as
-      standalone POSIX processes, communicating over stdio.
-      No Node. No npm. Just processes, pipes and sockets.</p>
-    <div class="arch-diagram arch-wide">
-      <svg class="arch-svg" viewBox="0 0 480 175" xmlns="http://www.w3.org/2000/svg" aria-label="Architecture: cli connects via unix socket to harness, which spawns agent, tools, and extensions over stdio.">
-        <text x="0" y="14" xml:space="preserve" class="c">┌─────────┐    unix socket    ┌───────────┐</text>
-        <text y="35" xml:space="preserve"><tspan x="0" class="c">│</tspan><tspan x="8.4" class="h">   cli   </tspan><tspan x="84" class="c">│───────────────────│</tspan><tspan x="260.4" class="h">  harness  </tspan><tspan x="352.8" class="c">│</tspan></text>
-        <text x="0" y="56" xml:space="preserve" class="c">└─────────┘                   └─────┬─────┘</text>
-        <text x="0" y="77" xml:space="preserve" class="c">                     ┌─────────┬────┴────┬─────────┐</text>
-        <text x="0" y="98" xml:space="preserve" class="c">                   stdio     stdio     stdio     stdio</text>
-        <text x="0" y="119" xml:space="preserve" class="c">                 ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐</text>
-        <text y="140" xml:space="preserve"><tspan x="0" class="c">                 │</tspan><tspan x="151.2" class="h"> agent </tspan><tspan x="210" class="c">│ │</tspan><tspan x="235.2" class="h"> tools </tspan><tspan x="294" class="c">│ │</tspan><tspan x="319.2" class="h">  ext  </tspan><tspan x="378" class="c">│ │</tspan><tspan x="403.2" class="h">  ext  </tspan><tspan x="462" class="c">│</tspan></text>
-        <text x="0" y="161" xml:space="preserve" class="c">                 └───────┘ └───────┘ └───────┘ └───────┘</text>
-      </svg>
-    </div>
-    <div class="arch-diagram arch-narrow">
-      <svg class="arch-svg" viewBox="0 0 220 270" xmlns="http://www.w3.org/2000/svg" aria-label="Architecture: cli to harness via unix socket, harness spawns agent, tools, and extensions over stdio.">
-        <text x="0" y="14" xml:space="preserve" class="c">    ┌───────┐</text>
-        <text y="35" xml:space="preserve"><tspan x="0" class="c">    │</tspan><tspan x="42" class="h">  cli  </tspan><tspan x="100.8" class="c">│</tspan></text>
-        <text x="0" y="56" xml:space="preserve" class="c">    └───┬───┘</text>
-        <text x="0" y="77" xml:space="preserve" class="c">        │ unix socket</text>
-        <text x="0" y="98" xml:space="preserve" class="c">   ┌────┴────┐</text>
-        <text y="119" xml:space="preserve"><tspan x="0" class="c">   │</tspan><tspan x="33.6" class="h"> harness </tspan><tspan x="109.2" class="c">│</tspan></text>
-        <text x="0" y="140" xml:space="preserve" class="c">   └────┬────┘</text>
-        <text x="0" y="161" xml:space="preserve" class="c">        │</text>
-        <text y="182" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">agent</tspan><tspan x="142.8" class="c"> (stdio)</tspan></text>
-        <text y="203" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">tools</tspan><tspan x="142.8" class="c"> (stdio)</tspan></text>
-        <text y="224" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">ext</tspan><tspan x="126" class="c">   (stdio)</tspan></text>
-        <text y="245" xml:space="preserve"><tspan x="0" class="c">        └── </tspan><tspan x="100.8" class="h">ext</tspan><tspan x="126" class="c">   (stdio)</tspan></text>
-      </svg>
-    </div>
-  </section>
-
-  <hr class="divider">
-
   <section id="features">
-    <h2>Benefits</h2>
-    <h3>What Unix gives you</h3>
-    <p>For a tour of concrete features &mdash; built-in extensions, key
-      bindings, commands, and configuration &mdash; see
-      <a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/FEATURES.md">FEATURES.md</a>.</p>
+    <h2>More capability. More control.</h2>
+    <h3>Make the harness fit the way you work</h3>
     <div class="features">
       <div class="feature">
-        <div class="feature-title"><span class="icon">$</span> Language agnostic</div>
-        <p>Extensions are just executables. Write in the language of your
-          choice.</p>
+        <div class="feature-title"><span class="icon">&amp;</span> Build a team, not a mega-prompt</div>
+        <p>Delegate implementation, research, and review to separate agents.
+          Give each role its own model settings, instructions, and tools.</p>
       </div>
       <div class="feature">
-        <div class="feature-title"><span class="icon">#</span> Native sandboxing</div>
-        <p>Each component can be individually sandboxed with bubblewrap,
-          Docker, Landlock, or jails&mdash;matched to its actual needs.</p>
+        <div class="feature-title"><span class="icon">@</span> Choose where intelligence comes from</div>
+        <p>Use a supported account, API endpoint, or local model server.
+          Tune reasoning effort and response detail to the task, not one global preset.</p>
       </div>
       <div class="feature">
-        <div class="feature-title"><span class="icon">@</span> Remote execution</div>
-        <p>Running a component on another machine is as simple as prefixing
-          its command with <code style="color:#00ffff">ssh&nbsp;user@host&nbsp;-c</code>.</p>
+        <div class="feature-title"><span class="icon">~</span> Keep the work, not just the answer</div>
+        <p>Resume sessions, explore transcript branches, and inspect what agents
+          actually did through diffs, exports, traces, and usage estimates.</p>
       </div>
       <div class="feature">
-        <div class="feature-title"><span class="icon">&amp;</span> Native packaging</div>
-        <p>Components can be packaged and managed by your OS. Pairs naturally
-          with NixOS, Guix, and traditional package managers.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">~</span> Single binary</div>
-        <p>Ships as one unified binary containing CLI, agent, and built-in
-          extensions. No runtime dependencies.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">%</span> Low resource use</div>
-        <p>Native binary that starts instantly and requires very little memory.
-          Initial measurements show just 4MB of memory use.</p>
+        <div class="feature-title"><span class="icon">+</span> Make your setup compound</div>
+        <p>Turn a useful instruction into a skill, a workflow into a profile,
+          and an integration into an extension. Reuse them across projects.</p>
       </div>
     </div>
-  </section>
-
-  <hr class="divider">
-
-  <section id="philosophy">
-    <h2>Philosophy</h2>
-    <h3>New tool for an old wizard</h3>
-    <ul class="philosophy-list">
-      <li><span class="keyword">Unix runtime.</span> Processes, pipes,
-        sockets, and file descriptors. No language managed runtimes.</li>
-      <li><span class="keyword">Composability.</span> Start, stop, restart,
-        redirect, and compose components with standard Unix tools.</li>
-      <li><span class="keyword">Efficient UI.</span> Every pixel of terminal
-        screen estate is used for content, not glitter.</li>
-      <li><span class="keyword">Native speed.</span> Fast startup, low memory
-        footprint, and minimal resource usage.</li>
-      <li><span class="keyword">Asynchronous events.</span> Components
-        communicate via a simple, non-blocking event system.</li>
-      <li><span class="keyword">Extendable minimalism.</span> Small, focused
-        core with all functionality pushed to extensions.</li>
-      <li><span class="keyword">Feel right.</span> Behaves like the Unix
-        tools you already know and trust, old and new.</li>
-      <li><span class="keyword">Best practices.</span> Following state of the
-        art Linux software conventions and system tool standards.</li>
-    </ul>
   </section>
 
   <hr class="divider">
 
   <section id="major-features">
-    <h2>Major features</h2>
-    <h3>What Tau can do today</h3>
-    <div class="features">
-      <div class="feature">
-        <div class="feature-title"><span class="icon">%</span> Durable sessions</div>
-        <p>Typed event logs preserve sessions, agent transcripts, branch trees,
-          rewinds, detach, and resume across restarts.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">@</span> Roles and model knobs</div>
-        <p>Configure roles, models, reasoning effort, verbosity, thinking summaries,
-          service tier, and per-role tool access.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">:</span> Terminal UI</div>
-        <p>Commands, path completion, prompt history, fzf-powered insertion,
-          custom key bindings, and editor-based prompt editing.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">$</span> Extensions</div>
-        <p>Core shell and filesystem tools, web search, notifications, provider
-          backends, and utility tools ship with Tau. PIM and service integrations
-          install as separate executables.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">&amp;</span> Multi-agent workflows</div>
-        <p>Agents can delegate to isolated sub-agents, message agents or users,
-          and keep long-running tool work in the background.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-title"><span class="icon">#</span> Review-friendly output</div>
-        <p>Inline diffs, reasoning rendering, cache stats, turn stats, policy gates,
-          approval logs, and shell/filesystem access locks keep agent work inspectable.</p>
-      </div>
+    <h2>Explore what Tau can do</h2>
+    <h3>Real capabilities. Concrete controls.</h3>
+    <p>Open a feature to see how it works. These are small, independent examples,
+      not a required setup: YAML snippets are patches for
+      <code>~/.config/tau/harness.yaml</code> unless labeled otherwise.</p>
+    <nav class="feature-nav" aria-label="Feature categories">
+      <a href="#configure-agents">Shape your agents</a>
+      <a href="#coding-workflow">Do the work</a>
+      <a href="#extend-workflow">Connect and extend</a>
+    </nav>
+
+    <div class="feature-group" id="configure-agents">
+      <h3>01 / Shape your agents</h3>
+      <details class="feature-detail" open>
+        <summary><span><strong>Specialist roles</strong><span class="feature-teaser">Different jobs deserve different agents.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Define an economical implementer, a careful reviewer, or a focused
+            research assistant. Roles combine model selection, reasoning effort,
+            response detail, prompts, required skills, and tool access.</p>
+            <p>Switch with <code>:role reviewer</code>, or let an agent delegate to
+              a named role. Model-specific controls depend on the selected provider.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Role configuration &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; role settings</p><pre><code>agents:
+  role_groups:
+    review:
+      roles:
+        reviewer:
+          description: Careful code review
+          effort: 0.8
+          verbosity: high</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Layered config &amp; profiles</strong><span class="feature-teaser">One base setup. Several ways to work.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Keep shared defaults in your dotfiles and overlay named profiles
+            at launch. Adjust agent behavior and extension settings without
+            duplicating the whole configuration.</p><p>Config fragments in
+            <code>harness.d/*.yaml</code> keep a growing setup organized. Selected
+            profiles apply in order; later patches take precedence.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md#configuration-profiles">Profiles &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml + shell</p><pre><code>profiles:
+  focused:
+    agents:
+      effort: "increase:0.25"
+  concise:
+    agents:
+      verbosity: low
+
+# Launch with both patches:
+# tau --profile focused,concise</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Provider choice &amp; local models</strong><span class="feature-teaser">Choose the model and where it runs.</span></span><span class="feature-kind">CLI</span></summary>
+        <div class="feature-body">
+          <div><p>Connect ChatGPT/Codex accounts, OpenRouter, public OpenAI Responses
+            endpoints, or compatible Chat Completions servers, including local
+            servers such as llama.cpp.</p><p>Provider profiles and credentials live
+            separately. Account quotas, API billing, and supported tools or
+            modalities depend on the route &mdash; not every model supports every feature.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/providers.md">Provider setup &rarr;</a></div>
+          <div class="feature-example"><p>Shell &middot; example: ChatGPT account setup</p><pre><code>tau provider add chatgpt
+tau provider list
+
+# In Tau, choose a configured route:
+# :model &lt;provider&gt;/&lt;model&gt;</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Project instructions &amp; skills</strong><span class="feature-teaser">Teach it once. Reuse it where it matters.</span></span><span class="feature-kind">Files</span></summary>
+        <div class="feature-body">
+          <div><p>Tau discovers layered <code>AGENTS.md</code> instructions and
+            reusable Markdown skills. Skills make detailed operating knowledge
+            available on demand instead of loading every guide into every prompt.</p>
+            <p>Keep project knowledge in the repository and personal skills in
+              your user config. Inject a skill explicitly with <code>:skill</code>,
+              or require exact skills for a role.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/skills.md">Instructions and skills &rarr;</a></div>
+          <div class="feature-example"><p>Example project layout + Tau command</p><pre><code>AGENTS.md
+.agents/
+  skills/
+    review-checklist/
+      SKILL.md
+
+# In Tau:
+:skill review-checklist</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Prompt templates</strong><span class="feature-teaser">Put your working standards into the context.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Add house rules or role-specific guidance as named prompt
+            fragments. Use Handlebars templates and file-backed text for richer,
+            directory-aware instructions.</p><p>These guide the model; they are
+            not permissions, a sandbox, or a place to store secrets.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Prompt controls &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; shared guidance</p><pre><code>agents:
+  prompt_fragments:
+    - name: team.workflow
+      text: |
+        Read project instructions first.
+        Add a focused regression test.
+        Report what you verified.</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Per-role tool policy</strong><span class="feature-teaser">Give each agent the tools its job needs.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Select tools by exact name, group, or semantic tag. Make narrow
+            specialist roles alongside fully equipped coding roles, and tune
+            model-aware defaults centrally.</p><p>The example exposes only
+            <code>self_info</code> to a transcript-focused role. Tool visibility is
+            not an OS sandbox; an exposed shell can still execute commands.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Tool policy &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; explicit tool list</p><pre><code>agents:
+  role_groups:
+    review:
+      roles:
+        transcript-reviewer:
+          description: Review supplied text
+          tools: [self_info]</code></pre></div>
+        </div>
+      </details>
     </div>
-    <p style="margin-top:1.5rem">See the full <a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/FEATURES.md">FEATURES.md</a>
-      for details and configuration examples.</p>
+
+    <div class="feature-group" id="coding-workflow">
+      <h3>02 / Do the work</h3>
+      <details class="feature-detail">
+        <summary><span><strong>Multi-agent delegation</strong><span class="feature-teaser">Split the work without juggling separate chat windows.</span></span><span class="feature-kind">Workflow</span></summary>
+        <div class="feature-body">
+          <div><p>Agents can start specialist sub-agents, exchange messages, watch
+            progress, and wait for results. Long-running tools move into the
+            background so independent work can continue.</p><p>Separate agent
+            contexts keep delegation focused. Per-agent workdirs and cooperative
+            directory locks help coordinate shared files; they do not isolate
+            each agent in a filesystem sandbox.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-messaging.md">Agent coordination &rarr;</a></div>
+          <div class="feature-example"><p>Example prompt &middot; with your configured roles</p><pre><code>Implement the parser change.
+Delegate a review of the edge cases
+to a reviewer while you add tests.
+Wait for the review, address findings,
+then summarize what passed.</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Durable sessions &amp; branches</strong><span class="feature-teaser">Pick up the work instead of reconstructing it.</span></span><span class="feature-kind">CLI / UI</span></summary>
+        <div class="feature-body">
+          <div><p>Keep conversations, tool facts, and alternate transcript
+            branches across restarts. Attach to a live session or resume a
+            stored one. Use the tree view to explore conversation history.</p>
+            <p>Use <code>:detach</code> to leave work running without the UI.
+              For a supervised service, run a pinned headless owner.
+              Ordinary quit shuts down when the last UI leaves unless you
+              have deliberately detached or pinned the session.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/session-startup.md">Session lifecycle &rarr;</a></div>
+          <div class="feature-example"><p>Shell &middot; replace SESSION with its ID</p><pre><code>tau resume
+tau attach SESSION
+
+# Keep a headless owner running:
+tau serve --session SESSION --existing
+
+# In the terminal UI:
+# :tree</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>A terminal built for active coding</strong><span class="feature-teaser">See the work. Keep your editor and shortcuts.</span></span><span class="feature-kind">UI config</span></summary>
+        <div class="feature-body">
+          <div><p>Follow streaming output, inline diffs, Markdown, reasoning
+            summaries, tool activity, and agent status. Use prompt history,
+            completion, local <code>!</code> shell commands, external-editor
+            prompts, and compact conversation views.</p><p>Customize key
+            bindings, themes, mouse behavior, and display detail independently
+            of your agent configuration.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/cli-keybindings.md">Terminal controls &rarr;</a></div>
+          <div class="feature-example"><p>~/.config/tau/cli.yaml</p><pre><code>theme: tau-plain-dark
+mouse: true
+
+# In Tau, discover live controls:
+# :set
+# :theme
+# :model</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Coding tools &amp; shell integration</strong><span class="feature-teaser">Files, search, patches, images, and real commands.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>The bundled shell extension provides everyday coding tools and
+            remembers a separate working directory per agent. Configure the
+            shell command, environment, and wrappers to fit your development
+            environment.</p><p>The example adds an environment variable to shell
+            calls. Allowlists and cooperative locks are guardrails, not a
+            general security boundary.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/getting-started.md">Your first coding task &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; shell environment</p><pre><code>extensions:
+  core-shell:
+    config:
+      shell:
+        extra_env:
+          RUST_BACKTRACE: "1"</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Context compaction &amp; recovery</strong><span class="feature-teaser">Manage the context budget on longer tasks.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Tau supports model-aware compaction and recovery rather than
+            assuming an unlimited context window. Keep provider defaults or
+            configure named standalone compaction policies.</p><p>This example
+            reserves context headroom. Compaction support depends on the
+            model route, and summaries cannot promise perfect recall.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Context controls &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; token reserve</p><pre><code>agents:
+  compactions:
+    default:
+      reserve: 25000</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Exports, traces &amp; accounting</strong><span class="feature-teaser">Inspect the path to the answer.</span></span><span class="feature-kind">CLI</span></summary>
+        <div class="feature-body">
+          <div><p>Export a selected conversation branch, inspect semantic
+            timelines, retrieve saved artifacts, and examine session activity
+            and cost estimates. Agent work does not have to end as an opaque
+            chat transcript.</p><p>Exports and traces can contain sensitive
+            content. Review them before sharing; cost estimates are not a
+            provider billing statement.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-trace.md">Trace and export workflow &rarr;</a></div>
+          <div class="feature-example"><p>Shell &middot; substitute your IDs</p><pre><code>tau agent export chat AGENT_ID
+tau agent trace AGENT_ID
+tau session stats --session SESSION_ID</code></pre></div>
+        </div>
+      </details>
+    </div>
+
+    <div class="feature-group" id="extend-workflow">
+      <h3>03 / Connect and extend</h3>
+      <details class="feature-detail">
+        <summary><span><strong>Configurable web research</strong><span class="feature-teaser">Search and fetch without leaving the task.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Use provider-hosted search on compatible routes or the bundled
+            external search and fetch tools. Select backend pools, configure
+            credentials, and choose role-level web-tool behavior.</p><p>This
+            selects external backends; it does not override a winning hosted
+            route. Backend availability and limits apply. Domain controls are
+            not a network sandbox, and fetched content remains untrusted input.</p>
+            <a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-websearch/README.md">Web research configuration &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; external backend pools</p><pre><code>extensions:
+  std-websearch:
+    config:
+      search_providers: [exa, parallel]
+      fetch_providers: [exa, parallel]</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Notifications &amp; reminders</strong><span class="feature-teaser">Step away without losing track.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Wire agent completion or idle events to a terminal bell, OSC
+            signals, or a local command for desktop notification glue. Hooks
+            ship unconfigured so you choose the interruptions.</p><p>Agents
+            can also schedule one-shot, recurring, and daily reminders.
+            Timers belong to a live session, not an always-on calendar service.</p>
+            <a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-std-notifications/README.md">Notification hooks &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; ring on completion</p><pre><code>extensions:
+  std-notifications:
+    config:
+      agent_end:
+        - bell: true</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Replaceable process extensions</strong><span class="feature-teaser">Your tools, your language, your deployment.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Enable, replace, or wrap capabilities as ordinary supervised
+            executables. Extensions can register tools and actions, subscribe
+            to events, and receive declared secrets. Use your preferred
+            language and configure process wrappers where needed.</p><p>The
+            placeholder executable below must implement Tau's extension
+            protocol. Configured extensions are trusted local code;
+            <code>require: false</code> allows startup with a warning if this
+            optional integration cannot initialize.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/extensions.md">Build and configure extensions &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; custom executable placeholder</p><pre><code>extensions:
+  team-tools:
+    enable: true
+    require: false
+    command: ["/path/to/team-extension"]
+    tool_prefix: team</code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Local scripting &amp; optional integrations</strong><span class="feature-teaser">Go beyond the repository when you need to.</span></span><span class="feature-kind">Opt-in</span></summary>
+        <div class="feature-body">
+          <div><p>Enable bundled Rhai scripting for trusted event hooks and custom
+            tools. Separately installed projects connect Tau to Slack, Telegram,
+            Zulip, XMPP, email and calendars, Swarm coordination, and Rostra.</p>
+            <p>These are opt-in, not services activated by a default install.
+              Each integration needs its own setup, credentials, and authority
+              choices. The Rhai example enables execution of a trusted local script.</p>
+            <a href="#extensions">Browse the extension catalog &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; Rhai, disabled by default</p><pre><code>extensions:
+  std-rhai:
+    enable: true
+    config:
+      script: "/home/me/.config/tau/hooks/team.rhai"
+
+# Create that file with trusted Rhai code.
+# See the scripting docs for callbacks.</code></pre>
+            <p><a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-rhai/README.md">Rhai scripting examples &rarr;</a></p></div>
+        </div>
+      </details>
+    </div>
+    <div class="feature-next">
+      <h3>Start with one real task.</h3>
+      <p>You do not need to configure all of this to begin. Install Tau, connect a
+        provider, and try a bounded change in a repository you know.</p>
+      <a class="btn-primary" href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/docs/getting-started.md">Try your first Tau task &rarr;</a>
+      <a href="https://github.com/dpc/tau/blob/master/FEATURES.md">Read the full feature tour</a>
+    </div>
   </section>
 
   <hr class="divider">
@@ -1739,17 +2149,74 @@
 
   <hr class="divider">
 
+  <section id="architecture">
+    <h2>Built to be taken apart</h2>
+    <h3>Unix foundations. Practical freedom.</h3>
+    <p>Tau's process architecture makes its capabilities replaceable.
+      The terminal UI connects to the harness over a local socket; providers
+      and tool extensions communicate with it over stdio. Configure wrappers
+      for remote execution or sandboxing where your environment needs them.</p>
+    <div class="arch-diagram arch-wide">
+      <svg class="arch-svg" viewBox="0 0 480 175" xmlns="http://www.w3.org/2000/svg" aria-label="Architecture: cli connects via unix socket to harness, which spawns agent, tools, and extensions over stdio.">
+        <text x="0" y="14" xml:space="preserve" class="c">┌─────────┐    unix socket    ┌───────────┐</text>
+        <text y="35" xml:space="preserve"><tspan x="0" class="c">│</tspan><tspan x="8.4" class="h">   cli   </tspan><tspan x="84" class="c">│───────────────────│</tspan><tspan x="260.4" class="h">  harness  </tspan><tspan x="352.8" class="c">│</tspan></text>
+        <text x="0" y="56" xml:space="preserve" class="c">└─────────┘                   └─────┬─────┘</text>
+        <text x="0" y="77" xml:space="preserve" class="c">                     ┌─────────┬────┴────┬─────────┐</text>
+        <text x="0" y="98" xml:space="preserve" class="c">                   stdio     stdio     stdio     stdio</text>
+        <text x="0" y="119" xml:space="preserve" class="c">                 ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐</text>
+        <text y="140" xml:space="preserve"><tspan x="0" class="c">                 │</tspan><tspan x="151.2" class="h"> agent </tspan><tspan x="210" class="c">│ │</tspan><tspan x="235.2" class="h"> tools </tspan><tspan x="294" class="c">│ │</tspan><tspan x="319.2" class="h">  ext  </tspan><tspan x="378" class="c">│ │</tspan><tspan x="403.2" class="h">  ext  </tspan><tspan x="462" class="c">│</tspan></text>
+        <text x="0" y="161" xml:space="preserve" class="c">                 └───────┘ └───────┘ └───────┘ └───────┘</text>
+      </svg>
+    </div>
+    <div class="arch-diagram arch-narrow">
+      <svg class="arch-svg" viewBox="0 0 220 270" xmlns="http://www.w3.org/2000/svg" aria-label="Architecture: cli to harness via unix socket, harness spawns agent, tools, and extensions over stdio.">
+        <text x="0" y="14" xml:space="preserve" class="c">    ┌───────┐</text>
+        <text y="35" xml:space="preserve"><tspan x="0" class="c">    │</tspan><tspan x="42" class="h">  cli  </tspan><tspan x="100.8" class="c">│</tspan></text>
+        <text x="0" y="56" xml:space="preserve" class="c">    └───┬───┘</text>
+        <text x="0" y="77" xml:space="preserve" class="c">        │ unix socket</text>
+        <text x="0" y="98" xml:space="preserve" class="c">   ┌────┴────┐</text>
+        <text y="119" xml:space="preserve"><tspan x="0" class="c">   │</tspan><tspan x="33.6" class="h"> harness </tspan><tspan x="109.2" class="c">│</tspan></text>
+        <text x="0" y="140" xml:space="preserve" class="c">   └────┬────┘</text>
+        <text x="0" y="161" xml:space="preserve" class="c">        │</text>
+        <text y="182" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">agent</tspan><tspan x="142.8" class="c"> (stdio)</tspan></text>
+        <text y="203" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">tools</tspan><tspan x="142.8" class="c"> (stdio)</tspan></text>
+        <text y="224" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">ext</tspan><tspan x="126" class="c">   (stdio)</tspan></text>
+        <text y="245" xml:space="preserve"><tspan x="0" class="c">        └── </tspan><tspan x="100.8" class="h">ext</tspan><tspan x="126" class="c">   (stdio)</tspan></text>
+      </svg>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <section id="philosophy">
+    <h2>Your tools, working together</h2>
+    <h3>Open source. Inspectable. Yours to configure.</h3>
+    <ul class="philosophy-list">
+      <li><span class="keyword">Native core.</span> The CLI, harness, and bundled
+        extensions ship in one native binary. Custom extensions can use their
+        own languages and runtimes.</li>
+      <li><span class="keyword">Composability.</span> Start, stop, restart,
+        redirect, and compose components with standard Unix tools.</li>
+      <li><span class="keyword">Explicit boundaries.</span> Local coding tools
+        and configured extensions are powerful, trusted code. Choose external
+        sandboxing when needed; a prompt is not an enforced write barrier.</li>
+      <li><span class="keyword">No sealed box.</span> Inspect the source,
+        version your setup, and replace components instead of waiting for a
+        single prescribed workflow.</li>
+    </ul>
+  </section>
+
+  <hr class="divider">
+
   <section id="status">
     <h2>Status</h2>
     <h3>Heavy development, daily use</h3>
-    <p>Tau is still under heavy development, but it has been a productive daily
-      driver for its developers for weeks. It already has features and design
-      choices that are stronger than those in popular coding agents, while the
-      Unix-centric UX keeps improving quickly.</p>
-    <p>There are many big plans ahead: more process-oriented integrations,
-      stronger multi-agent workflows, and Unix-native features no other coding
-      harness has today.</p>
-    <p>Watch the latest overview:
+    <p>Tau is under active development and used daily by its developers.
+      The capabilities above are here to use, but expect rough edges and
+      configuration changes as the project evolves.</p>
+    <p>Try it on a bounded task, inspect the result, and tell us what would make
+      your workflow better.</p>
+    <p>Watch an overview:
       <a href="https://www.youtube.com/watch?v=v2Ez2umV9xA">The State of Tau #1</a>.</p>
     <div class="video-embed">
       <iframe src="https://www.youtube.com/embed/v2Ez2umV9xA"
