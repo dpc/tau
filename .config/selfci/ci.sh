@@ -56,11 +56,11 @@ function job_cargo() {
     selfci step fail
   fi
 
-  # Submit independent checks together so Nix can schedule them concurrently
-  # after their shared workspace build completes.
+  # Submit the independent workspace gates together.
   selfci step start "Nix cargo checks"
   if ! nix build -L --no-link \
     .#ci.workspace \
+    .#ci.workspaceDocs \
     .#ci.clippy \
     .#ci.tests
   then

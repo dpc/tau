@@ -69,7 +69,10 @@
             # Tau's cargo-crap derivations use a locally pinned package and
             # project-specific CI gates rather than Flakebox's integration.
             cargo-crap.enable = false;
-            github.ci.buildOutputs = [ ".#ci.workspace" ];
+            github.ci.buildOutputs = [
+              ".#ci.workspace"
+              ".#ci.workspaceDocs"
+            ];
             just.importPaths = [ "justfile.custom.just" ];
             just.rules.watch.enable = false;
             rootDir.".envrc".text = pkgs.lib.mkForce ''
@@ -257,12 +260,38 @@
               env.RUSTDOCFLAGS = "-D warnings";
               env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             };
+            workspaceBuildCommand = "cargo build --profile $CARGO_PROFILE --locked --workspace --all-targets";
+            workspaceDocsCommand = "cargo doc --profile $CARGO_PROFILE --workspace --locked --no-deps";
           in
           rec {
-            workspaceDeps = craneLib.buildWorkspaceDepsOnly { };
+            # Docs compute ordinary dependencies in check mode, so retain both
+            # normal-build and check-mode dependency artifacts.
+            workspaceDeps = craneLib.buildDepsOnly {
+              pname = "${projectName}-workspace";
+              buildPhaseCargoCommand = ''
+                ${workspaceBuildCommand}
+                cargo check --profile $CARGO_PROFILE --workspace --locked
+              '';
+              cargoBuildCommand = "dontuse";
+              cargoCheckCommand = "dontuse";
+              doCheck = false;
+            };
 
-            workspace = craneLib.buildWorkspace {
+            # This artifact-producing build is the only workspace gate that
+            # tests consume. Docs and Clippy remain required terminal gates.
+            workspace = craneLib.mkCargoDerivation {
+              pname = "${projectName}-workspace";
               cargoArtifacts = workspaceDeps;
+              buildPhaseCargoCommand = workspaceBuildCommand;
+              doCheck = false;
+            };
+
+            workspaceDocs = craneLib.mkCargoDerivation {
+              pname = "${projectName}-workspace-docs";
+              cargoArtifacts = workspaceDeps;
+              buildPhaseCargoCommand = workspaceDocsCommand;
+              doCheck = false;
+              doInstallCargoArtifacts = false;
             };
 
             tests = craneLib.cargoNextest {
@@ -535,6 +564,7 @@
         ci = {
           inherit (multiBuild.ci)
             workspace
+            workspaceDocs
             clippy
             tests
             workspaceCcov

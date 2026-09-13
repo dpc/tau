@@ -1,5 +1,13 @@
 # Testing guidelines
 
+## Workspace CI graph
+
+SelfCI submits `ci.workspace`, `ci.workspaceDocs`, `ci.clippy`, and
+`ci.tests` in one Nix invocation. The shared dependency artifact runs build and
+check, so docs can reuse check-mode external dependencies. The actual-source
+build produces the artifact consumed by tests, while rustdoc with warning denial
+and Clippy remain independent required gates.
+
 ## Durable Rostra notification worker
 
 The separately maintained `tau-ext-rostra` project owns `std-rostra`
