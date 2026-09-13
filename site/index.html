@@ -2013,14 +2013,27 @@ tau serve --session SESSION --create-or-existing</code></pre></div>
             activity and performance. Toggle between them with <code>Ctrl+V</code>.
             Verbose mode exposes extra detail—including reasoning summaries,
             tool activity, and turn statistics—to help you understand how
-            your agents work.</p><p>Prompt history, completion, local
-            <code>!</code> shell commands, and external-editor prompts keep
-            everyday interactions convenient. Customize key bindings, themes,
-            mouse behavior, and display detail independently of your agent
-            configuration.</p>
+            your agents work.</p>
+            <p>Keybindings can run shell commands and insert their output into
+              your prompt. Use <code>fzf</code>-based file and history selection,
+              or the agent picker on <code>Ctrl+B</code>. Press <code>Ctrl+O</code>
+              to edit the prompt in your text editor: <code>$TAU_EDITOR</code>
+              takes precedence over <code>$EDITOR</code>, with further fallbacks
+              when neither is set.</p>
+            <p>Prompt completion and local <code>!</code> shell commands round
+              out the terminal workflow. Customize keybindings, themes, mouse
+              behavior, and display detail independently of agent configuration.
+              Install <code>fzf</code> to use the optional pickers.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/cli-keybindings.md">Terminal controls &rarr;</a></div>
           <div class="feature-example"><p>~/.config/tau/cli.yaml</p><pre><code class="language-yaml"><span class="yaml-key">theme</span>: <span class="yaml-string">tau-plain-dark</span>
 <span class="yaml-key">mouse</span>: <span class="yaml-boolean">true</span>
+
+<span class="yaml-comment"># Alt+s inserts git status into the prompt.</span>
+<span class="yaml-key">bind</span>:
+  <span class="yaml-key">M-s</span>:
+    <span class="yaml-key">action</span>: <span class="yaml-string">shell-prompt-insert</span>
+    <span class="yaml-key">command</span>: <span class="yaml-string">git status --short</span>
+    <span class="yaml-key">trim</span>: <span class="yaml-boolean">true</span>
 
 <span class="yaml-comment"># In Tau, discover live controls:</span>
 <span class="yaml-comment"># :set</span>
@@ -2078,7 +2091,32 @@ tau serve --session SESSION --create-or-existing</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
-        <summary><span><strong>Debugging &amp; observability</strong><span class="feature-teaser">Inspect agent behavior, configuration, and performance.</span></span><span class="feature-kind">CLI</span></summary>
+        <summary><span><strong>Context-size notices</strong><span class="feature-teaser">Give agents guidance when their context crosses a threshold.</span></span><span class="feature-kind">Config</span></summary>
+        <div class="feature-body">
+          <div><p>Named alerts send configurable notices to an agent when
+            provider-reported input-token usage exceeds a chosen threshold.
+            Use plain text or a prompt template to guide its next steps.
+            Set alerts globally or per role, with lifecycle and status
+            conditions controlling delivery.</p>
+            <p>Unlike automatic compaction, a notice lets the agent decide
+              how to respond. Within a running daemon, each alert fires once
+              while usage stays above its threshold and rearms when usage
+              falls back or context accounting resets. The example delivers
+              after a successful response and any tool calls it starts.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Configure context alerts &rarr;</a></div>
+          <div class="feature-example"><p>harness.yaml &middot; context-size guidance</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+  <span class="yaml-key">context_size_alerts</span>:
+    <span class="yaml-key">compact-soon</span>:
+      <span class="yaml-key">threshold</span>: <span class="yaml-number">160000</span>
+      <span class="yaml-key">when</span>:
+        <span class="yaml-key">at</span>: <span class="yaml-string">after_response</span>
+      <span class="yaml-key">message</span>: &gt;-
+<span class="yaml-string">        Context is large. Finish the current
+        task, then use the compact tool.</span></code></pre></div>
+        </div>
+      </details>
+      <details class="feature-detail">
+        <summary><span><strong>Debugging &amp; observability</strong><span class="feature-teaser">Inspect agent behavior, configuration, performance, and cost.</span></span><span class="feature-kind">CLI</span></summary>
         <div class="feature-body">
           <div><p>Inspect resolved prompts and tool definitions, durable event
             journals, agent-message timelines, and saved tool artifacts. Trace a
@@ -2089,6 +2127,13 @@ tau serve --session SESSION --create-or-existing</code></pre></div>
               human-readable output or machine-readable exports for your own
               analysis. Debug captures are best-effort and private; inspect them
               before sharing.</p>
+            <p>Track estimated API spend per agent and across a delegated
+              workflow. Live cost displays include both an agent's own spend
+              and a recursive total for it and the agents it created. These
+              totals follow delegation, not every peer an agent messages.
+              Usage and pricing coverage determine the estimates; they are
+              not a provider invoice. Include descendants in traces to
+              analyze the wider workflow.</p>
             <p>The bundled <code>papercut</code> tool lets agents
               record incidental harness, tooling, and environment problems
               without derailing their task. Review accumulated reports
