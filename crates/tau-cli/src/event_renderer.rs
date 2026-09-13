@@ -3611,7 +3611,7 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    /// Toggles the reversible process-local transcript presentation projection.
+    /// Toggles the process-local transcript between compact and verbose modes.
     pub(crate) fn toggle_verbose_mode(&mut self) {
         self.presentation.verbose_mode = !self.presentation.verbose_mode;
         self.rerender_visible_for_current_settings();

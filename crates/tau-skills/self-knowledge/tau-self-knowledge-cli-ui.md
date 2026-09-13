@@ -125,16 +125,17 @@ including model-facing internal prompts even when `show-internal-prompts` is on.
 
 Submitted prompts are kept in the current process and persisted under the state directory as `prompt-history.cbor`. Up/Down navigate prompt history. Built-in key bindings also support prompt undo/redo, Ctrl-R history search, Ctrl-O/Ctrl-G external editor integration, and shell-backed prompt insertion commands. `:edit-prompt [response_rel_idx]` opens the editor with a selected prior response, where zero is newest. `:edit-prompt-chat` and the shifted `C-O` binding place the complete durable Markdown conversation below the existing trailer marker; terminals that report bare `^O` keep ordinary `C-o`.
 
-## Verbose and compact transcript modes
+## Compact and verbose transcript modes
 
-The CLI starts in verbose mode. This is the full diagnostic transcript: existing
-`:set` choices continue to control thinking, tools, turn stats, and other
-presentation details. Press Ctrl-V, invoke the configurable
+The CLI starts in verbose mode. This is the information-dense view of agent
+actions and performance: existing `:set` choices continue to control thinking,
+tools, turn stats, and other presentation details. Press Ctrl-V, invoke the configurable
 `verbose-mode-toggle` action, or type `:verbose-mode-toggle` to switch to the
 compact conversation view.
 
-Compact mode is a stricter top-level filter. It hides all thinking and turn
-statistics. Completed historical tools and results disappear; each currently
+Compact mode is the conversation-focused view for daily use. It is a stricter
+top-level filter that hides all thinking and turn statistics. Completed
+historical tools and results disappear; each currently
 running tool retains the same informative status line as verbose mode without
 its payload body, and that line disappears on success, error, or cancellation.
 User and agent messages,

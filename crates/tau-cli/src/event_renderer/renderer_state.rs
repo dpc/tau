@@ -319,7 +319,7 @@ pub(super) struct PresentationSettingsState {
     pub(super) diffs_expanded: bool,
     /// Whether thinking is shown.
     pub(super) show_thinking: bool,
-    /// Whether verbose presentation is active.
+    /// Whether verbose rather than compact transcript presentation is active.
     pub(super) verbose_mode: bool,
     /// Whether turn stats are shown.
     pub(super) show_turn_stats: bool,

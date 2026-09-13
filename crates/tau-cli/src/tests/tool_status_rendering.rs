@@ -5012,7 +5012,7 @@ fn show_tools_compact_hides_payload_body() {
 }
 
 /// A bounded one-line tool header keeps its identity, status, and timing while
-/// full mode reveals the exact Unicode payload and compact mode hides it.
+/// Verbose mode reveals the exact Unicode payload and compact mode hides it.
 #[test]
 fn show_tools_full_reveals_truncated_one_line_payload() {
     let (_term, handle, vt) = setup(100, 24);

@@ -31,7 +31,7 @@ sample `config/cli.yaml`.
 | `C-j` | `agent-next` | Cycle to the next active agent or overview. |
 | `C-r` | `prompt-history-search` | Search past prompts with `fzf`, preview the highlighted prompt, and replace the current prompt with the selected prompt. |
 | `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
-| `C-v` | `verbose-mode-toggle` | Toggle between the full diagnostic transcript and the compact conversation view. |
+| `C-v` | `verbose-mode-toggle` | Toggle between the compact conversation view and the verbose activity and performance transcript. |
 | `Tab` | `cycle-role` | Cycle roles within the current role group. |
 | `BackTab` / `Shift-Tab` | `cycle-role-group` | Cycle to the first role in the next role group. |
 | `C-p`, `C-Up` | `prompt-previous` | Move to the previous prompt/history entry. |

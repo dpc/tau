@@ -108,7 +108,7 @@ tau
 
 Tau prints the new session ID and selected model during startup. Press
 <kbd>Ctrl-V</kbd> if you want to switch between the compact conversation and
-full tool transcript.
+verbose activity transcript.
 
 Ask Tau to inspect before changing anything:
 

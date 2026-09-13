@@ -27,8 +27,8 @@ ordinary UI quits until it is explicitly stopped. An attached UI does not take
 ownership of the daemon. See [Session startup](session-startup.md) for locking,
 pickers, multiple UIs, and supervised `tau serve` operation.
 
-Tau starts in the full diagnostic transcript. Press <kbd>Ctrl-V</kbd> or use
-`:verbose-mode-toggle` to switch between full and compact views. The toggle
+Tau starts in the verbose diagnostic transcript. Press <kbd>Ctrl-V</kbd> or use
+`:verbose-mode-toggle` to switch between verbose and compact views. The toggle
 changes only that UI's presentation.
 
 ## Upgrade and recovery checklist

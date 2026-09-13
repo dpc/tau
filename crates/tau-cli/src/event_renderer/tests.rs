@@ -2153,7 +2153,7 @@ fn queued_prompt_projection_drops_huge_unabridged_content() {
 }
 
 /// Queued prompt text and the synthetic queue-state annotation must retain
-/// independent semantic styles in both full and compact projections.
+/// independent semantic styles in both verbose and compact projections.
 #[test]
 fn queued_prompt_projection_styles_synthetic_annotations_separately() {
     use tau_cli_term::Color;

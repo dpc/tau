@@ -2490,7 +2490,7 @@ enum RendererCmd {
         /// Requester-directed metadata result from the separate roster client.
         result: Result<Vec<tau_proto::SessionAgentListEntry>, String>,
     },
-    /// Toggle the process-local top-level transcript presentation mode.
+    /// Toggle between compact and verbose transcript presentation.
     ToggleVerboseMode,
     /// `:set <name> <value>` — validated by the input loop before send.
     Set {
