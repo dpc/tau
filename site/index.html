@@ -717,6 +717,29 @@
       tab-size: 2;
     }
 
+    /* Static YAML tokens preserve selectable text and work without JavaScript. */
+    .feature-example .language-yaml {
+      color: var(--base1);
+    }
+
+    .language-yaml .yaml-key {
+      color: var(--cyan);
+    }
+
+    .language-yaml .yaml-string {
+      color: var(--base2);
+    }
+
+    .language-yaml .yaml-number,
+    .language-yaml .yaml-boolean {
+      color: var(--yellow);
+    }
+
+    .language-yaml .yaml-comment {
+      color: var(--base0);
+      font-style: italic;
+    }
+
     .feature-next {
       margin-top: 2.5rem;
       padding: 1.5rem;
@@ -778,10 +801,6 @@
       display: flex;
       align-items: center;
       gap: 0.5rem;
-    }
-
-    .feature-title .icon {
-      color: #ffffff;
     }
 
     .feature p {
@@ -1484,11 +1503,6 @@
       content: none;
     }
 
-    .hero p.terminal-caption {
-      margin: 0.75rem auto 0;
-      font-size: 0.8rem;
-    }
-
     /* Footer */
     footer {
       max-width: 1120px;
@@ -1660,28 +1674,34 @@
         <span class="terminal-title"><img class="terminal-title-logo" src="logo-transparent.svg" alt="" aria-hidden="true">Tau Coding Agent</span>
       </div>
       <div class="terminal-body">
-        <div class="terminal-row"><span class="term-blue">~/projects/parser</span> <span class="term-white">$</span> tau --profile focused</div>
-        <div class="terminal-row"><span class="term-white">▝▜▛▀</span> <span class="term-white term-bold">tau</span></div>
-        <div class="terminal-row"><span class="term-dim">▤ config profile stack: focused</span></div>
+        <div class="terminal-row"><span class="term-bright-cyan">dpc</span>@tlb:<span class="term-blue">~</span><span class="term-white">$</span> tau</div>
+        <div class="terminal-row"><span class="term-white">▝▜▛▀</span> <span class="term-white term-bold">tau</span> <span class="term-dim">0.1.0 (65c9690, 2026-09-07 10:18)</span></div>
+        <div class="terminal-row"> <span class="term-white">▐▙▖</span> <span class="term-dark-yellow">Tau-powered, Unix-native.</span></div>
+        <div class="terminal-row"><span class="term-dim">▤ ui dir: </span><span class="term-blue">~/.local/state/tau/uis/ui-1788808647504-46xqfi/</span></div>
+        <div class="terminal-row"><span class="term-dim">▤ started session: </span><span class="term-white">tau-4uerbz</span><span class="term-dim">, dir: </span><span class="term-blue">~/.local/state/tau/sessions/tau-4uerbz/</span></div>
+        <div class="terminal-row"><span class="term-dim">▤ config profile stack: codex-default,credentialed-web-all</span></div>
         <div class="terminal-row"><span class="term-dim">□ extension core-shell </span><span class="term-white">ready</span></div>
         <div class="terminal-row"><span class="term-dim">□ extension provider-builtin </span><span class="term-white">ready</span></div>
+        <div class="terminal-row"><span class="term-dim">□ extension std-utils </span><span class="term-white">ready</span></div>
         <div class="terminal-row"><span class="term-dim">□ extension std-websearch </span><span class="term-white">ready</span></div>
-        <div class="terminal-row"><span class="term-dim">AGENTS.md: </span><span class="term-blue">~/projects/parser/AGENTS.md</span></div>
-        <div class="terminal-row"><span class="term-dim">skills: </span><span class="term-blue">review-checklist</span></div>
-        <div class="terminal-row"></div>
-        <div class="terminal-row"><span class="term-user">⬤ Handle escaped delimiters. Add tests and delegate a review.</span></div>
-        <div class="terminal-row"><span class="term-cyan">◆ I'll update the parser and ask a reviewer to check edge cases.</span></div>
-        <div class="terminal-row"><span class="term-dim">  reviewer: checking delimiter handling</span></div>
-        <div class="terminal-row"><span class="term-dim">  engineer: adding regression tests</span></div>
-        <div class="terminal-row"></div>
-        <div class="terminal-row"><span class="term-cyan">◆ Tests pass. Review complete. Here's the diff and what changed.</span></div>
+        <div class="terminal-row"><span class="term-dim">□ Welcome to Tau! Ask your model to introduce you to Tau.</span></div>
+        <div class="terminal-row"><span class="term-dim">▤ initialized engineer-junior-qPYY</span></div>
+        <div class="terminal-row"><span class="term-dim">skills:</span></div>
+        <div class="terminal-row"><span class="term-dim">  </span><span class="term-blue">dpc</span><span class="term-blue"> 1L, 76B</span></div>
+        <div class="terminal-row"><span class="term-dim">AGENTS.md:</span></div>
+        <div class="terminal-row"><span class="term-dim">  </span><span class="term-blue">/home/dpc/lab/tau/tau/AGENTS.md</span><span class="term-blue"> 83L, 5.0kB</span></div>
+        <div class="terminal-row"><span class="term-user">⬤ hi</span></div>
+        <div class="terminal-row"><span class="term-cyan">◆ Hi!</span></div>
         <div class="terminal-row terminal-split">
-          <span class="terminal-left"><span class="term-cyan term-bold">◯ </span><span class="term-cursor">|</span><span class="term-placeholder">Write a message to </span><span class="term-magenta">engineer</span><span class="term-placeholder">...</span></span>
-          <span class="terminal-right term-dim">~/projects/parser</span>
+          <span class="terminal-left"><span class="term-cyan term-bold">◯ </span><span class="term-cursor">|</span><span class="term-placeholder">Write a message to </span><span class="term-magenta">engineer-junior-qPYY</span><span class="term-placeholder">...</span></span>
+          <span class="terminal-right term-dim">~/lab/tau/tau &amp;tau-4uerbz</span>
+        </div>
+        <div class="terminal-row terminal-split">
+          <span class="terminal-left term-magenta">✅💤 @engineer-junior-qPYY Responded to greeting</span>
+          <span class="terminal-right term-dark-yellow">#11k/353k *1 $.03/$.03</span>
         </div>
       </div>
     </div>
-    <p class="terminal-caption">Illustrative session with a configured profile and project skill.</p>
   </div>
 
   <hr class="divider">
@@ -1709,22 +1729,22 @@
     <h3>Make the harness fit the way you work</h3>
     <div class="features">
       <div class="feature">
-        <div class="feature-title"><span class="icon">&amp;</span> Build a team, not a mega-prompt</div>
+        <div class="feature-title">Build a team, not a mega-prompt</div>
         <p>Delegate implementation, research, and review to separate agents.
           Give each role its own model settings, instructions, and tools.</p>
       </div>
       <div class="feature">
-        <div class="feature-title"><span class="icon">@</span> Choose where intelligence comes from</div>
+        <div class="feature-title">Choose where intelligence comes from</div>
         <p>Use a supported account, API endpoint, or local model server.
           Tune reasoning effort and response detail to the task, not one global preset.</p>
       </div>
       <div class="feature">
-        <div class="feature-title"><span class="icon">~</span> Keep the work, not just the answer</div>
+        <div class="feature-title">Keep the work, not just the answer</div>
         <p>Resume sessions, explore transcript branches, and inspect what agents
           actually did through diffs, exports, traces, and usage estimates.</p>
       </div>
       <div class="feature">
-        <div class="feature-title"><span class="icon">+</span> Make your setup compound</div>
+        <div class="feature-title">Make your setup compound</div>
         <p>Turn a useful instruction into a skill, a workflow into a profile,
           and an integration into an extension. Reuse them across projects.</p>
       </div>
@@ -1756,14 +1776,14 @@
             <p>Switch with <code>:role reviewer</code>, or let an agent delegate to
               a named role. Model-specific controls depend on the selected provider.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Role configuration &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; role settings</p><pre><code>agents:
-  role_groups:
-    review:
-      roles:
-        reviewer:
-          description: Careful code review
-          effort: 0.8
-          verbosity: high</code></pre></div>
+          <div class="feature-example"><p>harness.yaml &middot; role settings</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+  <span class="yaml-key">role_groups</span>:
+    <span class="yaml-key">review</span>:
+      <span class="yaml-key">roles</span>:
+        <span class="yaml-key">reviewer</span>:
+          <span class="yaml-key">description</span>: <span class="yaml-string">Careful code review</span>
+          <span class="yaml-key">effort</span>: <span class="yaml-number">0.8</span>
+          <span class="yaml-key">verbosity</span>: <span class="yaml-string">high</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1775,16 +1795,16 @@
             <code>harness.d/*.yaml</code> keep a growing setup organized. Selected
             profiles apply in order; later patches take precedence.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md#configuration-profiles">Profiles &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml + shell</p><pre><code>profiles:
-  focused:
-    agents:
-      effort: "increase:0.25"
-  concise:
-    agents:
-      verbosity: low
+          <div class="feature-example"><p>harness.yaml + shell</p><pre><code class="language-yaml"><span class="yaml-key">profiles</span>:
+  <span class="yaml-key">focused</span>:
+    <span class="yaml-key">agents</span>:
+      <span class="yaml-key">effort</span>: <span class="yaml-string">"increase:0.25"</span>
+  <span class="yaml-key">concise</span>:
+    <span class="yaml-key">agents</span>:
+      <span class="yaml-key">verbosity</span>: <span class="yaml-string">low</span>
 
-# Launch with both patches:
-# tau --profile focused,concise</code></pre></div>
+<span class="yaml-comment"># Launch with both patches:</span>
+<span class="yaml-comment"># tau --profile focused,concise</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1831,13 +1851,13 @@ tau provider list
             directory-aware instructions.</p><p>These guide the model; they are
             not permissions, a sandbox, or a place to store secrets.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Prompt controls &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; shared guidance</p><pre><code>agents:
-  prompt_fragments:
-    - name: team.workflow
-      text: |
-        Read project instructions first.
+          <div class="feature-example"><p>harness.yaml &middot; shared guidance</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+  <span class="yaml-key">prompt_fragments</span>:
+    - <span class="yaml-key">name</span>: <span class="yaml-string">team.workflow</span>
+      <span class="yaml-key">text</span>: |
+<span class="yaml-string">        Read project instructions first.
         Add a focused regression test.
-        Report what you verified.</code></pre></div>
+        Report what you verified.</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1849,13 +1869,13 @@ tau provider list
             <code>self_info</code> to a transcript-focused role. Tool visibility is
             not an OS sandbox; an exposed shell can still execute commands.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Tool policy &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; explicit tool list</p><pre><code>agents:
-  role_groups:
-    review:
-      roles:
-        transcript-reviewer:
-          description: Review supplied text
-          tools: [self_info]</code></pre></div>
+          <div class="feature-example"><p>harness.yaml &middot; explicit tool list</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+  <span class="yaml-key">role_groups</span>:
+    <span class="yaml-key">review</span>:
+      <span class="yaml-key">roles</span>:
+        <span class="yaml-key">transcript-reviewer</span>:
+          <span class="yaml-key">description</span>: <span class="yaml-string">Review supplied text</span>
+          <span class="yaml-key">tools</span>: [<span class="yaml-string">self_info</span>]</code></pre></div>
         </div>
       </details>
     </div>
@@ -1910,13 +1930,13 @@ tau serve --session SESSION --existing
             bindings, themes, mouse behavior, and display detail independently
             of your agent configuration.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/cli-keybindings.md">Terminal controls &rarr;</a></div>
-          <div class="feature-example"><p>~/.config/tau/cli.yaml</p><pre><code>theme: tau-plain-dark
-mouse: true
+          <div class="feature-example"><p>~/.config/tau/cli.yaml</p><pre><code class="language-yaml"><span class="yaml-key">theme</span>: <span class="yaml-string">tau-plain-dark</span>
+<span class="yaml-key">mouse</span>: <span class="yaml-boolean">true</span>
 
-# In Tau, discover live controls:
-# :set
-# :theme
-# :model</code></pre></div>
+<span class="yaml-comment"># In Tau, discover live controls:</span>
+<span class="yaml-comment"># :set</span>
+<span class="yaml-comment"># :theme</span>
+<span class="yaml-comment"># :model</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1929,12 +1949,12 @@ mouse: true
             calls. Allowlists and cooperative locks are guardrails, not a
             general security boundary.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/getting-started.md">Your first coding task &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; shell environment</p><pre><code>extensions:
-  core-shell:
-    config:
-      shell:
-        extra_env:
-          RUST_BACKTRACE: "1"</code></pre></div>
+          <div class="feature-example"><p>harness.yaml &middot; shell environment</p><pre><code class="language-yaml"><span class="yaml-key">extensions</span>:
+  <span class="yaml-key">core-shell</span>:
+    <span class="yaml-key">config</span>:
+      <span class="yaml-key">shell</span>:
+        <span class="yaml-key">extra_env</span>:
+          <span class="yaml-key">RUST_BACKTRACE</span>: <span class="yaml-string">"1"</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1946,10 +1966,10 @@ mouse: true
             reserves context headroom. Compaction support depends on the
             model route, and summaries cannot promise perfect recall.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Context controls &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; token reserve</p><pre><code>agents:
-  compactions:
-    default:
-      reserve: 25000</code></pre></div>
+          <div class="feature-example"><p>harness.yaml &middot; token reserve</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+  <span class="yaml-key">compactions</span>:
+    <span class="yaml-key">default</span>:
+      <span class="yaml-key">reserve</span>: <span class="yaml-number">25000</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1981,11 +2001,11 @@ tau session stats --session SESSION_ID</code></pre></div>
             route. Backend availability and limits apply. Domain controls are
             not a network sandbox, and fetched content remains untrusted input.</p>
             <a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-websearch/README.md">Web research configuration &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; external backend pools</p><pre><code>extensions:
-  std-websearch:
-    config:
-      search_providers: [exa, parallel]
-      fetch_providers: [exa, parallel]</code></pre></div>
+          <div class="feature-example"><p>harness.yaml &middot; external backend pools</p><pre><code class="language-yaml"><span class="yaml-key">extensions</span>:
+  <span class="yaml-key">std-websearch</span>:
+    <span class="yaml-key">config</span>:
+      <span class="yaml-key">search_providers</span>: [<span class="yaml-string">exa</span>, <span class="yaml-string">parallel</span>]
+      <span class="yaml-key">fetch_providers</span>: [<span class="yaml-string">exa</span>, <span class="yaml-string">parallel</span>]</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1997,11 +2017,11 @@ tau session stats --session SESSION_ID</code></pre></div>
             can also schedule one-shot, recurring, and daily reminders.
             Timers belong to a live session, not an always-on calendar service.</p>
             <a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-std-notifications/README.md">Notification hooks &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; ring on completion</p><pre><code>extensions:
-  std-notifications:
-    config:
-      agent_end:
-        - bell: true</code></pre></div>
+          <div class="feature-example"><p>harness.yaml &middot; ring on completion</p><pre><code class="language-yaml"><span class="yaml-key">extensions</span>:
+  <span class="yaml-key">std-notifications</span>:
+    <span class="yaml-key">config</span>:
+      <span class="yaml-key">agent_end</span>:
+        - <span class="yaml-key">bell</span>: <span class="yaml-boolean">true</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -2016,12 +2036,12 @@ tau session stats --session SESSION_ID</code></pre></div>
             <code>require: false</code> allows startup with a warning if this
             optional integration cannot initialize.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/extensions.md">Build and configure extensions &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; custom executable placeholder</p><pre><code>extensions:
-  team-tools:
-    enable: true
-    require: false
-    command: ["/path/to/team-extension"]
-    tool_prefix: team</code></pre></div>
+          <div class="feature-example"><p>harness.yaml &middot; custom executable placeholder</p><pre><code class="language-yaml"><span class="yaml-key">extensions</span>:
+  <span class="yaml-key">team-tools</span>:
+    <span class="yaml-key">enable</span>: <span class="yaml-boolean">true</span>
+    <span class="yaml-key">require</span>: <span class="yaml-boolean">false</span>
+    <span class="yaml-key">command</span>: [<span class="yaml-string">"/path/to/team-extension"</span>]
+    <span class="yaml-key">tool_prefix</span>: <span class="yaml-string">team</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -2034,14 +2054,14 @@ tau session stats --session SESSION_ID</code></pre></div>
               Each integration needs its own setup, credentials, and authority
               choices. The Rhai example enables execution of a trusted local script.</p>
             <a href="#extensions">Browse the extension catalog &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; Rhai, disabled by default</p><pre><code>extensions:
-  std-rhai:
-    enable: true
-    config:
-      script: "/home/me/.config/tau/hooks/team.rhai"
+          <div class="feature-example"><p>harness.yaml &middot; Rhai, disabled by default</p><pre><code class="language-yaml"><span class="yaml-key">extensions</span>:
+  <span class="yaml-key">std-rhai</span>:
+    <span class="yaml-key">enable</span>: <span class="yaml-boolean">true</span>
+    <span class="yaml-key">config</span>:
+      <span class="yaml-key">script</span>: <span class="yaml-string">"/home/me/.config/tau/hooks/team.rhai"</span>
 
-# Create that file with trusted Rhai code.
-# See the scripting docs for callbacks.</code></pre>
+<span class="yaml-comment"># Create that file with trusted Rhai code.</span>
+<span class="yaml-comment"># See the scripting docs for callbacks.</span></code></pre>
             <p><a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-rhai/README.md">Rhai scripting examples &rarr;</a></p></div>
         </div>
       </details>
