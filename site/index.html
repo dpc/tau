@@ -2066,7 +2066,7 @@ tau serve --session SESSION --create-or-existing</code></pre></div>
               human-readable output or machine-readable exports for your own
               analysis. Debug captures are best-effort and private; inspect them
               before sharing.</p>
-            <p>Enable the bundled <code>papercut</code> tool to let agents
+            <p>The bundled <code>papercut</code> tool lets agents
               record incidental harness, tooling, and environment problems
               without derailing their task. Review accumulated reports
               periodically to find recurring friction and improve the setup;
@@ -2086,7 +2086,7 @@ tau agent trace AGENT_ID --include-descendants \
 # Inspect session activity and usage:
 tau session stats --session SESSION_ID
 
-# Review reports after enabling papercuts:
+# Review accumulated papercut reports:
 tau dev papercut list --markdown</code></pre></div>
         </div>
       </details>
@@ -2183,7 +2183,7 @@ tau dev papercut list --markdown</code></pre></div>
           waits and periodic checks: one-shot delays, recurring intervals,
           or daily local-time and UTC reminders. The session must be running
           to act on them; tool completion uses <code>wait</code> instead.</p>
-        <p>Opt-in <code>papercut</code> reporting collects incidental environment
+        <p>The <code>papercut</code> tool collects incidental environment
           problems for periodic review and improvement. Reports stay in local
           extension state; do not include secrets.</p>
       </div>
