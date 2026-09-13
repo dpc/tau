@@ -821,10 +821,11 @@ authority matrix, interception replacement/drop behavior, activation accounting,
 disconnect/respawn identity checks, or persistence classification. See
 [`SPEC-tool-declarations-and-canonical-state`](specs/SPEC-tool-declarations-and-canonical-state.md).
 
-When enabled, `std-utils` papercut reports persist unredacted model-supplied
+`std-utils` enables papercut reporting by default; an instance can opt out with
+`papercut.enable: false`. When enabled, reports persist unredacted model-supplied
 operational text plus harness-routed agent/session identity and an operation
-timestamp as plaintext per-instance `ExtensionDataScope::User` data. It is
-shared across sessions that use one Tau state root and configured instance.
+timestamp as plaintext per-instance `ExtensionDataScope::User` data. It is shared
+across sessions that use one Tau state root and configured instance.
 Tau-state operators can read these records, there is no automatic redaction,
 and agents must not put secrets in reports. The harness serializes User-scope
 appends across harness processes sharing that state root and instance. This is

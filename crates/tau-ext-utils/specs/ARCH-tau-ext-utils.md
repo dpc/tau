@@ -1,10 +1,10 @@
 # ARCH-tau-ext-utils: tau-ext-utils architecture
 
 `tau-ext-utils` is a first-party utility extension. It owns the model-visible
-`timer` tool in the `timer` group and an opt-in `papercut` diagnostic reporter.
-The reporter is declared only when its configured instance enables
-`papercut.enable`; ordinary global and role tool policy still controls its
-effective visibility.
+`timer` tool in the `timer` group and a default-enabled `papercut` diagnostic
+reporter. The reporter is declared unless its configured instance sets
+`papercut.enable: false`; ordinary global and role tool policy still controls
+its effective visibility.
 
 The dedicated inspection bootstrap runs before timer state, timezone discovery
 or extension-data clients exist. It shares the ordinary configured tool
@@ -49,7 +49,7 @@ This exception uses the explicit semantics approval in
 The extension uses deferred startup so it can validate this closed
 per-instance configuration before dynamically declaring its tools and prompt
 fragments. This preserves normal configured prefix scoping and avoids exposing
-papercut or its prompt when disabled.
+papercut or its prompt when explicitly disabled.
 
 Timers are session-scoped operational state, not a separate durable database. The
 extension reconstructs active timers by folding catch-up input:

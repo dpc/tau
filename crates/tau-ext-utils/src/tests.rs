@@ -82,26 +82,52 @@ fn run_frames(
     )
 }
 
+/// Run the ordinary bootstrap with its empty built-in configuration.
+fn run_default_frames(
+    deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
+) -> Vec<HarnessInputMessage> {
+    configured_default_frames(tau_proto::ConfigurePurpose::Runtime, deliveries)
+}
+
 /// Exercise the same production bootstrap for ordinary and inspection purposes.
 fn configured_frames(
     papercut_enabled: bool,
     purpose: tau_proto::ConfigurePurpose,
     deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
 ) -> Vec<HarnessInputMessage> {
-    let config = papercut_enabled.then(|| {
+    configured_frames_with_config(
         CborValue::Map(vec![(
             CborValue::Text("papercut".to_owned()),
             CborValue::Map(vec![(
                 CborValue::Text("enable".to_owned()),
-                CborValue::Bool(true),
+                CborValue::Bool(papercut_enabled),
             )]),
-        )])
-    });
+        )]),
+        purpose,
+        deliveries,
+    )
+}
+
+/// Exercise production bootstrap with the empty built-in utility configuration.
+fn configured_default_frames(
+    purpose: tau_proto::ConfigurePurpose,
+    deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
+) -> Vec<HarnessInputMessage> {
+    configured_frames_with_config(CborValue::Map(Vec::new()), purpose, deliveries)
+}
+
+/// Exercise production bootstrap with one fully specified extension
+/// configuration.
+fn configured_frames_with_config(
+    config: CborValue,
+    purpose: tau_proto::ConfigurePurpose,
+    deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
+) -> Vec<HarnessInputMessage> {
     let configure = HarnessOutputMessage::Configure(Configure {
         purpose,
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         instance_name: tau_proto::ExtensionName::parse("std-utils").expect("extension name"),
-        config: config.unwrap_or_else(|| CborValue::Map(Vec::new())),
+        config,
         state_dir: None,
         secrets: BTreeMap::new(),
         settings_files: Default::default(),
@@ -1382,17 +1408,22 @@ fn papercut_started(call_id: &str, agent: &str, report: &str) -> ToolStarted {
     }
 }
 
-/// Ensures the enabled reporter presents one exact conditional instruction in
-/// both model-visible surfaces, preventing an unconditional or no-problem call.
+/// Ensures papercuts default on, retain an explicit false opt-out, and present
+/// one exact conditional instruction in both model-visible surfaces.
 #[test]
-fn papercut_config_gates_visibility_and_prompt() {
-    let disabled: UtilsConfig =
+fn papercut_config_defaults_on_and_gates_visibility_and_prompt() {
+    let default: UtilsConfig =
         serde_json::from_value(serde_json::json!({})).expect("default config");
+    let disabled: UtilsConfig = serde_json::from_value(serde_json::json!({
+        "papercut": {"enable": false}
+    }))
+    .expect("disabled config");
     let enabled: UtilsConfig = serde_json::from_value(serde_json::json!({
         "papercut": {"enable": true}
     }))
     .expect("enabled config");
 
+    assert!(default.papercut.enable);
     assert!(!disabled.papercut.enable);
     assert!(enabled.papercut.enable);
     assert_eq!(tool_registrations(false).len(), 1);
@@ -1417,14 +1448,18 @@ fn papercut_config_gates_visibility_and_prompt() {
     );
 }
 
-/// Deferred startup must consume the actual encoded configuration before
-/// declaring tools, preserving configured prefixes and placing every accepted
-/// declaration before `Ready`.
+/// Ensures empty built-in configuration enables papercuts while an explicit
+/// false override removes its prefixed declaration before `Ready`.
 #[test]
-fn papercut_runtime_startup_gates_prefixed_declarations() {
+fn papercut_runtime_startup_defaults_on_and_honors_false_override() {
+    let default = run_default_frames([]);
     let disabled = startup_frames(false);
     let enabled = startup_frames(true);
 
+    assert_eq!(
+        declared_tool_names(&default),
+        ["work_timer", "work_papercut"]
+    );
     assert_eq!(declared_tool_names(&disabled), ["work_timer"]);
     assert_eq!(
         declared_tool_names(&enabled),

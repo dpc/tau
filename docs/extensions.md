@@ -312,8 +312,8 @@ The current executable speaks Tau protocol 5.0 only. Its
 and the gateway's fixed chat to provide send-only access to an exact agent
 allowlist without receiving or polling.
 
-`std-utils` keeps its best-effort `papercut` reporter disabled unless its
-instance config sets `papercut.enable: true`. See the
+`std-utils` enables its best-effort `papercut` reporter by default; an instance
+can opt out with `papercut.enable: false`. See the
 [std-utils README](../crates/tau-ext-utils/README.md) for its exact JSONL
 record, per-instance User-storage location, limits, privacy, retention, and
 inspection contract. `tau dev papercut list [--markdown]` inspects the normal

@@ -1,6 +1,6 @@
 //! First-party utility extension.
 //!
-//! The extension provides active-only `timer` reminders and an opt-in
+//! The extension provides active-only `timer` reminders and a default-enabled
 //! `papercut` reporter. Timers reconstruct session-scoped state from replayed
 //! tool and prompt facts; papercuts append independent diagnostic JSONL records
 //! through harness-managed per-instance storage.
@@ -190,16 +190,22 @@ struct TimerRuntime {
 #[derive(Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct UtilsConfig {
-    /// Opt-in best-effort papercut reporter configuration.
+    /// Best-effort papercut reporter configuration.
     papercut: PapercutConfig,
 }
 
 /// Operator configuration controlling the model-visible papercut tool.
-#[derive(Default, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct PapercutConfig {
     /// Exposes the papercut tool and its prompt guidance when true.
     enable: bool,
+}
+
+impl Default for PapercutConfig {
+    fn default() -> Self {
+        Self { enable: true }
+    }
 }
 
 /// Harness-mediated append operation used by the papercut reporter.

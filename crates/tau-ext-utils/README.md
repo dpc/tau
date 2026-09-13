@@ -1,6 +1,6 @@
 # std-utils
 
-`std-utils` provides the normal `timer` tool and an opt-in best-effort
+`std-utils` provides the normal `timer` tool and a default-enabled best-effort
 `papercut` reporter. Its model-visible guidance says: “Use this tool only if you
 encounter an incidental Tau harness, tooling, environment, confusing, or suspicious
 problem. Record one concise, best-effort report, then continue the primary task. Do
@@ -34,23 +34,23 @@ Each timer has one daily time, so register separate timer IDs for separate times
 and cancel or list them through the existing session-scoped actions.
 
 
-## Enable papercuts
+## Disable papercuts
 
-Papercuts are disabled by default. Enable them for every agent using one
-configured `std-utils` instance:
+Papercuts are enabled by default for every agent using a configured `std-utils`
+instance. Disable them with an explicit per-instance override:
 
 ```yaml
 extensions:
   std-utils:
     config:
       papercut:
-        enable: true
+        enable: false
 ```
 
-This declares the model-visible `papercut` tool with one required `report`
-string. The normal global and role tool policy still applies, so an explicit
-role allow-list or disable rule can hide it. The setting does not bypass that
-policy.
+By default, Tau declares the model-visible `papercut` tool with one required
+`report` string. The override above removes it. The normal global and role tool
+policy still applies, so an explicit role allow-list or disable rule can also
+hide it. The setting does not bypass that policy.
 
 
 ## Records

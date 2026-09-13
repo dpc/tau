@@ -90,7 +90,7 @@ These extensions ship in the Tau workspace:
 |---|---|
 | [Provider backends](crates/tau-ext-provider-builtin/) | Built-in model providers and provider profile management |
 | [Shell and filesystem](crates/tau-ext-shell/) | Shell commands, file operations, locking, and image inspection |
-| [Utilities](crates/tau-ext-utils/) | Timers, reminders, and opt-in papercut reporting |
+| [Utilities](crates/tau-ext-utils/) | Timers, reminders, and papercut reporting |
 | [Web search](crates/tau-ext-websearch/) | Generic web search and URL fetching |
 | [Notifications](crates/tau-ext-std-notifications/) | Terminal-facing activity notifications and detached notification commands |
 | [Rhai](crates/tau-ext-rhai/) | Opt-in trusted local scripting |
