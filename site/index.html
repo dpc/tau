@@ -593,18 +593,6 @@
       }
     }
 
-    .feature-nav {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.75rem 1.5rem;
-      margin: 1.5rem 0 2rem;
-    }
-
-    .feature-group {
-      margin-top: 2.5rem;
-      scroll-margin-top: 2rem;
-    }
-
     .feature-detail {
       border-top: 1px solid var(--border-subtle);
       background: rgb(0 43 54 / 0.55);
@@ -738,21 +726,6 @@
     .language-yaml .yaml-comment {
       color: var(--base0);
       font-style: italic;
-    }
-
-    .feature-next {
-      margin-top: 2.5rem;
-      padding: 1.5rem;
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      background: rgb(42 161 152 / 0.08);
-    }
-
-    .feature-next .btn-primary {
-      display: inline-block;
-      padding: 0.6rem 1rem;
-      border-radius: 4px;
-      margin: 0 1rem 1rem 0;
     }
 
     @media (max-width: 640px) {
@@ -1641,8 +1614,9 @@
     </div>
     <p style="margin-bottom: 0.25rem">The coding agent harness for power users</p>
     <h1>Powerful agents.<br><span class="accent">Your rules.</span></h1>
-    <p>Tau brings multi-agent workflows, durable sessions, and a rich tool suite
-      to your terminal. Choose the models. Shape the roles. Configure how work gets done.</p>
+    <p>Tau is a feature-rich harness for bleeding-edge agentic development,
+      rooted in Unix hacker culture. Powerful tools, deep configurability, and
+      composable components make it a system you can inspect, extend, and make your own.</p>
     <div class="hero-cta">
       <a class="btn-primary" href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/docs/getting-started.md">Try Tau</a>
       <a class="btn-secondary" href="#major-features">Explore the features &darr;</a>
@@ -1759,52 +1733,56 @@
     <p>Open a feature to see how it works. These are small, independent examples,
       not a required setup: YAML snippets are patches for
       <code>~/.config/tau/harness.yaml</code> unless labeled otherwise.</p>
-    <nav class="feature-nav" aria-label="Feature categories">
-      <a href="#configure-agents">Shape your agents</a>
-      <a href="#coding-workflow">Do the work</a>
-      <a href="#extend-workflow">Connect and extend</a>
-    </nav>
-
-    <div class="feature-group" id="configure-agents">
-      <h3>01 / Shape your agents</h3>
+    <div class="feature-list">
       <details class="feature-detail" open>
-        <summary><span><strong>Specialist roles</strong><span class="feature-teaser">Different jobs deserve different agents.</span></span><span class="feature-kind">Config</span></summary>
+        <summary><span><strong>Agent roles</strong><span class="feature-teaser">Compose a team with role-specific settings and behavior.</span></span><span class="feature-kind">Config</span></summary>
         <div class="feature-body">
-          <div><p>Define an economical implementer, a careful reviewer, or a focused
-            research assistant. Roles combine model selection, reasoning effort,
-            response detail, prompts, required skills, and tool access.</p>
-            <p>Switch with <code>:role reviewer</code>, or let an agent delegate to
-              a named role. Model-specific controls depend on the selected provider.</p>
+          <div><p>Tau defines agents through named roles that you compose into
+            multi-agent teams. Give implementers, reviewers, and researchers
+            different models, reasoning effort, communication styles, prompt
+            fragments, and required skills.</p>
+            <p>Share defaults across a role group, then specialize each role.
+              Tool policy belongs here too: select tools by name, group, or tag.
+              Agents delegate to these configured roles, and you can select one
+              directly with <code>:role reviewer</code>.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Role configuration &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; role settings</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+          <div class="feature-example"><p>harness.yaml &middot; a coding team</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
   <span class="yaml-key">role_groups</span>:
-    <span class="yaml-key">review</span>:
+    <span class="yaml-key">coding</span>:
       <span class="yaml-key">roles</span>:
+        <span class="yaml-key">implementer</span>:
+          <span class="yaml-key">description</span>: <span class="yaml-string">Implement and test changes</span>
+          <span class="yaml-key">effort</span>: <span class="yaml-number">0.5</span>
         <span class="yaml-key">reviewer</span>:
-          <span class="yaml-key">description</span>: <span class="yaml-string">Careful code review</span>
-          <span class="yaml-key">effort</span>: <span class="yaml-number">0.8</span>
-          <span class="yaml-key">verbosity</span>: <span class="yaml-string">high</span></code></pre></div>
+          <span class="yaml-key">description</span>: <span class="yaml-string">Independent correctness review</span>
+          <span class="yaml-key">effort</span>: <span class="yaml-number">0.9</span>
+          <span class="yaml-key">prompt_fragments</span>:
+            - <span class="yaml-key">name</span>: <span class="yaml-string">review.focus</span>
+              <span class="yaml-key">text</span>: <span class="yaml-string">Prioritize bugs over style.</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
         <summary><span><strong>Layered config &amp; profiles</strong><span class="feature-teaser">One base setup. Several ways to work.</span></span><span class="feature-kind">Config</span></summary>
         <div class="feature-body">
-          <div><p>Keep shared defaults in your dotfiles and overlay named profiles
-            at launch. Adjust agent behavior and extension settings without
-            duplicating the whole configuration.</p><p>Config fragments in
-            <code>harness.d/*.yaml</code> keep a growing setup organized. Selected
-            profiles apply in order; later patches take precedence.</p>
+          <div><p>Compose your setup from shared defaults, config fragments, and
+            named profile overlays. Keep model selection, agent behavior, and
+            extension configuration independently reusable instead of maintaining
+            a separate config for every workflow.</p><p>Stack profiles at launch;
+            later patches override earlier ones at the same scope. This example
+            selects DeepSeek as the inherited model default and adds a reasoning
+            adjustment. Explicit role-level model settings still win. Configure
+            a provider named <code>deepseek</code> with the listed model first.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md#configuration-profiles">Profiles &rarr;</a></div>
           <div class="feature-example"><p>harness.yaml + shell</p><pre><code class="language-yaml"><span class="yaml-key">profiles</span>:
+  <span class="yaml-key">deepseek</span>:
+    <span class="yaml-key">agents</span>:
+      <span class="yaml-key">model</span>: <span class="yaml-string">deepseek/deepseek-v4-flash</span>
   <span class="yaml-key">focused</span>:
     <span class="yaml-key">agents</span>:
       <span class="yaml-key">effort</span>: <span class="yaml-string">"increase:0.25"</span>
-  <span class="yaml-key">concise</span>:
-    <span class="yaml-key">agents</span>:
-      <span class="yaml-key">verbosity</span>: <span class="yaml-string">low</span>
 
-<span class="yaml-comment"># Launch with both patches:</span>
-<span class="yaml-comment"># tau --profile focused,concise</span></code></pre></div>
+<span class="yaml-comment"># tau --profile deepseek</span>
+<span class="yaml-comment"># tau --profile deepseek,focused</span></code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -1824,104 +1802,105 @@ tau provider list
         </div>
       </details>
       <details class="feature-detail">
-        <summary><span><strong>Project instructions &amp; skills</strong><span class="feature-teaser">Teach it once. Reuse it where it matters.</span></span><span class="feature-kind">Files</span></summary>
+        <summary><span><strong>Project instructions &amp; skill search</strong><span class="feature-teaser">Grow your skill library, not every agent's prompt.</span></span><span class="feature-kind">Tools</span></summary>
         <div class="feature-body">
-          <div><p>Tau discovers layered <code>AGENTS.md</code> instructions and
-            reusable Markdown skills. Skills make detailed operating knowledge
-            available on demand instead of loading every guide into every prompt.</p>
-            <p>Keep project knowledge in the repository and personal skills in
-              your user config. Inject a skill explicitly with <code>:skill</code>,
-              or require exact skills for a role.</p>
+          <div><p>Layer project and user <code>AGENTS.md</code> instructions while
+            keeping a large skill library searchable on demand. Discovery reads
+            bounded metadata, not every skill body. Agents search names and
+            descriptions, optionally search content, then load an exact skill.</p>
+            <p>Project skills advertise their names and descriptions by default;
+              user skills stay out of the prompt until searched.
+              Set <code>advertise: false</code> for less frequently used project
+              skills too. The library can grow without putting its whole catalog
+              or contents into every agent's context.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/skills.md">Instructions and skills &rarr;</a></div>
-          <div class="feature-example"><p>Example project layout + Tau command</p><pre><code>AGENTS.md
-.agents/
-  skills/
-    review-checklist/
-      SKILL.md
+          <div class="feature-example"><p>Example agent tool calls &middot; your own skill library</p><pre><code># Search skill names and descriptions:
+skill({"query": "rust review"})
 
-# In Tau:
-:skill review-checklist</code></pre></div>
+# Load a skill by its exact name:
+skill({"query": "rust-review-checklist"})
+
+# Opt into searching skill contents:
+skill({"query": "deadlock", "search_content": true})</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
         <summary><span><strong>Prompt templates</strong><span class="feature-teaser">Put your working standards into the context.</span></span><span class="feature-kind">Config</span></summary>
         <div class="feature-body">
-          <div><p>Add house rules or role-specific guidance as named prompt
-            fragments. Use Handlebars templates and file-backed text for richer,
-            directory-aware instructions.</p><p>These guide the model; they are
-            not permissions, a sandbox, or a place to store secrets.</p>
+          <div><p>Configure how agents communicate, reason about a task, and
+            present their results. Named prompt fragments compose at the global,
+            role-group, and individual-role levels, so shared preferences do not
+            need to be copied into every role.</p><p>Use inline text for a short
+            communication style, file-backed fragments for longer instructions,
+            and Handlebars templates for context-dependent behavior.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Prompt controls &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; shared guidance</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+          <div class="feature-example"><p>harness.yaml &middot; communication style</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
   <span class="yaml-key">prompt_fragments</span>:
-    - <span class="yaml-key">name</span>: <span class="yaml-string">team.workflow</span>
+    - <span class="yaml-key">name</span>: <span class="yaml-string">communication.style</span>
       <span class="yaml-key">text</span>: |
-<span class="yaml-string">        Read project instructions first.
-        Add a focused regression test.
-        Report what you verified.</span></code></pre></div>
+<span class="yaml-string">        Lead with the result or blocker.
+        Be concise, direct, and technical.
+        Explain tradeoffs, not basic concepts.
+        Skip praise and routine progress updates.</span></code></pre></div>
         </div>
       </details>
-      <details class="feature-detail">
-        <summary><span><strong>Per-role tool policy</strong><span class="feature-teaser">Give each agent the tools its job needs.</span></span><span class="feature-kind">Config</span></summary>
-        <div class="feature-body">
-          <div><p>Select tools by exact name, group, or semantic tag. Make narrow
-            specialist roles alongside fully equipped coding roles, and tune
-            model-aware defaults centrally.</p><p>The example exposes only
-            <code>self_info</code> to a transcript-focused role. Tool visibility is
-            not an OS sandbox; an exposed shell can still execute commands.</p>
-            <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Tool policy &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; explicit tool list</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
-  <span class="yaml-key">role_groups</span>:
-    <span class="yaml-key">review</span>:
-      <span class="yaml-key">roles</span>:
-        <span class="yaml-key">transcript-reviewer</span>:
-          <span class="yaml-key">description</span>: <span class="yaml-string">Review supplied text</span>
-          <span class="yaml-key">tools</span>: [<span class="yaml-string">self_info</span>]</code></pre></div>
-        </div>
-      </details>
-    </div>
-
-    <div class="feature-group" id="coding-workflow">
-      <h3>02 / Do the work</h3>
       <details class="feature-detail">
         <summary><span><strong>Multi-agent delegation</strong><span class="feature-teaser">Split the work without juggling separate chat windows.</span></span><span class="feature-kind">Workflow</span></summary>
         <div class="feature-body">
-          <div><p>Agents can start specialist sub-agents, exchange messages, watch
-            progress, and wait for results. Long-running tools move into the
-            background so independent work can continue.</p><p>Separate agent
-            contexts keep delegation focused. Per-agent workdirs and cooperative
-            directory locks help coordinate shared files; they do not isolate
-            each agent in a filesystem sandbox.</p>
+          <div><p>Tau provides a rich multi-agent interaction toolkit: role-based
+            delegation, asynchronous messages within and across sessions, progress
+            watches, completion notifications, and waits. Configure the team through
+            roles and its collaboration patterns through prompts and skills.</p>
+            <p>Coordination is optimized around push notifications rather than
+              repeated model-driven polling. Separate agent contexts keep delegated
+              work focused; background tools let independent work proceed while a
+              command runs. Per-agent workdirs and cooperative directory locks
+              coordinate shared files.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-messaging.md">Agent coordination &rarr;</a></div>
-          <div class="feature-example"><p>Example prompt &middot; with your configured roles</p><pre><code>Implement the parser change.
-Delegate a review of the edge cases
-to a reviewer while you add tests.
-Wait for the review, address findings,
-then summarize what passed.</code></pre></div>
+          <div class="feature-example"><p>.agents/skills/team-review/SKILL.md &middot; example skill</p><pre><code>---
+name: team-review
+description: Coordinate parallel code reviews
+---
+
+Freeze the candidate before review.
+Start two reviewer agents with that candidate:
+- One checks correctness and failure paths.
+- One checks test coverage and missing cases.
+Run tests while they inspect the same version.
+Use messages to answer their questions.
+Wait for completion notifications; do not poll.
+Consolidate findings before changing the code.
+Ask the same reviewers to check the fixes.</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
-        <summary><span><strong>Durable sessions &amp; branches</strong><span class="feature-teaser">Pick up the work instead of reconstructing it.</span></span><span class="feature-kind">CLI / UI</span></summary>
+        <summary><span><strong>Persistent sessions</strong><span class="feature-teaser">Detach, resume, or connect from multiple terminals.</span></span><span class="feature-kind">CLI / UI</span></summary>
         <div class="feature-body">
-          <div><p>Keep conversations, tool facts, and alternate transcript
-            branches across restarts. Attach to a live session or resume a
-            stored one. Use the tree view to explore conversation history.</p>
-            <p>Use <code>:detach</code> to leave work running without the UI.
-              For a supervised service, run a pinned headless owner.
-              Ordinary quit shuts down when the last UI leaves unless you
-              have deliberately detached or pinned the session.</p>
+          <div><p>Sessions live in the harness daemon, independently of any one
+            terminal UI. Detach while agents keep working, connect multiple UI
+            instances to the same live session, or resume a stored session after
+            its daemon stops.</p>
+            <p>Run <code>tau serve</code> under systemd or another supervisor for
+              a headless, long-lived session you can attach to as needed.
+              Interactive sessions shut down on the last ordinary UI quit unless
+              you have used <code>:detach</code>; supervised sessions stay alive
+              across UI disconnects.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/session-startup.md">Session lifecycle &rarr;</a></div>
-          <div class="feature-example"><p>Shell &middot; replace SESSION with its ID</p><pre><code>tau resume
+          <div class="feature-example"><p>Shell &middot; replace SESSION with its ID</p><pre><code># In Tau's UI, leave the session running:
+# :detach
+
+# Connect from one or more terminals:
 tau attach SESSION
 
-# Keep a headless owner running:
-tau serve --session SESSION --existing
+# After its daemon has stopped:
+tau resume SESSION
 
-# In the terminal UI:
-# :tree</code></pre></div>
+# Or run headlessly under a supervisor:
+tau serve --session SESSION --create-or-existing</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
-        <summary><span><strong>A terminal built for active coding</strong><span class="feature-teaser">See the work. Keep your editor and shortcuts.</span></span><span class="feature-kind">UI config</span></summary>
+        <summary><span><strong>Terminal UI</strong><span class="feature-teaser">See the work. Keep your editor and shortcuts.</span></span><span class="feature-kind">UI config</span></summary>
         <div class="feature-body">
           <div><p>Follow streaming output, inline diffs, Markdown, reasoning
             summaries, tool activity, and agent status. Use prompt history,
@@ -1958,70 +1937,55 @@ tau serve --session SESSION --existing
         </div>
       </details>
       <details class="feature-detail">
-        <summary><span><strong>Context compaction &amp; recovery</strong><span class="feature-teaser">Manage the context budget on longer tasks.</span></span><span class="feature-kind">Config</span></summary>
+        <summary><span><strong>Compaction controls</strong><span class="feature-teaser">Choose when and how agents compact their context.</span></span><span class="feature-kind">Config</span></summary>
         <div class="feature-body">
-          <div><p>Tau supports model-aware compaction and recovery rather than
-            assuming an unlimited context window. Keep provider defaults or
-            configure named standalone compaction policies.</p><p>This example
-            reserves context headroom. Compaction support depends on the
-            model route, and summaries cannot promise perfect recall.</p>
+          <div><p>Control compaction through named, composable policies with
+            model-aware thresholds, reserved headroom, lifecycle triggers, and
+            agent-status conditions. Compact after an agent finishes a task,
+            before its next inference, manually, or through an agent tool;
+            configure policies globally or specialize them per role.</p>
+            <p>Tau supports provider-native compaction and its own configurable
+              summary fallback, with custom mechanisms implemented through provider
+              extensions. Provider-inline compaction and overflow recovery have
+              separate controls from standalone policies. This example adds a
+              status-aware policy while retaining the default before-inference
+              safeguard; the model route determines the available mechanisms.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/agent-roles.md">Context controls &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; token reserve</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
+          <div class="feature-example"><p>harness.yaml &middot; compact at task boundaries</p><pre><code class="language-yaml"><span class="yaml-key">agents</span>:
   <span class="yaml-key">compactions</span>:
-    <span class="yaml-key">default</span>:
-      <span class="yaml-key">reserve</span>: <span class="yaml-number">25000</span></code></pre></div>
+    <span class="yaml-key">after-task</span>:
+      <span class="yaml-key">reserve</span>: <span class="yaml-number">40000</span>
+      <span class="yaml-key">when</span>:
+        <span class="yaml-key">at</span>: <span class="yaml-string">outer_turn_finished</span>
+        <span class="yaml-key">statuses</span>: [<span class="yaml-string">done</span>]</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
-        <summary><span><strong>Exports, traces &amp; accounting</strong><span class="feature-teaser">Inspect the path to the answer.</span></span><span class="feature-kind">CLI</span></summary>
+        <summary><span><strong>Debugging &amp; observability</strong><span class="feature-teaser">Inspect agent behavior, configuration, and performance.</span></span><span class="feature-kind">CLI</span></summary>
         <div class="feature-body">
-          <div><p>Export a selected conversation branch, inspect semantic
-            timelines, retrieve saved artifacts, and examine session activity
-            and cost estimates. Agent work does not have to end as an opaque
-            chat transcript.</p><p>Exports and traces can contain sensitive
-            content. Review them before sharing; cost estimates are not a
-            provider billing statement.</p>
-            <a href="https://github.com/dpc/tau/blob/master/docs/agent-trace.md">Trace and export workflow &rarr;</a></div>
-          <div class="feature-example"><p>Shell &middot; substitute your IDs</p><pre><code>tau agent export chat AGENT_ID
-tau agent trace AGENT_ID
-tau session stats --session SESSION_ID</code></pre></div>
-        </div>
-      </details>
-    </div>
+          <div><p>Inspect resolved prompts and tool definitions, durable event
+            journals, agent-message timelines, and saved tool artifacts. Trace a
+            delegated workflow across its agents, export conversations, or examine
+            provider request and response captures when diagnosing a model issue.</p>
+            <p>Performance traces expose token and cache usage, cost estimates,
+              tool and wait lifecycles, and compaction activity. Use compact
+              human-readable output or machine-readable exports for your own
+              analysis. Debug captures are best-effort and private; inspect them
+              before sharing.</p>
+            <a href="https://github.com/dpc/tau/blob/master/docs/agent-trace.md">Traces &amp; performance exports &rarr;</a></div>
+          <div class="feature-example"><p>Shell &middot; substitute your IDs</p><pre><code># Inspect the configured agent's inputs:
+tau dev print-prompt
+tau dev print-tools
 
-    <div class="feature-group" id="extend-workflow">
-      <h3>03 / Connect and extend</h3>
-      <details class="feature-detail">
-        <summary><span><strong>Configurable web research</strong><span class="feature-teaser">Search and fetch without leaving the task.</span></span><span class="feature-kind">Config</span></summary>
-        <div class="feature-body">
-          <div><p>Use provider-hosted search on compatible routes or the bundled
-            external search and fetch tools. Select backend pools, configure
-            credentials, and choose role-level web-tool behavior.</p><p>This
-            selects external backends; it does not override a winning hosted
-            route. Backend availability and limits apply. Domain controls are
-            not a network sandbox, and fetched content remains untrusted input.</p>
-            <a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-websearch/README.md">Web research configuration &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; external backend pools</p><pre><code class="language-yaml"><span class="yaml-key">extensions</span>:
-  <span class="yaml-key">std-websearch</span>:
-    <span class="yaml-key">config</span>:
-      <span class="yaml-key">search_providers</span>: [<span class="yaml-string">exa</span>, <span class="yaml-string">parallel</span>]
-      <span class="yaml-key">fetch_providers</span>: [<span class="yaml-string">exa</span>, <span class="yaml-string">parallel</span>]</code></pre></div>
-        </div>
-      </details>
-      <details class="feature-detail">
-        <summary><span><strong>Notifications &amp; reminders</strong><span class="feature-teaser">Step away without losing track.</span></span><span class="feature-kind">Config</span></summary>
-        <div class="feature-body">
-          <div><p>Wire agent completion or idle events to a terminal bell, OSC
-            signals, or a local command for desktop notification glue. Hooks
-            ship unconfigured so you choose the interruptions.</p><p>Agents
-            can also schedule one-shot, recurring, and daily reminders.
-            Timers belong to a live session, not an always-on calendar service.</p>
-            <a href="https://github.com/dpc/tau/blob/master/crates/tau-ext-std-notifications/README.md">Notification hooks &rarr;</a></div>
-          <div class="feature-example"><p>harness.yaml &middot; ring on completion</p><pre><code class="language-yaml"><span class="yaml-key">extensions</span>:
-  <span class="yaml-key">std-notifications</span>:
-    <span class="yaml-key">config</span>:
-      <span class="yaml-key">agent_end</span>:
-        - <span class="yaml-key">bell</span>: <span class="yaml-boolean">true</span></code></pre></div>
+# Trace a whole delegated workflow:
+tau agent trace AGENT_ID --include-descendants
+
+# Export performance data for analysis:
+tau agent trace AGENT_ID --include-descendants \
+  --format agent-performance-jsonl
+
+# Inspect session activity and usage:
+tau session stats --session SESSION_ID</code></pre></div>
         </div>
       </details>
       <details class="feature-detail">
@@ -2066,13 +2030,6 @@ tau session stats --session SESSION_ID</code></pre></div>
         </div>
       </details>
     </div>
-    <div class="feature-next">
-      <h3>Start with one real task.</h3>
-      <p>You do not need to configure all of this to begin. Install Tau, connect a
-        provider, and try a bounded change in a repository you know.</p>
-      <a class="btn-primary" href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/docs/getting-started.md">Try your first Tau task &rarr;</a>
-      <a href="https://github.com/dpc/tau/blob/master/FEATURES.md">Read the full feature tour</a>
-    </div>
   </section>
 
   <hr class="divider">
@@ -2096,15 +2053,20 @@ tau session stats --session SESSION_ID</code></pre></div>
       </div>
       <div class="extension-entry">
         <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-utils">Utilities</a></strong>
-        <p>Timers, reminders, and opt-in papercut reporting.</p>
+        <p>One-shot, recurring, and daily reminders within a live session,
+          plus opt-in papercut reporting.</p>
       </div>
       <div class="extension-entry">
         <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-websearch">Web search</a></strong>
-        <p>Generic web search and URL fetching.</p>
+        <p>Web search and URL fetching with configurable backend pools and
+          credentials. Choose external services such as Exa and Parallel
+          alongside provider-hosted search on compatible model routes.</p>
       </div>
       <div class="extension-entry">
         <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-std-notifications">Notifications</a></strong>
-        <p>Terminal-facing activity notifications and detached notification commands.</p>
+        <p>Configurable completion and idle hooks for terminal bells, OSC
+          signals, and detached commands for desktop notification glue.
+          Hooks ship unconfigured so you choose the interruptions.</p>
       </div>
       <div class="extension-entry">
         <strong><a href="https://radicle.network/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4/tree/crates/tau-ext-rhai">Rhai</a></strong>
@@ -2230,12 +2192,19 @@ tau session stats --session SESSION_ID</code></pre></div>
 
   <section id="status">
     <h2>Status</h2>
-    <h3>Heavy development, daily use</h3>
-    <p>Tau is under active development and used daily by its developers.
-      The capabilities above are here to use, but expect rough edges and
-      configuration changes as the project evolves.</p>
-    <p>Try it on a bounded task, inspect the result, and tell us what would make
-      your workflow better.</p>
+    <h3>Bleeding-edge features. Fast-paced development.</h3>
+    <p>Tau moves quickly, with a small but dedicated community building and
+      refining powerful agent workflows. Expect new capabilities, rapid
+      iteration, and occasional rough edges or configuration changes.</p>
+    <h3>Who Tau is for</h3>
+    <p>Tau is most useful for power users, especially developers, who want a
+      powerful, deeply customizable tool rather than a fixed workflow.
+      Configure your own agent teams, choose models and tools, and adapt the
+      harness to the way you work.</p>
+    <p>Its Unix-centered architecture favors composability: ordinary processes,
+      explicit interfaces, and components you can script, supervise, and replace.
+      If you want your coding agents to work with your existing tools rather than
+      dictate the rest of your setup, Tau is built for that.</p>
     <p>Watch an overview:
       <a href="https://www.youtube.com/watch?v=v2Ez2umV9xA">The State of Tau #1</a>.</p>
     <div class="video-embed">
