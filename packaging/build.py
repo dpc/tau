@@ -107,7 +107,7 @@ def docker_container_user():
     return f"{os.getuid()}:{os.getgid()}"
 
 
-def container_command(image, name, mounts, network=True, user=None):
+def container_command(image, name, mounts, network=True, user=None, executable_tmp=False):
     if user is None:
         user = f"{os.getuid()}:{os.getgid()}"
     command = [
@@ -115,7 +115,9 @@ def container_command(image, name, mounts, network=True, user=None):
         "--read-only", "--user", user,
         "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "--pids-limit=512", "--cpus=2", "--memory=12g",
-        "--tmpfs", "/tmp:rw,nosuid,nodev,size=1073741824",
+        # Docker tmpfs mounts default to noexec. Only archive qualification
+        # executes extracted payloads from this otherwise disposable scratch.
+        "--tmpfs", f"/tmp:rw,nosuid,nodev,{'exec' if executable_tmp else 'noexec'},size=1073741824",
     ]
     if not network:
         command.append("--network=none")
@@ -139,10 +141,10 @@ def execute(command, log, timeout, log_limit=64 * 1024 * 1024):
 
 
 def container(image, mounts, command, log, timeout, network=True,
-              log_limit=64 * 1024 * 1024, user=None):
+              log_limit=64 * 1024 * 1024, user=None, executable_tmp=False):
     name = f"tau-native-{uuid.uuid4().hex}"
     try:
-        execute([*container_command(image, name, mounts, network, user), *command],
+        execute([*container_command(image, name, mounts, network, user, executable_tmp), *command],
                 log, timeout, log_limit)
     finally:
         # Killing a timed-out Docker client does not necessarily stop its container.
@@ -288,7 +290,8 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                        ["python3", "/tooling/probe.py", "--packages", "/probe/packages",
                         "--version", manifest["core"]["version"], "--arch", arch]
                        + (["--tagged"] if release_tag else []),
-                       logs / "probe.log", 240, network=False, user=container_user)
+                       logs / "probe.log", 240, network=False, user=container_user,
+                       executable_tmp=True)
             probes = json.loads((logs / "probe.log").read_text())
             version = probes["version_output"]
             verify_version(version, manifest["core"]["version"], source_sha,

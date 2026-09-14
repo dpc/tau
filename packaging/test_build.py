@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 import build
@@ -18,6 +19,52 @@ from test_native import SourceFixture
 
 
 class IdentityTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("TAU_NATIVE_TEST_IMAGE"),
+                         "set TAU_NATIVE_TEST_IMAGE to run real Docker archive execution")
+    def test_real_archive_execution_requires_executable_scratch(self):
+        image = os.environ["TAU_NATIVE_TEST_IMAGE"]
+        code = """
+import errno, os, pathlib, shutil, subprocess, sys, tarfile, tempfile
+sys.path.insert(0, "/tooling")
+import complete, probe
+with tempfile.TemporaryDirectory(prefix="tau-probe-") as tmp:
+    root = pathlib.Path(tmp)
+    payload = root / "payload"
+    (payload / "bin").mkdir(parents=True)
+    shutil.copy2("/bin/true", payload / "bin/true")
+    (payload / "bin/true").chmod(0o755)
+    complete.archive(payload, root / "test.tar.gz", "test", 0)
+    with tarfile.open(root / "test.tar.gz") as archive:
+        member = archive.getmember("test/bin/true")
+        assert member.mode == 0o755 and member.uid == member.gid == 0
+    probe.extract(root / "test.tar.gz", root / "extracted")
+    binary = root / "extracted/test/bin/true"
+    assert binary.stat().st_mode & 0o777 == 0o755
+    assert binary.stat().st_uid == os.getuid()
+    for parent in binary.parents:
+        assert os.access(parent, os.X_OK)
+    options = next(line.split()[3].split(",") for line in
+                   pathlib.Path("/proc/mounts").read_text().splitlines()
+                   if line.split()[1] == "/tmp")
+    assert "nosuid" in options and "nodev" in options
+    executable = sys.argv[1] == "True"
+    assert ("noexec" not in options) == executable
+    try:
+        subprocess.run([str(binary)], check=True)
+    except PermissionError as error:
+        assert not executable and error.errno == errno.EACCES
+    else:
+        assert executable
+"""
+        for executable in (False, True):
+            with self.subTest(executable=executable):
+                command = build.container_command(
+                    image, f"tau-archive-test-{uuid.uuid4().hex}",
+                    [(build.TOOLS, "/tooling", True)], network=False,
+                    user=build.docker_container_user(), executable_tmp=executable)
+                subprocess.run([*command, "python3", "-c", code, str(executable)],
+                               check=True, timeout=60)
+
     def test_metadata_stamping_preserves_layout(self):
         raw = (b"ELF-prefix\0__TAU_BUILD_GIT_REVISION_PLACEHOLDER____\0"
                b"__TAU_BUILD_DIRTY\0__TAU_BUILD_DATE\0ELF-suffix")
@@ -116,6 +163,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("type=bind,src=/tmp/source,dst=/source,readonly", command)
         self.assertIn("type=bind,src=/tmp/tooling,dst=/tooling,readonly", command)
         self.assertNotIn("--privileged", command)
+        self.assertIn("/tmp:rw,nosuid,nodev,noexec,size=1073741824", command)
         self.assertFalse(any("docker.sock" in arg or "GITHUB_TOKEN" in arg for arg in command))
         with self.assertRaisesRegex(ValueError, "commas"):
             build.container_command("image", "name", [(Path("/tmp/a,b"), "/work", False)])
@@ -229,10 +277,13 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                     (packages / name).write_text("inert fixture")
                 (paths["/output"] / "toolchain.json").write_text("{}")
             if "/probe" in paths:
+                self.assertTrue(kwargs.get("executable_tmp"))
                 epoch = native.inventory(self.repo, self.sha)["source_date_epoch"]
                 date = datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M")
                 log.write_text(json.dumps({"version_output": "bad identity" if bad_version else
                                f"tau 1.2.3 ({self.sha[:7]}, {date})\n"}))
+            else:
+                self.assertFalse(kwargs.get("executable_tmp", False))
 
         with patch.object(build, "verify_tooling"), \
                 patch.object(build, "snapshot", side_effect=snapshot), \
