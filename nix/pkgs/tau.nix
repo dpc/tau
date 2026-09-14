@@ -14,7 +14,7 @@ assert buildDirty == null || builtins.isBool buildDirty;
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "tau";
-  version = "0.1.0";
+  version = (builtins.fromTOML (builtins.readFile ../../crates/tau/Cargo.toml)).package.version;
 
   src = lib.fileset.toSource {
     root = ../..;

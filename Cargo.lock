@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dpc-tau-cli",
  "dpc-tau-core",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "built",
  "ciborium",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-shell"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "blake3",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bon",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-harness-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dpc-tau-harness",
  "dpc-tau-proto",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-skills"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dpc-tau-proto",
  "serde_yaml_ng",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-test-support"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dpc-tau-config",
  "dpc-tau-core",

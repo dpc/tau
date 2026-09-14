@@ -114,6 +114,10 @@ class SourceFixture:
             'rust-version="1.97"\n'
         )
         (self.repo / "Cargo.lock").write_text("# fixture lock")
+        (self.repo / "crates/tau").mkdir(parents=True)
+        (self.repo / "crates/tau/Cargo.toml").write_text(
+            '[package]\nname="dpc-tau"\nversion.workspace=true\n'
+        )
         (self.repo / "LICENSE").write_text("fixture license")
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
@@ -126,6 +130,18 @@ class SourceFixture:
 
 
 class SourceTests(SourceFixture, unittest.TestCase):
+    def test_explicit_application_version_overrides_workspace(self):
+        (self.repo / "crates/tau/Cargo.toml").write_text(
+            '[package]\nname="dpc-tau"\nversion="1.2.4"\n'
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "explicit version")
+        sha = self.git("rev-parse", "HEAD").strip()
+        self.assertEqual(native.inventory(self.repo, sha)["core"]["version"], "1.2.4")
+        native.release_version("v1.2.4", native.inventory(self.repo, sha)["core"]["version"])
+        with self.assertRaises(ValueError):
+            native.release_version("v1.2.3", native.inventory(self.repo, sha)["core"]["version"])
+
     def test_release_tag_must_exactly_match_workspace_version(self):
         self.assertEqual(native.release_version("v1.2.3", "1.2.3"), "1.2.3")
         for tag in ("1.2.3", "v1.2.4", "v1.2.3-extra", "release-v1.2.3"):

@@ -13,8 +13,8 @@ through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r)
 owns its source and detailed operational documentation; its Cargo README
 installation instructions remain conditional on a future registry publication.
-The current executable speaks Tau protocol 5.0 only and requires a matching
-protocol-5 harness.
+The pinned executable speaks Tau protocol 7.0 using registry SDK 0.4.0.
+Tau 7.2 admits this same-major minor skew with a warning.
 
 Local-poll mode requires a named bot-token secret, a nonempty numeric
 `allowed_user_ids` list, and an optional exact `chat_id`. Without `chat_id`, an

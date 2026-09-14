@@ -12,7 +12,8 @@ tools such as `email_list_folders`, `email_read`, `email_send`,
 `calendar_search`, and `calendar_create`, and publishes `:email` and `:calendar`
 user actions.
 
-The executable speaks Tau protocol 5.0 only using registry SDK 0.2.0. The old
+The pinned executable speaks Tau protocol 7.0 using registry SDK 0.4.0.
+Tau 7.2 admits this same-major minor skew with a warning. The old
 `std-email` standard-instance alias is removed; rename it to `std-pim`. PIM
 configuration accepts only the nested `config.email` and `config.calendar`
 module keys.

@@ -71,7 +71,11 @@ Every package is an explicitly unqualified test version
 `0.0.0~test.<source_sha>-1`, ordered before stable `0.0.0` by modern DEB/RPM
 version comparison, unless `package-core` receives `--release-tag v<version>`.
 Release mode requires the tag to exactly equal `v` plus the selected source's
-workspace version and uses that version in the package metadata and filenames.
+application version and uses that version in the package metadata and filenames.
+The version comes from `crates/tau/Cargo.toml` (falling back to the workspace
+default only when that manifest explicitly inherits it). Tau 0.1.1 and its CLI
+have explicit versions; unchanged internal crates retain workspace default
+0.1.0, and the SDK retains its separate version.
 Outputs include `source-manifest.json` and `SHA256SUMS`. The manifest explicitly
 records that the caller-supplied binary's source relationship is not attested.
 Checksums provide integrity, not authentication. Archive timestamps/ownership

@@ -127,7 +127,8 @@ qualified. No site/release asset links have been added.
 
 `.github/workflows/release.yml` runs only when `dpc/tau` receives a `v*` tag.
 It binds both native builds to the immutable commit from the push event and
-requires the tag to equal `v` plus the workspace package version. Immediately
+requires the tag to equal `v` plus the application package version from
+`crates/tau/Cargo.toml`, resolving explicit workspace inheritance when present. Immediately
 before publication, it resolves the current remote lightweight or annotated
 tag and requires it still to identify that same commit. Only the final publisher
 job receives `contents: write`; the manual arbitrary-SHA workflow remains

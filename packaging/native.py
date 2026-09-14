@@ -95,6 +95,14 @@ def inventory(repo, source_sha):
         )
     cargo_bytes = source_file(repo, source_sha, "Cargo.toml")
     cargo = tomllib.loads(cargo_bytes.decode())["workspace"]["package"]
+    application = tomllib.loads(
+        source_file(repo, source_sha, "crates/tau/Cargo.toml").decode()
+    )["package"]
+    version = application["version"]
+    if version == {"workspace": True}:
+        version = cargo["version"]
+    if not isinstance(version, str):
+        raise ValueError("invalid application version")
     return {
         "schema": 1,
         "purpose": "non-release-candidate",
@@ -105,13 +113,14 @@ def inventory(repo, source_sha):
         ),
         "core": {
             "binary": "tau",
-            "version": cargo["version"],
+            "version": version,
             "license": cargo["license"],
             "rust_version": cargo["rust-version"],
         },
         "source_file_sha256": {
             name: sha256(source_file(repo, source_sha, name))
-            for name in ("Cargo.toml", "Cargo.lock", "flake.lock", "LICENSE")
+            for name in ("Cargo.toml", "crates/tau/Cargo.toml", "Cargo.lock",
+                         "flake.lock", "LICENSE")
         },
         "external": packages,
     }
