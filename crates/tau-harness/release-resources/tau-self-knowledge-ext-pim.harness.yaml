@@ -1,0 +1,113 @@
+extensions:
+  std-pim:
+    enable: true
+    secrets:
+      mail_password: {}
+      google_mail_desktop_client_id:
+        optional: true
+      google_mail_desktop_client_secret:
+        optional: true
+      google_mail_refresh_token:
+        optional: true
+      personal_calendar_ics_url: {}
+      google_calendar_device_client_id: {}
+      google_calendar_device_client_secret: {}
+    config:
+      email:
+        enable: true
+        accounts:
+          - id: work
+            enable: true
+            display_name: Work mail
+            from: Alice Example <alice@example.com>
+            imap:
+              host: imap.example.com
+              port: 993
+              tls: required
+              login: alice@example.com
+            smtp:
+              host: smtp.example.com
+              port: 587
+              tls: start_tls
+              login: alice@example.com
+            auth:
+              method: password
+              password_secret: mail_password
+              # Gmail OAuth alternative:
+              # method: oauth2
+              # provider: google
+              # client_id_secret: google_mail_desktop_client_id
+              # client_secret_secret: google_mail_desktop_client_secret
+              # Use a Google OAuth client of type "Desktop app".
+              # Omit refresh_token_secret, run start, open the URL, then paste
+              # the full failed loopback address-bar URL into finish:
+              #   :email auth google start work
+              #   :email auth google finish work http://127.0.0.1:54321/?state=...&code=...
+              # Or set refresh_token_secret for a manually provisioned token.
+              # refresh_token_secret: google_mail_refresh_token
+            folders:
+              allow:
+                - INBOX
+        policy:
+          incoming_allow:
+            - alice@example.com
+            - "*@trusted.example"
+          incoming_auth:
+            require: true
+            trusted_authserv_ids:
+              - mx.example.com
+            allow_dmarc_only: false
+          outgoing_allow:
+            - alice@example.com
+            - "*@trusted.example"
+          allow_state_policy_extensions: true
+      calendar:
+        enable: true
+        accounts:
+          - id: personal-ics
+            enable: true
+            display_name: Personal ICS calendar
+            backend:
+              type: ics_feed
+              url_secret: personal_calendar_ics_url
+            calendars:
+              default: main
+              allow:
+                - main
+          - id: google
+            enable: true
+            display_name: Google Calendar
+            backend:
+              type: google
+              client_id_secret: google_calendar_device_client_id
+              client_secret_secret: google_calendar_device_client_secret
+              # Use a Google OAuth client of type "TVs and Limited Input devices".
+              # Omit refresh_token_secret and authorize with:
+              #   :calendar auth google start google
+              #   :calendar auth google finish google
+              # Or set refresh_token_secret for a manually provisioned token.
+            calendars:
+              default: primary
+              allow:
+                - primary
+        policy:
+          read:
+            private_events: busy_only
+            descriptions: approved_only
+          write:
+            require_approval: true
+            max_attendees: 50
+agents:
+  role_groups:
+    user:
+      roles:
+        assistant:
+          enable_tools:
+            - email_list_folders
+            - email_list_recent
+            - email_read
+            - email_request_access
+            - email_send
+            - calendar_list_calendars
+            - calendar_search
+            - calendar_get

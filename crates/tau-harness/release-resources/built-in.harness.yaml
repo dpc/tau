@@ -1,0 +1,125 @@
+# Built-in HarnessSettings defaults. Harness-owned roles and prompt fragments
+# are provided as ordinary config so user partial overrides keep built-in fields.
+session_retention: null
+artifact_retention: null
+agent_retention: null
+diagnostic_retention: 30d
+inter_session:
+  outgoing_notice: null
+  incoming_notice: null
+  allow_project_roots: null
+  deny_project_roots: null
+# Show a one-line Tau onboarding prompt to the initial interactive UI.
+show_introduction_notice: true
+wait_timeout_minimum_minutes: 1
+wait_timeout_maximum_minutes: 1440
+# Suppress early live retry notifications sent to agents watching other agents.
+agent_watch_retry_notification_threshold: 5
+notification_delivery:
+  user_prompt: { idle_ms: 0, wait_any_ms: 0, wait_tool_ms: 5000 }
+  status: { idle_ms: 120000, wait_any_ms: 240000, wait_tool_ms: 240000 }
+  agent_message: { idle_ms: 0, wait_any_ms: 60000, wait_tool_ms: 120000 }
+  external_message: { idle_ms: 0, wait_any_ms: 0, wait_tool_ms: 30000 }
+provider_cache_refresh:
+  enabled: false
+  max_idle_seconds: 300
+# Persistent supervised extensions receive Tau state recursively read-only.
+tau_state_access: read_only
+aliases:
+  providers: {}
+  models: {}
+extensions: {}
+tool_policy:
+  rules:
+    builtin.chatgpt-shell:
+      enable: true
+      when:
+        model_tags:
+          - shell:chatgpt
+      disable_tool_tags:
+        - shell:*
+      enable_tool_tags:
+        - shell:edit:apply_patch
+        - shell:read:image
+        - shell:exec:shell_command
+        - shell:workdir
+        - shell:lock
+agents:
+  default_role: engineer
+  effort: 0.5
+  web_tools:
+    allowed_domains: null
+    search:
+      unavailable: omit
+      candidates:
+        native:
+          enable: true
+          priority: 10
+          kind: model_provider
+          access: cached
+        external:
+          enable: true
+          priority: 20
+          kind: tool
+          tool: websearch_hybrid_search
+    fetch:
+      unavailable: omit
+      candidates:
+        external:
+          enable: true
+          priority: 20
+          kind: tool
+          tool: websearch_hybrid_fetch
+  compactions:
+    default:
+      threshold: context_limit_safe
+      when:
+        at: before_inference
+  id_template: "{{random_alphanumeric 6}}"
+  # Only an explicit task supplies an initial display name. Persisted names,
+  # including role-derived names written by older versions, remain authoritative.
+  display_name_template: "{{#if task_name_present}}{{task_name}}{{/if}}"
+  prompt_fragments:
+    - name: agent.available-roles
+      priority: 800
+      text: |-
+        {{#if (tool_available capabilities.tools "agent_start")~}}
+        {{#if agent_context.delegate_roles~}}
+        ## Available agent roles for `agent_start`
+
+        {{#each agent_context.delegate_roles~}}
+        {{#each (sort value by="name")~}}
+        * `{{name}}` - "{{description}}"
+        {{/each~}}
+        {{/each~}}
+        {{/if~}}
+        {{/if~}}
+  role_groups:
+    engineer:
+      prompt_fragments:
+        - name: engineer.instructions
+          priority: 15
+          text: |-
+            You are an expert software engineering agent. You use good judgment and experience to build quality software, investigate and fix issues, and produce solid designs.
+
+            ## Best practices
+
+            You follow good engineering practices:
+
+            * do not take shortcuts,
+            * follow existing patterns of the project you're working on,
+            * always be honest,
+            * prefer straightforward and conservative solutions, as long as they are correct.
+
+      roles:
+        engineer-junior:
+          order: 10
+          description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
+          effort: decrease:0.25
+        engineer:
+          order: 20
+          description: Capable individual contributor. Good default for most tasks.
+        engineer-senior:
+          order: 30
+          effort: increase:0.25
+          description: Slow and expensive individual contributor using higher reasoning. Use only for the hardest tasks without prior planning, or when specifically requested.

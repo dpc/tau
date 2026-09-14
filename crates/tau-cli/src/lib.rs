@@ -361,8 +361,8 @@ pub(crate) fn mint_short_id(prefix: &str) -> String {
 // `tau init`
 // ---------------------------------------------------------------------------
 
-const SAMPLE_CLI: &str = include_str!("../../../config/cli.yaml");
-const SAMPLE_HARNESS: &str = include_str!("../../../config/harness.yaml");
+const SAMPLE_CLI: &str = include_str!("../release-resources/cli.yaml");
+const SAMPLE_HARNESS: &str = include_str!("../release-resources/harness.yaml");
 
 fn run_init(force: bool) -> Result<(), CliError> {
     let Some(dir) = tau_config::settings::config_dir() else {

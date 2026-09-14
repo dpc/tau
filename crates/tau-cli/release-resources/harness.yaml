@@ -1,0 +1,287 @@
+# Provider extensions publish the live model list and model metadata at
+# runtime. Harness config owns role defaults and extension settings.
+# Use `:model <provider>/<model>` to switch the selected agent model and
+# `:role ...` to edit persisted role overrides.
+#
+# Optional startup-only aliases rewrite the provider and exact model suffix of
+# configured role models. They do not apply to interactive commands.
+# Set false to hide the one-line Tau onboarding notice at interactive startup.
+# show_introduction_notice: true
+#
+# aliases:
+#   providers:
+#     subscription: codex-work
+#   models:
+#     current: gpt-5.4
+
+# Agent settings, role defaults, and role groups live under `agents:`.
+#
+# Optional prompt fragments applied to every role. Fragments are rendered as
+# Handlebars templates and sorted by priority together with role-, tool-, and
+# extension-provided fragments. Templates can use `agent_id` when rendering a
+# concrete agent prompt, `session.cwd`, `cwd`, `working_directory` (`present`,
+# `path`, `basename`, `ancestors`), `eq`, and `starts_with` for project-specific
+# conditionals. `session.cwd` is the harness process directory captured at
+# startup; `cwd` and `working_directory` instead describe the mutable per-agent
+# shell workdir. `tau dev print-prompt` role previews use the stable fake
+# `dev-preview-agent` id, but reusable agent-id text should still be guarded
+# with `{{#if agent_id}}`. Priorities below
+# 100 render before generated context such as skills and AGENTS.md.
+# agents:
+#   # Roles default enabled. Set false to disable all, then use narrower group or
+#   # role `enable: true` settings to retain selected roles.
+#   enable: false
+#   prompt_fragments:
+#     - name: user.short-plain-style
+#       priority: 65
+#       text: Keep answers short and plain, using only simple words.
+#   # Optional exact skill names required by every role.
+#   required_skills: [company-policy]
+#   # Optional named internal prompts fired after provider-reported input usage
+#   # strictly exceeds the threshold. Committed deliveries appear in UI history
+#   # as `□ <configured message>` in the dedicated internal-notice style. `enable`
+#   # defaults true; `message` defaults to asking the agent to use `compact` after
+#   # its current task. Every new alert requires a positive threshold, and an
+#   # explicit message cannot be empty.
+#   context_size_alerts:
+#     compact-soon:
+#       threshold: 160000
+#       enable: true
+#       message: "Use the `compact` tool after finishing your current task."
+
+# Optional startup role. If omitted, Tau starts on the first role in
+# `agents.role_groups` order after roles inside that group are sorted by `order` and
+# then role name. If the named role is missing, Tau warns and falls back to that
+# first role.
+#   default_role: engineer
+
+# `default_profile` optionally selects one fallback after base config/drop-ins
+# and before CLI overrides. `--profile` and `TAU_PROFILE` take precedence. Omit
+# it (or set it to `null`) to load only base configuration when neither explicit
+# selector is present. ASCII spaces/tabs around its name are ignored, but it
+# cannot use comma-separated syntax.
+# Profiles do not inherit from the fallback; `--profile focused,review` applies
+# only `profiles.focused` then `profiles.review`.
+# default_profile: default
+# profiles:
+#   default:
+#     agents:
+#       effort: high
+#   focused:
+#     agents:
+#       default_role: engineer-senior
+
+# Optional grouped role defaults. Role names are globally unique across all
+# groups. Tab cycles roles within the current group; Shift-Tab cycles to the
+# next role group. Group-level fields are defaults for every role in `roles`.
+# Per-role `order` sorts roles within a group before role name; unordered roles
+# sort after ordered roles by name.
+# `description` is shown in `:role ...` completions.
+# `inference_compaction` controls provider-inline and reactive-overflow
+# compaction. Named `compactions` policies control harness-scheduled standalone
+# compaction. Both accept provider defaults or explicit threshold/reserve forms.
+# `context_size_alerts` entries inherit field-by-field from `agents` through the
+# role group to each role, so a specific role can set `enable: false`.
+# Per-role `prompt_fragments` add instructions only for that role.
+# `prompt_override` selects a system prompt template. `tools` and `disable_tools`
+# Prompt fragments may use strict capability helpers, for example:
+# `{{#if (tool_available capabilities.tools "web_search")}}Use web search.{{/if}}`
+# `extension_enabled` tests final startup intent and `extension_active` tests
+# current Ready state. Valid absent names are false; malformed inputs are errors.
+# customize internal tool availability for the role. `required_skills` declares
+# exact skills that must be model-loadable or the role
+# is disabled with a configuration notice.
+#   role_groups:
+#     engineer:
+#       prompt_fragments:
+#         - name: engineer.careful
+#           priority: 80
+#           text: You are a careful coding agent.
+#       roles:
+#         engineer-junior:
+#           order: 10
+#           effort: low
+#         engineer:
+#           order: 20
+#           description: Balanced coding engineer.
+#           model: chatgpt/gpt-5.6-sol
+#           inference_compaction: { reserve: 25000 }
+#           compactions:
+#             default: { reserve: 25000 }
+#           tools: [read, grep]
+#           disable_tools: [shell]
+#           required_skills: [project-review-process]
+#         engineer-senior:
+#           order: 30
+#           effort: xhigh
+#         old-role:
+#           enable: false  # hide a lower-layer or built-in role
+
+# Optional built-in extension overrides. Extension names may contain only ASCII
+# letters, digits, `_`, and `-` so they are safe for state paths and dotted
+# --harness-config overrides.
+# extensions:
+#   core-shell:
+#     config:
+#       shell:
+#         # Defaults true. Setting false permits the protected pagers to prompt.
+#         non_interactive_pager: true
+#   provider-builtin:
+#     enable: false
+#   test-dummy:
+#     enable: true
+#   # Install tau-ext-swarm separately and make it available through PATH.
+#   # Publish this Tau session to one identity-pinned Tau Swarm server.
+#   # Starting the extension does not expose its tools. Opt selected roles into
+#   # `enable_tool_groups: [swarm]` under `agents.role_groups` separately. With
+#   # `tool_prefix: work`, use the final group name `work_swarm` instead.
+#   std-swarm:
+#     enable: true
+#     require: false
+#     secrets:
+#       swarm_worker_secret: {}
+#     config:
+#       endpoint:
+#         peer_id: "kix..."
+#         # relay_url: "https://relay.example.net"
+#         # direct_addresses: ["203.0.113.10:11204"]
+#       credential_id: "tau-worker-production"
+#       credential_secret: "swarm_worker_secret"
+#       # hostname: "builder-01"
+#   # Install dpc-tau-ext-telegram separately and make tau-ext-telegram
+#   # available through PATH before enabling this instance.
+#   std-telegram:
+#     enable: true
+#     secrets:
+#       telegram_bot_token: {}
+#     config:
+#       bot_token_secret: telegram_bot_token
+#       allowed_user_ids: [123456789]
+#       # Optional for a private chat; if omitted, send /start to link it.
+#       chat_id: 123456789
+#   std-zulip:
+#     enable: true
+#     secrets:
+#       zulip_bot_email: {}
+#       zulip_api_key: {}
+#       zulip_identity_key: {}
+#     config:
+#       site: https://chat.example.com
+#       bot_email_secret: zulip_bot_email
+#       api_key_secret: zulip_api_key
+#       identity_key_secret: zulip_identity_key
+#       offline_message_catch_up: false
+#       allowed_user_ids: [42]
+#       direct_messages: { receive: all_messages }
+#       conversations:
+#         - { name: Operations, topic: deploy, receive: mentions_only, proactive_send: true }
+#   # Install tau-ext-xmpp separately and make it available through PATH.
+#   std-xmpp:
+#     enable: true
+#     secrets:
+#       xmpp_password: {}
+#     config:
+#       jid: tau@example.org
+#       password_secret: xmpp_password
+#       allowed_jids: [me@example.org]
+#       default_recipient: me@example.org
+#       routing: { mode: muc } # or: { mode: direct_resource }
+#       muc:
+#         # Domain-only MUC service JID.
+#         service: conference.example.org
+#         # Recommended: configure Prosody/MUC defaults to create hidden,
+#         # members-only rooms that expose real JIDs to Tau.
+#         expose_real_jids: true
+#         # Set true only when server-side room membership is the intended
+#         # authorization boundary and real JIDs are intentionally hidden.
+#         trust_muc_membership: false
+#         # Send XEP-0045 mediated invites plus a direct fallback notice.
+#         invite_default_recipient: true
+#       # Default: 16384 bytes. Valid range: 1..=131072 (128 KiB).
+#       max_message_bytes: 16384
+#   # Install tau-ext-pim separately and make it available through PATH.
+#   std-pim:
+#     enable: true
+#     # Secret names may contain ASCII letters, digits, '.', '_' and '-'.
+#     # Values come from <state_dir>/secrets/<name>.yaml or one-shot
+#     # TAU_SECRET_<NAME> environment variables (suffixes are lowercased and
+#     # removed from the harness environment after startup).
+#     secrets:
+#       personal_mail_password: {}        # required by default
+#       google_mail_desktop_client_id:
+#         optional: true
+#       google_mail_desktop_client_secret:
+#         optional: true
+#       google_mail_refresh_token:
+#         optional: true
+#       personal_calendar_ics_url: {}
+#       google_calendar_device_client_id:
+#         optional: true
+#       google_calendar_device_client_secret:
+#         optional: true
+#       google_calendar_refresh_token:
+#         optional: true
+#       backup_mail_password:
+#         optional: true                  # omit when no value is configured
+#     config:
+#       email:
+#         enable: true
+#         accounts:
+#           - id: personal
+#             enable: true
+#             from: "Me <me@example.com>"
+#             imap: { host: imap.example.com, login: me@example.com }
+#             smtp: { host: smtp.example.com, login: me@example.com }
+#             auth:
+#               method: password
+#               # Replace legacy auth.password_env/auth.command/password_command
+#               # with auth.password_secret plus the declaration above.
+#               password_secret: personal_mail_password
+#             # Gmail OAuth2/XOAUTH2 alternative:
+#             # auth:
+#             #   method: oauth2
+#             #   provider: google
+#             #   client_id_secret: google_mail_desktop_client_id
+#             #   client_secret_secret: google_mail_desktop_client_secret
+#             #   # Use a Google OAuth client of type "Desktop app".
+#             #   # Omit refresh_token_secret, run start, open the URL, then paste
+#             #   # the full failed loopback address-bar URL into finish:
+#             #   #   :email auth google start personal
+#             #   #   :email auth google finish personal http://127.0.0.1:54321/?state=...&code=...
+#             #   # refresh_token_secret: google_mail_refresh_token
+#       calendar:
+#         enable: true
+#         accounts:
+#           - id: personal-calendar
+#             enable: true
+#             backend:
+#               type: ics_feed
+#               url_secret: personal_calendar_ics_url
+#             calendars:
+#               default: main
+#               allow: [main]
+#           # Google read/write support can use :calendar auth google to
+#           # store OAuth in private extension state, or a manual refresh-token
+#           # secret for power users. Mutations queue under :calendar change by
+#           # default.
+#           - id: google-calendar
+#             enable: false
+#             backend:
+#               type: google
+#               client_id_secret: google_calendar_device_client_id
+#               client_secret_secret: google_calendar_device_client_secret
+#               # Use a Google OAuth client of type "TVs and Limited Input devices".
+#               # Omit refresh_token_secret and run:
+#               #   :calendar auth google start google-calendar
+#               #   :calendar auth google finish google-calendar
+#               # refresh_token_secret: google_calendar_refresh_token
+#             calendars:
+#               default: primary
+#               allow: [primary]
+#         policy:
+#           read:
+#             private_events: busy_only
+#             descriptions: approved_only
+#           write:
+#             require_approval: true
+#             max_attendees: 50

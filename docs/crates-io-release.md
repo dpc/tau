@@ -22,16 +22,19 @@ Run the registry-independent metadata and file-selection check:
 ```
 
 It verifies complete package metadata, exact internal version requirements,
-the dependency order below, and `cargo package --list` for every archive. It
-does not claim that an unpublished dependency exists in the registry.
+the dependency order below, and `cargo package --list` for every archive.
+Literal non-test `include_str!` and `include_bytes!` inputs must be present in
+the corresponding archive, and release-owned resource snapshots must match
+their canonical workspace sources byte for byte. It does not claim that an
+unpublished dependency exists in the registry.
 
 ## Publication order
 
 The current dependencies-first order is:
 
 ```text
-dpc-tau-actions                  0.1.0 (already published)
-dpc-tau-blocking-notify-channel  0.1.0 (already published)
+dpc-tau-actions                  0.1.0
+dpc-tau-blocking-notify-channel  0.1.0
 dpc-tau-themes                   0.1.0
 dpc-tau-util-fs-err              0.1.0
 dpc-tau-vcr                      0.1.0
@@ -65,8 +68,11 @@ dpc-tau-cli                      0.1.0
 dpc-tau                          0.1.0
 ```
 
-The first two versions are already published and their packaged source still
-matches the current leaf-crate source. The other 31 versions require upload.
+As of September 14, 2026, the first 28 versions through
+`dpc-tau-ext-provider-builtin` are published. Their registry archives match the
+prepared release source. The following five versions remain absent:
+`dpc-tau-harness`, `dpc-tau-harness-tools`, `dpc-tau-test-support`,
+`dpc-tau-cli`, and `dpc-tau`.
 
 The published `dpc-tau-proto` and `dpc-tau-client` `0.4.0` archives cannot be
 reused for this source. The workspace protocol is now 7.2. Protocol 7.1 added
@@ -105,7 +111,10 @@ After all crates resolve, run:
 cargo install --locked dpc-tau --version '=0.1.0'
 ```
 
-Only after those registry checks succeed should the exact source commit receive
-and push tag `v0.1.0`. The tag-triggered workflow then creates the GitHub
-release and native package assets. Update the site and public installation
-links only after verifying those final artifacts.
+The public `v0.1.0` tag and GitHub release already identify the original
+prepared source commit `79463b83114722bde95423014c58c39c416b70da`. Never move,
+force, recreate, or push that tag as part of archive repair. Publishing the five
+remaining `0.1.0` archives from a newer repair commit creates an intentional
+source split and therefore requires explicit release approval before upload.
+After an approved recovery publishes all five, rerun the registry checks above
+and verify the existing release assets; do not run the tag step again.

@@ -1951,7 +1951,7 @@ fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
 
 fn delegate_bootstrap_prefix(self_agent_id: &str) -> String {
     format!(
-        include_str!("../../tau-harness/src/harness/prompts/delegate_prefix.md"),
+        include_str!("../release-resources/delegate_prefix.md"),
         self_agent_id = self_agent_id,
         prompt = "",
     )

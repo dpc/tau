@@ -268,10 +268,10 @@ const SELF_KNOWLEDGE_BUILD_DATE_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_BUILD_DATE__
 const SELF_KNOWLEDGE_CONFIG_SKILL_NAME: &str = "tau-self-knowledge-config";
 const SELF_KNOWLEDGE_PIM_SKILL_NAME: &str = "tau-self-knowledge-ext-pim";
 const SELF_KNOWLEDGE_HARNESS_CONFIG: &str =
-    include_str!("../../tau-config/config/built-in.harness.yaml");
-const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/built-in.cli.yaml");
+    include_str!("../release-resources/built-in.harness.yaml");
+const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../release-resources/built-in.cli.yaml");
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
-    include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-ext-pim.harness.yaml");
+    include_str!("../release-resources/tau-self-knowledge-ext-pim.harness.yaml");
 
 /// Build the model-visible provenance notice from the shared outer-family
 /// registry so its family list cannot drift from projection recognition.
@@ -1378,7 +1378,7 @@ fn render_built_in_self_knowledge_content(
 
 fn render_self_knowledge_config_content() -> std::borrow::Cow<'static, str> {
     path_std_borrow::Cow::Owned(format!(
-        include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-config.md"),
+        include_str!("../release-resources/tau-self-knowledge-config.md"),
         XDG_RUNTIME_DIR = "{XDG_RUNTIME_DIR}",
         harness_config = SELF_KNOWLEDGE_HARNESS_CONFIG,
         ui_config = SELF_KNOWLEDGE_UI_CONFIG,
@@ -1387,7 +1387,7 @@ fn render_self_knowledge_config_content() -> std::borrow::Cow<'static, str> {
 
 fn render_self_knowledge_pim_content() -> std::borrow::Cow<'static, str> {
     path_std_borrow::Cow::Owned(format!(
-        include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-ext-pim.md"),
+        include_str!("../release-resources/tau-self-knowledge-ext-pim.md"),
         pim_config = SELF_KNOWLEDGE_PIM_CONFIG,
     ))
 }

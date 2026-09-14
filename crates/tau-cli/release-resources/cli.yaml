@@ -1,0 +1,38 @@
+# CLI display settings
+# greeting: true
+# show_logo: true
+# bar_cursor: true
+# Disable terminal mouse reporting while Tau owns the CLI UI. The terminal keeps
+# wheel scrolling, text selection, and link handling native.
+# mouse: false
+# Send full prompt buffers in ui.prompt_draft liveness events. Disabled by
+# default so live subscribers and best-effort events.jsonl do not receive
+# in-progress prompt content.
+# send_prompt_draft_content: false
+# prompt_symbol: "◯"
+# submitted_prompt_symbol: "⬤"
+# notice_level: info  # critical|warning|info|debug|trace
+# redraw_history_size: 2000  # rendered history lines replayed on full redraw
+# osc8_links: true  # false shows inline-link targets for terminal URL detection
+# Optional prompt completion rules keyed by word prefix.
+# First-non-whitespace `:` command completion is intrinsic and cannot be
+# overridden here.
+# completions:
+#   "@": complete_agents
+#   "&": complete_sessions
+#   "./": complete_path
+#   "../": complete_path
+#   "/": complete_path
+#   "~": complete_path
+#   "~/": complete_path
+#   "#/": complete_with_command fzf some arguments
+
+# Optional keybinding overrides. Merge on top of built-in defaults.
+# bind:
+#   C-b:
+#     action: agent-pick
+#   C-g:
+#     action: shell-prompt-insert
+#     command: git status --short
+#     trim: true
+{}

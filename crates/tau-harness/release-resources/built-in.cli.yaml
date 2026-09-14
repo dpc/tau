@@ -1,0 +1,30 @@
+greeting: true
+show_logo: true
+bar_cursor: true
+mouse: true
+send_prompt_draft_content: false
+prompt_symbol: "◯"
+submitted_prompt_symbol: "⬤"
+show_diff: false
+show_thinking: true
+show_turn_stats: false
+redraw_counter: false
+redraw_history_size: 2000
+osc8_links: true
+show_ui_io: false
+show_tools: full
+show_messages: all-full
+show_internal_prompts: false
+notice_level: info
+show_status: all
+show_prompt_scroll_indicator: true
+theme: tau-plain-dark
+completions:
+  "@": complete_agents
+  "&": complete_sessions
+  "./": complete_path
+  "../": complete_path
+  "/": complete_path
+  "~": complete_path
+  "~/": complete_path
+bind: {}
