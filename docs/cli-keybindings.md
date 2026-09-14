@@ -40,12 +40,15 @@ sample `config/cli.yaml`.
 | `C-y` | `shell-prompt-insert` | Pick a jj change or git commit with `fzf` and insert its id at the cursor. |
 | `C-o`, `C-g` | `shell-prompt-edit` | Edit the current prompt with `$TAU_EDITOR`, falling back through `$EDITOR`, `$VISUAL`, `hx`, `vim`, `vi`, then `nano`. |
 | `C-O` | `shell-prompt-edit-chat` | Edit the prompt with the complete durable Markdown conversation below the trailer marker. Terminals that report bare `^O` without Shift keep ordinary `C-o`; use `:edit-prompt-chat` when the distinction is unavailable. |
-## Built-in file completion triggers
+## Built-in prompt completion triggers
 
-Typing any of the following prefixes at the prompt triggers inline path completion:
+Typing any of the following word-leading prefixes at the prompt triggers inline
+completion:
 
 | Prefix | Behavior |
 | --- | --- |
+| `@` | Active agent ID completion. |
+| `&` | Running session ID completion, with each session's project root shown as context. A token containing `/` is left unchanged so completion cannot erase an existing `/@agent` suffix. |
 | `./` | Directory prefix matching in the current directory. Configure `complete_path_fuzzy` to prefer fuzzy git-tracked/unignored file matches for this prefix. |
 | `../` | Directory prefix matching in the parent directory. |
 | `:` | Intrinsic command/action completion when it is the first non-whitespace character; `::text` submits literal `:text`. |
@@ -53,8 +56,8 @@ Typing any of the following prefixes at the prompt triggers inline path completi
 | `~` | Directory prefix matching in the home directory; accepting it retains the tilde form. |
 | `~/` | Directory prefix matching in the home directory. Previewing or cycling keeps `~/...`; explicit acceptance replaces only the completed token with the full `$HOME` path. |
 
-`@...` is intentionally not a file completion trigger; it remains reserved for
-agent mention completion.
+`@...` and `&...` are ordinary prompt text. Completion inserts the exact ID and
+does not add routing behavior or a trailing space.
 
 
 ## Built-in editing keys

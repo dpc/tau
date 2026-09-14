@@ -19,6 +19,7 @@ mod event_message_tests;
 #[cfg(test)]
 mod recorded_line_routing_tests;
 mod renderer_scheduler;
+mod session_completion;
 
 #[cfg(test)]
 mod ui_io_tests;
@@ -36,6 +37,7 @@ use std::time::{Duration, Instant};
 use cold_attach_stager::{ColdAttachStager, renderer_event_from_delivery};
 use delivery_memory::{DeliveryMemoryCut, DeliveryMemoryTracker};
 use renderer_scheduler::{LocalRendererSender, RemoteRendererSender, RendererCommandScheduler};
+use session_completion::SessionCompletion;
 use tau_cli_term::RendererDeliveryId;
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
@@ -1567,6 +1569,8 @@ fn run_chat_session(
     );
     completion_data
         .set_agent_mention_completer(build_agent_mention_completer(input_routing.clone()));
+    let session_completion = SessionCompletion::new(session_id.clone(), handle.clone());
+    completion_data.set_session_completer(session_completion.completer());
     completion_data.set_arg_completer(
         tau_cli_term::CommandName::new(":theme"),
         build_theme_arg_completer(dirs.clone()),
@@ -1711,6 +1715,7 @@ fn run_chat_session(
         exit,
         local_disconnect_started,
     );
+    drop(session_completion);
     // HighTerm owns raw mode and performs its final repaint on Drop. Joining
     // renderer workers alone does not restore the terminal.
     drop(term);

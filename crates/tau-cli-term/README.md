@@ -25,7 +25,11 @@ both raw editable history and the high-level history-search list.
 
 `tau-cli` owns application behavior. High-level binding actions unknown to this crate are surfaced as `Event::Action(String)` and interpreted by `tau-cli`; this crate should not interpret application actions or provider/role behavior.
 
-Tau-specific prompt content can still be supplied through explicit hooks. For example, `CompletionData::set_agent_mention_completer` lets the application provide `@` mention candidates while this crate owns only token detection, replacement ranges, and menu presentation.
+Tau-specific prompt content can still be supplied through explicit hooks. For
+example, `CompletionData::set_agent_mention_completer` and
+`CompletionData::set_session_completer` let the application provide `@` agent
+and `&` session candidates while this crate owns only token detection,
+replacement ranges, and menu presentation.
 
 ## Binding action model
 

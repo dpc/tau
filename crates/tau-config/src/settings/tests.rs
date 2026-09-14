@@ -1703,6 +1703,10 @@ fn cli_settings_user_completion_keeps_built_in_prefixes() {
         Some("complete_agents")
     );
     assert_eq!(
+        s.completions.get("&").map(String::as_str),
+        Some("complete_sessions")
+    );
+    assert_eq!(
         s.completions.get("~").map(String::as_str),
         Some("complete_path")
     );

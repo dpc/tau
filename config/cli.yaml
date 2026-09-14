@@ -19,6 +19,7 @@
 # overridden here.
 # completions:
 #   "@": complete_agents
+#   "&": complete_sessions
 #   "./": complete_path
 #   "../": complete_path
 #   "/": complete_path

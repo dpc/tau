@@ -1161,7 +1161,8 @@ pub fn list_running_sessions() -> io::Result<Vec<RunningSession>> {
 /// contended claims.
 ///
 /// Claim-directory traversal remains strict. This tolerant responder policy is
-/// intended for explicit diagnostic listing, not implicit target selection.
+/// intended for explicit diagnostic listing and advisory user-selected
+/// completion, not implicit target selection.
 pub fn list_running_sessions_tolerant() -> io::Result<RunningSessionSnapshot> {
     let deadline = Instant::now() + DISCOVERY_TIMEOUT;
     let permit = DiscoveryCallPermit::try_acquire()

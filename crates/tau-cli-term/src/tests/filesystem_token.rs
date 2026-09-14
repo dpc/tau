@@ -260,6 +260,69 @@ fn at_token_completes_agent_mentions_in_prompt_text() {
     assert_eq!(cands[0].replacement, "ask @worker for help");
 }
 
+/// Session completion replaces only a word-leading ampersand token and keeps
+/// ordinary surrounding prompt text unchanged.
+#[test]
+fn ampersand_token_completes_running_session_ids() {
+    let data = CompletionData::new();
+    data.set_session_completer(path_std_sync::Arc::new(|args| {
+        assert_eq!(args, ["roj"]);
+        vec![crate::completion::CompletionItem::new(
+            "project-main",
+            "/work/project",
+        )]
+    }));
+    let buffer = "ask &roj about this";
+    let cursor = "ask &roj".len();
+
+    let candidates = build_candidates(&[], &data, buffer, cursor);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].label, "project-main");
+    assert_eq!(candidates[0].description, "/work/project");
+    assert_eq!(candidates[0].replacement, "ask &project-main about this");
+    assert_eq!(candidates[0].cursor, "ask &project-main".len());
+}
+
+/// The named session rule parses and participates in the built-in rule set.
+#[test]
+fn complete_sessions_rule_parses_and_is_built_in() {
+    assert!(matches!(
+        CompletionRule::parse("&", "complete_sessions").map(|rule| rule.kind),
+        Some(crate::completion::CompletionRuleKind::Sessions)
+    ));
+    let data = CompletionData::new();
+    data.set_session_completer(path_std_sync::Arc::new(|_| {
+        vec![crate::completion::CompletionItem::plain("session-one")]
+    }));
+    assert_eq!(build_candidates(&[], &data, "&", 1).len(), 1);
+}
+
+/// Session completion never treats an embedded ampersand as a token trigger and
+/// never erases a remote-agent suffix from a session address.
+#[test]
+fn session_completion_rejects_embedded_tokens_and_remote_agent_suffixes() {
+    let data = CompletionData::new();
+    data.set_session_completer(path_std_sync::Arc::new(|_| {
+        vec![crate::completion::CompletionItem::plain("project-main")]
+    }));
+
+    assert!(build_candidates(&[], &data, "x&proj", "x&proj".len()).is_empty());
+    assert!(build_candidates(&[], &data, "&proj/@agent", "&proj".len()).is_empty());
+    assert!(build_candidates(&[], &data, "&proj/@agent", "&proj/@agent".len()).is_empty());
+}
+
+/// Intrinsic command mode retains precedence over session completion in command
+/// arguments.
+#[test]
+fn command_mode_does_not_offer_session_completion() {
+    let data = CompletionData::new();
+    data.set_session_completer(path_std_sync::Arc::new(|_| {
+        vec![crate::completion::CompletionItem::plain("project-main")]
+    }));
+    assert!(build_candidates(&[], &data, ":anything &proj", 15).is_empty());
+}
+
 /// Preserves indentation while completing a leading command token.
 #[test]
 fn leading_whitespace_command_preserves_prefix() {

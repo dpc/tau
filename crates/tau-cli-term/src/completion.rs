@@ -136,6 +136,7 @@ struct CompletionInner {
     dynamic_arg_completers: HashMap<CommandName, ArgCompleter>,
     dynamic_commands: Vec<CommandCompletion>,
     agent_mention_completer: Option<ArgCompleter>,
+    session_completer: Option<ArgCompleter>,
 }
 
 /// Thread-safe storage for dynamic command and argument completions.
@@ -258,11 +259,28 @@ impl CompletionData {
             .agent_mention_completer = Some(completer);
     }
 
+    /// Registers prompt-text completion for running sessions typed as
+    /// `&<partial-session-id>`.
+    pub fn set_session_completer(&self, completer: ArgCompleter) {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .session_completer = Some(completer);
+    }
+
     fn get_agent_mention_completer(&self) -> Option<ArgCompleter> {
         self.inner
             .lock()
             .expect("completion data lock")
             .agent_mention_completer
+            .clone()
+    }
+
+    fn get_session_completer(&self) -> Option<ArgCompleter> {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .session_completer
             .clone()
     }
 
@@ -288,6 +306,8 @@ impl CompletionData {
 pub enum CompletionRuleKind {
     /// Complete active agent mentions from harness-provided agent data.
     Agents,
+    /// Complete running session identifiers from application-provided data.
+    Sessions,
     /// Complete filesystem paths by reading the matching directory.
     Path,
     /// Complete filesystem paths, preferring fuzzy git-tracked file matches for
@@ -370,6 +390,8 @@ impl From<&CompletionRule> for RuntimeCompletionRule {
 enum RuntimeCompletionRuleKind {
     /// Complete active agent mentions from harness-provided agent data.
     Agents,
+    /// Complete running session identifiers from application-provided data.
+    Sessions,
     /// Complete filesystem paths by reading the matching directory.
     Path,
     /// Complete filesystem paths, preferring fuzzy git-tracked file matches.
@@ -384,6 +406,7 @@ impl From<&CompletionRuleKind> for RuntimeCompletionRuleKind {
     fn from(kind: &CompletionRuleKind) -> Self {
         match kind {
             CompletionRuleKind::Agents => Self::Agents,
+            CompletionRuleKind::Sessions => Self::Sessions,
             CompletionRuleKind::Path => Self::Path,
             CompletionRuleKind::PathFuzzy => Self::PathFuzzy,
             CompletionRuleKind::Actions => Self::Actions,
@@ -403,6 +426,7 @@ impl CompletionRule {
         let name = parts.next()?;
         let kind = match name {
             "complete_agents" => CompletionRuleKind::Agents,
+            "complete_sessions" => CompletionRuleKind::Sessions,
             "complete_path" => CompletionRuleKind::Path,
             "complete_path_fuzzy" => CompletionRuleKind::PathFuzzy,
             "complete_actions" => CompletionRuleKind::Actions,
@@ -450,6 +474,7 @@ impl CompletionRules {
     pub fn built_in() -> Self {
         Self::new(vec![
             CompletionRule::parse("@", "complete_agents").expect("valid built-in completion"),
+            CompletionRule::parse("&", "complete_sessions").expect("valid built-in completion"),
             CompletionRule::parse("./", "complete_path").expect("valid built-in completion"),
             CompletionRule::parse("../", "complete_path").expect("valid built-in completion"),
             CompletionRule::parse("/", "complete_path").expect("valid built-in completion"),
@@ -683,6 +708,7 @@ fn build_candidates_with_home_and_rules_at_cwd(
 
     match &rule.kind {
         CompletionRuleKind::Agents => build_agent_mention_candidates(data, &token, &rule.prefix),
+        CompletionRuleKind::Sessions => build_session_candidates(data, &token, &rule.prefix),
         CompletionRuleKind::Path => {
             build_filesystem_candidates_with_home(&token, home_dir, false, working_dir)
         }
@@ -790,6 +816,8 @@ fn build_action_token_candidates(
 }
 struct PathToken<'a> {
     prefix: &'a str,
+    /// Bytes in the current token after the cursor.
+    suffix: &'a str,
     before: &'a str,
     after: &'a str,
 }
@@ -813,9 +841,45 @@ fn word_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
         .unwrap_or(buffer.len());
     Some(PathToken {
         prefix: &buffer[token_start..cursor],
+        suffix: &buffer[cursor..token_end],
         before: &buffer[..token_start],
         after: &buffer[token_end..],
     })
+}
+
+fn build_session_candidates(
+    data: &CompletionData,
+    token: &PathToken<'_>,
+    trigger_prefix: &str,
+) -> Vec<Candidate> {
+    if token.prefix.contains('/') || token.suffix.contains('/') {
+        return Vec::new();
+    }
+    let Some(completer) = data.get_session_completer() else {
+        return Vec::new();
+    };
+    let partial = token
+        .prefix
+        .strip_prefix(trigger_prefix)
+        .unwrap_or(token.prefix);
+    completer(&[partial])
+        .into_iter()
+        .map(|item| {
+            let accepted = format!("{trigger_prefix}{}", item.value);
+            replace_candidate(
+                Candidate {
+                    label: item.value,
+                    description: item.description,
+                    replacement: String::new(),
+                    cursor: 0,
+                    acceptance: None,
+                },
+                token.before,
+                &accepted,
+                token.after,
+            )
+        })
+        .collect()
 }
 fn build_agent_mention_candidates(
     data: &CompletionData,

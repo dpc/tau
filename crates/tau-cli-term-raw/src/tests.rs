@@ -6949,6 +6949,116 @@ fn completion_refresh_requeries_an_open_menu_on_the_input_owner() {
     );
 }
 
+/// A guarded background refresh opens a cold menu only while the captured
+/// completion interaction remains current.
+#[test]
+fn guarded_completion_refresh_opens_cold_menu_for_current_generation() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_completion_source(Some(Box::new(|buffer: &str, _cursor: usize| {
+        (buffer == "&")
+            .then(|| Candidate {
+                label: "session-one".to_owned(),
+                description: "/work/one".to_owned(),
+                replacement: "&session-one".to_owned(),
+                cursor: "&session-one".len(),
+                acceptance: None,
+            })
+            .into_iter()
+            .collect()
+    })));
+    handle.set_buffer("&".to_owned(), 1);
+    let generation = handle.completion_refresh_generation();
+
+    handle.request_completion_refresh_if_generation(generation);
+
+    assert!(matches!(
+        term.get_next_event().expect("guarded refresh"),
+        Event::CompletionRefresh
+    ));
+    assert_eq!(
+        handle
+            .completion_state()
+            .expect("completion menu")
+            .candidates[0]
+            .label,
+        "session-one"
+    );
+}
+
+/// Guarded refreshes cannot reopen a dismissed interaction or disturb an active
+/// candidate preview and its Escape baseline.
+#[test]
+fn guarded_completion_refresh_skips_stale_and_previewed_interactions() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_completion_source(Some(Box::new(|buffer: &str, _cursor: usize| {
+        (buffer == "&")
+            .then(|| Candidate {
+                label: "session-one".to_owned(),
+                description: "/work/one".to_owned(),
+                replacement: "&session-one".to_owned(),
+                cursor: "&session-one".len(),
+                acceptance: None,
+            })
+            .into_iter()
+            .collect()
+    })));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('&'),
+            KeyModifiers::NONE,
+        )))
+        .expect("type trigger");
+    assert!(matches!(
+        term.get_next_event().expect("open completion"),
+        Event::BufferChanged
+    ));
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )))
+        .expect("preview candidate");
+    assert!(matches!(
+        term.get_next_event().expect("preview completion"),
+        Event::BufferChanged
+    ));
+    let preview_generation = handle.completion_refresh_generation();
+    handle.request_completion_refresh_if_generation(preview_generation);
+    input_tx
+        .send(RawEvent::FocusChanged { focused: true })
+        .expect("wake after skipped preview refresh");
+    assert!(matches!(
+        term.get_next_event().expect("skip preview refresh"),
+        Event::FocusChanged { focused: true }
+    ));
+    assert_eq!(handle.get_buffer(), "&session-one");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )))
+        .expect("dismiss completion");
+    assert!(matches!(
+        term.get_next_event().expect("dismiss completion"),
+        Event::BufferChanged
+    ));
+    handle.request_completion_refresh_if_generation(preview_generation);
+    input_tx
+        .send(RawEvent::FocusChanged { focused: false })
+        .expect("wake after skipped stale refresh");
+    assert!(matches!(
+        term.get_next_event().expect("skip stale refresh"),
+        Event::FocusChanged { focused: false }
+    ));
+    assert_eq!(handle.get_buffer(), "&");
+}
+
 /// A completion refresh must reuse the outstanding real-terminal reader rather
 /// than spawning a second reader that could race stdin.
 #[test]

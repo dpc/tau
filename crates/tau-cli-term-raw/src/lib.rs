@@ -346,6 +346,12 @@ impl SharedState {
         }
     }
 
+    /// Invalidates guarded asynchronous completion refreshes from older input
+    /// interactions.
+    fn advance_completion_generation(&mut self) {
+        self.editor.completion_generation = self.editor.completion_generation.wrapping_add(1);
+    }
+
     fn alloc_id(&mut self) -> BlockId {
         let id = BlockId(self.layout.next_id);
         self.layout.next_id += 1;
@@ -735,6 +741,7 @@ impl SharedState {
         };
         self.editor.buffer = new_buffer;
         self.write_cursor(new_cursor);
+        self.advance_completion_generation();
         true
     }
 
@@ -749,6 +756,7 @@ impl SharedState {
             self.editor.buffer = menu.original_buffer;
             self.write_cursor(menu.original_cursor);
         }
+        self.advance_completion_generation();
         true
     }
 
@@ -768,6 +776,7 @@ impl SharedState {
             self.editor.buffer.clone_from(&acceptance.replacement);
             self.write_cursor(acceptance.cursor);
         }
+        self.advance_completion_generation();
         true
     }
 
@@ -1518,6 +1527,20 @@ impl TermHandle {
         let _ = self.input_tx.send(InputMessage::RefreshCompletion);
     }
 
+    /// Returns the generation that a background completion owner must preserve
+    /// before requesting a guarded menu refresh.
+    pub fn completion_refresh_generation(&self) -> u64 {
+        self.lock().editor.completion_generation
+    }
+
+    /// Requests a completion refresh only if the input interaction still
+    /// matches `generation` and no candidate is currently previewed.
+    pub fn request_completion_refresh_if_generation(&self, generation: u64) {
+        let _ = self
+            .input_tx
+            .send(InputMessage::RefreshCompletionIfGeneration(generation));
+    }
+
     /// Run `f` while redraw notifications from this handle are suppressed.
     ///
     /// Mutations remain visible in shared state, but redraw requests are marked
@@ -2128,6 +2151,7 @@ impl TermHandle {
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
         st.editor.revision = st.editor.revision.wrapping_add(1);
+        st.advance_completion_generation();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.editor.buffer = text;
         let abandoned_history_nav = st.editor.history_nav.take().is_some();
@@ -2153,6 +2177,7 @@ impl TermHandle {
             return false;
         }
         st.editor.revision = st.editor.revision.wrapping_add(1);
+        st.advance_completion_generation();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.editor.buffer = text;
         let abandoned_history_nav = st.editor.history_nav.take().is_some();
@@ -2172,6 +2197,7 @@ impl TermHandle {
     pub fn recall_prompt_before_current(&self, text: String) {
         let mut st = self.lock();
         st.editor.revision = st.editor.revision.wrapping_add(1);
+        st.advance_completion_generation();
         st.recall_prompt_before_current(text);
     }
 
@@ -2185,6 +2211,7 @@ impl TermHandle {
     pub fn set_buffer_preserving_undo(&self, text: String, cursor: usize) {
         let mut st = self.lock();
         st.editor.revision = st.editor.revision.wrapping_add(1);
+        st.advance_completion_generation();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.editor.buffer = text;
         let abandoned_history_nav = st.editor.history_nav.take().is_some();
@@ -2308,6 +2335,9 @@ pub enum RawEvent {
     Paste(String),
     /// Re-evaluate the completion source without treating it as user input.
     CompletionRefresh,
+    /// Re-evaluate completion only if the captured interaction is still
+    /// current.
+    CompletionRefreshIfGeneration(u64),
 }
 
 enum InputMessage {
@@ -2319,6 +2349,8 @@ enum InputMessage {
     Shutdown,
     /// Wake the input owner to re-evaluate an already-open completion menu.
     RefreshCompletion,
+    /// Wake the input owner for a generation-guarded completion refresh.
+    RefreshCompletionIfGeneration(u64),
     /// A real-terminal reader error that retires the in-flight reader marker.
     RealError(io::Error),
 }
@@ -2671,6 +2703,7 @@ impl Term {
                     {
                         let mut st = self.handle.lock();
                         st.editor.revision = st.editor.revision.wrapping_add(1);
+                        st.advance_completion_generation();
                     }
                     if let Some(event) = self.handle_key(key)? {
                         self.handle.redraw();
@@ -2711,6 +2744,7 @@ impl Term {
                     {
                         let mut st = self.handle.lock();
                         st.editor.revision = st.editor.revision.wrapping_add(1);
+                        st.advance_completion_generation();
                         st.record_undo();
                         let cursor = st.editor.cursor;
                         st.editor.buffer.insert_str(cursor, &text);
@@ -2722,6 +2756,23 @@ impl Term {
                     return Ok(Event::BufferChanged);
                 }
                 RawEvent::CompletionRefresh => {
+                    self.refresh_completion();
+                    self.handle.redraw();
+                    return Ok(Event::CompletionRefresh);
+                }
+                RawEvent::CompletionRefreshIfGeneration(generation) => {
+                    let eligible = {
+                        let st = self.handle.lock();
+                        st.editor.completion_generation == generation
+                            && st
+                                .editor
+                                .completion
+                                .as_ref()
+                                .is_none_or(|menu| menu.selected.is_none())
+                    };
+                    if !eligible {
+                        continue;
+                    }
                     self.refresh_completion();
                     self.handle.redraw();
                     return Ok(Event::CompletionRefresh);
@@ -2781,6 +2832,9 @@ impl Term {
                 Ok(None)
             }
             InputMessage::RefreshCompletion => Ok(Some(RawEvent::CompletionRefresh)),
+            InputMessage::RefreshCompletionIfGeneration(generation) => {
+                Ok(Some(RawEvent::CompletionRefreshIfGeneration(generation)))
+            }
             InputMessage::RealError(error) => {
                 finish_real_reader(&self.real_read_in_flight);
                 Err(error)
