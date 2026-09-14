@@ -1148,15 +1148,11 @@ fn format_compact_duration(duration: std::time::Duration) -> String {
     format!("{}m", duration.as_secs() / 60)
 }
 
-fn response_stats_indicator_for_prompt(state: &PromptState, verbose_mode: bool) -> String {
-    verbose_mode
-        .then(|| {
-            state
-                .provider_response_stats
-                .as_ref()
-                .map(response_stats_indicator_suffix)
-        })
-        .flatten()
+fn response_stats_indicator_for_prompt(state: &PromptState) -> String {
+    state
+        .provider_response_stats
+        .as_ref()
+        .map(response_stats_indicator_suffix)
         .unwrap_or_default()
 }
 
@@ -3372,7 +3368,6 @@ impl EventRenderer {
     fn rerender_live_response_stat_indicators(&mut self) {
         use tau_themes::names;
 
-        let verbose_mode = self.presentation.verbose_mode;
         let updates = self
             .transcript
             .runtime
@@ -3382,7 +3377,7 @@ impl EventRenderer {
             .filter_map(|state| {
                 Some((
                     state.response_block_id?,
-                    response_stats_indicator_for_prompt(state, verbose_mode),
+                    response_stats_indicator_for_prompt(state),
                 ))
             })
             .collect::<Vec<_>>();
@@ -8105,7 +8100,6 @@ impl EventRenderer {
     ) {
         use tau_themes::names;
 
-        let verbose_mode = self.presentation.verbose_mode;
         if let Some(bid) = self
             .transcript
             .runtime
@@ -8122,7 +8116,7 @@ impl EventRenderer {
                     &self.resources.theme,
                     names::AGENT_PENDING,
                     STREAMING_AGENT_RESPONSE_PREFIX.trim_end(),
-                    response_stats_indicator_for_prompt(state, verbose_mode),
+                    response_stats_indicator_for_prompt(state),
                 )
             } else {
                 state.live_response_is_pending_indicator = false;

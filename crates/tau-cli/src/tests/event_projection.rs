@@ -1014,11 +1014,10 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
     assert!(!vt.screen_contains(80, "… (820ms,"));
 }
 
-/// Compact mode must hide both retained in-progress response statistics and a
-/// newly completed turn-stat row, then restore each retained projection in
-/// verbose mode.
+/// Compact mode must retain in-progress response statistics while hiding
+/// completed turn-stat rows, and verbose mode must preserve both projections.
 #[test]
-fn compact_mode_hides_live_and_new_turn_statistics() {
+fn compact_mode_shows_live_but_hides_completed_turn_statistics() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1038,13 +1037,13 @@ fn compact_mode_hides_live_and_new_turn_statistics() {
 
     renderer.toggle_verbose_mode();
     sync(&handle);
-    assert!(!vt.screen_contains(100, "Δ8KB/s"));
+    assert!(vt.screen_contains(100, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
 
     renderer.handle(&Event::ProviderResponseUpdated(
         main_provider_response_stats_update("sp-compact-stats", 20 * 1024, 12 * 1024),
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "Δ8KB/s"));
+    assert!(vt.screen_contains(100, "… (2s, 20KB, Δ8KB/s, 10KB/s)"));
 
     renderer.toggle_verbose_mode();
     sync(&handle);
