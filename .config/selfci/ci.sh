@@ -31,6 +31,11 @@ function job_lint() {
     selfci step fail
   fi
 
+  selfci step start "crates.io package metadata"
+  if ! .config/selfci/check-crates-io-packages.py; then
+    selfci step fail
+  fi
+
   selfci step start "treefmt"
   if ! treefmt --ci ; then
     selfci step fail

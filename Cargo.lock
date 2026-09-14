@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "ciborium",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-proto"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ciborium",
  "dpc-tau-actions",

@@ -34,7 +34,7 @@ tau-proto.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-rustix-v1 = { workspace = true, features = ["fs"] }
+rustix-v1 = { workspace = true, features = ["fs", "std"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util.workspace = true

@@ -20,6 +20,14 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+The protocol `7.2` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
+`0.5.0`, with their unchanged leaf dependencies remaining at
+`dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Since the
+`0.4.0` release, protocol 7.1 added typed inter-session notice policy and
+notice fields, while protocol 7.2 added per-agent effort selection and
+override fields. These accumulated public field and type additions change Rust
+struct construction, so the source API moves to the new `0.5` minor line.
+
 The protocol `7.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.4.0`, with their unchanged leaf dependencies remaining at
 `dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Protocol 7
@@ -62,7 +70,7 @@ compatibility.
 
 ## Release checkpoint
 
-Run the package readiness check before requesting publication:
+The package readiness check verifies the complete SDK archive set:
 
 ```console
 ./.config/selfci/check-sdk-packages.sh
@@ -70,14 +78,16 @@ Run the package readiness check before requesting publication:
 
 The check creates all four package archives, inspects their normalized
 manifests, and builds a small consumer outside the workspace against the exact
-archives. Before the first registry release, the consumer uses temporary Cargo
-patches to stand in for the unpublished packages.
+archives. Its consumer uses temporary Cargo patches unless `--registry` is
+selected.
 
-For the protocol `7.0` release, the leaf versions are already published.
-Dry-run and upload `dpc-tau-proto` `0.4.0`, verify that registry release, then
-dry-run and upload `dpc-tau-client` `0.4.0`. Each `cargo publish --dry-run`
-must immediately precede its upload; do not upload a package whose current
-dry-run fails.
+For the protocol `7.2` release, the leaf versions are already published.
+First dry-run and upload `dpc-tau-proto` `0.5.0`. Cargo cannot package the
+dependent client against an unpublished registry proto without bypassing
+verification, so wait for proto `0.5.0` to resolve. Then run the package
+readiness check, dry-run and upload `dpc-tau-client` `0.5.0`. Each
+`cargo publish --dry-run` must immediately precede its upload; do not upload a
+package whose current dry-run fails.
 
 After the complete set is available, run
 `./.config/selfci/check-sdk-packages.sh --registry` to repeat the exact-version

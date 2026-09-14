@@ -20,7 +20,7 @@ workspace = true
 [dependencies]
 bon.workspace = true
 crossterm.workspace = true
-tau-proto = { package = "dpc-tau-proto", path = "../tau-proto" }
+tau-proto.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
