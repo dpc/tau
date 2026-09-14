@@ -222,6 +222,19 @@ def check_literal_include_regressions() -> None:
             raise SystemExit("literal include regression failed to reject outside archive")
 
 
+def check_crate_local_readmes(packages: dict[str, dict[str, object]]) -> None:
+    """Require package-local README files to be the published package README."""
+    for package_name, package in packages.items():
+        package_root = Path(str(package["manifest_path"])).parent
+        if not (package_root / "README.md").is_file():
+            continue
+        if package["readme"] != "README.md":
+            raise SystemExit(
+                f"{package_name} has a crate-local README.md but package readme is "
+                f'{package["readme"]!r}, expected "README.md"'
+            )
+
+
 def main() -> None:
     """Validate metadata, dependency order, and package file selection."""
     workspace = Path.cwd().resolve()
@@ -236,6 +249,7 @@ def main() -> None:
         ).stdout
     )
     packages = {package["name"]: package for package in metadata["packages"]}
+    check_crate_local_readmes(packages)
     expected = set(PUBLICATION_ORDER)
     actual = set(packages) - EXCLUDED_PACKAGES
     if actual != expected:
