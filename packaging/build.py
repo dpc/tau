@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build manual core candidates locally; requires a native Linux Docker host."""
+"""Build core candidates or trusted tagged releases on a native Linux Docker host."""
 
 import argparse
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ TOOLS = Path(__file__).resolve().parent
 TOOL_FILES = (
     "packaging/build.py", "packaging/inside.py", "packaging/native.py",
     "packaging/build-inputs.json", "packaging/Dockerfile", "packaging/.dockerignore",
-    ".github/workflows/native-candidates.yml",
+    ".github/workflows/native-candidates.yml", ".github/workflows/release.yml",
 )
 
 
@@ -148,7 +148,8 @@ def verify_version(text, version, source_sha, epoch):
         raise ValueError("packaged tau --version does not match clean selected source")
 
 
-def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_attempt):
+def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_attempt,
+          release_tag=None):
     native.require_sha(source_sha)
     native.require_sha(workflow_sha)
     verify_tooling(workflow_sha)
@@ -165,6 +166,8 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
         source = root / "source"
         snapshot(repo, source_sha, source)
         manifest = native.inventory(source, source_sha)
+        if release_tag is not None:
+            native.release_version(release_tag, manifest["core"]["version"])
         logs = root / "logs"
         logs.mkdir()
         try:
@@ -195,7 +198,8 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                 (TOOLS, "/tooling", True), (package_work, "/work", False),
                 (assembly, "/output", False),
             ], ["python3", "/tooling/inside.py", "--source-sha", source_sha,
-                 "--arch", arch, "--maintainer", maintainer],
+                  "--arch", arch, "--maintainer", maintainer]
+                 + (["--release-tag", release_tag] if release_tag else []),
                        logs / "package.log", 300, network=False, user=container_user)
             probe_work = root / "probe-work"
             probe_work.mkdir()
@@ -206,16 +210,28 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
             verify_version(version, manifest["core"]["version"], source_sha,
                            manifest["source_date_epoch"])
             assets = assembly / "packages"
+            basename = (
+                f"tau-{manifest['core']['version']}-{arch}"
+                if release_tag else f"tau-test-{arch}"
+            )
             expected = {"SHA256SUMS", "source-manifest.json",
-                        f"tau-test-{arch}.deb", f"tau-test-{arch}.rpm",
-                        f"tau-test-{arch}.tar.gz"}
+                        f"{basename}.deb", f"{basename}.rpm", f"{basename}.tar.gz"}
             if {p.name for p in assets.iterdir()} != expected:
                 raise ValueError("unexpected package inventory")
             if any(p.is_symlink() or not p.is_file() for p in assets.iterdir()):
                 raise ValueError("package assets must be regular files")
             native.write_json(assets / "build-manifest.json", {
-                "schema": 1, "purpose": "manual-non-release-core-candidate",
+                "schema": 1,
+                "purpose": (
+                    "tagged-github-release" if release_tag
+                    else "manual-non-release-core-candidate"
+                ),
                 "source_sha": source_sha, "workflow_sha": workflow_sha,
+                "release_tag": release_tag,
+                "github_prerelease": (
+                    native.release_is_prerelease(manifest["core"]["version"])
+                    if release_tag else None
+                ),
                 "run_id": run_id, "run_attempt": run_attempt,
                 "source_date_epoch": manifest["source_date_epoch"],
                 "build_inputs_sha256": pins_sha, "build_inputs": pins,
@@ -227,7 +243,11 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                 "restrictions": [
                     "No distro install/uninstall or default restricted supervised startup test",
                     "No external packages; manifest inventory is not qualification",
-                    "Workflow/source labels are not signed provenance or release authority",
+                    (
+                        "GitHub tag and workflow identity are release authority, not signed provenance"
+                        if release_tag else
+                        "Workflow/source labels are not signed provenance or release authority"
+                    ),
                 ],
             })
             shutil.copyfile(assembly / "toolchain.json", assets / "toolchain.json")
@@ -257,6 +277,7 @@ if __name__ == "__main__":
     parser.add_argument("--maintainer", required=True)
     parser.add_argument("--run-id", default="local")
     parser.add_argument("--run-attempt", default="1")
+    parser.add_argument("--release-tag")
     args = vars(parser.parse_args())
     args["output"] = args["output"].absolute()
     try:

@@ -23,6 +23,20 @@ Ordinary workspace builds require stable Rust 1.97 or newer. The Flakebox
 development shell selects its pinned stable channel and does not require a
 nightly compiler or alternate code-generation backend.
 
+## GitHub tag releases
+
+Pushing a tag that exactly matches `v` plus the workspace version, such as
+`v0.1.0`, triggers `.github/workflows/release.yml`. Native x86_64 and ARM64
+runners build core DEB, RPM, and tar packages from the resolved tag commit.
+After both builds succeed, the workflow creates the matching GitHub release
+with generated notes and attaches the packages, per-architecture manifests,
+and `SHA256SUMS`.
+
+This lane packages only the bundled `tau` executable. External extension
+projects keep their own versions and are not release assets of this workflow.
+The manual arbitrary-SHA candidate workflow remains separate and cannot publish
+a release.
+
 `packages.tau` and `packages.default` use the pinned Nixpkgs
 `rustPlatform.buildRustPackage` toolchain. The specialized Crane graph remains
 under `legacyPackages` and supplies CI and cross-built release archives. The

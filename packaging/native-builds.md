@@ -1,11 +1,10 @@
-# Native core builds and manual Actions artifacts
+# Native core builds and GitHub release packages
 
-The driver has begun local native execution, but **neither a complete local
-architecture build nor the Actions workflow is qualified**. Local tests verify
-orchestration, immutable inputs, metadata stamping and workflow policy, not
-compilation or portability. A successful compilation or candidate assembly
-would still leave the install, runtime and cross-architecture gates below. No
-release publication or activation is part of this tooling.
+GitHub Actions run 34556681071 completed the driver on both native
+architectures on September 11, 2026. Local tests verify orchestration, immutable
+inputs, metadata stamping and workflow policy. Successful compilation still
+does not establish package-manager installation, runtime behavior, or broad
+portability.
 
 ## Local invocation
 
@@ -124,6 +123,27 @@ startup. No external package is built by this slice: all seven/eight locked
 external roots/binaries are still inventoried rather than silently presented as
 qualified. No site/release asset links have been added.
 
+## Tagged release workflow
+
+`.github/workflows/release.yml` runs only when `dpc/tau` receives a `v*` tag.
+It binds both native builds to the immutable commit from the push event and
+requires the tag to equal `v` plus the workspace package version. Immediately
+before publication, it resolves the current remote lightweight or annotated
+tag and requires it still to identify that same commit. Only the final publisher
+job receives `contents: write`; the manual arbitrary-SHA workflow remains
+read-only and cannot supply artifacts to this lane.
+
+The publisher waits for both architectures, downloads only this workflow run's
+artifacts, requires the complete 12-file inventory, creates one aggregate
+`SHA256SUMS`, and uses `gh release create --verify-tag --generate-notes` to
+create the matching GitHub release with all assets attached. Package filenames
+are `tau-<version>-<arch>.{deb,rpm,tar.gz}`. The other assets are uniquely named
+per-architecture source, build, and toolchain manifests.
+
+This release contains the bundled `tau` core executable only. It does not build
+the separately versioned external extension packages and does not claim that
+the DEB/RPM dependencies or runtime have been qualified on every distribution.
+
 ## Verification and remaining gates
 
 ```console
@@ -131,6 +151,7 @@ python3 packaging/test_native.py
 python3 packaging/test_build.py
 python3 packaging/test_tools.py
 actionlint .github/workflows/native-candidates.yml
+actionlint .github/workflows/release.yml
 ```
 
 The first two suites run in SelfCI without Docker. The real nFPM/dpkg/rpm
@@ -138,11 +159,11 @@ format suite requires those tools and still uses an inert payload. Actionlint
 checks workflow syntax; policy regressions separately check the pinned actions,
 permissions, checkout separation and artifact retention.
 
-Remaining gates include actual native builds on both architectures; named
-distro dependency-resolving install/ownership/uninstall tests; genuine
+Remaining gates include named distro dependency-resolving
+install/ownership/uninstall tests; genuine
 default-restricted supervised/no-credential startup, shell/PTY/CA tests on
 approved real kernels/security policies; source/license closure and all external
-packages; and the separate trusted complete-inventory tagged publisher.
+packages.
 Linux 5.12 remains the documented mount API minimum, not a claim established by
 containers sharing a newer host kernel.
 

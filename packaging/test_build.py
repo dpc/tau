@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -160,9 +161,55 @@ class PolicyTests(unittest.TestCase):
         for action in uses:
             self.assertRegex(action, r"^actions/[a-z-]+@[0-9a-f]{40}$")
 
+    def test_release_workflow_uses_only_tag_source_and_scoped_write_authority(self):
+        workflow = (build.TOOLS.parent / ".github/workflows/release.yml").read_text()
+        self.assertIn('tags:\n      - "v*"', workflow)
+        self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertNotIn("inputs.", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertIn("SOURCE_SHA: ${{ github.sha }}", workflow)
+        self.assertIn("--release-tag \"$RELEASE_TAG\"", workflow)
+        self.assertIn("--verify-tag", workflow)
+        self.assertIn("--generate-notes", workflow)
+        self.assertIn("needs: build", workflow)
+        self.assertEqual(workflow.count("contents: write"), 1)
+        self.assertIn("git ls-remote", workflow)
+        self.assertIn('test "$remote_sha" = "$SOURCE_SHA"', workflow)
+        asset_block = re.search(
+            r"^          assets=\(\n(?P<body>.*?)^          \)$",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(asset_block)
+        assets = re.findall(r'^            "([^"]+)"$', asset_block["body"], re.MULTILINE)
+        expected_assets = [
+            f"tau-$version-{arch}.{fmt}"
+            for arch in ("amd64", "arm64")
+            for fmt in ("deb", "rpm", "tar.gz")
+        ] + [
+            f"tau-$version-{arch}-{metadata}.json"
+            for arch in ("amd64", "arm64")
+            for metadata in ("build-manifest", "source-manifest", "toolchain")
+        ]
+        self.assertEqual(set(assets), set(expected_assets))
+        self.assertEqual(len(assets), 12)
+        self.assertIn("diff -u <(printf", workflow)
+        self.assertIn('build["source_sha"] == source_sha', workflow)
+        self.assertIn('source["elf"]["arch"] == arch', workflow)
+        self.assertIn('Path("github-prerelease").write_text', workflow)
+        self.assertIn("release_flags+=(--prerelease)", workflow)
+        self.assertIn('"${release_flags[@]}"', workflow)
+        self.assertIn("Dawid Ciężarkiewicz <dpc@dpc.pw>", workflow)
+        self.assertIn("No external packages", Path(build.TOOLS / "build.py").read_text())
+        uses = [line.split("uses: ", 1)[1].split()[0]
+                for line in workflow.splitlines() if "uses: " in line]
+        self.assertEqual(len(uses), 3)
+        for action in uses:
+            self.assertRegex(action, r"^actions/[a-z-]+@[0-9a-f]{40}$")
+
 
 class OrchestrationTests(SourceFixture, unittest.TestCase):
-    def exercise(self, bad_version=False):
+    def exercise(self, bad_version=False, release=False):
         output = self.repo / "output"
         calls = []
         real_run = native.run
@@ -194,8 +241,9 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
             if "/output" in paths:
                 packages = paths["/output"] / "packages"
                 packages.mkdir()
-                for name in ("SHA256SUMS", "source-manifest.json", "tau-test-amd64.deb",
-                             "tau-test-amd64.rpm", "tau-test-amd64.tar.gz"):
+                basename = "tau-1.2.3-amd64" if release else "tau-test-amd64"
+                for name in ("SHA256SUMS", "source-manifest.json", f"{basename}.deb",
+                             f"{basename}.rpm", f"{basename}.tar.gz"):
                     (packages / name).write_text("inert fixture")
                 (paths["/output"] / "toolchain.json").write_text("{}")
             if "/probe" in paths:
@@ -219,13 +267,21 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                 self.assertFalse(output.exists())
             else:
                 build.build(self.repo, self.sha, "c" * 40, "amd64", output,
-                            "Test <test@example.invalid>", "123", "2")
+                             "Test <test@example.invalid>", "123", "2",
+                             "v1.2.3" if release else None)
                 report = json.loads((output / "build-manifest.json").read_text())
                 self.assertEqual(report["source_sha"], self.sha)
                 self.assertEqual(report["workflow_sha"], "c" * 40)
                 self.assertEqual(report["runtime_qualification"], "not-performed")
                 self.assertEqual(report["run_id"], "123")
                 self.assertEqual(report["derived_image_id"], "sha256:" + "b" * 64)
+                self.assertEqual(
+                    report["purpose"],
+                    "tagged-github-release" if release
+                    else "manual-non-release-core-candidate",
+                )
+                self.assertEqual(report["release_tag"], "v1.2.3" if release else None)
+                self.assertEqual(report["github_prerelease"], False if release else None)
                 for line in (output / "SHA256SUMS").read_text().splitlines():
                     digest, name = line.split("  ")
                     self.assertEqual(digest, native.sha256((output / name).read_bytes()))
@@ -242,6 +298,19 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
 
     def test_bad_version_does_not_publish_assets(self):
         self.exercise(bad_version=True)
+
+    def test_tagged_release_uses_source_version_and_release_labels(self):
+        self.exercise(release=True)
+
+    def test_mismatched_release_tag_does_not_build(self):
+        with patch.object(build, "verify_tooling"), \
+                patch.object(build.platform, "system", return_value="Linux"), \
+                patch.object(build.platform, "machine", return_value="x86_64"), \
+                patch.object(build.os, "getuid", return_value=1000):
+            with self.assertRaisesRegex(ValueError, "exactly match"):
+                build.build(self.repo, self.sha, "c" * 40, "amd64",
+                            self.repo / "output", "Tau project maintainers",
+                            "123", "1", "v1.2.4")
 
 
 if __name__ == "__main__":

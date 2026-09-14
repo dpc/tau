@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local, non-release Linux packaging tools. See README.md for trust limits."""
+"""Linux packaging tools. See README.md for release and trust boundaries."""
 
 import argparse
 import hashlib
@@ -42,6 +42,17 @@ def require_sha(value):
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise ValueError("source_sha must be a full lowercase 40-character Git SHA")
     return value
+
+
+def release_version(tag, source_version):
+    expected = f"v{source_version}"
+    if tag != expected:
+        raise ValueError(f"release tag must exactly match source version: {expected}")
+    return source_version
+
+
+def release_is_prerelease(version):
+    return "-" in version.split("+", 1)[0]
 
 
 def source_file(repo, source_sha, name):
@@ -172,8 +183,8 @@ def check_nfpm_version(output):
         raise ValueError(f"requires stable nFPM {NFPM_VERSION}")
 
 
-def package(repo, source_sha, binary, arch, output, maintainer):
-    """Wrap only the core, as a visibly unqualified test candidate."""
+def package(repo, source_sha, binary, arch, output, maintainer, release_tag=None):
+    """Wrap only the core as either a test candidate or a tagged release."""
     manifest = inventory(repo, source_sha)
     if output.exists():
         raise ValueError("output must not exist (never mix or overwrite candidates)")
@@ -188,14 +199,27 @@ def package(repo, source_sha, binary, arch, output, maintainer):
         staged_binary.chmod(0o755)
         manifest["elf"] = audit(staged_binary, arch)
         manifest["nfpm_version"] = NFPM_VERSION
-        manifest["limitations"] = [
+        limitations = [
             "Binary/source relationship is supplied by caller, not attested",
             "No supervised startup or distro install/uninstall qualification",
             "External packages are inventoried, not built",
-            "Not a release or a portability guarantee",
         ]
-        # A fixed zero-version prerelease cannot outrank any stable SemVer.
-        version = f"0.0.0~test.{source_sha}"
+        if release_tag is None:
+            limitations.append("Not a release or a portability guarantee")
+            # A fixed zero-version prerelease cannot outrank any stable SemVer.
+            version = f"0.0.0~test.{source_sha}"
+            basename = f"tau-test-{arch}"
+            description = "Tau universal executable (unqualified test candidate)"
+        else:
+            version = release_version(release_tag, manifest["core"]["version"])
+            manifest["purpose"] = "tagged-release"
+            manifest["release_tag"] = release_tag
+            manifest["github_prerelease"] = release_is_prerelease(version)
+            limitations.append("Tagged release package, not a portability guarantee")
+            basename = f"tau-{version}-{arch}"
+            description = "Tau universal executable"
+        version_schema = "semver" if release_tag else "none"
+        manifest["limitations"] = limitations
         manifest["package_version"] = version
         license_file = payload / "LICENSE"
         license_file.write_bytes(source_file(repo, source_sha, "LICENSE"))
@@ -214,10 +238,10 @@ def package(repo, source_sha, binary, arch, output, maintainer):
             "arch": arch,
             "platform": "linux",
             "version": version,
-            "version_schema": "none",
+            "version_schema": version_schema,
             "release": "1",
             "maintainer": maintainer,
-            "description": "Tau universal executable (unqualified test candidate)",
+            "description": description,
             "license": manifest["core"]["license"],
             "contents": contents,
             "overrides": {
@@ -233,15 +257,15 @@ def package(repo, source_sha, binary, arch, output, maintainer):
             subprocess.run(
                 [
                     "nfpm", "package", "--config", str(config_file),
-                    "--packager", fmt, "--target", str(assets / f"tau-test-{arch}.{fmt}"),
+                    "--packager", fmt, "--target", str(assets / f"{basename}.{fmt}"),
                 ],
                 check=True,
                 env={**os.environ, "SOURCE_DATE_EPOCH": str(manifest["source_date_epoch"])},
             )
         # Tar metadata is normalized; gzip byte reproducibility is not claimed.
-        with tarfile.open(assets / f"tau-test-{arch}.tar.gz", "w:gz") as archive:
+        with tarfile.open(assets / f"{basename}.tar.gz", "w:gz") as archive:
             for file in sorted(payload.iterdir()):
-                info = archive.gettarinfo(file, arcname=f"tau-test-{arch}/{file.name}")
+                info = archive.gettarinfo(file, arcname=f"{basename}/{file.name}")
                 info.uid = info.gid = 0
                 info.uname = info.gname = ""
                 info.mtime = manifest["source_date_epoch"]
@@ -270,6 +294,7 @@ def main():
     pack.add_argument("--arch", choices=ARCHES, required=True)
     pack.add_argument("--output", type=Path, required=True)
     pack.add_argument("--maintainer", required=True)
+    pack.add_argument("--release-tag")
     args = vars(parser.parse_args())
     command = args.pop("command")
     try:

@@ -126,6 +126,22 @@ class SourceFixture:
 
 
 class SourceTests(SourceFixture, unittest.TestCase):
+    def test_release_tag_must_exactly_match_workspace_version(self):
+        self.assertEqual(native.release_version("v1.2.3", "1.2.3"), "1.2.3")
+        for tag in ("1.2.3", "v1.2.4", "v1.2.3-extra", "release-v1.2.3"):
+            with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, "exactly match"):
+                native.release_version(tag, "1.2.3")
+
+    def test_github_prerelease_matches_semver_prerelease_component(self):
+        for version, expected in (
+            ("1.2.3", False),
+            ("1.2.3+build.1", False),
+            ("1.2.3-rc.1", True),
+            ("1.2.3-rc.1+build.1", True),
+        ):
+            with self.subTest(version=version):
+                self.assertEqual(native.release_is_prerelease(version), expected)
+
     def test_exact_source_not_dirty_worktree(self):
         (self.repo / "flake.lock").write_text("not json")
         result = native.inventory(self.repo, self.sha)
@@ -243,6 +259,55 @@ class SourceTests(SourceFixture, unittest.TestCase):
                 self.assertEqual(member.uname, "")
                 self.assertEqual(member.gname, "")
                 self.assertEqual(member.mtime, epoch)
+
+    def test_tagged_release_uses_source_version_and_release_inventory(self):
+        binary = self.repo / "binary"
+        binary.write_bytes(b"fixture only, not a real ELF")
+        output = self.repo / "output"
+        real_run = native.run
+        real_subprocess_run = subprocess.run
+        configs = []
+
+        def tool_run(*args):
+            return NFPM_OUTPUT if args[0] == "nfpm" else real_run(*args)
+
+        def package_run(args, **kwargs):
+            if args[0] != "nfpm":
+                return real_subprocess_run(args, **kwargs)
+            configs.append(json.loads(Path(args[args.index("--config") + 1]).read_text()))
+            Path(args[args.index("--target") + 1]).write_bytes(b"package fixture")
+
+        with patch.object(native, "run", side_effect=tool_run), \
+                patch.object(native, "audit",
+                             return_value={"runtime_qualification": "not-performed"}), \
+                patch.object(subprocess, "run", side_effect=package_run):
+            native.package(self.repo, self.sha, binary, "amd64", output,
+                           "Tau project maintainers", "v1.2.3")
+
+        self.assertEqual([config["version"] for config in configs], ["1.2.3", "1.2.3"])
+        self.assertEqual([config["version_schema"] for config in configs], ["semver", "semver"])
+        self.assertEqual(
+            {path.name for path in output.iterdir()},
+            {
+                "SHA256SUMS", "source-manifest.json",
+                "tau-1.2.3-amd64.deb", "tau-1.2.3-amd64.rpm",
+                "tau-1.2.3-amd64.tar.gz",
+            },
+        )
+        manifest = json.loads((output / "source-manifest.json").read_text())
+        self.assertEqual(manifest["purpose"], "tagged-release")
+        self.assertEqual(manifest["release_tag"], "v1.2.3")
+        self.assertFalse(manifest["github_prerelease"])
+        self.assertNotIn("Not a release", manifest["limitations"])
+        with tarfile.open(output / "tau-1.2.3-amd64.tar.gz") as archive:
+            self.assertEqual(
+                set(archive.getnames()),
+                {
+                    "tau-1.2.3-amd64/tau",
+                    "tau-1.2.3-amd64/LICENSE",
+                    "tau-1.2.3-amd64/source-manifest.json",
+                },
+            )
 
 
 class ToolVersionTests(unittest.TestCase):

@@ -1,15 +1,17 @@
-# Native Linux packaging: local candidate harness
+# Native Linux packaging
 
-This is **manual candidate tooling, not a release pipeline or qualified
-distribution**. It inventories immutable Tau/external sources, rejects ELF
-runtime linkage outside a conservative GNU baseline, and creates test core
-DEB/RPM/archive assets with nFPM. Existing Nix packages remain unchanged. Do not
-repackage Nix executables by patching their loader.
+This tooling builds either manual test candidates or tag-authorized GitHub
+release packages for Tau's core executable. It inventories immutable
+Tau/external sources, rejects ELF runtime linkage outside a conservative GNU
+baseline, and creates core DEB/RPM/archive assets with nFPM. Existing Nix
+packages remain unchanged. Do not repackage Nix executables by patching their
+loader.
 
-The [native build driver and manual Actions workflow](native-builds.md) add
+The [native build driver and Actions workflows](native-builds.md) add
 digest-pinned baseline images and checksum-pinned Rust/nFPM downloads. They have
-local orchestration tests but have **not been executed on native build runners**.
-The low-level supplied-binary commands below remain useful independently.
+run successfully on GitHub's native x86_64 and ARM64 hosted runners, but
+install/runtime qualification remains outstanding. The low-level
+supplied-binary commands below remain useful independently.
 
 ## Run locally
 
@@ -67,7 +69,9 @@ on a distribution.
 
 Every package is an explicitly unqualified test version
 `0.0.0~test.<source_sha>-1`, ordered before stable `0.0.0` by modern DEB/RPM
-version comparison. This is not the future stable release version policy.
+version comparison, unless `package-core` receives `--release-tag v<version>`.
+Release mode requires the tag to exactly equal `v` plus the selected source's
+workspace version and uses that version in the package metadata and filenames.
 Outputs include `source-manifest.json` and `SHA256SUMS`. The manifest explicitly
 records that the caller-supplied binary's source relationship is not attested.
 Checksums provide integrity, not authentication. Archive timestamps/ownership
@@ -75,7 +79,9 @@ are normalized; byte-for-byte reproducibility is not claimed.
 
 ## Qualification and remaining implementation
 
-Before release authority or download links are added:
+The release-tag workflow now creates the matching GitHub release and attaches
+the core packages, per-architecture source/build/toolchain manifests, and an
+aggregate `SHA256SUMS`. Before claiming broad distribution support:
 
 * Execute the native x86_64 and ARM64 builder with its pinned baseline images,
   Rust and nFPM, bounded resources and `cargo build --locked --release -p dpc-tau`.
@@ -94,18 +100,18 @@ Before release authority or download links are added:
   binaries, including separate Telegram gateway), preserving their own versions
   and recording SDK/protocol/tested Tau compatibility. Do not omit an
   unqualified package silently.
-* Validate the least-privilege exact-SHA manual Actions workflow on approved
-  runners, then add separate trusted tag builds and complete-inventory draft publication. Never
-  execute candidate scripts/binaries in the publisher or promote arbitrary
-  manual artifacts to releases.
-* Publish source archives, complete provenance and the approved full inventory.
-  Only then add verified asset links to the site/docs. No links are added here.
+* Preserve the least-privilege exact-SHA manual Actions workflow separately
+  from the trusted tag publisher. Never promote arbitrary manual artifacts to
+  releases.
+* Complete provenance and the approved external inventory before presenting
+  the GitHub assets as packages for every Tau integration. No site links are
+  added here.
 
 Local investigation found that the available Nix-built `result/bin/tau` has a
-Nix-store loader and RUNPATH and therefore fails the baseline filter. Local
-rootless-Docker native execution has begun, but no complete architecture build
-or runtime qualification has passed. No alternate host has been qualified or
-activated by this work.
+Nix-store loader and RUNPATH and therefore fails the baseline filter. GitHub
+Actions run 34556681071 completed the native core build on both architectures
+on September 11, 2026. That build did not perform package-manager installation
+or runtime qualification.
 
 See `docs/release-builds.md` for the existing build profile and Nix distribution;
 see `docs/extensions.md` for explicit extension configuration and restrictions.

@@ -27,7 +27,7 @@ def stamp(data, source_sha, epoch):
     return data
 
 
-def assemble(source_sha, arch, maintainer):
+def assemble(source_sha, arch, maintainer, release_tag=None):
     manifest = native.inventory(Path("/source"), source_sha)
     staged = Path("/work/tau")
     # /build is read-only in this fresh container. Even hostile symlinks resolve
@@ -38,7 +38,7 @@ def assemble(source_sha, arch, maintainer):
     ))
     staged.chmod(0o755)
     native.package(Path("/source"), source_sha, staged, arch,
-                   Path("/output/packages"), maintainer)
+                    Path("/output/packages"), maintainer, release_tag)
     # Keep a copy for the separate no-network version probe; do not execute
     # candidate code in the assembly process/container.
     shutil.copyfile(staged, "/output/tau")
@@ -57,4 +57,5 @@ if __name__ == "__main__":
     parser.add_argument("--source-sha", required=True, type=native.require_sha)
     parser.add_argument("--arch", required=True, choices=native.ARCHES)
     parser.add_argument("--maintainer", required=True)
+    parser.add_argument("--release-tag")
     assemble(**vars(parser.parse_args()))
