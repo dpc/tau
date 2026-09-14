@@ -1,0 +1,9 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+# Slim-image documentation exclusions must not erase the payload under test.
+RUN printf 'path-include /usr/share/doc/tau*/*\n' > /etc/dpkg/dpkg.cfg.d/zz-tau-qualification
+# Repository resolution is qualification setup, not part of the delivered build.
+# The resulting image ID and installed package versions are retained as evidence.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 libc6 libgcc-s1 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*

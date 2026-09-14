@@ -12,17 +12,11 @@ import subprocess
 import tarfile
 import tempfile
 import tomllib
+import distribution
 
 
-EXTERNAL = {
-    "tau-ext-pim": ["tau-ext-pim"],
-    "tau-ext-rostra": ["tau-ext-rostra"],
-    "tau-ext-slack": ["tau-ext-slack"],
-    "tau-ext-swarm": ["tau-ext-swarm"],
-    "tau-ext-telegram": ["tau-ext-telegram", "tau-telegram-gateway"],
-    "tau-ext-xmpp": ["tau-ext-xmpp"],
-    "tau-ext-zulip": ["tau-ext-zulip"],
-}
+EXTERNAL = {p["name"]: p["binaries"] for p in distribution.projects()
+            if p["name"] != "tau"}
 ARCHES = {
     "amd64": ("Advanced Micro Devices X86-64", "/lib64/ld-linux-x86-64.so.2"),
     "arm64": ("AArch64", "/lib/ld-linux-aarch64.so.1"),
@@ -90,7 +84,6 @@ def inventory(repo, source_sha):
                 "url": locked["url"],
                 "source_sha": locked["rev"],
                 "nar_hash": locked["narHash"],
-                "qualification": "pending-owner-audit",
             }
         )
     cargo_bytes = source_file(repo, source_sha, "Cargo.toml")

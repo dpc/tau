@@ -1,0 +1,3 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+RUN dnf install -y python3 glibc libgcc ca-certificates && dnf clean all

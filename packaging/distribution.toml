@@ -1,0 +1,66 @@
+# The complete native distribution. Versions are verified against each locked
+# source, never substituted into upstream Cargo manifests.
+schema = 1
+
+[[projects]]
+binaries = ["tau"]
+license = "MPL-2.0"
+manifest = "crates/tau/Cargo.toml"
+name = "tau"
+package = "dpc-tau"
+
+[[projects]]
+binaries = ["tau-ext-pim"]
+license = "MPL-2.0"
+manifest = "Cargo.toml"
+name = "tau-ext-pim"
+package = "dpc-tau-ext-pim"
+version = "0.1.0"
+
+[[projects]]
+binaries = ["tau-ext-rostra"]
+license = "MPL-2.0"
+manifest = "Cargo.toml"
+name = "tau-ext-rostra"
+package = "dpc-tau-ext-rostra"
+version = "0.1.0"
+
+[[projects]]
+binaries = ["tau-ext-slack"]
+license = "MPL-2.0"
+manifest = "Cargo.toml"
+name = "tau-ext-slack"
+package = "dpc-tau-ext-slack"
+version = "0.1.0"
+
+[[projects]]
+binaries = ["tau-ext-swarm"]
+license = "MPL-2.0"
+manifest = "Cargo.toml"
+name = "tau-ext-swarm"
+package = "dpc-tau-ext-swarm"
+version = "0.1.0"
+
+[[projects]]
+binaries = ["tau-ext-telegram", "tau-telegram-gateway"]
+license = "MPL-2.0"
+manifest = "Cargo.toml"
+name = "tau-ext-telegram"
+package = "dpc-tau-ext-telegram"
+version = "0.1.0"
+
+[[projects]]
+binaries = ["tau-ext-xmpp"]
+license = "MPL-2.0"
+manifest = "Cargo.toml"
+name = "tau-ext-xmpp"
+package = "dpc-tau-ext-xmpp"
+version = "0.1.0"
+
+[[projects]]
+binaries = ["tau-ext-zulip"]
+license = "MPL-2.0"
+manifest = "Cargo.toml"
+name = "tau-ext-zulip"
+package = "dpc-tau-ext-zulip"
+version = "0.1.0"

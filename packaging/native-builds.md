@@ -1,179 +1,161 @@
-# Native core builds and GitHub release packages
-
-GitHub Actions run 34556681071 completed the driver on both native
-architectures on September 11, 2026. Local tests verify orchestration, immutable
-inputs, metadata stamping and workflow policy. Successful compilation still
-does not establish package-manager installation, runtime behavior, or broad
-portability.
+# Complete native builds and GitHub release packages
 
 ## Local invocation
 
-Use a non-root user on a matching native x86_64 or ARM64 Linux Docker host.
-The host needs Python 3.11+, Git, Docker access, network access to the pinned
-image/tool sources and Cargo dependencies, and ample disk/RAM. No emulation
-fallback is provided; both client and Docker-server architectures are checked.
+Use a non-root user on a matching native x86_64 or ARM64 Linux Docker host,
+with Python 3.11+, Git, Docker access, network access to source/tool/dependency
+servers, and ample disk/RAM. No emulation fallback exists.
 
 ```console
 python3 packaging/build.py \
   --repo /path/to/source-repository \
   --source-sha FULL_40_CHARACTER_SOURCE_COMMIT_SHA \
   --workflow-sha FULL_40_CHARACTER_TOOLING_COMMIT_SHA \
-  --arch amd64 --output /tmp/new-native-candidate \
+  --arch amd64 --output /path/visible/to/docker/new-native-candidate \
   --maintainer 'Your Name <your-email@example.org>'
 ```
 
-Use `arm64` for ARM64. The source commit must be available in the local
-repository. The tooling commit identifies the checkout containing this driver,
-not necessarily the application source. Every build-control file must match its
-Git object at that tooling commit, so an uncommitted tooling edit fails instead
-of being mislabeled. The supplied repository is a trusted local Git repository;
-its selected source tree/build scripts may be arbitrary executable code.
+Use `arm64` for ARM64. The output parent and tooling checkout must be visible
+at identical paths to the Docker daemon; sandbox-private `/tmp` may not be.
+The source commit must exist in the supplied local Git repository.
+All build-control files must match their immutable tooling Git objects.
+Source and workflow identities remain separate, but both must select the same
+reviewed commit when qualifying an exact release candidate.
 
-The driver creates a fresh shallow source checkout from the exact commit with
-global/system Git configuration, templates, hooks and replacement objects
-disabled. It does not copy caller credentials or Git configuration. Dirty
-caller worktree files are not build inputs.
+The driver checks out the core and seven external source SHAs into fresh shallow
+repositories without caller Git configuration, credentials, hooks, templates,
+replacement objects, or interactive prompts. External URLs/SHAs/NAR hashes come
+from the core commit's flake lock. The selected inventory must byte-match trusted
+tooling; arbitrary source cannot quietly redefine the required product set.
 
-## Pinned build inputs and limits
+## Pinned inputs and sequential builds
 
-`build-inputs.json` pins per-architecture PyPA `manylinux_2_28` image digests,
-Rust **1.97.0** distribution archives and nFPM **2.46.3** archive SHA256s. The
-trusted Dockerfile verifies both downloaded archives before installation and
-does not install floating distro packages. The image pins its existing C
-toolchain and Python environment. Changes to any pin require reviewed source,
-architecture and runtime checks; do not substitute another URL on failure.
+`build-inputs.json` pins architecture-specific PyPA `manylinux_2_28` images,
+Rust **1.97.0** archives, nFPM **2.46.3** archives, and qualification image indexes.
+The Dockerfile also verifies the cargo-about **0.9.0** registry archive against
+its registry checksum and compiles it natively using its own locked dependency
+checksums. It does not copy a Nix-linked generator into a manylinux image.
 
-The AlmaLinux 8/glibc 2.28 baseline was selected instead of the documented
-`manylinux_2_34` alpha images and their x86-64-v2 distro-library caveat. This
-does not make Tau a Python wheel or confer manylinux certification. The existing
-ELF filter and candidate dependency metadata still conservatively require no
-newer than GLIBC 2.34 symbols and advertise package dependencies of glibc >=2.34.
-There is no claim of support for old kernels, every RPM distribution, old CPU
-variants or every libgcc ABI. No ELF loader/RPATH relocation is performed.
+The AlmaLinux 8/glibc 2.28 build baseline avoids the previously evaluated
+`manylinux_2_34` alpha/x86-64-v2 caveats. This is not manylinux certification.
+The conservative package dependency floor remains glibc ≥2.34.
+No loader or RPATH relocation is performed.
 
-Source compilation uses the selected source's default features and release
-profile with `cargo build --locked --release -p dpc-tau`, Rust installed directly
-rather than rustup, two Cargo jobs and no shared writable dependency/target
-cache. Source Rust requirements above the pin fail; no toolchain auto-upgrade.
-`SOURCE_DATE_EPOCH` is the source commit timestamp. Source-only Cargo builds
-retain Tau's intentional packaging slots, so a fresh assembly container fills
-the existing fixed-size revision/clean/date slots, just as Nix packaging does.
-Only build metadata is stamped; this is not a workaround for Nix runtime
-linkage. Each slot must occur exactly once and retain its length; missing,
-duplicate or incompatible slots fail closed. The version probe compares the
-source revision, version and exact UTC minute from the source commit epoch.
-These are consistency checks, not authentication of a binary's source.
+One job per native architecture builds core, then each external project,
+sequentially using `cargo fetch --locked` followed by
+`cargo build --locked --release -p <package> --bins`,
+default features, and the selected source profile. Telegram's two binaries come
+from one source build. Each project has private writable Cargo/target storage.
+After offline notices succeed, its fresh finish container retains binaries and
+notices and removes only that project's compiler/Cargo scratch. This bounds
+sequential-job disk growth; it does not clean unrelated runner directories.
+Rust requirements above the pin fail rather than auto-upgrading.
 
-Each Docker build writes its immutable image ID to a private per-invocation
-`--iidfile`; all subsequent containers use that ID, never a shared mutable tag.
-Trusted builder images/layers remain in the local Docker cache for reuse;
-ordinary Docker cache maintenance is the operator's responsibility. Untrusted
-source compilation runs in discarded containers, not cached Docker build layers.
+Cargo-about runs against each delivered package's manifest and exact lockfile
+with `--frozen --fail` and the same architecture target. The earlier fetch covers
+all locked platforms because Cargo metadata needs their source manifests even
+when notice output is target-filtered. `about.toml` declares
+the accepted license policy; `notices.hbs` emits full texts and crate identities.
+Build dependencies remain included because generated/bundled code may survive
+linking; dev-only dependencies are excluded. The resulting notice is installed
+and its digest recorded for every binary package (shared by the two Telegram
+binaries from the same source).
 
-Build containers use the caller's non-root UID on a rootful Docker daemon. On
-a rootless daemon they use container UID 0, which the daemon's user namespace
-maps to the caller's unprivileged host identity; using the caller's numeric UID
-inside that namespace would instead map bind-mount writes to a subordinate UID.
-Both modes use a read-only root and source, no capabilities, no-new-privileges,
-a 512-process limit, two CPUs and 12 GiB memory. Only scratch storage is
-writable; no Docker socket, host home, Actions credentials or runtime
-authorization files are mounted. Cargo can fetch locked dependencies over the
-network. Package assembly uses a **fresh, network-disabled container** with
-build output read-only. A third fresh network-disabled container probes the
-packaged `tau --version`; candidate code never executes in the host or assembly
-process.
+A fresh offline assembly container stamps only Tau's existing fixed-size
+revision/clean/date placeholders. Each slot must exist exactly once and retain
+its length. All nine ELF payloads are audited and packaged with project licenses,
+notices, and source manifests. The release-set package revision preserves the
+external Cargo version; [README.md](README.md) specifies the payload/asset layout.
 
-The driver limits build/probe time and captured output, and attempts to
-force-remove its named container after failure or timeout. It requires at least 8 GiB free after
-preparing the builder, but that check is not a sufficient-capacity guarantee.
-The configured public GitHub VM labels have documented 16 GiB RAM and 14 GiB
-SSD; the image, compiler and target tree may still exhaust available storage.
-No destructive runner cleanup is included. Measure actual peak memory/disk and
-adjust approved capacity before calling the workflow operational.
+## Isolation and executable qualification
 
-## Manual workflow trust boundary
+Build containers use the caller UID with rootful Docker, or namespaced root
+with rootless Docker (which maps to the unprivileged host caller). They have
+read-only root/source/tooling, no capabilities, no-new-privileges, 512 processes,
+two CPUs, 12 GiB RAM, and bounded scratch/log/time use. No Docker socket, host
+home, authorization file, or Actions token is mounted.
 
-`.github/workflows/native-candidates.yml` is dispatch-only and restricted to the
-verified `dpc/tau` repository's `master` workflow ref. It checks out tooling at
-`github.workflow_sha`, validates the independent full lowercase `source_sha`,
-then checks out that source separately. Both checkout steps disable persisted
-credentials. Application source cannot replace the build driver/Dockerfile.
+Cargo fetching is network-enabled. Notice generation, assembly, archive probes,
+and installed-package checks are network-disabled. Archive probes execute only
+extracted payloads, in another fresh container, never in assembly or on the host.
+They compare complete/individual binaries and prove `--help`, Tau build identity,
+and real protocol-7 Hello admission with deliberately invalid configs.
+Hello admission is not Ready or integration functionality.
 
-Actions are pinned to full commits: checkout v6.1.0 and upload-artifact v7.0.1.
-Only `contents: read` is granted. There is no OIDC, environment secret, signing
-or release token, shared cache action, privileged/self-hosted runner, tag
-trigger, promotion switch, or publisher. The configured native hosted runners
-are `ubuntu-24.04` and `ubuntu-24.04-arm`, not a mutable `latest` label.
-The workflow must first reach the approved mirror/default branch through the
-normal owner-controlled process; this change does not push or dispatch it.
+Distro setup images use digest-pinned Debian 12 and Fedora 43 bases and resolve
+their ordinary runtime/Python dependencies from distro repositories. Those setup
+resolutions are not reproducible build inputs: the derived image IDs and exact
+installed package versions are retained as qualification evidence. Actual
+package installation/removal runs offline in disposable containers with writable
+container rootfs and only CHOWN/FOWNER/DAC_OVERRIDE/SETUID/SETGID added to the otherwise empty
+capability set. All host mounts are read-only. The checks do not configure or
+start services, and they must preserve a user-state sentinel. The Debian slim
+test image explicitly includes Tau documentation otherwise excluded by its
+space-saving dpkg policy, so notices/manifests must actually install.
 
-Successful jobs upload architecture/source/run-specific artifacts for **14
-days**. The eight output files comprise core DEB/RPM/archive, source manifest,
-build manifest, toolchain report, Cargo log and SHA256SUMS. The build manifest
-separates source and workflow SHAs, records pin-file digest, image ID, source
-epoch, run identity, compiler/profile/features and version probe result.
-All files are checksummed after assembly. A failure leaves no final output
-directory; escaped diagnostic tails are printed instead of interpreting source
-output as terminal or Actions commands.
+Every image uses a private `--iidfile`, never a mutable shared tag. Containers
+are force-removed after errors/timeouts; trusted Docker build layers remain
+available for ordinary operator cache maintenance. The 8 GiB free-space precheck
+is not a capacity guarantee for nine binaries. Measure hosted peak usage;
+there is no destructive runner cleanup or silent omission on exhaustion.
 
-These are unqualified manual test assets, not releases, signatures, independently
-authenticated provenance or promises of bit-for-bit reproducibility. Neither a
-successful build nor matching `--version` proves actual restricted supervisor
-startup. No external package is built by this slice: all seven/eight locked
-external roots/binaries are still inventoried rather than silently presented as
-qualified. No site/release asset links have been added.
+## Manual workflow versus tagged publication
 
-## Tagged release workflow
+`native-candidates.yml` is dispatch-only for `dpc/tau` on `master`. It checks out
+tooling at `github.workflow_sha` and selected application source at the independent
+40-character input SHA, with persisted credentials disabled in both checkouts.
+It grants only `contents: read`, has no release/signing/OIDC lane or secret, and
+uploads architecture/source/run-specific test artifacts for 14 days.
+The configured native runners are `ubuntu-24.04` and `ubuntu-24.04-arm`.
 
-`.github/workflows/release.yml` runs only when `dpc/tau` receives a `v*` tag.
-It binds both native builds to the immutable commit from the push event and
-requires the tag to equal `v` plus the application package version from
-`crates/tau/Cargo.toml`, resolving explicit workspace inheritance when present. Immediately
-before publication, it resolves the current remote lightweight or annotated
-tag and requires it still to identify that same commit. Only the final publisher
-job receives `contents: write`; the manual arbitrary-SHA workflow remains
-read-only and cannot supply artifacts to this lane.
+Successful candidates contain all 30 package/archive files, source/build/toolchain
+manifests, build/notice/probe/setup/qualification logs, and `SHA256SUMS`.
+The build manifest records source/workflow identities, pins, image IDs, per-asset
+hashes, upstream inventory, archive probes, and distro qualification evidence.
+These labels/checksums are not independently authenticated provenance.
 
-The publisher waits for both architectures, downloads only this workflow run's
-artifacts, requires the complete 12-file inventory, creates one aggregate
-`SHA256SUMS`, and uses `gh release create --verify-tag --generate-notes` to
-create the matching GitHub release with all assets attached. Package filenames
-are `tau-<version>-<arch>.{deb,rpm,tar.gz}`. The other assets are uniquely named
-per-architecture source, build, and toolchain manifests.
+`release.yml` runs only for `v*` tags in `dpc/tau`. The tag must exactly match the
+application version (`crates/tau/Cargo.toml`, resolving workspace inheritance only
+when explicit). Both builds use that tag's exact source as tooling. Only the
+final publisher has `contents: write`; manual artifacts cannot feed it.
 
-This release contains the bundled `tau` core executable only. It does not build
-the separately versioned external extension packages and does not claim that
-the DEB/RPM dependencies or runtime have been qualified on every distribution.
+After both native builds pass, `release_assets.py` verifies the complete
+66-file, two-architecture inventory (30 packages plus three metadata files each),
+source/workflow/tag identities, source lock inventory, per-asset hashes, and
+qualification evidence. No shell glob decides what is required. The publisher
+rechecks the remote lightweight/annotated tag SHA and writes aggregate checksums.
+`publish.py` creates or resumes only a Tau-marked draft bound to the exact
+tag/source/workflow identities. It checks every existing remote asset's name,
+size, uploaded state, and GitHub SHA256 digest, then uploads only missing assets.
+Unexpected, partial-starter, or differing assets fail closed without overwrite
+or deletion. Foreign drafts and published releases are never modified.
+A fully matching already-published release is a read-only verified no-op.
 
-## Verification and remaining gates
+After all remote assets and checksums match, the publisher rechecks the tag
+and marks the draft non-draft. An interrupted upload or finalization can be
+retried; the same identity/content checks run again. This explicit resume
+contract does not rely on undocumented CLI cleanup behavior (current `gh release
+create` itself also stages asset uploads as a draft). SemVer prereleases are
+marked prerelease; build metadata is not supported for release-set versions.
 
-```console
-python3 packaging/test_native.py
-python3 packaging/test_build.py
-python3 packaging/test_tools.py
-actionlint .github/workflows/native-candidates.yml
-actionlint .github/workflows/release.yml
-```
+Source readiness is not hosted qualification. Review and mandatory local SelfCI
+must pass before the owner lands source without a tag and dispatches the manual
+candidate workflow. Verify both recorded SHAs match that exact candidate; a
+newer-master race must not silently qualify different tooling. Both hosted native
+results remain release blockers before creating the 0.1.1 tag or publishing
+registry packages. No site links to uncreated assets are added here.
 
-The first two suites run in SelfCI without Docker. The real nFPM/dpkg/rpm
-format suite requires those tools and still uses an inert payload. Actionlint
-checks workflow syntax; policy regressions separately check the pinned actions,
-permissions, checkout separation and artifact retention.
+## Verification limits
 
-Remaining gates include named distro dependency-resolving
-install/ownership/uninstall tests; genuine
-default-restricted supervised/no-credential startup, shell/PTY/CA tests on
-approved real kernels/security policies; source/license closure and all external
-packages.
-Linux 5.12 remains the documented mount API minimum, not a claim established by
-containers sharing a newer host kernel.
+Run the four Python unit suites listed in README, optional real `test_tools.py`,
+actionlint for both workflows, and mandatory project SelfCI. Unit fixtures are
+not execution evidence. Successful container checks do not establish default
+restricted supervision, no-credential provider round trips, shell/PTY/CA behavior,
+the Linux 5.12 mount-API floor, or every distro/CPU/libgcc ABI.
 
-## Input provenance references
-
-Pins and platform behavior were checked against official sources on September
-9, 2026: PyPA's `pypa/manylinux` README and Quay manifests; Rust's
-`static.rust-lang.org/dist/rust-1.97.0-<target>.tar.xz.sha256`; nFPM's v2.46.3
-release checksums; the official checkout/upload-artifact Git tags; and GitHub's
-Actions contexts, hosted runner and artifact documentation. The committed
-digests, not today's mutable image tags, drive builds. Availability of those
-inputs and runner labels is not an executed Tau build result.
+Historical Actions run 34556681071 built core only on both architectures on
+September 11, 2026. It is not evidence for this new complete distribution.
+Original build pins were checked against PyPA/Quay, Rust distribution checksums,
+nFPM release checksums, and official Actions repositories on September 9, 2026.
+The cargo-about registry checksum and Debian/Fedora image indexes were resolved
+on September 14, 2026. Committed digests, not mutable tags, control selection.

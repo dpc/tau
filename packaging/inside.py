@@ -5,9 +5,9 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import shutil
 
 import native
+import complete
 
 
 def stamp(data, source_sha, epoch):
@@ -28,27 +28,28 @@ def stamp(data, source_sha, epoch):
 
 
 def assemble(source_sha, arch, maintainer, release_tag=None):
-    manifest = native.inventory(Path("/source"), source_sha)
+    manifest = native.inventory(Path("/sources/tau"), source_sha)
     staged = Path("/work/tau")
     # /build is read-only in this fresh container. Even hostile symlinks resolve
     # only within this container's non-secret filesystem, not the host.
     staged.write_bytes(stamp(
-        Path("/build/target/release/tau").read_bytes(),
+        Path("/builds/tau/target/release/tau").read_bytes(),
         source_sha, manifest["source_date_epoch"],
     ))
     staged.chmod(0o755)
-    native.package(Path("/source"), source_sha, staged, arch,
-                    Path("/output/packages"), maintainer, release_tag)
-    # Keep a copy for the separate no-network version probe; do not execute
-    # candidate code in the assembly process/container.
-    shutil.copyfile(staged, "/output/tau")
-    Path("/output/tau").chmod(0o755)
+    if release_tag:
+        native.release_version(release_tag, manifest["core"]["version"])
+        manifest.update(purpose="tagged-release", release_tag=release_tag,
+                        github_prerelease=native.release_is_prerelease(manifest["core"]["version"]))
+    complete.assemble(manifest, Path("/sources"), Path("/builds"), staged, arch,
+                      Path("/output/packages"), maintainer, release_tag is not None)
     Path("/output/toolchain.json").write_text(json.dumps({
         "rustc": native.run("rustc", "--version", "--verbose"),
         "cargo": native.run("cargo", "--version"),
         "cc": native.run("cc", "--version"),
         "readelf": native.run("readelf", "--version"),
         "nfpm": native.run("nfpm", "--version"),
+        "cargo_about": native.run("cargo-about", "--version"),
     }, indent=2) + "\n")
 
 

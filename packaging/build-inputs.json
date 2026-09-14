@@ -2,6 +2,10 @@
   "schema": 1,
   "rust_version": "1.97.0",
   "nfpm_version": "2.46.3",
+  "qualification_images": {
+    "deb": "docker.io/library/debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+    "rpm": "registry.fedoraproject.org/fedora:43@sha256:9e11dca4f23cf69e420f0b006f4f65507ed7e3061f4f214bb8a9611b230ae4d7"
+  },
   "architectures": {
     "amd64": {
       "machine": "x86_64",

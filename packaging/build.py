@@ -15,12 +15,19 @@ import tempfile
 import uuid
 
 import native
+import distribution
 
 
 TOOLS = Path(__file__).resolve().parent
 TOOL_FILES = (
     "packaging/build.py", "packaging/inside.py", "packaging/native.py",
     "packaging/build-inputs.json", "packaging/Dockerfile", "packaging/.dockerignore",
+    "packaging/distribution.toml", "packaging/distribution.py", "packaging/complete.py",
+    "packaging/about.toml", "packaging/notices.hbs", "packaging/probe.py",
+    "packaging/distro.py", "packaging/Dockerfile.deb-test", "packaging/Dockerfile.rpm-test",
+    "packaging/release_assets.py",
+    "packaging/publish.py",
+    "packaging/finish_project.py",
     ".github/workflows/native-candidates.yml", ".github/workflows/release.yml",
 )
 
@@ -51,13 +58,15 @@ def snapshot(repo, source_sha, destination):
     native.require_sha(source_sha)
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
-               GIT_NO_REPLACE_OBJECTS="1")
+               GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0",
+               HOME=str(destination))
     git = ["git", "--no-replace-objects", "-c", "init.templateDir=",
            "-c", "core.hooksPath=/dev/null", "-C", str(destination)]
     destination.mkdir()
     subprocess.run([*git, "init", "-q"], check=True, env=env)
     subprocess.run([*git, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-                    "--depth=1", str(repo.absolute()), source_sha], check=True, env=env)
+                    "--depth=1", str(repo.absolute()) if isinstance(repo, Path) else repo,
+                    source_sha], check=True, env=env, timeout=300)
     subprocess.run([*git, "checkout", "--quiet", "--detach", source_sha],
                    check=True, env=env)
     if native.run(*git, "rev-parse", "HEAD").strip() != source_sha:
@@ -148,10 +157,55 @@ def verify_version(text, version, source_sha, epoch):
         raise ValueError("packaged tau --version does not match clean selected source")
 
 
+def qualify_distros(pins, assets, version, arch, tagged, root, logs):
+    evidence = {}
+    for fmt, base in pins["qualification_images"].items():
+        if not re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", base):
+            raise ValueError("qualification image must be digest-pinned")
+        iidfile = root / f"{fmt}.iid"
+        execute([
+            "docker", "build", "--pull", "--iidfile", str(iidfile),
+            "--build-arg", f"BASE_IMAGE={base}", "--file",
+            str(TOOLS / f"Dockerfile.{fmt}-test"), str(TOOLS),
+        ], logs / f"{fmt}-image.log", 1800)
+        image = iidfile.read_text().strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+            raise ValueError("invalid qualification image identity")
+        name = f"tau-native-{uuid.uuid4().hex}"
+        command = container_command(
+            image, name, [(assets, "/packages", True), (TOOLS, "/tooling", True)],
+            network=False, user="0:0",
+        )
+        # Only this disposable container's root filesystem is writable. Package
+        # managers need ownership capabilities; no host directories are writable.
+        command.remove("--read-only")
+        command[-1:-1] = [
+            "--cap-add=CHOWN", "--cap-add=FOWNER", "--cap-add=DAC_OVERRIDE",
+            "--cap-add=SETUID", "--cap-add=SETGID",
+        ]
+        try:
+            execute([*command, "python3", "/tooling/distro.py", "--packages", "/packages",
+                     "--version", version, "--arch", arch, "--fmt", fmt]
+                    + (["--tagged"] if tagged else []),
+                    logs / f"{fmt}-qualification.log", 300)
+        finally:
+            subprocess.run(["docker", "rm", "--force", name], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        evidence[fmt] = {
+            "base_image": base, "derived_image_id": image,
+            "result": json.loads((logs / f"{fmt}-qualification.log").read_text()),
+        }
+    if set(evidence) != {"deb", "rpm"}:
+        raise ValueError("both distro package formats must be qualified")
+    return evidence
+
+
 def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_attempt,
           release_tag=None):
     native.require_sha(source_sha)
     native.require_sha(workflow_sha)
+    if release_tag is not None and source_sha != workflow_sha:
+        raise ValueError("tagged builds require identical source_sha and workflow_sha")
     verify_tooling(workflow_sha)
     pins, selected, pins_sha = inputs(arch)
     if platform.system() != "Linux" or platform.machine() != selected["machine"]:
@@ -163,11 +217,21 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".tau-native-", dir=output.parent) as tmp:
         root = Path(tmp)
-        source = root / "source"
+        sources = root / "sources"
+        sources.mkdir()
+        source = sources / "tau"
         snapshot(repo, source_sha, source)
         manifest = native.inventory(source, source_sha)
         if release_tag is not None:
             native.release_version(release_tag, manifest["core"]["version"])
+            manifest.update(purpose="tagged-release", release_tag=release_tag,
+                            github_prerelease=native.release_is_prerelease(manifest["core"]["version"]))
+        # The trusted inventory controls builds. Selected source cannot silently
+        # add/remove products by supplying a different inventory.
+        if native.source_file(source, source_sha, "packaging/distribution.toml") != distribution.INVENTORY.read_bytes():
+            raise ValueError("selected source distribution differs from trusted tooling")
+        for project in manifest["external"]:
+            snapshot(project["url"], project["source_sha"], sources / project["input"])
         logs = root / "logs"
         logs.mkdir()
         try:
@@ -183,48 +247,69 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                 raise ValueError("Docker did not return an immutable derived image ID")
             if shutil.disk_usage(root).free < 8 * 1024**3:
                 raise ValueError("need at least 8 GiB free after preparing builder (not a capacity guarantee)")
-            work = root / "build"
-            work.mkdir()
-            container(image_id, [(source, "/source", True), (work, "/work", False)],
-                       ["env", f"SOURCE_DATE_EPOCH={manifest['source_date_epoch']}",
-                        "/opt/rust/bin/cargo", "build", "--locked", "--release", "-p", "dpc-tau"],
-                       logs / "cargo.log", 5400, user=container_user)
+            builds = root / "builds"
+            builds.mkdir()
+            for project in distribution.projects():
+                name = project["name"]
+                work = builds / name
+                work.mkdir()
+                mounts = [(sources / name, "/source", True), (work, "/work", False),
+                          (TOOLS, "/tooling", True)]
+                # cargo-about's metadata pass needs the complete locked source
+                # graph, even though its emitted notice is target-filtered.
+                container(image_id, mounts, ["cargo", "fetch", "--locked"],
+                          logs / f"fetch-{name}.log", 900, user=container_user)
+                container(image_id, mounts,
+                          ["env", f"SOURCE_DATE_EPOCH={manifest['source_date_epoch']}",
+                           "/opt/rust/bin/cargo", "build", "--locked", "--release",
+                           "-p", project["package"], "--bins"],
+                          logs / f"cargo-{name}.log", 5400, user=container_user)
+                container(image_id, mounts,
+                          ["python3", "/tooling/finish_project.py", "--project-name", name,
+                           "--target", selected["rust_target"]],
+                          logs / f"licenses-{name}.log", 300, network=False,
+                          user=container_user)
             assembly = root / "assembly"
             assembly.mkdir()
             package_work = root / "package-work"
             package_work.mkdir()
             container(image_id, [
-                (source, "/source", True), (work, "/build", True),
+                (sources, "/sources", True), (builds, "/builds", True),
                 (TOOLS, "/tooling", True), (package_work, "/work", False),
                 (assembly, "/output", False),
             ], ["python3", "/tooling/inside.py", "--source-sha", source_sha,
                   "--arch", arch, "--maintainer", maintainer]
                  + (["--release-tag", release_tag] if release_tag else []),
-                       logs / "package.log", 300, network=False, user=container_user)
+                       logs / "package.log", 900, network=False, user=container_user)
             probe_work = root / "probe-work"
             probe_work.mkdir()
-            container(image_id, [(assembly, "/probe", True), (probe_work, "/work", False)],
-                       ["/probe/tau", "--version"], logs / "version.log", 30,
-                       network=False, log_limit=8192, user=container_user)
-            version = (logs / "version.log").read_text()
+            container(image_id, [(assembly, "/probe", True), (probe_work, "/work", False),
+                                 (TOOLS, "/tooling", True)],
+                       ["python3", "/tooling/probe.py", "--packages", "/probe/packages",
+                        "--version", manifest["core"]["version"], "--arch", arch]
+                       + (["--tagged"] if release_tag else []),
+                       logs / "probe.log", 240, network=False, user=container_user)
+            probes = json.loads((logs / "probe.log").read_text())
+            version = probes["version_output"]
             verify_version(version, manifest["core"]["version"], source_sha,
                            manifest["source_date_epoch"])
             assets = assembly / "packages"
-            basename = (
-                f"tau-{manifest['core']['version']}-{arch}"
-                if release_tag else f"tau-test-{arch}"
-            )
-            expected = {"SHA256SUMS", "source-manifest.json",
-                        f"{basename}.deb", f"{basename}.rpm", f"{basename}.tar.gz"}
+            expected = distribution.package_assets(manifest["core"]["version"], arch,
+                                                   release_tag is not None) | {"source-manifest.json"}
             if {p.name for p in assets.iterdir()} != expected:
                 raise ValueError("unexpected package inventory")
             if any(p.is_symlink() or not p.is_file() for p in assets.iterdir()):
                 raise ValueError("package assets must be regular files")
+            distro_tests = qualify_distros(
+                pins, assets, manifest["core"]["version"], arch, release_tag is not None,
+                root, logs,
+            )
+            shutil.copyfile(assembly / "toolchain.json", assets / "toolchain.json")
             native.write_json(assets / "build-manifest.json", {
                 "schema": 1,
                 "purpose": (
                     "tagged-github-release" if release_tag
-                    else "manual-non-release-core-candidate"
+                    else "manual-non-release-complete-candidate"
                 ),
                 "source_sha": source_sha, "workflow_sha": workflow_sha,
                 "release_tag": release_tag,
@@ -236,13 +321,24 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                 "source_date_epoch": manifest["source_date_epoch"],
                 "build_inputs_sha256": pins_sha, "build_inputs": pins,
                 "arch": arch, "derived_image_id": image_id,
-                "command": ["cargo", "build", "--locked", "--release", "-p", "dpc-tau"],
+                "projects": distribution.projects(),
                 "profile": "release (selected source Cargo.toml)",
                 "features": "selected source defaults", "version_output": version,
-                "runtime_qualification": "not-performed",
+                "runtime_qualification": "extracted-archive-help-and-Hello-only",
+                "archive_probes": probes,
+                "distro_qualification": distro_tests,
+                "metadata_sha256": {
+                    name: native.sha256((assets / name).read_bytes())
+                    for name in ("source-manifest.json", "toolchain.json")
+                },
+                "package_asset_sha256": {
+                    name: native.sha256((assets / name).read_bytes())
+                    for name in sorted(distribution.package_assets(
+                        manifest["core"]["version"], arch, release_tag is not None))
+                },
                 "restrictions": [
-                    "No distro install/uninstall or default restricted supervised startup test",
-                    "No external packages; manifest inventory is not qualification",
+                    "No default restricted supervised startup test",
+                    "Hello admission is not Ready or integration service qualification",
                     (
                         "GitHub tag and workflow identity are release authority, not signed provenance"
                         if release_tag else
@@ -250,8 +346,8 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                     ),
                 ],
             })
-            shutil.copyfile(assembly / "toolchain.json", assets / "toolchain.json")
-            shutil.copyfile(logs / "cargo.log", assets / "cargo.log")
+            for log in sorted(logs.glob("*.log")):
+                shutil.copyfile(log, assets / log.name)
             # Regenerate checksums after adding trusted orchestration metadata.
             (assets / "SHA256SUMS").write_text("".join(
                 f"{native.sha256(p.read_bytes())}  {p.name}\n"

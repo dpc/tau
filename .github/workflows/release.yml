@@ -1,4 +1,4 @@
-name: Tagged Linux core release
+name: Tagged Linux complete release
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
       PACKAGE_ARCH: ${{ matrix.arch }}
       RELEASE_TAG: ${{ github.ref_name }}
@@ -53,7 +53,7 @@ jobs:
           manifest = native.inventory(__import__("pathlib").Path("."), sys.argv[1])
           native.release_version(sys.argv[2], manifest["core"]["version"])
           PY
-      - name: Build tagged core release packages
+      - name: Build and qualify the complete tagged distribution
         shell: bash
         run: |
           python3 packaging/build.py \
@@ -70,13 +70,10 @@ jobs:
         run: |
           set -euo pipefail
           version=${RELEASE_TAG#v}
-          mkdir "$RUNNER_TEMP/release-assets"
-          cp "$RUNNER_TEMP"/native-release/tau-"$version"-"$PACKAGE_ARCH".* \
-            "$RUNNER_TEMP/release-assets/"
-          for metadata in build-manifest source-manifest toolchain; do
-            cp "$RUNNER_TEMP/native-release/$metadata.json" \
-              "$RUNNER_TEMP/release-assets/tau-$version-$PACKAGE_ARCH-$metadata.json"
-          done
+          python3 packaging/release_assets.py stage \
+            --source "$RUNNER_TEMP/native-release" \
+            --output "$RUNNER_TEMP/release-assets" \
+            --version "$version" --arch "$PACKAGE_ARCH"
       - name: Upload release inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -99,6 +96,12 @@ jobs:
       RELEASE_TAG: ${{ github.ref_name }}
       SOURCE_SHA: ${{ github.sha }}
     steps:
+      - name: Check out trusted tagged verification tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
       - name: Download all architecture assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -109,79 +112,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/release-assets"
-          version=${RELEASE_TAG#v}
-          assets=(
-            "tau-$version-amd64.deb"
-            "tau-$version-amd64.rpm"
-            "tau-$version-amd64.tar.gz"
-            "tau-$version-amd64-build-manifest.json"
-            "tau-$version-amd64-source-manifest.json"
-            "tau-$version-amd64-toolchain.json"
-            "tau-$version-arm64.deb"
-            "tau-$version-arm64.rpm"
-            "tau-$version-arm64.tar.gz"
-            "tau-$version-arm64-build-manifest.json"
-            "tau-$version-arm64-source-manifest.json"
-            "tau-$version-arm64-toolchain.json"
-          )
-          mapfile -t actual < <(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
-          mapfile -t expected < <(printf '%s\n' "${assets[@]}" | LC_ALL=C sort)
-          diff -u <(printf '%s\n' "${expected[@]}") <(printf '%s\n' "${actual[@]}")
-          python3 - "$SOURCE_SHA" "$RELEASE_TAG" "$version" <<'PY'
-          import json
-          from pathlib import Path
-          import sys
-
-          source_sha, tag, version = sys.argv[1:]
-          prerelease = "-" in version.split("+", 1)[0]
-          for arch in ("amd64", "arm64"):
-              prefix = Path(f"tau-{version}-{arch}")
-              build = json.loads(Path(f"{prefix}-build-manifest.json").read_text())
-              source = json.loads(Path(f"{prefix}-source-manifest.json").read_text())
-              assert build["purpose"] == "tagged-github-release"
-              assert build["source_sha"] == source_sha
-              assert build["workflow_sha"] == source_sha
-              assert build["release_tag"] == tag
-              assert build["arch"] == arch
-              assert build["github_prerelease"] is prerelease
-              assert source["purpose"] == "tagged-release"
-              assert source["source_sha"] == source_sha
-              assert source["release_tag"] == tag
-              assert source["core"]["version"] == version
-              assert source["elf"]["arch"] == arch
-              assert source["github_prerelease"] is prerelease
-          Path("github-prerelease").write_text("true\n" if prerelease else "false\n")
-          PY
-          mapfile -t refs < <(
-            git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
-              "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}"
-          )
-          test "${#refs[@]}" -ge 1
-          test "${#refs[@]}" -le 2
-          remote_sha=
-          direct_sha=
-          for ref in "${refs[@]}"; do
-            sha=${ref%%$'\t'*}
-            name=${ref#*$'\t'}
-            if [[ "$name" == "refs/tags/$RELEASE_TAG^{}" ]]; then
-              remote_sha=$sha
-            elif [[ "$name" == "refs/tags/$RELEASE_TAG" ]]; then
-              direct_sha=$sha
-            else
-              exit 1
-            fi
-          done
-          remote_sha=${remote_sha:-$direct_sha}
-          test "$remote_sha" = "$SOURCE_SHA"
-          sha256sum "${assets[@]}" > SHA256SUMS
-          release_flags=()
-          if [[ $(<github-prerelease) == true ]]; then
-            release_flags+=(--prerelease)
-          fi
-          gh release create "$RELEASE_TAG" \
+          python3 packaging/publish.py \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes \
-            "${release_flags[@]}" \
-            "${assets[@]}" SHA256SUMS
+            --source-repo "$GITHUB_WORKSPACE" \
+            --source "$RUNNER_TEMP/release-assets" \
+            --source-sha "$SOURCE_SHA" --workflow-sha "$SOURCE_SHA" \
+            --tag "$RELEASE_TAG"

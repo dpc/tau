@@ -1,121 +1,95 @@
-# Native Linux packaging
+# Native Linux distribution
 
-This tooling builds either manual test candidates or tag-authorized GitHub
-release packages for Tau's core executable. It inventories immutable
-Tau/external sources, rejects ELF runtime linkage outside a conservative GNU
-baseline, and creates core DEB/RPM/archive assets with nFPM. Existing Nix
-packages remain unchanged. Do not repackage Nix executables by patching their
-loader.
+The native builder produces **Tau plus all seven owned extension projects**
+(nine executables, including `tau-telegram-gateway`). Use `tau-full` for the
+complete distribution, or install individual packages. Installation does not
+enable extensions, create accounts, install services, supply credentials, or
+change user configuration. Existing Nix packages are unchanged.
 
-The [native build driver and Actions workflows](native-builds.md) add
-digest-pinned baseline images and checksum-pinned Rust/nFPM downloads. They have
-run successfully on GitHub's native x86_64 and ARM64 hosted runners, but
-install/runtime qualification remains outstanding. The low-level
-supplied-binary commands below remain useful independently.
+`distribution.toml` is the required inventory shared by the builder, assembler,
+qualification probes, staging, and publisher. Missing products fail the build;
+there is no core-only fallback. See [native-builds.md](native-builds.md) for
+commands, pinned inputs, provenance, and workflow trust boundaries.
 
-## Run locally
+## Packages and archives
 
-Requires Python 3.11+, Git, GNU readelf, and nFPM **2.46.3** on PATH. nFPM is
-version-checked, not downloaded by `native.py`; this low-level script alone is
-not a reproducible toolchain. The nFPM JSON configuration uses its YAML-compatible
-config schema.
+Each architecture gets 30 package/archive assets:
+
+* `tau-<tau-version>-<arch>.{deb,rpm,tar.gz}`;
+* eight external binary packages,
+  `<binary>-<upstream-version>-tau-<tau-version>-<arch>.{deb,rpm,tar.gz}`;
+* `tau-full-<tau-version>-<arch>.{deb,rpm,tar.gz}`.
+
+The DEB/RPM `tau-full` package contains **only exact-version dependencies** on
+the nine individual packages. It owns no files, so installing it alongside
+individual packages cannot create overlapping file ownership. Place all matching
+architecture DEBs/RPMs together and install them with the distro package manager;
+the metapackage is not useful without the individual packages being available.
+
+An individual package installs `/usr/bin/<binary>`, the upstream project
+`LICENSE`, full generated `THIRD_PARTY_NOTICES.html`, and its source/ELF manifest
+under `/usr/share/{licenses,doc}/<binary>`. Archives contain the same payload in
+`bin/` and `share/` below one named prefix. The full archive combines those
+payloads; it is not an archive of package-manager files.
+
+External Cargo versions stay unchanged. For example, upstream `0.1.0` from the
+Tau `0.1.1` release set becomes native package version `0.1.0-1.tau0.1.1`.
+A later release set gets a different revision even if the upstream version is
+still `0.1.0`. DEB/RPM numeric ordering covers `0.1.9` → `0.1.10`; prereleases use
+tilde ordering. Source URL, full Git SHA, locked NAR hash, source-file hashes,
+upstream version/license, ELF dependencies, and notice digest remain explicit.
+
+Manual candidates instead use `0.0.0~test.<source-sha>-1`, below stable `0.0.0`.
+They are not promoted into releases. Tags must exactly match the application
+version in `crates/tau/Cargo.toml`, not the independently versioned SDK or the
+default version of unchanged workspace crates.
+
+## Qualification boundaries
+
+Every successful complete build must:
+
+1. Build all exact locked sources on a matching native architecture.
+2. Generate full notices per source/architecture with pinned cargo-about, including
+   build dependencies and excluding dev-only dependencies. Unknown license
+   requirements fail; no warning-only or metadata-only license substitute exists.
+3. Inspect every ELF without `ldd` or executing it during assembly. The filter
+   requires standard GNU loaders, no Nix-store linkage/RPATH, only reviewed
+   libc/libm/libgcc/pthread/dl/loader dependencies, and GLIBC symbols ≤2.34.
+4. Extract actual individual and full archives, compare their binaries, check
+   every executable's `--help`, and verify core version/revision/date.
+5. Use extracted Tau to admit each packaged stdio extension's protocol-7 Hello
+   with an intentionally invalid credential-free configuration. The private
+   Telegram gateway is checked for executable startup, not stdio Hello.
+6. Install with dependency resolution, check exact ownership/no lifecycle
+   scripts, execute installed `--help`, remove packages, preserve a user-state
+   sentinel, and check release revision ordering in disposable Debian 12 and
+   Fedora 43 userspaces.
+
+The probes are **not Ready/service-integration qualification**. They do not
+establish default restricted supervision, shell/PTY/CA behavior, minimum kernel
+support, every RPM distro, or broad portability. Containers share a host kernel.
+No complete hosted result is implied merely by implementing these gates.
+The historical core-only Actions run 34556681071 (September 11, 2026) does not
+qualify the new complete distribution.
+
+## Tests and low-level inspection
 
 ```console
 python3 packaging/test_native.py
+python3 packaging/test_build.py
+python3 packaging/test_complete.py
+python3 packaging/test_publish.py
 python3 packaging/native.py inventory --source-sha FULL_40_CHARACTER_COMMIT_SHA
-python3 packaging/native.py audit-elf --binary /path/to/native/tau --arch amd64
-python3 packaging/native.py package-core \
-  --source-sha FULL_40_CHARACTER_COMMIT_SHA \
-  --binary /path/to/native/tau --arch amd64 \
-  --maintainer 'Your Name <your-email@example.org>' --output /tmp/new-tau-candidate
+python3 packaging/native.py audit-elf --binary /path/to/tau --arch amd64
 ```
 
-With nFPM 2.46.3, `dpkg`/`dpkg-deb` and `rpm` on PATH, also run
-`python3 packaging/test_tools.py`. This creates real package formats around an
-**inert test payload**, checks both package managers' version ordering, inspects
-file inventory and absence of activation scripts, and extracts the DEB. The
-test replaces ELF inspection only for that inert fixture; it does not run Tau
-or install packages and is not runtime qualification. The dependency-free unit
-suite runs in SelfCI's lint job; the real-tool suite is a separate explicit gate
-alongside the native builder's eventual execution checks.
+The four unit suites run in SelfCI. `test_tools.py` additionally requires nFPM
+2.46.3, dpkg, and rpm; its inert core/full format fixtures are not runtime evidence.
+`native.py package-core` remains a low-level supplied-binary diagnostic tool,
+not the complete release builder. Its manifest explicitly disclaims an attested
+binary/source relationship and it does not generate third-party notices.
 
-Use `arm64` for AArch64. `inventory` reads Git objects with replacement objects
-disabled, not dirty worktree files or locally substituted history; the commit
-must be available locally. It reads external revisions/URLs/NAR hashes
-from the selected commit's root flake inputs, never a floating branch. The eight
-external binaries remain pending their owning projects' audits; no external
-source is fetched or executed here. On September 9, 2026, the local GitHub origin
-was verified as `dpc/tau` (default branch `master`), a build/download mirror
-candidate; Radicle remains canonical. Older Cargo metadata naming
-`dpc/tau-agent` must not be used to infer the publication destination.
-
-`audit-elf` never runs the binary or `ldd`. It requires ELF64 little-endian, the
-architecture's standard GNU loader, no Nix-store interpreter/dynamic references,
-no RPATH/RUNPATH, only libc/libm/libgcc plus the baseline glibc pthread/dl
-compatibility libraries and loader dependencies, and required GLIBC symbols no
-newer than 2.34. It rejects unresolved Tau build placeholders. Additional
-dynamic libraries require an explicit dependency-policy review.
-Passing this filter **does not establish source identity, kernel compatibility,
-libgcc symbol compatibility, TLS/CA behavior, or successful startup**.
-
-`package-core` copies the binary into private staging, audits that copy, and
-creates all output in a new directory only after both nFPM invocations succeed.
-An existing output path is refused. Packages contain only `/usr/bin/tau`,
-the source license and source/ELF manifest: no maintainer scripts, service units,
-accounts, user configuration, secrets, or automatic activation. The archive
-contains the same three files. Uninstall must preserve user state; actual package
-manager install/uninstall testing is still required before claiming that behavior
-on a distribution.
-
-Every package is an explicitly unqualified test version
-`0.0.0~test.<source_sha>-1`, ordered before stable `0.0.0` by modern DEB/RPM
-version comparison, unless `package-core` receives `--release-tag v<version>`.
-Release mode requires the tag to exactly equal `v` plus the selected source's
-application version and uses that version in the package metadata and filenames.
-The version comes from `crates/tau/Cargo.toml` (falling back to the workspace
-default only when that manifest explicitly inherits it). Tau 0.1.1 and its CLI
-have explicit versions; unchanged internal crates retain workspace default
-0.1.0, and the SDK retains its separate version.
-Outputs include `source-manifest.json` and `SHA256SUMS`. The manifest explicitly
-records that the caller-supplied binary's source relationship is not attested.
-Checksums provide integrity, not authentication. Archive timestamps/ownership
-are normalized; byte-for-byte reproducibility is not claimed.
-
-## Qualification and remaining implementation
-
-The release-tag workflow now creates the matching GitHub release and attaches
-the core packages, per-architecture source/build/toolchain manifests, and an
-aggregate `SHA256SUMS`. Before claiming broad distribution support:
-
-* Execute the native x86_64 and ARM64 builder with its pinned baseline images,
-  Rust and nFPM, bounded resources and `cargo build --locked --release -p dpc-tau`.
-  Record compiler, image digest, source/workflow SHAs and build identity;
-  validate the actual `tau --version` against source.
-* Run real package-manager install/metadata/ownership/uninstall tests with
-  dependency resolution on named Debian/Ubuntu and RPM-family userspaces.
-  Candidate dependency names are not a claim of support for all RPM systems.
-* Exercise default **restricted supervised startup**, a no-credential provider
-  round trip, shell/PTY and CA loading on real supported VM kernels/security
-  policies. `--help`, a privileged container, or a successful ELF audit is not
-  sufficient. Linux 5.12 is the documented minimum for recursive read-only
-  mount support; vendor backports remain unverified. Containers share the host
-  kernel and cannot prove the floor.
-* Audit/build/license/package all seven locked external projects (eight
-  binaries, including separate Telegram gateway), preserving their own versions
-  and recording SDK/protocol/tested Tau compatibility. Do not omit an
-  unqualified package silently.
-* Preserve the least-privilege exact-SHA manual Actions workflow separately
-  from the trusted tag publisher. Never promote arbitrary manual artifacts to
-  releases.
-* Complete provenance and the approved external inventory before presenting
-  the GitHub assets as packages for every Tau integration. No site links are
-  added here.
-
-Local investigation found that the available Nix-built `result/bin/tau` has a
-Nix-store loader and RUNPATH and therefore fails the baseline filter. GitHub
-Actions run 34556681071 completed the native core build on both architectures
-on September 11, 2026. That build did not perform package-manager installation
-or runtime qualification.
-
-See `docs/release-builds.md` for the existing build profile and Nix distribution;
-see `docs/extensions.md` for explicit extension configuration and restrictions.
+All outputs use new directories; failures do not leave a final candidate.
+Checksums provide integrity, not authentication. Ownership/timestamps are
+normalized, but byte-for-byte archive/build reproducibility is not claimed.
+See `docs/extensions.md` for explicit extension configuration.

@@ -9,10 +9,45 @@ import unittest
 from unittest.mock import patch
 
 import native
+import complete
+import distribution
+import test_complete
 from test_native import SourceFixture
 
 
 class PackageToolTests(SourceFixture, unittest.TestCase):
+    def test_real_complete_metapackage_metadata_and_revision_ordering(self):
+        sources, builds = test_complete.AssemblyTests.prepare(self)
+        output = self.repo / "complete-assets"
+        with patch.object(native, "audit", return_value={"test_fixture_only": True}):
+            complete.assemble(native.inventory(self.repo, self.sha), sources, builds,
+                              builds / "tau/target/release/tau", "amd64", output,
+                              "Inert complete distribution fixture", True)
+        products = distribution.components("1.2.3")
+        deb = str(output / "tau-full-1.2.3-amd64.deb")
+        rpm = str(output / "tau-full-1.2.3-amd64.rpm")
+        versions = {p["name"]: "-".join(complete.package_version(p, "1.2.3", self.sha, True))
+                    for p in products}
+        self.assertEqual(
+            {s.strip() for s in native.run("dpkg-deb", "-f", deb, "Depends").split(",")},
+            {f"{name} (= {version})" for name, version in versions.items()},
+        )
+        self.assertEqual(
+            {s for s in native.run("rpm", "-qp", "--requires", rpm).splitlines()
+             if not s.startswith("rpmlib(")},
+            {f"{name} = {version}" for name, version in versions.items()},
+        )
+        self.assertEqual(native.run("rpm", "-qp", "--qf", "[%{FILENAMES}\n]", rpm), "")
+        for earlier, later in [
+            ("0.1.0-1.tau0.1.9", "0.1.0-1.tau0.1.10"),
+            ("0.1.0-1.tau0.1.1~rc.1", "0.1.0-1.tau0.1.1"),
+            ("0.0.0~test." + self.sha + "-1", "0.0.0"),
+        ]:
+            subprocess.run(["dpkg", "--compare-versions", earlier, "lt", later], check=True)
+            self.assertEqual(native.run(
+                "rpm", "--eval", f'%{{lua:print(rpm.vercmp("{earlier}", "{later}"))}}'
+            ).strip(), "-1")
+
     def test_real_formats(self):
         binary = self.repo / "binary"
         binary.write_bytes(b"Inert packaging fixture, not Tau or an ELF executable\n")

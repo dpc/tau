@@ -2,13 +2,15 @@
 
 ## Native packaging tools
 
-The [local native packaging harness](packaging/README.md) creates non-release
-candidates, not qualified distributions. Source inventory reads exact commit
+The low-level `native.py package-core` [packaging tool](packaging/README.md)
+wraps a caller-supplied binary; it is not the complete native builder.
+Source inventory reads exact commit
 objects with Git replacements disabled, but does not attest a supplied binary's
 relationship to that source or its runtime compatibility. Git, readelf and nFPM
 on PATH are trusted build tools; the nFPM version check verifies its reported
 version only, not the tool's origin. Output is staged and published to a new
-directory only after packaging succeeds. Checksums detect corruption, not
+directory only after packaging succeeds. Its optional release-form labeling
+does not authorize publication. Checksums detect corruption, not
 authenticity. See the packaging README for qualification and publication limits.
 
 The [manual native build workflow](packaging/native-builds.md) separately pins
@@ -18,11 +20,23 @@ home or Docker socket. On rootful Docker they run as the caller's non-root
 UID/GID; on rootless Docker they use namespaced container root, which maps to
 the unprivileged daemon/caller identity rather than host root. Both modes drop
 all capabilities, set no-new-privileges and use read-only root/source mounts in
-disposable restricted containers. Assembly and the version probe run in
-separate fresh containers without network. These build containers are not proof
+disposable restricted containers. The complete builder produces all nine
+executables, full notices, individual packages, and a dependency-only
+metapackage. Assembly and extracted-archive probes run in separate fresh
+containers without network. Offline distro install/remove checks use disposable
+writable container filesystems with CHOWN/FOWNER/DAC_OVERRIDE/SETUID/SETGID,
+but all host mounts remain read-only. These build containers are not proof
 of Tau's own default restricted-supervisor startup. Only expiring, explicitly
 unqualified manual artifacts are uploaded; there is no release publisher or
 artifact promotion path in this lane.
+
+Local release-form builds require identical source/tooling SHAs and a matching
+application-version tag label; these checks do not grant GitHub publication
+authority. The separate tag workflow binds both to the pushed tag commit and
+gates publication on the complete two-architecture asset/provenance inventory.
+Only its publisher job has write authority. Implemented probes and source
+readiness do not imply an executed hosted result, Ready/service functionality,
+or broad distro/kernel qualification.
 
 ## Runtime boundaries
 

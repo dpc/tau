@@ -53,6 +53,12 @@ function job_lint() {
   if ! python3 packaging/test_build.py; then
     selfci step fail
   fi
+  if ! python3 packaging/test_complete.py; then
+    selfci step fail
+  fi
+  if ! python3 packaging/test_publish.py; then
+    selfci step fail
+  fi
 }
 
 function job_cargo() {

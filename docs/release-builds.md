@@ -25,15 +25,24 @@ nightly compiler or alternate code-generation backend.
 
 ## GitHub tag releases
 
-Pushing a tag that exactly matches `v` plus the workspace version, such as
-`v0.1.0`, triggers `.github/workflows/release.yml`. Native x86_64 and ARM64
-runners build core DEB, RPM, and tar packages from the resolved tag commit.
-After both builds succeed, the workflow creates the matching GitHub release
-with generated notes and attaches the packages, per-architecture manifests,
-and `SHA256SUMS`.
+Pushing a tag that exactly matches `v` plus the application version from
+`crates/tau/Cargo.toml`, such as `v0.1.1`, triggers
+`.github/workflows/release.yml`. Native x86_64 and ARM64 runners build complete
+DEB, RPM, and tar distributions from the resolved tag commit.
+After both builds succeed, the workflow creates or resumes an identity-marked
+draft with generated notes, uploads only missing matching assets, verifies the
+complete remote inventory/checksums, then publishes it. It never overwrites
+conflicting assets, unrelated drafts, or already-published releases.
 
-This lane packages only the bundled `tau` executable. External extension
-projects keep their own versions and are not release assets of this workflow.
+This lane packages `tau` and all seven locked external extension projects
+(nine executables including the Telegram gateway), individually and as
+`tau-full`. External projects retain their Cargo versions; native package
+revisions distinguish Tau release sets, and the DEB/RPM full package depends
+on exact individual package versions without duplicate file ownership.
+See [native packaging](../packaging/README.md) for the required inventory,
+license/provenance records, and narrow archive/distro qualification gates.
+The implemented workflow is not evidence that a candidate has passed its
+required hosted tests.
 The manual arbitrary-SHA candidate workflow remains separate and cannot publish
 a release.
 

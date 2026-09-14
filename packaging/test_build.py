@@ -68,7 +68,7 @@ class SnapshotTests(SourceFixture, unittest.TestCase):
 
     def test_tooling_must_match_recorded_workflow_objects(self):
         tools = self.repo / "packaging"
-        tools.mkdir()
+        tools.mkdir(exist_ok=True)
         (tools / "build.py").write_text("trusted fixture")
         self.git("add", ".")
         self.git("commit", "-qm", "tooling")
@@ -98,9 +98,11 @@ class PolicyTests(unittest.TestCase):
             self.assertIn("--iidfile", command)
             self.assertNotIn("--tag", command)
         dockerfile = (build.TOOLS / "Dockerfile").read_text()
-        self.assertEqual(dockerfile.count("sha256sum --check --strict"), 2)
+        self.assertEqual(dockerfile.count("sha256sum --check --strict"), 3)
         self.assertNotIn("COPY", dockerfile)
         self.assertIn("CARGO_BUILD_JOBS=2", dockerfile)
+        self.assertIn("--features cli --bin cargo-about", dockerfile)
+        self.assertIn("/opt/cargo-about/bin/cargo-about --version", dockerfile)
 
     def test_runtime_cannot_mount_credentials_or_docker_socket(self):
         command = build.container_command("image", "name", [
@@ -169,41 +171,15 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", workflow)
         self.assertIn("SOURCE_SHA: ${{ github.sha }}", workflow)
         self.assertIn("--release-tag \"$RELEASE_TAG\"", workflow)
-        self.assertIn("--verify-tag", workflow)
-        self.assertIn("--generate-notes", workflow)
         self.assertIn("needs: build", workflow)
         self.assertEqual(workflow.count("contents: write"), 1)
-        self.assertIn("git ls-remote", workflow)
-        self.assertIn('test "$remote_sha" = "$SOURCE_SHA"', workflow)
-        asset_block = re.search(
-            r"^          assets=\(\n(?P<body>.*?)^          \)$",
-            workflow,
-            re.MULTILINE | re.DOTALL,
-        )
-        self.assertIsNotNone(asset_block)
-        assets = re.findall(r'^            "([^"]+)"$', asset_block["body"], re.MULTILINE)
-        expected_assets = [
-            f"tau-$version-{arch}.{fmt}"
-            for arch in ("amd64", "arm64")
-            for fmt in ("deb", "rpm", "tar.gz")
-        ] + [
-            f"tau-$version-{arch}-{metadata}.json"
-            for arch in ("amd64", "arm64")
-            for metadata in ("build-manifest", "source-manifest", "toolchain")
-        ]
-        self.assertEqual(set(assets), set(expected_assets))
-        self.assertEqual(len(assets), 12)
-        self.assertIn("diff -u <(printf", workflow)
-        self.assertIn('build["source_sha"] == source_sha', workflow)
-        self.assertIn('source["elf"]["arch"] == arch', workflow)
-        self.assertIn('Path("github-prerelease").write_text', workflow)
-        self.assertIn("release_flags+=(--prerelease)", workflow)
-        self.assertIn('"${release_flags[@]}"', workflow)
+        self.assertIn("release_assets.py stage", workflow)
+        self.assertIn("python3 packaging/publish.py", workflow)
+        self.assertIn('--source-sha "$SOURCE_SHA" --workflow-sha "$SOURCE_SHA"', workflow)
         self.assertIn("Dawid Ciężarkiewicz <dpc@dpc.pw>", workflow)
-        self.assertIn("No external packages", Path(build.TOOLS / "build.py").read_text())
         uses = [line.split("uses: ", 1)[1].split()[0]
                 for line in workflow.splitlines() if "uses: " in line]
-        self.assertEqual(len(uses), 3)
+        self.assertEqual(len(uses), 4)
         for action in uses:
             self.assertRegex(action, r"^actions/[a-z-]+@[0-9a-f]{40}$")
 
@@ -211,8 +187,16 @@ class PolicyTests(unittest.TestCase):
 class OrchestrationTests(SourceFixture, unittest.TestCase):
     def exercise(self, bad_version=False, release=False):
         output = self.repo / "output"
+        workflow_sha = self.sha if release else "c" * 40
         calls = []
         real_run = native.run
+        real_snapshot = build.snapshot
+
+        def snapshot(repo, sha, destination):
+            if isinstance(repo, Path):
+                real_snapshot(repo, sha, destination)
+            else:
+                destination.mkdir()
 
         def tool_run(*args):
             if args == ("docker", "info", "--format", "{{.Architecture}}"):
@@ -241,18 +225,18 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
             if "/output" in paths:
                 packages = paths["/output"] / "packages"
                 packages.mkdir()
-                basename = "tau-1.2.3-amd64" if release else "tau-test-amd64"
-                for name in ("SHA256SUMS", "source-manifest.json", f"{basename}.deb",
-                             f"{basename}.rpm", f"{basename}.tar.gz"):
+                for name in build.distribution.package_assets("1.2.3", "amd64", release) | {"source-manifest.json"}:
                     (packages / name).write_text("inert fixture")
                 (paths["/output"] / "toolchain.json").write_text("{}")
             if "/probe" in paths:
                 epoch = native.inventory(self.repo, self.sha)["source_date_epoch"]
                 date = datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M")
-                log.write_text("bad identity" if bad_version else
-                               f"tau 1.2.3 ({self.sha[:7]}, {date})\n")
+                log.write_text(json.dumps({"version_output": "bad identity" if bad_version else
+                               f"tau 1.2.3 ({self.sha[:7]}, {date})\n"}))
 
         with patch.object(build, "verify_tooling"), \
+                patch.object(build, "snapshot", side_effect=snapshot), \
+                patch.object(build, "qualify_distros", return_value={"fixture": True}), \
                 patch.object(build.platform, "system", return_value="Linux"), \
                 patch.object(build.platform, "machine", return_value="x86_64"), \
                 patch.object(build.os, "getuid", return_value=1000), \
@@ -266,19 +250,19 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                                 "Test <test@example.invalid>", "123", "2")
                 self.assertFalse(output.exists())
             else:
-                build.build(self.repo, self.sha, "c" * 40, "amd64", output,
+                build.build(self.repo, self.sha, workflow_sha, "amd64", output,
                              "Test <test@example.invalid>", "123", "2",
                              "v1.2.3" if release else None)
                 report = json.loads((output / "build-manifest.json").read_text())
                 self.assertEqual(report["source_sha"], self.sha)
-                self.assertEqual(report["workflow_sha"], "c" * 40)
-                self.assertEqual(report["runtime_qualification"], "not-performed")
+                self.assertEqual(report["workflow_sha"], workflow_sha)
+                self.assertEqual(report["runtime_qualification"], "extracted-archive-help-and-Hello-only")
                 self.assertEqual(report["run_id"], "123")
                 self.assertEqual(report["derived_image_id"], "sha256:" + "b" * 64)
                 self.assertEqual(
                     report["purpose"],
                     "tagged-github-release" if release
-                    else "manual-non-release-core-candidate",
+                    else "manual-non-release-complete-candidate",
                 )
                 self.assertEqual(report["release_tag"], "v1.2.3" if release else None)
                 self.assertEqual(report["github_prerelease"], False if release else None)
@@ -286,12 +270,14 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                     digest, name = line.split("  ")
                     self.assertEqual(digest, native.sha256((output / name).read_bytes()))
         self.assertFalse(list(self.repo.glob(".tau-native-*")))
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 26)
         self.assertTrue(all(call[2]["user"] == "0:0" for call in calls))
-        self.assertTrue(calls[1][2]["network"] is False)
-        self.assertTrue(calls[2][2]["network"] is False)
-        self.assertFalse(any(dst == "/output" for _, dst, _ in calls[2][0]))
+        self.assertTrue(all(call[2]["network"] is False for call in calls[2:24:3]))
+        self.assertTrue(calls[-2][2]["network"] is False)
+        self.assertTrue(calls[-1][2]["network"] is False)
+        self.assertFalse(any(dst == "/output" for _, dst, _ in calls[-1][0]))
         self.assertIn("--locked", calls[0][1])
+        self.assertEqual(calls[0][1], ["cargo", "fetch", "--locked"])
 
     def test_manual_orchestration_labels_separate_source_and_workflow(self):
         self.exercise()
@@ -308,9 +294,16 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                 patch.object(build.platform, "machine", return_value="x86_64"), \
                 patch.object(build.os, "getuid", return_value=1000):
             with self.assertRaisesRegex(ValueError, "exactly match"):
-                build.build(self.repo, self.sha, "c" * 40, "amd64",
+                build.build(self.repo, self.sha, self.sha, "amd64",
                             self.repo / "output", "Tau project maintainers",
                             "123", "1", "v1.2.4")
+
+    def test_release_source_must_equal_tooling_before_any_execution(self):
+        with patch.object(build, "verify_tooling") as tooling, \
+                self.assertRaisesRegex(ValueError, "identical source_sha"):
+            build.build(self.repo, self.sha, "c" * 40, "amd64",
+                        self.repo / "output", "fixture", "123", "1", "v1.2.3")
+        tooling.assert_not_called()
 
 
 if __name__ == "__main__":

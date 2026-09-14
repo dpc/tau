@@ -114,6 +114,8 @@ class SourceFixture:
             'rust-version="1.97"\n'
         )
         (self.repo / "Cargo.lock").write_text("# fixture lock")
+        (self.repo / "packaging").mkdir()
+        (self.repo / "packaging/distribution.toml").write_bytes(native.distribution.INVENTORY.read_bytes())
         (self.repo / "crates/tau").mkdir(parents=True)
         (self.repo / "crates/tau/Cargo.toml").write_text(
             '[package]\nname="dpc-tau"\nversion.workspace=true\n'
