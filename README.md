@@ -49,7 +49,7 @@ Recent overview video: [The State of Tau #1](https://www.youtube.com/watch?v=v2E
 
 Terminal demo:
 
-[![asciicast](https://asciinema.org/a/973826.svg)](https://asciinema.org/a/973826)
+[![asciicast](https://asciinema.org/a/1265333.svg)](https://asciinema.org/a/1265333)
 
 ## Installing
 
