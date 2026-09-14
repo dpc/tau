@@ -68,6 +68,25 @@ def archive(payload, target, prefix, epoch):
             info.mtime = epoch
             with file.open("rb") as stream:
                 output.addfile(info, stream)
+    verify_archive(payload, target, prefix)
+
+
+def verify_archive(payload, target, prefix):
+    """Read back the exact payload, ownership and modes without executing it."""
+    expected = {f"{prefix}/{p.relative_to(payload)}": p for p in payload.rglob("*")
+                if p.is_file() and not p.is_symlink()}
+    with tarfile.open(target) as archive:
+        members = archive.getmembers()
+        if len(members) != len(expected) or {m.name for m in members} != set(expected):
+            raise ValueError("archive payload inventory mismatch")
+        for member in members:
+            file = expected[member.name]
+            mode = 0o755 if file.parent.name == "bin" else 0o644
+            if not member.isfile() or member.mode != mode or member.uid != 0 or member.gid != 0:
+                raise ValueError("archive payload type, ownership or mode mismatch")
+            with archive.extractfile(member) as stored:
+                if stored.read() != file.read_bytes():
+                    raise ValueError("archive payload content mismatch")
 
 
 def nfpm(config, basename, stage, assets, epoch):
@@ -130,7 +149,9 @@ def assemble(manifest, sources, builds, staged_tau, arch, output, maintainer, ta
                 "elf": native.audit(payload / f"bin/{name}", arch),
                 "third_party_notices_sha256": native.sha256(notice.read_bytes()),
             }
-            native.write_json(payload / f"share/doc/{name}/source-manifest.json", report)
+            source_manifest = payload / f"share/doc/{name}/source-manifest.json"
+            native.write_json(source_manifest, report)
+            source_manifest.chmod(0o644)
             reports.append(report)
             contents = [
                 {"src": str(file), "dst": f"/usr/{file.relative_to(payload)}"}

@@ -7,7 +7,7 @@ enable extensions, create accounts, install services, supply credentials, or
 change user configuration. Existing Nix packages are unchanged.
 
 `distribution.toml` is the required inventory shared by the builder, assembler,
-qualification probes, staging, and publisher. Missing products fail the build;
+static package checks, staging, and publisher. Missing products fail the build;
 there is no core-only fallback. See [native-builds.md](native-builds.md) for
 commands, pinned inputs, provenance, and workflow trust boundaries.
 
@@ -44,7 +44,7 @@ They are not promoted into releases. Tags must exactly match the application
 version in `crates/tau/Cargo.toml`, not the independently versioned SDK or the
 default version of unchanged workspace crates.
 
-## Qualification boundaries
+## Build and static packaging checks
 
 Every successful complete build must:
 
@@ -55,22 +55,15 @@ Every successful complete build must:
 3. Inspect every ELF without `ldd` or executing it during assembly. The filter
    requires standard GNU loaders, no Nix-store linkage/RPATH, only reviewed
    libc/libm/libgcc/pthread/dl/loader dependencies, and GLIBC symbols ≤2.34.
-4. Extract actual individual and full archives, compare their binaries, check
-   every executable's `--help`, and verify core version/revision/date.
-5. Use extracted Tau to admit each packaged stdio extension's protocol-7 Hello
-   with an intentionally invalid credential-free configuration. The private
-   Telegram gateway is checked for executable startup, not stdio Hello.
-6. Install with dependency resolution, check exact ownership/no lifecycle
-   scripts, execute installed `--help`, remove packages, preserve a user-state
-   sentinel, and check release revision ordering in disposable Debian 12 and
-   Fedora 43 userspaces.
+4. Read back individual and full archives to verify exact payload contents,
+   inventory, ownership and executable/document modes without extracting or running them.
+5. Generate all individual packages and the dependency-only metapackage, with
+   exact release-set dependencies, source/license manifests and asset checksums.
 
-The probes are **not Ready/service-integration qualification**. They do not
-establish default restricted supervision, shell/PTY/CA behavior, minimum kernel
-support, every RPM distro, or broad portability. Containers share a host kernel.
-No complete hosted result is implied merely by implementing these gates.
-The historical core-only Actions run 34556681071 (September 11, 2026) does not
-qualify the new complete distribution.
+The release build packages the already-tested application; it does not rerun
+application help, Hello, supervisor, service, or distro install/remove tests.
+The build manifest records runtime qualification as **not performed**, not passed.
+Static ELF checks do not establish every distro, kernel, CPU or runtime behavior.
 
 ## Tests and low-level inspection
 

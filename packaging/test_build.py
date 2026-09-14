@@ -2,14 +2,11 @@
 """Native build orchestration tests; Docker/native execution is not simulated proof."""
 
 import json
-from datetime import datetime, timezone
-import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
 import unittest
-import uuid
 from unittest.mock import patch
 
 import build
@@ -19,52 +16,6 @@ from test_native import SourceFixture
 
 
 class IdentityTests(unittest.TestCase):
-    @unittest.skipUnless(os.environ.get("TAU_NATIVE_TEST_IMAGE"),
-                         "set TAU_NATIVE_TEST_IMAGE to run real Docker archive execution")
-    def test_real_archive_execution_requires_executable_scratch(self):
-        image = os.environ["TAU_NATIVE_TEST_IMAGE"]
-        code = """
-import errno, os, pathlib, shutil, subprocess, sys, tarfile, tempfile
-sys.path.insert(0, "/tooling")
-import complete, probe
-with tempfile.TemporaryDirectory(prefix="tau-probe-") as tmp:
-    root = pathlib.Path(tmp)
-    payload = root / "payload"
-    (payload / "bin").mkdir(parents=True)
-    shutil.copy2("/bin/true", payload / "bin/true")
-    (payload / "bin/true").chmod(0o755)
-    complete.archive(payload, root / "test.tar.gz", "test", 0)
-    with tarfile.open(root / "test.tar.gz") as archive:
-        member = archive.getmember("test/bin/true")
-        assert member.mode == 0o755 and member.uid == member.gid == 0
-    probe.extract(root / "test.tar.gz", root / "extracted")
-    binary = root / "extracted/test/bin/true"
-    assert binary.stat().st_mode & 0o777 == 0o755
-    assert binary.stat().st_uid == os.getuid()
-    for parent in binary.parents:
-        assert os.access(parent, os.X_OK)
-    options = next(line.split()[3].split(",") for line in
-                   pathlib.Path("/proc/mounts").read_text().splitlines()
-                   if line.split()[1] == "/tmp")
-    assert "nosuid" in options and "nodev" in options
-    executable = sys.argv[1] == "True"
-    assert ("noexec" not in options) == executable
-    try:
-        subprocess.run([str(binary)], check=True)
-    except PermissionError as error:
-        assert not executable and error.errno == errno.EACCES
-    else:
-        assert executable
-"""
-        for executable in (False, True):
-            with self.subTest(executable=executable):
-                command = build.container_command(
-                    image, f"tau-archive-test-{uuid.uuid4().hex}",
-                    [(build.TOOLS, "/tooling", True)], network=False,
-                    user=build.docker_container_user(), executable_tmp=executable)
-                subprocess.run([*command, "python3", "-c", code, str(executable)],
-                               check=True, timeout=60)
-
     def test_metadata_stamping_preserves_layout(self):
         raw = (b"ELF-prefix\0__TAU_BUILD_GIT_REVISION_PLACEHOLDER____\0"
                b"__TAU_BUILD_DIRTY\0__TAU_BUILD_DATE\0ELF-suffix")
@@ -82,18 +33,6 @@ with tempfile.TemporaryDirectory(prefix="tau-probe-") as tmp:
                 inside.stamp(raw + b"\0" + slot, "a" * 40, 0)
         with self.assertRaisesRegex(ValueError, "source_sha"):
             inside.stamp(raw, "HEAD", 0)
-
-    def test_clean_version_identity_only(self):
-        good = "tau 1.2.3 (aaaaaaa, 1970-01-01 00:00)\n"
-        build.verify_version(good, "1.2.3", "a" * 40, 0)
-        for text in [
-            good.replace("aaaaaaa", "bbbbbbb"), good.replace("1.2.3", "1.2.4"),
-            good.replace("aaaaaaa", "aaaaaaa-modified"),
-            good.replace("1970-01-01 00:00", "1970-01-01 00:01"),
-            good + "::set-output name=release::true", "tau --help output",
-        ]:
-            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "--version"):
-                build.verify_version(text, "1.2.3", "a" * 40, 0)
 
 
 class SnapshotTests(SourceFixture, unittest.TestCase):
@@ -233,7 +172,7 @@ class PolicyTests(unittest.TestCase):
 
 
 class OrchestrationTests(SourceFixture, unittest.TestCase):
-    def exercise(self, bad_version=False, release=False):
+    def exercise(self, missing_asset=False, release=False):
         output = self.repo / "output"
         workflow_sha = self.sha if release else "c" * 40
         calls = []
@@ -276,18 +215,12 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                 for name in build.distribution.package_assets("1.2.3", "amd64", release) | {"source-manifest.json"}:
                     (packages / name).write_text("inert fixture")
                 (paths["/output"] / "toolchain.json").write_text("{}")
-            if "/probe" in paths:
-                self.assertTrue(kwargs.get("executable_tmp"))
-                epoch = native.inventory(self.repo, self.sha)["source_date_epoch"]
-                date = datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M")
-                log.write_text(json.dumps({"version_output": "bad identity" if bad_version else
-                               f"tau 1.2.3 ({self.sha[:7]}, {date})\n"}))
-            else:
-                self.assertFalse(kwargs.get("executable_tmp", False))
+                if missing_asset:
+                    (packages / "tau-test-amd64.tar.gz").unlink()
+            self.assertFalse(any(dst == "/probe" for _, dst, _ in mounts))
 
         with patch.object(build, "verify_tooling"), \
                 patch.object(build, "snapshot", side_effect=snapshot), \
-                patch.object(build, "qualify_distros", return_value={"fixture": True}), \
                 patch.object(build.platform, "system", return_value="Linux"), \
                 patch.object(build.platform, "machine", return_value="x86_64"), \
                 patch.object(build.os, "getuid", return_value=1000), \
@@ -295,8 +228,8 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                 patch.object(native, "run", side_effect=tool_run), \
                 patch.object(build, "execute", side_effect=image_execute), \
                 patch.object(build, "container", side_effect=container):
-            if bad_version:
-                with self.assertRaisesRegex(ValueError, "--version"):
+            if missing_asset:
+                with self.assertRaisesRegex(ValueError, "inventory"):
                     build.build(self.repo, self.sha, "c" * 40, "amd64", output,
                                 "Test <test@example.invalid>", "123", "2")
                 self.assertFalse(output.exists())
@@ -307,7 +240,9 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                 report = json.loads((output / "build-manifest.json").read_text())
                 self.assertEqual(report["source_sha"], self.sha)
                 self.assertEqual(report["workflow_sha"], workflow_sha)
-                self.assertEqual(report["runtime_qualification"], "extracted-archive-help-and-Hello-only")
+                self.assertEqual(report["runtime_qualification"], "not-performed")
+                for absent in ("archive_probes", "distro_qualification", "version_output"):
+                    self.assertNotIn(absent, report)
                 self.assertEqual(report["run_id"], "123")
                 self.assertEqual(report["derived_image_id"], "sha256:" + "b" * 64)
                 self.assertEqual(
@@ -321,20 +256,19 @@ class OrchestrationTests(SourceFixture, unittest.TestCase):
                     digest, name = line.split("  ")
                     self.assertEqual(digest, native.sha256((output / name).read_bytes()))
         self.assertFalse(list(self.repo.glob(".tau-native-*")))
-        self.assertEqual(len(calls), 26)
+        self.assertEqual(len(calls), 25)
         self.assertTrue(all(call[2]["user"] == "0:0" for call in calls))
         self.assertTrue(all(call[2]["network"] is False for call in calls[2:24:3]))
-        self.assertTrue(calls[-2][2]["network"] is False)
         self.assertTrue(calls[-1][2]["network"] is False)
-        self.assertFalse(any(dst == "/output" for _, dst, _ in calls[-1][0]))
+        self.assertIn(["python3", "/tooling/inside.py"], [calls[-1][1][:2]])
         self.assertIn("--locked", calls[0][1])
         self.assertEqual(calls[0][1], ["cargo", "fetch", "--locked"])
 
     def test_manual_orchestration_labels_separate_source_and_workflow(self):
         self.exercise()
 
-    def test_bad_version_does_not_publish_assets(self):
-        self.exercise(bad_version=True)
+    def test_missing_package_does_not_publish_assets(self):
+        self.exercise(missing_asset=True)
 
     def test_tagged_release_uses_source_version_and_release_labels(self):
         self.exercise(release=True)

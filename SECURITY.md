@@ -22,11 +22,11 @@ the unprivileged daemon/caller identity rather than host root. Both modes drop
 all capabilities, set no-new-privileges and use read-only root/source mounts in
 disposable restricted containers. The complete builder produces all nine
 executables, full notices, individual packages, and a dependency-only
-metapackage. Assembly and extracted-archive probes run in separate fresh
-containers without network. Offline distro install/remove checks use disposable
-writable container filesystems with CHOWN/FOWNER/DAC_OVERRIDE/SETUID/SETGID,
-but all host mounts remain read-only. These build containers are not proof
-of Tau's own default restricted-supervisor startup. Only expiring, explicitly
+metapackage. Assembly runs in a fresh container without network and reads back
+archive contents, modes and ownership without executing delivered binaries.
+The release build performs no application, supervisor, or distro install/remove
+qualification, adds no capabilities, and changes no seccomp/AppArmor policy.
+Runtime qualification is explicitly recorded as not performed. Only expiring, explicitly
 unqualified manual artifacts are uploaded; there is no release publisher or
 artifact promotion path in this lane.
 
@@ -34,8 +34,8 @@ Local release-form builds require identical source/tooling SHAs and a matching
 application-version tag label; these checks do not grant GitHub publication
 authority. The separate tag workflow binds both to the pushed tag commit and
 gates publication on the complete two-architecture asset/provenance inventory.
-Only its publisher job has write authority. Implemented probes and source
-readiness do not imply an executed hosted result, Ready/service functionality,
+Only its publisher job has write authority. Static checks and source
+readiness do not imply a completed hosted build, Ready/service functionality,
 or broad distro/kernel qualification.
 
 ## Runtime boundaries

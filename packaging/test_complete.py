@@ -12,7 +12,6 @@ from unittest.mock import patch
 import complete
 import distribution
 import native
-import probe
 import release_assets
 import finish_project
 from test_native import SourceFixture, NFPM_OUTPUT
@@ -57,19 +56,31 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(complete.package_version(component, "0.1.1", "a" * 40, False),
                          ("0.0.0~test." + "a" * 40, "1"))
 
-    def test_archive_probe_rejects_special_and_traversal_entries(self):
+    def test_archive_readback_checks_content_modes_and_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name, kind in [("../escape", tarfile.REGTYPE), ("/escape", tarfile.REGTYPE),
-                               ("link", tarfile.SYMTYPE), ("device", tarfile.CHRTYPE)]:
-                with self.subTest(name=name):
+            payload = root / "payload"
+            (payload / "bin").mkdir(parents=True)
+            binary = payload / "bin/tau"
+            binary.write_bytes(b"inert")
+            binary.chmod(0o755)
+            complete.archive(payload, root / "good.tar.gz", "bundle", 0)
+            for name, kind, mode, content in [
+                ("../escape", tarfile.REGTYPE, 0o755, b"inert"),
+                ("bundle/bin/tau", tarfile.SYMTYPE, 0o755, b""),
+                ("bundle/bin/tau", tarfile.REGTYPE, 0o644, b"inert"),
+                ("bundle/bin/tau", tarfile.REGTYPE, 0o755, b"wrong"),
+            ]:
+                with self.subTest(name=name, mode=mode, content=content):
                     archive = root / "input.tar.gz"
                     with tarfile.open(archive, "w:gz") as output:
                         info = tarfile.TarInfo(name)
                         info.type = kind
-                        output.addfile(info, io.BytesIO())
-                    with self.assertRaisesRegex(ValueError, "archive member"):
-                        probe.extract(archive, root / "output")
+                        info.mode = mode
+                        info.size = len(content)
+                        output.addfile(info, io.BytesIO(content))
+                    with self.assertRaisesRegex(ValueError, "archive payload"):
+                        complete.verify_archive(payload, archive, "bundle")
 
 
 class AssemblyTests(SourceFixture, unittest.TestCase):
@@ -157,10 +168,6 @@ class PublicationTests(SourceFixture, unittest.TestCase):
         products = distribution.components("1.2.3")
         pins_raw = Path(__file__).with_name("build-inputs.json").read_bytes()
         pins = json.loads(pins_raw)
-        installed = {
-            p["name"]: "-".join(complete.package_version(p, "1.2.3", self.sha, True))
-            for p in [*products, {"name": "tau-full", "version": "1.2.3"}]
-        }
         for arch in native.ARCHES:
             hashes = {}
             for name in distribution.package_assets("1.2.3", arch, True):
@@ -205,17 +212,7 @@ class PublicationTests(SourceFixture, unittest.TestCase):
                     f"{name}.json": native.sha256((output / f"{prefix}-{name}.json").read_bytes())
                     for name in ("source-manifest", "toolchain")
                 },
-                "distro_qualification": {
-                    fmt: {"base_image": pins["qualification_images"][fmt],
-                          "derived_image_id": "sha256:" + "b" * 64,
-                          "result": {"installed": installed, "format": fmt,
-                                     "checks": sorted(release_assets.DISTRO_CHECKS),
-                                     "baseline_packages": "fixture",
-                                     "install_output": "fixture", "remove_output": "fixture"}}
-                    for fmt in ("deb", "rpm")
-                },
-                "archive_probes": {"hello": dict.fromkeys(native.EXTERNAL, "fixture"),
-                                   "help": sorted(p["name"] for p in products)},
+                "runtime_qualification": "not-performed",
                 "package_asset_sha256": hashes,
             })
         return output
@@ -239,12 +236,11 @@ class PublicationTests(SourceFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provenance"):
             release_assets.verify(output, self.repo, self.sha, "v1.2.3")
 
-    def test_missing_gateway_qualification_and_wrong_release_revision_fail(self):
+    def test_runtime_qualification_is_not_claimed(self):
         output = self.candidate()
         buildfile = output / "tau-1.2.3-amd64-build-manifest.json"
-        original = json.loads(buildfile.read_text())
         build = json.loads(buildfile.read_text())
-        build["archive_probes"]["help"].remove("tau-telegram-gateway")
+        build["runtime_qualification"] = "passed"
         native.write_json(buildfile, build)
         with self.assertRaisesRegex(ValueError, "provenance"):
             release_assets.verify(output, self.repo, self.sha, "v1.2.3")

@@ -2,7 +2,6 @@
 """Build core candidates or trusted tagged releases on a native Linux Docker host."""
 
 import argparse
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -23,8 +22,7 @@ TOOL_FILES = (
     "packaging/build.py", "packaging/inside.py", "packaging/native.py",
     "packaging/build-inputs.json", "packaging/Dockerfile", "packaging/.dockerignore",
     "packaging/distribution.toml", "packaging/distribution.py", "packaging/complete.py",
-    "packaging/about.toml", "packaging/notices.hbs", "packaging/probe.py",
-    "packaging/distro.py", "packaging/Dockerfile.deb-test", "packaging/Dockerfile.rpm-test",
+    "packaging/about.toml", "packaging/notices.hbs",
     "packaging/release_assets.py",
     "packaging/publish.py",
     "packaging/finish_project.py",
@@ -107,7 +105,7 @@ def docker_container_user():
     return f"{os.getuid()}:{os.getgid()}"
 
 
-def container_command(image, name, mounts, network=True, user=None, executable_tmp=False):
+def container_command(image, name, mounts, network=True, user=None):
     if user is None:
         user = f"{os.getuid()}:{os.getgid()}"
     command = [
@@ -115,9 +113,7 @@ def container_command(image, name, mounts, network=True, user=None, executable_t
         "--read-only", "--user", user,
         "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "--pids-limit=512", "--cpus=2", "--memory=12g",
-        # Docker tmpfs mounts default to noexec. Only archive qualification
-        # executes extracted payloads from this otherwise disposable scratch.
-        "--tmpfs", f"/tmp:rw,nosuid,nodev,{'exec' if executable_tmp else 'noexec'},size=1073741824",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=1073741824",
     ]
     if not network:
         command.append("--network=none")
@@ -141,65 +137,15 @@ def execute(command, log, timeout, log_limit=64 * 1024 * 1024):
 
 
 def container(image, mounts, command, log, timeout, network=True,
-              log_limit=64 * 1024 * 1024, user=None, executable_tmp=False):
+              log_limit=64 * 1024 * 1024, user=None):
     name = f"tau-native-{uuid.uuid4().hex}"
     try:
-        execute([*container_command(image, name, mounts, network, user, executable_tmp), *command],
+        execute([*container_command(image, name, mounts, network, user), *command],
                 log, timeout, log_limit)
     finally:
         # Killing a timed-out Docker client does not necessarily stop its container.
         subprocess.run(["docker", "rm", "--force", name], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-
-
-def verify_version(text, version, source_sha, epoch):
-    date = datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M")
-    expected = rf"tau {re.escape(version)} \({source_sha[:7]}, {re.escape(date)}\)\n?"
-    if not re.fullmatch(expected, text):
-        raise ValueError("packaged tau --version does not match clean selected source")
-
-
-def qualify_distros(pins, assets, version, arch, tagged, root, logs):
-    evidence = {}
-    for fmt, base in pins["qualification_images"].items():
-        if not re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", base):
-            raise ValueError("qualification image must be digest-pinned")
-        iidfile = root / f"{fmt}.iid"
-        execute([
-            "docker", "build", "--pull", "--iidfile", str(iidfile),
-            "--build-arg", f"BASE_IMAGE={base}", "--file",
-            str(TOOLS / f"Dockerfile.{fmt}-test"), str(TOOLS),
-        ], logs / f"{fmt}-image.log", 1800)
-        image = iidfile.read_text().strip()
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
-            raise ValueError("invalid qualification image identity")
-        name = f"tau-native-{uuid.uuid4().hex}"
-        command = container_command(
-            image, name, [(assets, "/packages", True), (TOOLS, "/tooling", True)],
-            network=False, user="0:0",
-        )
-        # Only this disposable container's root filesystem is writable. Package
-        # managers need ownership capabilities; no host directories are writable.
-        command.remove("--read-only")
-        command[-1:-1] = [
-            "--cap-add=CHOWN", "--cap-add=FOWNER", "--cap-add=DAC_OVERRIDE",
-            "--cap-add=SETUID", "--cap-add=SETGID",
-        ]
-        try:
-            execute([*command, "python3", "/tooling/distro.py", "--packages", "/packages",
-                     "--version", version, "--arch", arch, "--fmt", fmt]
-                    + (["--tagged"] if tagged else []),
-                    logs / f"{fmt}-qualification.log", 300)
-        finally:
-            subprocess.run(["docker", "rm", "--force", name], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-        evidence[fmt] = {
-            "base_image": base, "derived_image_id": image,
-            "result": json.loads((logs / f"{fmt}-qualification.log").read_text()),
-        }
-    if set(evidence) != {"deb", "rpm"}:
-        raise ValueError("both distro package formats must be qualified")
-    return evidence
 
 
 def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_attempt,
@@ -283,19 +229,6 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                   "--arch", arch, "--maintainer", maintainer]
                  + (["--release-tag", release_tag] if release_tag else []),
                        logs / "package.log", 900, network=False, user=container_user)
-            probe_work = root / "probe-work"
-            probe_work.mkdir()
-            container(image_id, [(assembly, "/probe", True), (probe_work, "/work", False),
-                                 (TOOLS, "/tooling", True)],
-                       ["python3", "/tooling/probe.py", "--packages", "/probe/packages",
-                        "--version", manifest["core"]["version"], "--arch", arch]
-                       + (["--tagged"] if release_tag else []),
-                       logs / "probe.log", 240, network=False, user=container_user,
-                       executable_tmp=True)
-            probes = json.loads((logs / "probe.log").read_text())
-            version = probes["version_output"]
-            verify_version(version, manifest["core"]["version"], source_sha,
-                           manifest["source_date_epoch"])
             assets = assembly / "packages"
             expected = distribution.package_assets(manifest["core"]["version"], arch,
                                                    release_tag is not None) | {"source-manifest.json"}
@@ -303,10 +236,6 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                 raise ValueError("unexpected package inventory")
             if any(p.is_symlink() or not p.is_file() for p in assets.iterdir()):
                 raise ValueError("package assets must be regular files")
-            distro_tests = qualify_distros(
-                pins, assets, manifest["core"]["version"], arch, release_tag is not None,
-                root, logs,
-            )
             shutil.copyfile(assembly / "toolchain.json", assets / "toolchain.json")
             native.write_json(assets / "build-manifest.json", {
                 "schema": 1,
@@ -326,10 +255,8 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                 "arch": arch, "derived_image_id": image_id,
                 "projects": distribution.projects(),
                 "profile": "release (selected source Cargo.toml)",
-                "features": "selected source defaults", "version_output": version,
-                "runtime_qualification": "extracted-archive-help-and-Hello-only",
-                "archive_probes": probes,
-                "distro_qualification": distro_tests,
+                "features": "selected source defaults",
+                "runtime_qualification": "not-performed",
                 "metadata_sha256": {
                     name: native.sha256((assets / name).read_bytes())
                     for name in ("source-manifest.json", "toolchain.json")
@@ -340,8 +267,7 @@ def build(repo, source_sha, workflow_sha, arch, output, maintainer, run_id, run_
                         manifest["core"]["version"], arch, release_tag is not None))
                 },
                 "restrictions": [
-                    "No default restricted supervised startup test",
-                    "Hello admission is not Ready or integration service qualification",
+                    "Build and static packaging checks only; no application or distro runtime tests",
                     (
                         "GitHub tag and workflow identity are release authority, not signed provenance"
                         if release_tag else

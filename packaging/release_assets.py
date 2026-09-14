@@ -13,11 +13,6 @@ import complete
 
 
 METADATA = ("build-manifest", "source-manifest", "toolchain")
-DISTRO_CHECKS = {
-    "exact-metapackage-dependencies", "dependency-resolution", "payload-ownership",
-    "no-lifecycle-scripts", "installed-help", "uninstall", "user-state-preserved",
-    "revision-ordering",
-}
 
 
 def digest(value):
@@ -92,8 +87,8 @@ def verify(source, repo, source_sha, tag):
             manifest["core"] == expected_source["core"],
             manifest["external"] == expected_source["external"],
             manifest["distribution_sha256"] == native.sha256(distribution.INVENTORY.read_bytes()),
-            set(build["distro_qualification"]) == {"deb", "rpm"},
-            set(build["archive_probes"]["hello"]) == set(native.EXTERNAL),
+            build["runtime_qualification"] == "not-performed",
+            not ({"distro_qualification", "archive_probes", "version_output"} & build.keys()),
             build["projects"] == distribution.projects(),
             build["build_inputs"] == pins,
             build["build_inputs_sha256"] == native.sha256(pins_raw),
@@ -115,7 +110,6 @@ def verify(source, repo, source_sha, tag):
         checks.extend([
             [p["name"] for p in components] == [p["name"] for p in products],
             all(p["elf"]["arch"] == arch for p in components),
-            build["archive_probes"]["help"] == sorted(p["name"] for p in products),
         ])
         for component, product in zip(components, products):
             version_revision = complete.package_version(product, version, source_sha, True)
@@ -124,20 +118,6 @@ def verify(source, repo, source_sha, tag):
                 component["license"] == product["license"],
                 (component["package_version"], component["package_revision"]) == version_revision,
                 component_valid(component, product, expected_source, arch),
-            ])
-        installed = {
-            p["name"]: "-".join(complete.package_version(p, version, source_sha, True))
-            for p in [*products, {"name": "tau-full", "version": version}]
-        }
-        for fmt, evidence in build["distro_qualification"].items():
-            result = evidence["result"]
-            checks.extend([
-                evidence["base_image"] == pins["qualification_images"][fmt],
-                digest(evidence["derived_image_id"].removeprefix("sha256:")),
-                result["installed"] == installed, result["format"] == fmt,
-                set(result["checks"]) == DISTRO_CHECKS,
-                bool(result["baseline_packages"].strip()),
-                isinstance(result["install_output"], str), isinstance(result["remove_output"], str),
             ])
         hashes = build["package_asset_sha256"]
         checks.append(set(hashes) == distribution.package_assets(version, arch, True))

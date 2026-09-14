@@ -53,7 +53,7 @@ jobs:
           manifest = native.inventory(__import__("pathlib").Path("."), sys.argv[1])
           native.release_version(sys.argv[2], manifest["core"]["version"])
           PY
-      - name: Build and qualify the complete tagged distribution
+      - name: Build and package the complete tagged distribution
         shell: bash
         run: |
           python3 packaging/build.py \

@@ -40,7 +40,8 @@ This lane packages `tau` and all seven locked external extension projects
 revisions distinguish Tau release sets, and the DEB/RPM full package depends
 on exact individual package versions without duplicate file ownership.
 See [native packaging](../packaging/README.md) for the required inventory,
-license/provenance records, and narrow archive/distro qualification gates.
+license/provenance records, and static archive integrity checks without rerunning
+application or distro-runtime tests.
 The implemented workflow is not evidence that a candidate has passed its
 required hosted tests.
 The manual arbitrary-SHA candidate workflow remains separate and cannot publish

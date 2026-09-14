@@ -59,7 +59,7 @@ jobs:
           path: source
           persist-credentials: false
           fetch-depth: 1
-      - name: Build and qualify complete native candidates
+      - name: Build and package complete native candidates
         shell: bash
         run: |
           python3 tooling/packaging/build.py \
