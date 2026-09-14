@@ -826,6 +826,87 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     assert!(!status_row.contains("@engineer-junior (engineer-junior_b)"));
 }
 
+/// The selected-agent work title keeps the watched-row informational style,
+/// while the selected agent identity retains its role style.
+#[test]
+fn status_agent_work_title_matches_watched_agent_status_style() {
+    let (_term, handle, _vt) = setup(100, 24);
+    let theme = cli_test_theme();
+    let mut renderer =
+        EventRenderer::new(handle, tau_cli_term::CompletionData::new(), theme.clone());
+    let agent = agent_id("engineer-junior_b");
+    let title = "review status-bar styling";
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.switch_agent(agent.clone());
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent,
+        work_status: tau_proto::SessionAgentWorkStatus::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            Some(title.to_owned()),
+        )
+        .expect("valid work status"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+        inner_turns_total: None,
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+    }));
+
+    let status_cells = priority_header_cells(&renderer.build_model_status_block(), 100);
+    let watched_status = tau_proto::AgentWatchWorkStatusNotification {
+        session_id: test_session_id("s1"),
+        subscription_id: "watch-engineer-junior".to_owned(),
+        status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
+        phase: tau_proto::AgentWorkStatusPhase::Working,
+        title: Some(title.to_owned()),
+        initial: false,
+    };
+    let watched_cells = priority_header_cells(
+        &render_tool_block(
+            &theme,
+            &watched_agent_tool_display(
+                None,
+                "engineer-junior_b",
+                None,
+                None,
+                WatchedAgentActivity::Idle,
+                Some(&watched_status),
+            ),
+        ),
+        100,
+    );
+    let style_for_title = |cells: &[tau_cli_term::Cell]| {
+        cells
+            .windows(title.chars().count())
+            .find(|cells| cells.iter().map(|cell| cell.ch).eq(title.chars()))
+            .expect("status title")
+            .first()
+            .expect("non-empty status title")
+            .style
+    };
+    let title_style = style_for_title(&status_cells);
+    let watched_title_style = style_for_title(&watched_cells);
+    let agent_style = status_cells
+        .iter()
+        .find(|cell| cell.ch == '@')
+        .expect("selected-agent identity")
+        .style;
+
+    assert_eq!(title_style, watched_title_style);
+    assert_eq!(
+        agent_style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_ROLE)
+    );
+    assert_ne!(title_style, agent_style);
+}
+
 /// A selected agent without an explicit display name must not show its role as
 /// a synthesized parenthetical in the status bar.
 #[test]

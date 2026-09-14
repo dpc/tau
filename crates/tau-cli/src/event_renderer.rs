@@ -3647,7 +3647,7 @@ impl EventRenderer {
                     line.push(
                         StatusElement::WorkTitle.priority(),
                         left,
-                        status_chip(&self.resources.theme, names::STATUS_ROLE, title),
+                        status_chip(&self.resources.theme, names::TOOL_STATUS_INFO, title),
                     );
                 }
                 if let Some(description) = self.agent_status_description(agent_id) {
