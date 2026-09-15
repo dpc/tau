@@ -146,11 +146,10 @@ fn repository_tool_verification_root_references_every_focused_skill() {
     assert_eq!(referenced_names, focused_names);
 }
 
-/// Ensures every YAML representation of a missing description is rejected by
-/// Tau's loader with the stable skip diagnostic, rather than relying on YAML's
-/// null and empty-scalar details.
+/// Missing descriptions must retain a discoverable skill with honest recovery
+/// metadata instead of hiding useful instructions.
 #[test]
-fn load_skill_missing_or_blank_descriptions_are_skipped() {
+fn load_skill_missing_or_blank_descriptions_recover() {
     let path = Path::new("/skills/no-description/SKILL.md");
     for (label, description) in [
         ("omitted", ""),
@@ -160,15 +159,22 @@ fn load_skill_missing_or_blank_descriptions_are_skipped() {
     ] {
         let content = format!("---\nname: no-description\n{description}---\nBody");
         let (skill, diagnostics) = load_skill_from_content(&content, path);
-        assert!(skill.is_none(), "{label} description must not load");
-        assert_eq!(
-            diagnostics,
-            [SkillDiagnostic {
-                path: path.to_owned(),
-                kind: DiagnosticKind::Skipped,
-                message: "description is required".to_owned(),
-            }],
-            "{label} description"
+        let skill = skill.expect("recover missing description");
+        assert!(
+            skill.description.contains("malformed frontmatter"),
+            "{label}"
+        );
+        assert!(
+            diagnostics.iter().all(|diagnostic| {
+                diagnostic.path == path && diagnostic.kind == DiagnosticKind::Frontmatter
+            }),
+            "{label}"
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("description is required; using recovery description")),
+            "{label}"
         );
     }
 }
@@ -471,17 +477,17 @@ fn parse_frontmatter_invalid_yaml_treats_as_no_frontmatter() {
     let content = "---\nname: x\n  bad: indent : here\n  more\n---\nBody";
     let (fm, body) = parse_frontmatter(content);
     assert!(fm.is_empty());
-    assert_eq!(body, "Body");
+    assert_eq!(body, content);
 }
 
 #[test]
-fn load_skill_invalid_yaml_is_skipped_with_parse_diagnostic() {
+fn load_skill_invalid_yaml_recovers_with_parse_diagnostic() {
     let content = "---\nname: x\n  bad: indent : here\n---\nBody";
     let path = Path::new("/skills/broken/SKILL.md");
     let (skill, diags) = load_skill_from_content(content, path);
-    assert!(skill.is_none());
+    assert_eq!(skill.expect("recover skill").name.as_str(), "broken");
     assert!(diags.iter().any(|d| {
-        d.kind == DiagnosticKind::Skipped && d.message.contains("YAML failed to parse")
+        d.kind == DiagnosticKind::Frontmatter && d.message.contains("YAML failed to parse")
     }));
 }
 

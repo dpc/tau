@@ -1224,12 +1224,14 @@ fn clearing_selected_agent_clears_response_editor_context() {
 #[test]
 fn agent_context_initialization_skill_stats_measure_prompt_description() {
     let initialized = tau_proto::HarnessAgentContextInitialized {
+        effective_skills: Vec::new(),
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
         agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
             .expect("test identifier must be valid"),
         listed_skills: vec![
             tau_proto::DiscoveryEffectiveSkill {
+                visibility: Default::default(),
                 name: "focused".into(),
                 description: "one\né".to_owned(),
                 source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
@@ -1239,6 +1241,7 @@ fn agent_context_initialization_skill_stats_measure_prompt_description() {
                 argument_hint: None,
             },
             tau_proto::DiscoveryEffectiveSkill {
+                visibility: Default::default(),
                 name: "empty".into(),
                 description: String::new(),
                 source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,

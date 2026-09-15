@@ -44,9 +44,7 @@ impl Harness {
         }
         for agent_id in finalize {
             if let Err(error) = self.finalize_agent_discovery(&agent_id) {
-                self.emit_harness_failure(&format!(
-                    "failed to finalize agent discovery after disconnect: {error}"
-                ));
+                self.fail_agent_initialization(&agent_id, &error.to_string());
             }
         }
     }

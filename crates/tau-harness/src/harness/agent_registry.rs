@@ -1120,6 +1120,23 @@ impl Harness {
             initial_metadata,
             start_operation_id,
         );
+        if start_operation_id.is_some_and(|start_id| {
+            self.agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .get(&start_id)
+                .is_none_or(|operation| operation.phase == StartPhase::ClosingFailure)
+        }) {
+            // The accepted start's canonical terminal already owns cleanup and
+            // reporting, including normal cancellation during installation.
+            return Ok(());
+        }
+        if !self.agent_runtime.agent_registry.agents.contains_key(&cid) {
+            return Err(HarnessError::Participant(format!(
+                "agent `{agent_id}` initialization was rejected"
+            )));
+        }
         if let Some(display_name) = self
             .agent_runtime
             .agent_registry
@@ -2189,6 +2206,11 @@ impl Harness {
         );
         self.publish_delegate_roles_context();
         self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id_proto, metadata, None);
+        if !self.agent_runtime.agent_registry.agents.contains_key(&cid) {
+            return Err(HarnessError::Participant(format!(
+                "agent `{agent_id}` initialization was rejected"
+            )));
+        }
         Ok(cid)
     }
 
@@ -2203,6 +2225,9 @@ impl Harness {
             .clone()
         {
             self.ensure_loaded_agent_for_agent(cid, &agent_id);
+            if !self.agent_runtime.agent_registry.agents.contains_key(cid) {
+                return None;
+            }
             self.emit_agent_stats_updated(cid);
             return Some(agent_id);
         }
@@ -2293,6 +2318,9 @@ impl Harness {
             }),
         );
         self.ensure_loaded_agent_for_agent(cid, &agent_id_proto);
+        if !self.agent_runtime.agent_registry.agents.contains_key(cid) {
+            return None;
+        }
         self.emit_agent_stats_updated(cid);
         Some(agent_id_proto)
     }
@@ -2600,7 +2628,7 @@ impl Harness {
                 .is_some_and(|pending| pending.waiting_on.is_empty())
             && let Err(error) = self.finalize_agent_discovery(agent_id)
         {
-            self.emit_harness_failure(&format!("failed to finalize agent discovery: {error}"));
+            self.fail_agent_initialization(agent_id, &error.to_string());
         }
     }
 

@@ -2343,6 +2343,12 @@ impl Harness {
         }
         match user_skill_invocation::read_user_invoked_skill_body(&skill.source) {
             Ok(loaded) => {
+                if let Some(warning) = &loaded.frontmatter_warning {
+                    self.emit_context_frontmatter_warning(
+                        Path::new(&skill.source.label()),
+                        warning,
+                    );
+                }
                 if loaded.truncated {
                     self.emit_info_important(&format!(
                         "skill too long: {} truncated to {} bytes while invoking {name}",

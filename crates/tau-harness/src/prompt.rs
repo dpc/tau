@@ -1233,8 +1233,9 @@ More specific files usually override broader ones.\n\n",
             "<AGENTS_FILE path=\"{}\">",
             file.file_path.display()
         );
-        text.push_str(&file.content);
-        if !file.content.ends_with('\n') {
+        let parsed = tau_skills::parse_context_frontmatter(&file.content);
+        text.push_str(parsed.body);
+        if !parsed.body.ends_with('\n') {
             text.push('\n');
         }
         text.push_str("</AGENTS_FILE>\n\n");

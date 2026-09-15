@@ -191,7 +191,16 @@ impl Harness {
                             model.as_ref(),
                         )
                         .map_err(|error| format!("failed to render system prompt: {error}"));
-                    self.send_rendered_prompt(&connection_id, request_id, enable_agents_md, result);
+                    let agents_message = enable_agents_md
+                        .then(|| {
+                            self.session_runtime
+                                .agent_store
+                                .agent(agent_id.as_str())
+                                .and_then(|tree| tree.initialization_context())
+                                .and_then(|context| context.agents_message.clone())
+                        })
+                        .flatten();
+                    self.send_rendered_prompt(&connection_id, request_id, agents_message, result);
                 }
                 PendingRenderedPrompt::Tools {
                     connection_id,
@@ -254,10 +263,9 @@ impl Harness {
             PendingRenderedPrompt::Prompt {
                 connection_id,
                 request_id,
-                enable_agents_md,
                 ..
             } => {
-                self.send_rendered_prompt(&connection_id, request_id, enable_agents_md, Err(error));
+                self.send_rendered_prompt(&connection_id, request_id, None, Err(error));
             }
             PendingRenderedPrompt::Tools {
                 connection_id,
@@ -294,25 +302,11 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
         request_id: String,
-        enable_agents_md: bool,
+        agents_message: Option<String>,
         result: Result<String, String>,
     ) {
         let result = result.map(|system_prompt| {
-            let agents_context = (enable_agents_md
-                && !self
-                    .prompt_coordination
-                    .context_discovery
-                    .agents_files
-                    .is_empty())
-            .then(|| {
-                render_agents_context_message(
-                    self.prompt_coordination
-                        .context_discovery
-                        .agents_files
-                        .iter(),
-                )
-            });
-            render_effective_prompt_message(&system_prompt, agents_context.as_deref())
+            render_effective_prompt_message(&system_prompt, agents_message.as_deref())
         });
         let (prompt, error) =
             result.map_or_else(|error| (None, Some(error)), |prompt| (Some(prompt), None));
@@ -364,6 +358,24 @@ impl Harness {
                 .unwrap_or_else(|| self.config.selected_role.clone()),
         });
     }
+    /// Reject pending previews through their existing directed response path.
+    pub(super) fn fail_rendered_previews_for_agent(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+        message: &str,
+    ) {
+        if let Some(pending) = self
+            .prompt_coordination
+            .context_discovery
+            .pending_rendered_prompts
+            .remove(agent_id)
+        {
+            for request in pending.requests {
+                self.send_rendered_preview_error(request, message.to_owned());
+            }
+        }
+    }
+
     /// Fails expired previews and unloads their context agents.
     pub(super) fn process_rendered_preview_deadlines(&mut self, now: Instant) {
         let expired = self

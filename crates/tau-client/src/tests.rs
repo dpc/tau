@@ -490,6 +490,7 @@ impl TauExtension for ContextReadyEmitExtension {
             )?;
             cx.handle().declare_session_discovery_snapshot(
                 tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+                    frontmatter_diagnostics: Vec::new(),
                     session_id: tau_proto::SessionId::parse("session-1")
                         .expect("known-safe SessionId must be valid"),
                     skills: Vec::new(),
@@ -498,6 +499,7 @@ impl TauExtension for ContextReadyEmitExtension {
             )?;
             cx.handle().declare_agent_discovery_snapshot(
                 tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                    frontmatter_diagnostics: Vec::new(),
                     session_id: tau_proto::SessionId::parse("session-1")
                         .expect("known-safe SessionId must be valid"),
                     agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -1718,6 +1720,7 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let session = Event::ExtensionSessionDiscoverySnapshotDeclared(
         tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+            frontmatter_diagnostics: Vec::new(),
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
@@ -1732,6 +1735,7 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let agent = Event::ExtensionAgentDiscoverySnapshotDeclared(
         tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+            frontmatter_diagnostics: Vec::new(),
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
@@ -1766,6 +1770,7 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let agent_projection =
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),

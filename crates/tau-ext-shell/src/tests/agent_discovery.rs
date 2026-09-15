@@ -351,6 +351,10 @@ fn per_agent_discovery_excludes_session_collision_diagnostics() {
     );
     let scan = DiscoveryScan {
         snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+            frontmatter_diagnostics: vec![tau_proto::DiscoveryFrontmatterDiagnostic {
+                file_path: PathBuf::from("/malformed/SKILL.md"),
+                message: "invalid filter".to_owned(),
+            }],
             session_id: tau_proto::SessionId::parse("session-1").expect("session id"),
             skills: Vec::new(),
             agents_files: Vec::new(),
@@ -379,6 +383,7 @@ fn per_agent_discovery_excludes_session_collision_diagnostics() {
         emit.event.as_ref(),
         Event::ExtensionAgentDiscoverySnapshotDeclared(event)
             if event.agent_id.as_str() == "agent-1"
+                && event.frontmatter_diagnostics.len() == 1
     ));
     assert!(
         rx.try_recv().is_err(),
@@ -548,8 +553,10 @@ fn session_skill_dirs_do_not_treat_home_agents_as_project_skills() {
     );
 }
 
+/// Malformed metadata recovers the skill identity and must not be demoted to a
+/// best-effort extension notice instead of mandatory discovery diagnostics.
 #[test]
-fn skill_diagnostics_use_extension_notice_requests() {
+fn malformed_skill_diagnostics_do_not_use_extension_notice_requests() {
     let temp = TempDir::new().expect("tempdir");
     let skills_dir = temp.path().join(".agents").join("skills");
     let skill_dir = skills_dir.join("bad-skill");
@@ -561,29 +568,16 @@ fn skill_diagnostics_use_extension_notice_requests() {
     .expect("write skill");
 
     let result = tau_skills::load_skills_from_dirs(&[skills_dir]);
-    assert!(result.skills.is_empty());
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].name.as_str(), "bad-skill");
+    assert!(result.diagnostics.iter().any(|diagnostic| diagnostic.kind
+        == tau_skills::DiagnosticKind::Frontmatter
+        && diagnostic.path.ends_with("bad-skill/SKILL.md")));
 
     let mut messages = Vec::new();
     push_skill_diagnostic_requests(&mut messages, result.diagnostics);
 
-    let skipped = messages.iter().find_map(|message| match message {
-        HarnessInputMessage::ExtensionNoticeRequest(request)
-            if request.message.contains("skill skipped:") =>
-        {
-            Some(request)
-        }
-        _ => None,
-    });
-    let Some(skipped_request) = skipped else {
-        panic!("expected skipped skill notice request, got {messages:?}");
-    };
-    assert_eq!(skipped_request.level, tau_proto::NoticeLevel::Warning);
-    assert!(skipped_request.message.contains("bad-skill/SKILL.md"));
-    assert!(
-        skipped_request
-            .message
-            .contains("name contains invalid characters")
-    );
+    assert!(messages.is_empty());
 }
 
 /// Ensures ext-shell keeps the expected notice severity for each skill-loader

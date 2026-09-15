@@ -1283,6 +1283,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     h.prompt_coordination.context_discovery.skills.insert(
         tau_proto::SkillName::new("late-loaded"),
         crate::discovery::DiscoveredSkill {
+            visibility: Default::default(),
             source_id: tau_proto::ConnectionId::parse("test-ext")
                 .expect("test connection id must satisfy the identifier grammar"),
             description: "appears between turns".to_owned(),
@@ -2959,7 +2960,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
                 transaction_id: transaction_id.clone(),
                 cut: tau_proto::AgentHead::Root,
                 suffix_end: tau_proto::AgentHead::Root,
-                compact_prompt_id: compact_prompt_id,
+                compact_prompt_id,
                 model: model.clone(),
                 operation: tau_proto::PromptOperation::StandaloneCompaction,
                 replacement_window: vec![ContextItem::Message(MessageItem {

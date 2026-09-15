@@ -2,6 +2,95 @@
 
 use super::*;
 
+/// A prospective role's preview must use its own filtered bootstrap and skill
+/// advertisement, never the selected UI role or raw session AGENTS inventory.
+#[test]
+fn context_role_preview_uses_requested_role_for_skills_and_agents() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let selected = h.config.selected_role.clone();
+    let requested = "preview-context-role";
+    h.config.available_roles.insert(
+        requested.to_owned(),
+        h.config.available_roles[&selected].clone(),
+    );
+    let path = td.path().join("preview-only.md");
+    std::fs::write(
+        &path,
+        "---\nname: preview-only\ndescription: preview-only\n---\nbody",
+    )
+    .expect("skill");
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("preview-source"),
+        tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+            session_id: h.session_runtime.current_session_id.clone(),
+            frontmatter_diagnostics: Vec::new(),
+            skills: vec![tau_proto::DiscoverySkillCandidate {
+                visibility: tau_proto::ContextVisibility {
+                    only_roles: Some(vec![requested.to_owned()]),
+                    ..Default::default()
+                },
+                name: "preview-only".into(),
+                description: "preview-only advertisement".to_owned(),
+                file_path: path,
+                add_to_prompt: true,
+                user_invocable: true,
+                disable_model_invocation: false,
+                argument_hint: None,
+                sampled_modified: None,
+            }],
+            agents_files: vec![
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: td.path().join("AGENTS.requested.md"),
+                    content: format!("---\nonly-roles: [{requested}]\n---\nREQUESTED BOOTSTRAP"),
+                },
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: td.path().join("AGENTS.selected.md"),
+                    content: format!("---\nonly-roles: [{selected}]\n---\nSELECTED BOOTSTRAP"),
+                },
+            ],
+        },
+    );
+    let result = request_rendered_prompt(&mut h, requested, true);
+    assert_eq!(result.error, None);
+    let prompt = result.prompt.expect("prompt");
+    assert!(prompt.contains("REQUESTED BOOTSTRAP"));
+    assert!(!prompt.contains("SELECTED BOOTSTRAP"));
+    assert!(!prompt.contains("only-roles:"));
+    assert!(prompt.contains("preview-only advertisement"));
+}
+
+/// Synchronous initialization rejection must return a preview error before the
+/// preview caller tries to index the already-unloaded temporary agent.
+#[test]
+fn context_required_skill_rejection_fails_synchronous_preview_without_panic() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let role = h.config.selected_role.clone();
+    h.config
+        .available_roles
+        .get_mut(&role)
+        .expect("role")
+        .required_skills = vec!["unavailable".into()];
+    let before = h.agent_runtime.agent_registry.agents.len();
+    let result = request_rendered_prompt(&mut h, &role, true);
+    assert!(result.prompt.is_none());
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("initialization was rejected"))
+    );
+    assert_eq!(h.agent_runtime.agent_registry.agents.len(), before);
+    assert!(
+        h.prompt_coordination
+            .context_discovery
+            .pending_agents
+            .is_empty()
+    );
+    assert!(h.runtime_io.publication.pending_error.is_none());
+}
+
 fn register_managed_fetch_backings(harness: &mut Harness) {
     let connection_id = crate::test_connection_id("managed-fetch-backings");
     for (name, enabled_by_default) in [

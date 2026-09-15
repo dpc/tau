@@ -563,6 +563,46 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     assert!(vt.screen_contains(80, "agent @worker-1 context ready"));
 }
 
+/// Selecting a hidden agent must immediately switch skill completion to its
+/// complete frozen projection, including skills omitted from advertisement.
+#[test]
+fn context_skill_completion_follows_selected_agent_projection() {
+    let (_term, handle, _vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle);
+    let completer = renderer.skill_arg_completer();
+    for (agent, name) in [("first-agent", "first"), ("second-agent", "second")] {
+        renderer.handle(&Event::HarnessAgentContextInitialized(
+            tau_proto::HarnessAgentContextInitialized {
+                session_id: test_session_id("s1"),
+                agent_id: agent_id(agent),
+                agent_initialization_id: "init".parse().expect("init"),
+                listed_skills: Vec::new(),
+                effective_skills: vec![tau_proto::DiscoveryEffectiveSkill {
+                    visibility: Default::default(),
+                    name: name.into(),
+                    description: name.to_owned(),
+                    source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+                    add_to_prompt: false,
+                    user_invocable: true,
+                    disable_model_invocation: false,
+                    argument_hint: None,
+                }],
+                agents_files: Vec::new(),
+            },
+        ));
+    }
+    for (agent, name) in [
+        ("first-agent", "first"),
+        ("second-agent", "second"),
+        ("first-agent", "first"),
+    ] {
+        renderer.switch_agent(agent_id(agent));
+        let items = completer(&[""]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].value, name);
+    }
+}
+
 /// The initialization UI must use real line breaks, expose only advertised
 /// skill names, aggregate other skills, and put each bootstrap path on its own
 /// concise line with prompt-context size statistics but without leaking skill
@@ -570,6 +610,7 @@ fn extension_context_ready_routes_to_agent_ui_state() {
 #[test]
 fn agent_context_initialization_summary_is_concise_and_literal() {
     let advertised = tau_proto::DiscoveryEffectiveSkill {
+        visibility: Default::default(),
         name: "advertised".into(),
         description: "description must stay hidden".to_owned(),
         source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
@@ -579,6 +620,7 @@ fn agent_context_initialization_summary_is_concise_and_literal() {
         argument_hint: None,
     };
     let initialized = tau_proto::HarnessAgentContextInitialized {
+        effective_skills: Vec::new(),
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
         agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
@@ -625,6 +667,7 @@ fn agent_context_initialization_summary_is_concise_and_literal() {
 #[test]
 fn agent_context_initialization_summary_omits_empty_sections() {
     let initialized = tau_proto::HarnessAgentContextInitialized {
+        effective_skills: Vec::new(),
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
         agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
@@ -659,6 +702,7 @@ fn agent_context_initialization_event_aggregates_session_skills() {
         cli_test_theme(),
     );
     let skill = |name: &str| tau_proto::DiscoveryEffectiveSkill {
+        visibility: Default::default(),
         name: name.into(),
         description: format!("{name} description"),
         source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
@@ -676,6 +720,7 @@ fn agent_context_initialization_event_aggregates_session_skills() {
     renderer.switch_agent(agent_id("agent-1"));
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: test_session_id("session-1"),
             agent_id: agent_id("agent-1"),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
@@ -718,6 +763,7 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
     }));
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: test_session_id("session-1"),
             agent_id: agent_id("restored"),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("restored-init")

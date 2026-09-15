@@ -4200,7 +4200,7 @@ impl Harness {
                     .is_some_and(|pending| pending.waiting_on.is_empty())
                 && let Err(error) = self.finalize_agent_discovery(&loaded.agent_id)
             {
-                self.emit_harness_failure(&format!("failed to finalize agent discovery: {error}"));
+                self.fail_agent_initialization(&loaded.agent_id, &error.to_string());
             }
         }
         if let Event::AgentInitializationContextSet(context) = event {

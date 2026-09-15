@@ -1164,6 +1164,7 @@ fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill
             (
                 skill.name,
                 DiscoveredSkill {
+                    visibility: skill.visibility,
                     source_id: tau_proto::ConnectionId::parse(BUILT_IN_SKILLS_SOURCE_ID).expect(
                         "built-in skills source id must satisfy the connection identifier grammar",
                     ),
@@ -1204,6 +1205,7 @@ fn discovered_skill_to_effective(
     skill: &DiscoveredSkill,
 ) -> tau_proto::DiscoveryEffectiveSkill {
     tau_proto::DiscoveryEffectiveSkill {
+        visibility: skill.visibility.clone(),
         name: name.clone(),
         description: skill.description.clone(),
         source: match &skill.source {

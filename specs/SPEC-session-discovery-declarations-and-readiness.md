@@ -73,8 +73,10 @@ pending state and its wait set, but never mutates a frozen agent snapshot.
 ## Finalized state and consumers
 
 After the final waiter settles, the harness checks effective skill sources for
-loadability, falls back through collision candidates when possible, renders all
-ordered AGENTS.md files once, and publishes one durable
+loadability and falls back through collision candidates when possible. It then
+filters winners for the agent's effective role and configured group, independently
+filters ordered AGENTS.md files, validates required skills against the eligible
+set, and renders included instructions without frontmatter. It publishes one durable
 `agent.initialization_context_set` replacement fact for that exact initialization,
 including an unchanged cold-restored initialization with a fresh ID. The reducer
 stores the latest durable fact as agent side state without creating a transcript
@@ -104,5 +106,49 @@ one current `harness.session_skills_available` snapshot and one
 `harness.agent_context_initialized` projection per live initialized agent, with no
 raw declarations or prompt side effects.
 
+The agent current-state projection includes the complete frozen eligible
+`effective_skills` set separately from advertised `listed_skills`. Selected-agent
+completion consumes only that eligible set, including unadvertised user-invocable
+skills. An older projection omitting the eligible set yields empty completion,
+never a fallback to the role-neutral session inventory. Prospective-agent
+completion filters the session baseline by the effective role and configured group.
+
 Configured extensions are trusted local executables subject to the authority and
 resource boundaries in [`SECURITY.md`](../SECURITY.md).
+
+## Role-filtered context
+
+Skills and every independently stacked AGENTS file share four optional YAML
+list fields: `only-roles`, `only-role-groups`, `except-roles`, and
+`except-role-groups`. Only dimensions form a union first, then any except match
+excludes. Missing both only fields admits all; an explicit empty only list
+admits none unless the other only dimension matches. Names are exact,
+case-sensitive, nonempty, and unpadded. Unknown names are inert. Group identity
+comes from configured membership, with the existing role-name fallback.
+
+Policy cannot reveal a lower collision candidate when the selected loadable
+winner is hidden. Session inventory stays role-neutral; required-skill preflight
+evaluates each prospective role independently. All initialized consumers,
+including advertisement, exact/search/content model access, `:skill`, selected
+completion, and role previews, use that agent's eligible frozen set. File bodies
+remain live reads, but editing a header does not resample eligibility until a
+new initialization. This does not restrict direct filesystem access.
+
+An unavailable per-agent required skill rejects that initialization before the
+durable replacement is published. Accepted delegated starts use their existing
+correlated failure terminal; pending previews and initial UI prompts receive
+their existing failure responses and the rejected runtime is unloaded. Other
+agents and the harness remain operational. Session-level selected/default-role
+preflight failure remains a startup error.
+
+Malformed headers and filters follow
+[REQ-context-file-frontmatter-fail-open](REQ-context-file-frontmatter-fail-open.md).
+Recognized invalid policy discards all four filters while preserving valid
+unrelated metadata. Unparseable headers preserve raw useful instructions.
+File-specific diagnostics travel with the admitted source snapshot, including
+agent-only discovery; stale or dropped snapshots cannot alert. The harness
+reserves existing snapshot capacity for mandatory diagnostics before ordinary
+inventory items can consume it. The harness
+retains Warning+Alert notices for late subscribers and diagnostic filtering
+cannot suppress them. Encountered malformed live bodies warn through the same
+alert path without changing sampled eligibility.

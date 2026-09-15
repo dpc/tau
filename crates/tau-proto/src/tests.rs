@@ -1900,8 +1900,10 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ExtensionSessionDiscoverySnapshotDeclared(
             ExtensionSessionDiscoverySnapshotDeclared {
+                frontmatter_diagnostics: Vec::new(),
                 session_id: test_session_id("s1"),
                 skills: vec![DiscoverySkillCandidate {
+                    visibility: Default::default(),
                     name: "brave-search".into(),
                     description: "Web search via Brave API".to_owned(),
                     file_path: "/home/user/.agents/skills/brave-search/SKILL.md".into(),
@@ -1918,11 +1920,13 @@ fn representative_events() -> Vec<Event> {
             },
         ),
         Event::ExtensionAgentDiscoverySnapshotDeclared(ExtensionAgentDiscoverySnapshotDeclared {
+            frontmatter_diagnostics: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
             agent_initialization_id: AgentInitializationId::parse("init-1")
                 .expect("test identifier must be valid"),
             skills: vec![DiscoverySkillCandidate {
+                visibility: Default::default(),
                 name: "local-search".into(),
                 description: "Search locally".to_owned(),
                 file_path: "/project/.agents/skills/local-search/SKILL.md".into(),
@@ -2005,6 +2009,7 @@ fn representative_events() -> Vec<Event> {
             agents_message: Some("project instructions".to_owned()),
             effective_skills: vec![
                 DiscoveryEffectiveSkill {
+                    visibility: Default::default(),
                     name: "brave-search".into(),
                     description: "Web search via Brave API".to_owned(),
                     source: DiscoveryEffectiveSkillSource::File {
@@ -2016,6 +2021,7 @@ fn representative_events() -> Vec<Event> {
                     argument_hint: Some("<query>".to_owned()),
                 },
                 DiscoveryEffectiveSkill {
+                    visibility: Default::default(),
                     name: "tau-self-knowledge".into(),
                     description: "Explain Tau".to_owned(),
                     source: DiscoveryEffectiveSkillSource::BuiltIn,
@@ -2087,11 +2093,13 @@ fn representative_events() -> Vec<Event> {
             ],
         }),
         Event::HarnessAgentContextInitialized(HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
             agent_initialization_id: AgentInitializationId::parse("init-1")
                 .expect("test identifier must be valid"),
             listed_skills: vec![DiscoveryEffectiveSkill {
+                visibility: Default::default(),
                 name: "tau-self-knowledge".into(),
                 description: "Explain Tau".to_owned(),
                 source: DiscoveryEffectiveSkillSource::BuiltIn,
@@ -2109,6 +2117,7 @@ fn representative_events() -> Vec<Event> {
         Event::HarnessSessionSkillsAvailable(HarnessSessionSkillsAvailable {
             session_id: test_session_id("s1"),
             skills: vec![DiscoveryEffectiveSkill {
+                visibility: Default::default(),
                 name: "brave-search".into(),
                 description: "Web search via Brave API".to_owned(),
                 source: DiscoveryEffectiveSkillSource::File {
@@ -2913,6 +2922,7 @@ fn discovery_snapshot_events_round_trip_complete_wire_payloads() {
 fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
     for micros in [-1, 0, 1] {
         let candidate = DiscoverySkillCandidate {
+            visibility: Default::default(),
             name: "sample".into(),
             description: "sample".to_owned(),
             file_path: "/sample/SKILL.md".into(),
@@ -2931,6 +2941,7 @@ fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
     }
 
     let absent = DiscoverySkillCandidate {
+        visibility: Default::default(),
         name: "sample".into(),
         description: "sample".to_owned(),
         file_path: "/sample/SKILL.md".into(),
@@ -2942,6 +2953,27 @@ fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
     };
     let absent_json = serde_json::to_value(&absent).expect("serialize absent timestamp");
     assert!(absent_json.get("sampled_modified").is_none());
+    let mut old_json = absent_json.clone();
+    old_json
+        .as_object_mut()
+        .expect("object")
+        .remove("visibility");
+    assert_eq!(
+        serde_json::from_value::<DiscoverySkillCandidate>(old_json)
+            .expect("old candidate")
+            .visibility,
+        ContextVisibility::default(),
+    );
+    let mut restricted = absent.clone();
+    restricted.visibility.only_roles = Some(Vec::new());
+    let encoded = serde_json::to_value(&restricted).expect("encode restricted");
+    assert_eq!(encoded["visibility"]["only-roles"], serde_json::json!([]));
+    assert!(
+        !serde_json::from_value::<DiscoverySkillCandidate>(encoded)
+            .expect("decode restricted")
+            .visibility
+            .allows("engineer", "engineer")
+    );
 
     let empty = Event::AgentInitializationContextSet(AgentInitializationContextSet {
         session_id: test_session_id("s1"),
@@ -2964,6 +2996,21 @@ fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
             .expect("deserialize empty replacement from CBOR"),
         empty
     );
+}
+
+/// Older agent projections lack the complete eligible set; decoding must leave
+/// it empty so completion cannot accidentally substitute role-neutral skills.
+#[test]
+fn context_agent_projection_omitted_eligible_set_is_empty() {
+    let projection: HarnessAgentContextInitialized = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "agent_id": "agent-1",
+        "agent_initialization_id": "init-1",
+        "listed_skills": [],
+        "agents_files": []
+    }))
+    .expect("older projection");
+    assert!(projection.effective_skills.is_empty());
 }
 
 fn expected_default_persist(event: &Event) -> bool {
@@ -4367,7 +4414,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 7, "minor": 2})
+        serde_json::json!({"major": 7, "minor": 3})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4459,7 +4506,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 7, "minor": 2})
+        serde_json::json!({"major": 7, "minor": 3})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

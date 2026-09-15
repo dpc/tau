@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -505,6 +505,15 @@ impl<'a> InternalToolHost<'a> {
 
     /// Return a cloned snapshot of skills discovered by the harness.
     pub fn discovered_skills(&self, conversation_id: &AgentId) -> Vec<InternalSkill> {
+        let role = self
+            .harness
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(conversation_id)
+            .map(|agent| self.harness.role_name_for_agent(agent))
+            .unwrap_or_else(|| self.harness.config.selected_role.clone());
+        let group = self.harness.role_group_name_for_role(&role);
         let skills = self
             .harness
             .agent_runtime
@@ -526,6 +535,7 @@ impl<'a> InternalToolHost<'a> {
         skills
             .iter()
             .filter(|(_, skill)| !skill.disable_model_invocation)
+            .filter(|(_, skill)| skill.visibility.allows(&role, &group))
             .map(|(name, skill)| InternalSkill {
                 name: name.as_str().to_owned(),
                 description: skill.description.clone(),
@@ -542,6 +552,12 @@ impl<'a> InternalToolHost<'a> {
     /// Emit an important informational message to the user.
     pub fn emit_info_important(&mut self, message: &str) {
         self.harness.emit_info_important(message);
+    }
+
+    /// Retain a file-specific malformed context header warning for UI replay.
+    pub fn emit_context_frontmatter_warning(&mut self, source: &str, warning: &str) {
+        self.harness
+            .emit_context_frontmatter_warning(Path::new(source), warning);
     }
 
     /// Apply a canonical work-status report to the calling agent only.

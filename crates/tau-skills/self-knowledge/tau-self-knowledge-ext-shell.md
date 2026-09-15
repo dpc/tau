@@ -158,6 +158,18 @@ agent's frozen snapshot.
 
 `.local` locations are intended for machine- or user-specific instructions and are usually gitignored.
 
+Skills and AGENTS files support YAML list filters `only-roles`,
+`only-role-groups`, `except-roles`, and `except-role-groups`. The two allow
+dimensions form a union first; any exclusion wins afterward. Missing allow
+lists admit everyone; explicitly empty lists match nobody. Role/group names
+match exactly, using actual configured groups rather than role-name prefixes.
+Each AGENTS file filters independently; headers are stripped from injected
+instructions. Skill winners are selected before filtering, so hiding a winner
+does not expose duplicates. Eligibility freezes at agent initialization while
+later skill loads still read current bodies. Malformed filters fail open and
+produce file-specific UI warnings retained for late attachment. Unparseable
+headers preserve raw useful instructions. These filters are not filesystem ACLs.
+
 AGENTS.md files and skills are trusted prompt input. Tau follows symlinks during
 discovery; do not run Tau in projects whose instruction files or skill files you
 do not trust.

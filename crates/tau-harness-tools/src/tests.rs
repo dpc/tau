@@ -232,6 +232,64 @@ fn exact_skill_loading_filters_comments_but_content_search_keeps_them() {
     assert!(read.raw.contains("<!-- searchable note -->"));
 }
 
+/// Model exact/autoload and content search keep sampled eligibility while
+/// reading edited bodies, including raw recovery and diagnostics for non-hits.
+#[test]
+fn context_live_skill_body_recovery_does_not_resample_visibility() {
+    let source = InternalSkillSource::BuiltIn {
+        content: "---\nonly-roles: []\n---\nLIVE NEEDLE".into(),
+    };
+    let mut skills = vec![InternalSkill {
+        name: "frozen-visible".to_owned(),
+        description: "sampled description".to_owned(),
+        source,
+    }];
+    for query in ["frozen-visible", "sampled"] {
+        let outcome = search_discovered_skills(&skills, &[query.to_owned()], false);
+        assert_eq!(outcome.auto_load_name.as_deref(), Some("frozen-visible"));
+    }
+    let outcome = search_discovered_skills(&skills, &["needle".to_owned()], true);
+    assert_eq!(outcome.auto_load_name.as_deref(), Some("frozen-visible"));
+    let raw = "---\ninvalid: [\nRAW NEEDLE";
+    skills[0].source = InternalSkillSource::BuiltIn {
+        content: raw.into(),
+    };
+    for (query, hits) in [("needle", 1), ("absent", 0)] {
+        let outcome = search_discovered_skills(&skills, &[query.to_owned()], true);
+        assert_eq!(outcome.total_matches, hits);
+        assert_eq!(outcome.frontmatter_warnings.len(), 1);
+    }
+    let prepared = prepare_skill_content(
+        read_skill_source_prefix(&skills[0].source, MAX_SKILL_CONTENT_BYTES).expect("bounded read"),
+    )
+    .expect("raw recovery");
+    assert_eq!(prepared.model_body, raw);
+    assert!(prepared.frontmatter_warning.is_some());
+    skills[0].source = InternalSkillSource::BuiltIn {
+        content: "---\nname: [bad]\ndescription: live\nuser-invocable: maybe\n---\nSCALAR NEEDLE"
+            .into(),
+    };
+    let outcome = search_discovered_skills(&skills, &["needle".to_owned()], true);
+    assert_eq!(outcome.auto_load_name.as_deref(), Some("frozen-visible"));
+    assert!(
+        outcome
+            .frontmatter_warnings
+            .iter()
+            .any(|(_, warning)| warning.contains("user-invocable"))
+    );
+    let prepared = prepare_skill_content(
+        read_skill_source_prefix(&skills[0].source, MAX_SKILL_CONTENT_BYTES).expect("read"),
+    )
+    .expect("scalar recovery");
+    assert_eq!(prepared.model_body, "SCALAR NEEDLE");
+    assert!(
+        prepared
+            .frontmatter_warning
+            .expect("warning")
+            .contains("user-invocable")
+    );
+}
+
 fn cbor_map_text<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
     let CborValue::Map(entries) = value else {
         return None;
@@ -1596,6 +1654,7 @@ fn truncated_skill_search_uses_standard_success_status() {
         &["common".to_owned()],
         false,
         SkillSearchOutcome {
+            frontmatter_warnings: Vec::new(),
             hits,
             total_matches: 56,
             truncated: true,
@@ -1621,6 +1680,7 @@ fn skill_search_guidance_matches_content_search_branch() {
             &["missing".to_owned()],
             search_content,
             SkillSearchOutcome {
+                frontmatter_warnings: Vec::new(),
                 hits: Vec::new(),
                 total_matches: 0,
                 truncated: false,

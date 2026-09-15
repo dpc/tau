@@ -889,6 +889,9 @@ fn handle_skill_query(
     for warning in &outcome.warnings {
         host.emit_info_important(warning);
     }
+    for (source, warning) in &outcome.frontmatter_warnings {
+        host.emit_context_frontmatter_warning(source, warning);
+    }
     if let Some(name) = outcome.auto_load_name.clone() {
         return read_skill_by_name(host, &skills, &name);
     }
@@ -912,6 +915,9 @@ fn read_skill_by_name(
     })?;
     let prepared = prepare_skill_content(read)
         .map_err(|message| (message.clone(), Some(skill_error_display(name, &message))))?;
+    if let Some(warning) = &prepared.frontmatter_warning {
+        host.emit_context_frontmatter_warning(&source_label, warning);
+    }
     let mut body = prepared.model_body;
     if prepared.truncated {
         host.emit_info_important(&format!(
@@ -955,6 +961,9 @@ struct SkillSearchHit {
     description: String,
 }
 struct SkillSearchOutcome {
+    /// Malformed live headers requiring alerts even when no search result
+    /// matches.
+    frontmatter_warnings: Vec<(String, String)>,
     hits: Vec<SkillSearchHit>,
     total_matches: usize,
     truncated: bool,
@@ -968,6 +977,7 @@ fn search_discovered_skills(
     search_content: bool,
 ) -> SkillSearchOutcome {
     let mut warnings = Vec::new();
+    let mut frontmatter_warnings = Vec::new();
     let mut hits = Vec::new();
     let mut total_matches = 0;
     let mut only_hit_name = None;
@@ -991,7 +1001,15 @@ fn search_discovered_skills(
             if search_content {
                 let body = body.get_or_insert_with(|| match read_skill_source_prefix(&skill.source, MAX_SKILL_CONTENT_BYTES) {
                     Ok(read) => match prepare_skill_content(read) {
-                        Ok(prepared) => { if prepared.truncated { warnings.push(format!("skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while content-searching {}", skill.source.label(), skill.name)); } prepared.body.to_lowercase() }
+                        Ok(prepared) => {
+                            if let Some(warning) = prepared.frontmatter_warning {
+                                frontmatter_warnings.push((skill.source.label(), warning));
+                            }
+                            if prepared.truncated {
+                                warnings.push(format!("skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while content-searching {}", skill.source.label(), skill.name));
+                            }
+                            prepared.body.to_lowercase()
+                        }
                         Err(message) => { warnings.push(format!("skill frontmatter too long: {} while content-searching {}: {message}", skill.source.label(), skill.name)); String::new() }
                     },
                     Err(_) => String::new(),
@@ -1029,6 +1047,7 @@ fn search_discovered_skills(
         }
     }
     SkillSearchOutcome {
+        frontmatter_warnings,
         hits,
         total_matches,
         truncated: MAX_SKILL_SEARCH_MATCHES < total_matches,

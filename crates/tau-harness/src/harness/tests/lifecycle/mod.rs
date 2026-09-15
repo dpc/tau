@@ -430,7 +430,7 @@ pub(super) fn seed_restored_compaction_checkpoint(
             transaction_id: transaction_id.clone(),
             cut: tau_proto::AgentHead::Root,
             suffix_end: tau_proto::AgentHead::Root,
-            compact_prompt_id: compact_prompt_id,
+            compact_prompt_id,
             model: model.clone(),
             operation: tau_proto::PromptOperation::StandaloneCompaction,
             replacement_window: vec![ContextItem::Message(MessageItem {

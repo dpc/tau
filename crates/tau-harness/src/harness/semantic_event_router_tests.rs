@@ -98,6 +98,7 @@ fn discovery_snapshot_declarations_never_enter_semantic_history() {
     let events = [
         Event::ExtensionSessionDiscoverySnapshotDeclared(
             tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+                frontmatter_diagnostics: Vec::new(),
                 session_id: "test-session"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
@@ -107,6 +108,7 @@ fn discovery_snapshot_declarations_never_enter_semantic_history() {
         ),
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                frontmatter_diagnostics: Vec::new(),
                 session_id: "test-session"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),

@@ -2762,10 +2762,21 @@ fn build_discovery_snapshot(
     discovery_policy: DiscoverySourcePolicy,
 ) -> DiscoveryScan {
     let mut diagnostics = Vec::new();
+    let mut frontmatter_diagnostics = Vec::new();
     let (skills, agents_files) = if discovery_policy.reads_environment() {
         let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
         let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
-        push_skill_diagnostic_requests(&mut diagnostics, result.diagnostics);
+        let (malformed, ordinary): (Vec<_>, Vec<_>) = result
+            .diagnostics
+            .into_iter()
+            .partition(|diagnostic| diagnostic.kind == tau_skills::DiagnosticKind::Frontmatter);
+        frontmatter_diagnostics.extend(malformed.into_iter().map(|diagnostic| {
+            tau_proto::DiscoveryFrontmatterDiagnostic {
+                file_path: diagnostic.path,
+                message: diagnostic.message,
+            }
+        }));
+        push_skill_diagnostic_requests(&mut diagnostics, ordinary);
         let skills = result
             .skills
             .into_iter()
@@ -2784,6 +2795,7 @@ fn build_discovery_snapshot(
     };
     DiscoveryScan {
         snapshot: ExtensionSessionDiscoverySnapshotDeclared {
+            frontmatter_diagnostics,
             session_id: _started.session_id,
             skills,
             agents_files,
@@ -2799,6 +2811,7 @@ fn discovery_skill_candidate(skill: tau_skills::Skill) -> DiscoverySkillCandidat
         .ok()
         .and_then(system_time_to_discovery_micros);
     DiscoverySkillCandidate {
+        visibility: skill.visibility,
         name: skill.name,
         description: skill.description,
         file_path,
@@ -2877,6 +2890,7 @@ fn agent_discovery_message(
 ) -> HarnessInputMessage {
     HarnessInputMessage::emit_transient(Event::ExtensionAgentDiscoverySnapshotDeclared(
         ExtensionAgentDiscoverySnapshotDeclared {
+            frontmatter_diagnostics: snapshot.frontmatter_diagnostics,
             session_id: snapshot.session_id,
             agent_id,
             agent_initialization_id,
@@ -2916,6 +2930,8 @@ fn push_skill_diagnostic_requests(
 ) {
     for diagnostic in diagnostics {
         let (kind, level) = match diagnostic.kind {
+            // These travel atomically in the mandatory discovery snapshot.
+            tau_skills::DiagnosticKind::Frontmatter => continue,
             tau_skills::DiagnosticKind::Warning => ("warning", tau_proto::NoticeLevel::Info),
             tau_skills::DiagnosticKind::Collision => ("collision", tau_proto::NoticeLevel::Trace),
             tau_skills::DiagnosticKind::Skipped => ("skipped", tau_proto::NoticeLevel::Warning),

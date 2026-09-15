@@ -565,7 +565,7 @@ fn partial_compaction_restart_and_replacement_only_retreat_preserve_suffix() {
                 model: started.model,
                 operation: started.operation,
                 cut: started.cut,
-                suffix_end: suffix_end,
+                suffix_end,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 replacement_window: provider_text_response(

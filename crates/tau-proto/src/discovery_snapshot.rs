@@ -39,6 +39,9 @@ impl DiscoveryModifiedMicros {
 /// One raw skill candidate in a complete extension discovery snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DiscoverySkillCandidate {
+    /// Role policy sampled with this candidate; omission is unrestricted.
+    #[serde(default)]
+    pub visibility: crate::ContextVisibility,
     /// Declared skill name.
     pub name: SkillName,
     /// Human-readable skill description.
@@ -84,6 +87,10 @@ pub enum DiscoveryEffectiveSkillSource {
 /// One validated effective skill in a harness-owned discovery projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DiscoveryEffectiveSkill {
+    /// Sampled role policy retained across projection and initialization
+    /// replay.
+    #[serde(default)]
+    pub visibility: crate::ContextVisibility,
     /// Effective skill name after validation and collision resolution.
     pub name: SkillName,
     /// Human-readable skill description.
@@ -118,6 +125,9 @@ pub struct DiscoveryAgentsFileSummary {
 /// it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionSessionDiscoverySnapshotDeclared {
+    /// Malformed context headers encountered by this scan, requiring UI alerts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontmatter_diagnostics: Vec<DiscoveryFrontmatterDiagnostic>,
     /// Session to which this complete source snapshot belongs.
     pub session_id: SessionId,
     /// Complete skill candidate list for this source.
@@ -132,6 +142,9 @@ pub struct ExtensionSessionDiscoverySnapshotDeclared {
 /// lists clear it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionAgentDiscoverySnapshotDeclared {
+    /// Malformed context headers encountered by this correlated scan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontmatter_diagnostics: Vec<DiscoveryFrontmatterDiagnostic>,
     /// Session containing the target agent.
     pub session_id: SessionId,
     /// Agent receiving this discovery snapshot.
@@ -173,6 +186,11 @@ pub struct HarnessAgentContextInitialized {
     pub agent_initialization_id: AgentInitializationId,
     /// Exact effective skills listed in this agent's system prompt.
     pub listed_skills: Vec<DiscoveryEffectiveSkill>,
+    /// Complete frozen eligible set for selected-agent completion. Older
+    /// projections omit this field; consumers must not fall back to session
+    /// inventory for an initialized agent.
+    #[serde(default)]
+    pub effective_skills: Vec<DiscoveryEffectiveSkill>,
     /// Exact ordered AGENTS.md files used for this agent's bootstrap block.
     pub agents_files: Vec<DiscoveryAgentsFileSummary>,
 }
@@ -184,4 +202,13 @@ pub struct HarnessSessionSkillsAvailable {
     pub session_id: SessionId,
     /// Complete validated, collision-resolved session skill state.
     pub skills: Vec<DiscoveryEffectiveSkill>,
+}
+
+/// A recoverable malformed context header reported with its source snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryFrontmatterDiagnostic {
+    /// Absolute source path, including files whose skill identity was unusable.
+    pub file_path: PathBuf,
+    /// Actionable parser diagnostic; never a replacement for the source body.
+    pub message: String,
 }

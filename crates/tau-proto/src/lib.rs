@@ -21,6 +21,7 @@ use serde::de as path_serde_de;
 mod artifact;
 mod byte_count;
 mod context;
+mod context_visibility;
 mod diff;
 mod discovery_snapshot;
 mod duration_format;
@@ -64,6 +65,7 @@ pub use artifact::*;
 pub use byte_count::ByteCount;
 pub use ciborium::value::Value as CborValue;
 pub use context::*;
+pub use context_visibility::*;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
 pub use discovery_snapshot::*;
 pub use duration_format::format_approximate_duration_secs;
@@ -105,7 +107,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(7, 2);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(7, 3);
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

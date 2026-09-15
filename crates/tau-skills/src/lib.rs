@@ -5,8 +5,8 @@
 //! flow style, comments, anchors. Two project-level conventions on top of
 //! that:
 //!
-//! - Only top-level scalar values (string, bool, number) are exposed. Lists,
-//!   mappings and `null` are dropped silently.
+//! - The legacy metadata map exposes only top-level scalars. The four
+//!   recognized role/group selectors are parsed separately as typed lists.
 //! - All scalars are stringified before being returned. `BTreeMap<String,
 //!   String>` is the contract callers see.
 use std::borrow::Cow;
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_yaml_ng::Value as YamlValue;
-use tau_proto::SkillName;
+use tau_proto::{ContextVisibility, SkillName};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -27,6 +27,9 @@ use tau_proto::SkillName;
 /// A validated, loaded skill.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Skill {
+    /// Role policy sampled at discovery, independent of live instruction
+    /// bodies.
+    pub visibility: ContextVisibility,
     /// Validated skill name.
     pub name: SkillName,
     /// Short human-facing description from frontmatter.
@@ -72,6 +75,10 @@ pub struct SkillDir {
 /// A skill bundled into Tau at compile time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuiltInSkill {
+    /// Role policy sampled from the bundled source.
+    pub visibility: ContextVisibility,
+    /// Discovery warnings retained for mandatory harness UI reporting.
+    pub diagnostics: Vec<SkillDiagnostic>,
     /// Validated skill name from frontmatter.
     pub name: SkillName,
     /// Validated and possibly truncated description from frontmatter.
@@ -119,6 +126,8 @@ pub struct SkillDiagnostic {
 /// Category for a skill loading diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticKind {
+    /// Malformed context metadata; must become a replayable UI warning.
+    Frontmatter,
     /// Soft issue — the skill still loads.
     Warning,
     /// Duplicate skill name; the loader selected a winner using explicit source
@@ -152,6 +161,9 @@ pub struct LoadedSkillContent {
 /// A bounded skill read plus its prepared model-facing body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedSkillContent {
+    /// Malformed live header encountered during this read, requiring a UI
+    /// alert.
+    pub frontmatter_warning: Option<String>,
     /// Exact decoded text loaded from the source, including frontmatter.
     pub raw: String,
     /// Skill body with frontmatter removed and maintenance comments preserved.
@@ -177,10 +189,13 @@ impl LoadedSkillContent {
         if self.truncated && has_unclosed_frontmatter(&self.raw) {
             return Err(SkillContentPreparationError::FrontmatterTruncated);
         }
-        let body = strip_frontmatter(&self.raw);
+        let parsed = parse_context_frontmatter(&self.raw);
+        let warnings = skill_frontmatter_warnings(&parsed);
+        let body = parsed.body;
         let model_body = strip_model_context_comments(body).into_owned();
         let body = body.to_owned();
         Ok(PreparedSkillContent {
+            frontmatter_warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
             raw: self.raw,
             body,
             model_body,
@@ -458,20 +473,82 @@ fn find_closing_fence(s: &str) -> Option<(usize, usize)> {
     None
 }
 
-struct ParsedFrontmatter<'a> {
-    fields: BTreeMap<String, String>,
-    body: &'a str,
-    yaml_error: Option<String>,
+/// Parsed context header, preserving instructions when metadata is malformed.
+pub struct ParsedFrontmatter<'a> {
+    /// Legacy scalar metadata; unrelated sequence and mapping keys are ignored.
+    pub fields: BTreeMap<String, String>,
+    /// Header-stripped instructions, or raw content if the header is
+    /// unparseable.
+    pub body: &'a str,
+    /// Validated role policy; unrestricted when any recognized filter is
+    /// invalid.
+    pub visibility: ContextVisibility,
+    /// File-specific warning text that discovery must surface in the UI.
+    pub warning: Option<String>,
+    /// Legacy skill scalar keys whose values cannot be interpreted as scalars.
+    invalid_skill_scalars: Vec<String>,
 }
 
-fn parse_frontmatter_inner(content: &str) -> ParsedFrontmatter<'_> {
+/// Parse shared skill/AGENTS headers with fail-open role policy and body
+/// recovery.
+///
+/// Implements REQ-context-file-frontmatter-fail-open. Callers must surface
+/// `warning` as a mandatory, replayable UI warning, not a diagnostic-only log.
+pub fn parse_context_frontmatter(content: &str) -> ParsedFrontmatter<'_> {
+    parse_frontmatter_inner(content)
+}
+
+/// Diagnose skill-specific metadata for both discovery and live body reads,
+/// without changing the caller's already-sampled identity or visibility.
+fn skill_frontmatter_warnings(parsed: &ParsedFrontmatter<'_>) -> Vec<String> {
+    let mut warnings = parsed.warning.iter().cloned().collect::<Vec<_>>();
+    if !parsed.invalid_skill_scalars.is_empty() {
+        warnings.push(format!(
+            "invalid scalar metadata for {}; using available metadata and defaults",
+            parsed.invalid_skill_scalars.join(", ")
+        ));
+    }
+    if let Some(name) = parsed.fields.get("name")
+        && let Some(error) = skill_name_validation_message(name)
+    {
+        warnings.push(format!("invalid declared skill name {name:?}: {error}"));
+    }
+    if parsed
+        .fields
+        .get("description")
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        warnings.push("description is required; retaining available instructions".to_owned());
+    }
+    let mut diagnostics = Vec::new();
+    for (key, default) in [
+        ("advertise", false),
+        ("user-invocable", true),
+        ("disable-model-invocation", false),
+    ] {
+        parse_bool_frontmatter(
+            &parsed.fields,
+            key,
+            default,
+            Path::new(""),
+            &mut diagnostics,
+        );
+    }
+    warnings.extend(diagnostics.into_iter().map(|diagnostic| diagnostic.message));
+    warnings
+}
+
+fn parse_frontmatter_inner(raw: &str) -> ParsedFrontmatter<'_> {
+    let content = raw;
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
     let Some(rest) = content.strip_prefix("---") else {
         return ParsedFrontmatter {
             fields: BTreeMap::new(),
             body: content,
-            yaml_error: None,
+            visibility: ContextVisibility::default(),
+            warning: None,
+            invalid_skill_scalars: Vec::new(),
         };
     };
     let Some(rest) = rest
@@ -481,15 +558,21 @@ fn parse_frontmatter_inner(content: &str) -> ParsedFrontmatter<'_> {
         return ParsedFrontmatter {
             fields: BTreeMap::new(),
             body: content,
-            yaml_error: None,
+            visibility: ContextVisibility::default(),
+            warning: None,
+            invalid_skill_scalars: Vec::new(),
         };
     };
 
     let Some((yaml_end, body_start)) = find_closing_fence(rest) else {
         return ParsedFrontmatter {
             fields: BTreeMap::new(),
-            body: content,
-            yaml_error: None,
+            body: raw,
+            visibility: ContextVisibility::default(),
+            warning: Some(
+                "unterminated frontmatter header; preserving raw instructions".to_owned(),
+            ),
+            invalid_skill_scalars: Vec::new(),
         };
     };
 
@@ -497,29 +580,109 @@ fn parse_frontmatter_inner(content: &str) -> ParsedFrontmatter<'_> {
     let body = &rest[body_start..];
 
     match serde_yaml_ng::from_str::<YamlValue>(yaml_block) {
-        Ok(YamlValue::Mapping(m)) => ParsedFrontmatter {
-            fields: m
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let YamlValue::String(key) = k else {
-                        return None;
-                    };
-                    Some((key, scalar_to_string(&v)?))
-                })
-                .collect(),
-            body,
-            yaml_error: None,
-        },
+        Ok(YamlValue::Mapping(m)) => {
+            let (visibility, warning) = parse_context_visibility(&m);
+            let invalid_skill_scalars = [
+                "name",
+                "description",
+                "advertise",
+                "user-invocable",
+                "disable-model-invocation",
+                "argument-hint",
+            ]
+            .into_iter()
+            .filter(|key| {
+                m.get(YamlValue::String((*key).to_owned()))
+                    .is_some_and(|value| scalar_to_string(value).is_none())
+            })
+            .map(str::to_owned)
+            .collect();
+            ParsedFrontmatter {
+                fields: m
+                    .into_iter()
+                    .filter_map(|(k, v)| {
+                        let YamlValue::String(key) = k else {
+                            return None;
+                        };
+                        Some((key, scalar_to_string(&v)?))
+                    })
+                    .collect(),
+                body,
+                visibility,
+                warning,
+                invalid_skill_scalars,
+            }
+        }
         Ok(_) => ParsedFrontmatter {
             fields: BTreeMap::new(),
-            body,
-            yaml_error: None,
+            body: raw,
+            visibility: ContextVisibility::default(),
+            warning: Some(
+                "frontmatter must be a YAML mapping; preserving raw instructions".to_owned(),
+            ),
+            invalid_skill_scalars: Vec::new(),
         },
         Err(err) => ParsedFrontmatter {
             fields: BTreeMap::new(),
-            body,
-            yaml_error: Some(err.to_string()),
+            body: raw,
+            visibility: ContextVisibility::default(),
+            warning: Some(format!(
+                "frontmatter YAML failed to parse: {err}; preserving raw instructions"
+            )),
+            invalid_skill_scalars: Vec::new(),
         },
+    }
+}
+
+/// Validate the entire recognized policy before applying any of its selectors.
+fn parse_context_visibility(
+    mapping: &serde_yaml_ng::Mapping,
+) -> (ContextVisibility, Option<String>) {
+    let mut policy = ContextVisibility::default();
+    let mut errors = Vec::new();
+    for key in [
+        "only-roles",
+        "only-role-groups",
+        "except-roles",
+        "except-role-groups",
+    ] {
+        let Some(value) = mapping.get(YamlValue::String(key.to_owned())) else {
+            continue;
+        };
+        let names = match value {
+            YamlValue::Sequence(values) => values
+                .iter()
+                .map(|value| match value {
+                    YamlValue::String(name) if !name.is_empty() && name.trim() == name => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            _ => None,
+        };
+        let Some(names) = names else {
+            errors.push(key);
+            continue;
+        };
+        match key {
+            "only-roles" => policy.only_roles = Some(names),
+            "only-role-groups" => policy.only_role_groups = Some(names),
+            "except-roles" => policy.except_roles = names,
+            "except-role-groups" => policy.except_role_groups = names,
+            _ => unreachable!(),
+        }
+    }
+    if errors.is_empty() {
+        (policy, None)
+    } else {
+        (
+            ContextVisibility::default(),
+            Some(format!(
+                "invalid {}: expected YAML lists of nonempty, unpadded names; ignoring all role filters",
+                errors.join(", ")
+            )),
+        )
     }
 }
 
@@ -653,11 +816,17 @@ fn parse_bool_frontmatter(
     match parsed {
         Some(value) => (value, true),
         None => {
-            diagnostics.push(SkillDiagnostic {
-                path: path.to_owned(),
-                kind: DiagnosticKind::Warning,
-                message: format!("{key}: invalid boolean value {value:?}; using default {default}"),
-            });
+            let message =
+                format!("{key}: invalid boolean value {value:?}; using default {default}");
+            if !diagnostics.iter().any(|diagnostic| {
+                diagnostic.kind == DiagnosticKind::Frontmatter && diagnostic.message == message
+            }) {
+                diagnostics.push(SkillDiagnostic {
+                    path: path.to_owned(),
+                    kind: DiagnosticKind::Frontmatter,
+                    message,
+                });
+            }
             (default, false)
         }
     }
@@ -762,8 +931,8 @@ pub fn is_valid_skill_name(name: &str) -> bool {
 
 /// Load a single skill from file content and its path on disk.
 ///
-/// Returns `None` for the skill if the description is missing/empty or the
-/// name is invalid. Diagnostics are returned in all cases.
+/// Recovers malformed metadata using a valid declared or path-derived name and
+/// an honest fallback description. Diagnostics are returned in all cases.
 pub fn load_skill_from_content(
     content: &str,
     file_path: &Path,
@@ -774,13 +943,12 @@ pub fn load_skill_from_content(
     // instructions are picked up without a daemon restart; caching the
     // body on `Skill` would freeze the contents at discovery time.
     let parsed = parse_frontmatter_inner(content);
-    if let Some(err) = parsed.yaml_error {
+    for message in skill_frontmatter_warnings(&parsed) {
         diagnostics.push(SkillDiagnostic {
             path: file_path.to_owned(),
-            kind: DiagnosticKind::Skipped,
-            message: format!("frontmatter YAML failed to parse: {err}"),
+            kind: DiagnosticKind::Frontmatter,
+            message,
         });
-        return (None, diagnostics);
     }
     let fm = parsed.fields;
 
@@ -807,12 +975,37 @@ pub fn load_skill_from_content(
     let name = fm
         .get("name")
         .cloned()
-        .or(fallback_name)
+        .or(fallback_name.clone())
         .unwrap_or_default();
 
-    let name_check = validate_name(&name, parent_name_for_validation, file_path);
+    let mut name_check = validate_name(&name, parent_name_for_validation, file_path);
+    let name = if name_check.skip {
+        if let Some(fallback) = fallback_name
+            && !validate_name(&fallback, parent_name_for_validation, file_path).skip
+        {
+            diagnostics.push(SkillDiagnostic {
+                path: file_path.to_owned(),
+                kind: DiagnosticKind::Frontmatter,
+                message: format!(
+                    "invalid declared skill name {name:?}; using path-derived name {fallback:?}"
+                ),
+            });
+            name_check = validate_name(&fallback, parent_name_for_validation, file_path);
+            fallback
+        } else {
+            name
+        }
+    } else {
+        name
+    };
     diagnostics.extend(name_check.diagnostics);
     if name_check.skip {
+        diagnostics.push(SkillDiagnostic {
+            path: file_path.to_owned(),
+            kind: DiagnosticKind::Frontmatter,
+            message: "cannot recover a valid skill name from the header or path; skipping skill"
+                .to_owned(),
+        });
         return (None, diagnostics);
     }
 
@@ -825,10 +1018,12 @@ pub fn load_skill_from_content(
         _ => {
             diagnostics.push(SkillDiagnostic {
                 path: file_path.to_owned(),
-                kind: DiagnosticKind::Skipped,
-                message: "description is required".to_owned(),
+                kind: DiagnosticKind::Frontmatter,
+                message: format!(
+                    "description is required; using recovery description for skill {name:?}"
+                ),
             });
-            return (None, diagnostics);
+            "Skill with malformed frontmatter; inspect and repair its header.".to_owned()
         }
     };
 
@@ -854,6 +1049,14 @@ pub fn load_skill_from_content(
     }
 
     let skill = Skill {
+        visibility: if diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == DiagnosticKind::Frontmatter)
+        {
+            ContextVisibility::default()
+        } else {
+            parsed.visibility
+        },
         name: SkillName::from(name),
         description,
         file_path: file_path.to_owned(),
@@ -1371,6 +1574,8 @@ pub fn built_in_skills() -> Vec<BuiltInSkill> {
                 )
             });
             BuiltInSkill {
+                visibility: skill.visibility,
+                diagnostics,
                 name: skill.name,
                 description: skill.description,
                 content,
@@ -1389,3 +1594,6 @@ pub fn built_in_skills() -> Vec<BuiltInSkill> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod context_frontmatter_tests;

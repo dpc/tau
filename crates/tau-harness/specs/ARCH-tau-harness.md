@@ -528,6 +528,14 @@ slots. Session winners drive role preflight and agentless UI completion. Every
 agent initialization starts from that baseline and freezes its own finalized
 skill/bootstrap state.
 
+Role/group visibility filters run after role-neutral collision and loadability
+selection, never exposing hidden duplicates. Each AGENTS file filters
+independently and its header is removed before bootstrap rendering. Required
+skills are checked per role at startup and against each final eligible set.
+Malformed metadata fails open and reports file-specific retained Warning+Alert
+notices from admitted snapshots or encountered live reads. Skill bodies stay
+live while eligibility remains frozen; previews use the same frozen bootstrap.
+
 User `:skill <name> [args]` and `:skill:<name> [args]` expansion uses the selected
 agent's frozen snapshot. New-agent initial commands defer expansion until
 finalization. The model skill tool and `<available_skills>` use the same frozen

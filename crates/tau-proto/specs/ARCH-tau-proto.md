@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 7.3 carries optional sampled role/group visibility and malformed-header
+diagnostics through existing discovery declarations and effective projections.
+Omitted policy is unrestricted; old peers may ignore the metadata.
+The current agent initialization projection includes all frozen eligible skills
+separately from its advertised list. An older omitted eligible set gives empty
+selected-agent completion rather than exposing session inventory.
+
 Protocol 7.2 adds transient loaded-agent effort selection and an optional
 create-time effort override. Both are runtime-only UI controls; they do not
 change durable agent identity or journal replay.

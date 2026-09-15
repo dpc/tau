@@ -1536,8 +1536,8 @@ impl Harness {
             .is_some_and(|pending| {
                 pending.waiting_on.remove(&source_id) && pending.waiting_on.is_empty()
             });
-        if should_finalize {
-            self.finalize_agent_discovery(&ready.agent_id)?;
+        if should_finalize && let Err(error) = self.finalize_agent_discovery(&ready.agent_id) {
+            self.fail_agent_initialization(&ready.agent_id, &error.to_string());
         }
         Ok(())
     }
@@ -1601,8 +1601,9 @@ impl Harness {
     }
 
     pub(super) fn required_skill_unavailable_reason(
-        &self,
+        &mut self,
         skill_name: &tau_proto::SkillName,
+        role_name: &str,
     ) -> Option<String> {
         if let Some(message) = tau_skills::skill_name_validation_message(skill_name.as_str()) {
             return Some(format!("`{skill_name}` has invalid skill name: {message}"));
@@ -1615,27 +1616,42 @@ impl Harness {
         else {
             return Some(format!("`{skill_name}` is not discovered"));
         };
+        if !skill
+            .visibility
+            .allows(role_name, &self.role_group_name_for_role(role_name))
+        {
+            return Some(format!("`{skill_name}` is excluded for role `{role_name}`"));
+        }
         if skill.disable_model_invocation {
             return Some(format!(
                 "`{skill_name}` is hidden from model-side skill loading"
             ));
         }
-        if let Err(error) = user_skill_invocation::read_user_invoked_skill_body(&skill.source) {
-            return Some(format!(
-                "`{skill_name}` could not be loaded from {}: {error}",
-                skill.source.label()
-            ));
+        let source = skill.source.clone();
+        match user_skill_invocation::read_user_invoked_skill_body(&source) {
+            Ok(body) => {
+                if let Some(warning) = body.frontmatter_warning {
+                    self.emit_context_frontmatter_warning(Path::new(&source.label()), &warning);
+                }
+            }
+            Err(error) => {
+                return Some(format!(
+                    "`{skill_name}` could not be loaded from {}: {error}",
+                    source.label()
+                ));
+            }
         }
         None
     }
 
     pub(super) fn unavailable_required_skills(
-        &self,
+        &mut self,
+        role_name: &str,
         role: &tau_config::settings::AgentRole,
     ) -> Vec<String> {
         role.required_skills
             .iter()
-            .filter_map(|skill| self.required_skill_unavailable_reason(skill))
+            .filter_map(|skill| self.required_skill_unavailable_reason(skill, role_name))
             .collect()
     }
 
@@ -1648,12 +1664,18 @@ impl Harness {
     }
 
     pub(super) fn enforce_required_role_skills(&mut self) -> Result<(), HarnessError> {
-        let disabled = self
-            .config
-            .available_roles
+        for skill in tau_skills::built_in_skills() {
+            for diagnostic in skill.diagnostics {
+                if diagnostic.kind == tau_skills::DiagnosticKind::Frontmatter {
+                    self.emit_context_frontmatter_warning(&diagnostic.path, &diagnostic.message);
+                }
+            }
+        }
+        let roles = self.config.available_roles.clone();
+        let disabled = roles
             .iter()
             .filter_map(|(role_name, role)| {
-                let reasons = self.unavailable_required_skills(role);
+                let reasons = self.unavailable_required_skills(role_name, role);
                 (!reasons.is_empty()).then(|| {
                     (
                         role_name.clone(),
@@ -1777,6 +1799,18 @@ impl Harness {
         &mut self,
         agent_id: &tau_proto::AgentId,
     ) -> Result<(), HarnessError> {
+        let role = self
+            .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(&cid))
+            .map(|agent| self.role_name_for_agent(agent).to_owned())
+            .unwrap_or_else(|| self.config.selected_role.clone());
+        let group = self.role_group_name_for_role(&role);
+        let required_skills = self
+            .config
+            .available_roles
+            .get(&role)
+            .map(|role| role.required_skills.clone())
+            .unwrap_or_default();
         if self
             .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             .is_none()
@@ -1799,6 +1833,7 @@ impl Harness {
             return Ok(());
         }
         let mut diagnostics = Vec::new();
+        let mut frontmatter_warnings = Vec::new();
         let names = pending.skill_candidates.keys().cloned().collect::<Vec<_>>();
         for name in names {
             loop {
@@ -1811,7 +1846,12 @@ impl Harness {
                     pending.skills.remove(&name);
                     break;
                 };
-                if user_skill_invocation::read_user_invoked_skill_body(&winner.source).is_ok() {
+                if let Ok(loaded) =
+                    user_skill_invocation::read_user_invoked_skill_body(&winner.source)
+                {
+                    if let Some(warning) = loaded.frontmatter_warning {
+                        frontmatter_warnings.push((winner.source.label(), warning));
+                    }
                     pending.skills.insert(name.clone(), winner);
                     break;
                 }
@@ -1827,6 +1867,42 @@ impl Harness {
                     }
                 }
             }
+        }
+        // Resolve loadability and collisions without role policy first. A
+        // hidden winner must never reveal a lower-priority duplicate.
+        pending
+            .skills
+            .retain(|_, skill| skill.visibility.allows(&role, &group));
+        pending.agents_files.retain(|file| {
+            tau_skills::parse_context_frontmatter(&file.content)
+                .visibility
+                .allows(&role, &group)
+        });
+        let unavailable = required_skills
+            .iter()
+            .filter(|name| {
+                pending
+                    .skills
+                    .get(*name)
+                    .is_none_or(|skill| skill.disable_model_invocation)
+            })
+            .map(|name| format!("`{name}` is unavailable in the finalized context"))
+            .collect::<Vec<_>>();
+        if !unavailable.is_empty() {
+            let message = format!(
+                "agent `{agent_id}` initialization failed: required skill(s) unavailable for role `{role}`: {}",
+                unavailable.join("; "),
+            );
+            for (source, warning) in frontmatter_warnings {
+                self.emit_context_frontmatter_warning(Path::new(&source), &warning);
+            }
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_CONFIG_ERROR,
+                tau_proto::NoticeLevel::Warning,
+                tau_proto::NoticePurpose::Alert,
+                &message,
+            );
+            return Err(HarnessError::Participant(message));
         }
         let initialization_id = pending.initialization_id.clone();
         let agents_message = (!pending.agents_files.is_empty())
@@ -1851,12 +1927,46 @@ impl Harness {
         for diagnostic in diagnostics {
             self.emit_info_important(&diagnostic);
         }
+        for (source, warning) in frontmatter_warnings {
+            self.emit_context_frontmatter_warning(Path::new(&source), &warning);
+        }
         let event = Event::AgentInitializationContextSet(context);
         let cid = self
             .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             .expect("agent route checked before discovery finalization");
         self.publish_event_for_agent(&cid, None, event);
         Ok(())
+    }
+
+    /// Terminate only the rejected initialization's existing request/runtime
+    /// owner. A malformed or unavailable required skill must not kill the
+    /// harness or leave a permanently waiting agent.
+    pub(super) fn fail_agent_initialization(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+        message: &str,
+    ) {
+        let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) else {
+            return;
+        };
+        if let Some(start_id) = self
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .agents
+            .get(&cid)
+            .copied()
+        {
+            self.begin_start_failure(start_id, tau_proto::AgentStartFailure::DispatchRejected);
+            return;
+        }
+        self.fail_rendered_previews_for_agent(agent_id, message);
+        self.fail_pending_initial_prompts(
+            &cid,
+            tau_proto::AgentPromptFailureStage::Preprocessing,
+            message,
+        );
+        self.remove_agent_expected(&cid);
     }
 
     pub(super) fn apply_finalized_agent_initialization_context(
@@ -1892,6 +2002,7 @@ impl Harness {
             session_id: context.session_id.clone(),
             agent_id: context.agent_id.clone(),
             agent_initialization_id: frozen.initialization_id.clone(),
+            effective_skills: effective_skills(&frozen.skills),
             listed_skills: effective_skills(&frozen.skills)
                 .into_iter()
                 .filter(|skill| skill.add_to_prompt && !skill.disable_model_invocation)

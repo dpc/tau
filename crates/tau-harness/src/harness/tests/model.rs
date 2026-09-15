@@ -1653,6 +1653,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
     .expect("frozen skill");
     let make_skill =
         |path: std::path::PathBuf, description: &str| crate::discovery::DiscoveredSkill {
+            visibility: Default::default(),
             source_id: crate::test_connection_id("test-source"),
             description: description.to_owned(),
             source: path_crate_discovery::DiscoveredSkillSource::File(path),

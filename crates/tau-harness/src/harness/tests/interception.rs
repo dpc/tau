@@ -5204,6 +5204,7 @@ fn discovery_canonical_events_are_protected() {
             agents_files: Vec::new(),
         }),
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id,
             agent_initialization_id: initialization_id,

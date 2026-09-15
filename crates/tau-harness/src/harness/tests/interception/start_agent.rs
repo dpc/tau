@@ -24,6 +24,68 @@ fn request_event(query_id: &str, instruction: &str) -> Event {
     Event::StartAgentRequest(request(query_id, instruction))
 }
 
+/// A required-skill rejection at committed load must close the accepted start
+/// exactly once rather than dispatching, killing the harness, or leaking waits.
+#[test]
+fn context_required_skill_failure_closes_accepted_start() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let sink = connect_ready_configured_extension(
+        &mut h,
+        "requester",
+        "requester",
+        tau_proto::ClientKind::Action,
+    );
+    h.config
+        .available_roles
+        .get_mut("engineer")
+        .expect("role")
+        .required_skills = vec!["unavailable".into()];
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        request_event("required-failure", "must never dispatch"),
+    )
+    .expect("local rejection");
+    let accepted = directed_acceptance(&sink, "required-failure").expect("accepted");
+    let result = directed_result(&sink, "required-failure").expect("terminal result");
+    assert!(result.error.is_some());
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+                Event::AgentStartFailed(failed)
+                    if failed.agent_id == accepted.agent_id
+                        && failed.reason == tau_proto::AgentStartFailure::DispatchRejected
+            ))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| matches!(event,
+        Event::AgentInferenceDispatchStarted(started) if started.agent_id == accepted.agent_id
+    )));
+    assert!(h.runtime_io.publication.pending_error.is_none());
+    assert!(
+        h.agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .is_empty()
+    );
+    assert!(
+        !h.prompt_coordination
+            .context_discovery
+            .pending_agents
+            .contains_key(&accepted.agent_id)
+    );
+    assert!(
+        !h.agent_runtime
+            .agent_registry
+            .agents
+            .contains_key(&accepted.agent_id)
+    );
+}
+
 /// Register one exact-name interceptor for start-agent requests.
 fn connect_start_agent_interceptor(h: &mut Harness) {
     connect_test_tool(h, "start-agent-interceptor");

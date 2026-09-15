@@ -4,6 +4,38 @@ This crate packages Tau's built-in skills. Extension-owned skills may retain
 relative links from their standalone source; the sections below keep those
 links useful in Tau's embedded copy.
 
+## Role-filtered context
+
+Skills and AGENTS files support the same optional YAML frontmatter lists:
+
+```yaml
+---
+only-roles: [researcher-senior]
+only-role-groups: [engineer]
+except-roles: [engineer-junior]
+except-role-groups: [reviewer]
+---
+```
+
+The two `only` lists are alternatives: either role or group may allow the file.
+Then any `except` match excludes it. Missing both `only` lists allows everyone;
+an explicitly empty list allows nobody unless the other dimension matches.
+Names are exact and case-sensitive; unknown names match nothing. Group names
+are actual configured groups, not role-name prefixes.
+
+Filtering selects context, not filesystem permissions. Collision winners are
+chosen first; hiding a winner never reveals a duplicate. Eligibility freezes
+when an agent initializes, while later skill loads still read current bodies.
+AGENTS files stack independently and their headers are removed from context.
+
+Malformed filters ignore all four lists, preserve useful content and valid
+unrelated metadata, and produce a file-specific UI warning. Unparseable headers
+preserve raw instructions rather than discarding them. Warnings remain available
+to UIs that attach later.
+Skills without a recoverable valid name in either header or path are discarded
+with a corrective warning; Tau does not invent aliases or bypass bounded reads.
+Minor auxiliary metadata errors do not justify hiding recoverable instructions.
+
 ## Migration from removed keys
 
 For Slack, replace `channel_ids`, `listening_scope`, and `send_destinations`

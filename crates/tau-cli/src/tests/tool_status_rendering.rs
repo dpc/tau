@@ -2285,6 +2285,7 @@ fn shell_replay_abandonment_covers_renderer_owners_and_collision() {
     }));
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("worker"),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("worker-init")

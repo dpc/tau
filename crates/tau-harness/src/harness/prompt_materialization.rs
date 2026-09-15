@@ -2042,6 +2042,12 @@ impl Harness {
                 |snapshot| &snapshot.skills,
             );
         let role_group = self.role_group_name_for_role(role_name);
+        let visible_skills = skills
+            .iter()
+            .filter(|(_, skill)| skill.visibility.allows(role_name, &role_group))
+            .map(|(name, skill)| (name.clone(), skill.clone()))
+            .collect::<HashMap<_, _>>();
+        let skills = &visible_skills;
         let payload_envelope_provenance_notice = contains_payload_envelope_provenance_projection
             .then(payload_envelope_provenance_notice);
         let template_context = match agent_id {

@@ -346,6 +346,7 @@ fn test_discovered_skill(
     modified_secs: u64,
 ) -> DiscoveredSkill {
     DiscoveredSkill {
+        visibility: Default::default(),
         source_id: crate::test_connection_id(source_id),
         description: description.to_owned(),
         source: DiscoveredSkillSource::File(PathBuf::from(format!("/tmp/{description}.md"))),

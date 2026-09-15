@@ -31,6 +31,8 @@ fn split_skill_name_and_args(rest: &str) -> (&str, &str) {
 
 #[derive(Debug)]
 pub(super) struct LoadedSkillBody {
+    /// Malformed live header encountered without resampling role eligibility.
+    pub(super) frontmatter_warning: Option<String>,
     pub(super) body: String,
     pub(super) truncated: bool,
     pub(super) total_bytes: u64,
@@ -59,6 +61,7 @@ pub(super) fn read_user_invoked_skill_body(
         ),
     })?;
     Ok(LoadedSkillBody {
+        frontmatter_warning: prepared.frontmatter_warning,
         body: prepared.model_body,
         truncated: prepared.truncated,
         total_bytes: prepared.total_bytes,

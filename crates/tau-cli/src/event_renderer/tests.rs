@@ -2738,6 +2738,16 @@ fn cold_attach_suppresses_routine_snapshots_and_announces_session_once() {
     renderer.handle_cold_attach_replay_socket_delivery(
         &tau_proto::Event::HarnessAgentContextInitialized(
             tau_proto::HarnessAgentContextInitialized {
+                effective_skills: vec![tau_proto::DiscoveryEffectiveSkill {
+                    visibility: Default::default(),
+                    name: "restored-skill".into(),
+                    description: "frozen completion from cold attach".to_owned(),
+                    source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+                    add_to_prompt: false,
+                    user_invocable: true,
+                    disable_model_invocation: false,
+                    argument_hint: None,
+                }],
                 session_id: "s1".parse().expect("valid session id"),
                 agent_id: agent_id("agent-a"),
                 agent_initialization_id: "init-a".parse().expect("valid initialization id"),
@@ -2791,6 +2801,10 @@ fn cold_attach_suppresses_routine_snapshots_and_announces_session_once() {
     assert!(!output.contains("live updates below"));
     handle.redraw_sync();
     assert!(vt.screen_contains(100, "replay warning"));
+    renderer.switch_agent(agent_id("agent-a"));
+    let completion = renderer.skill_arg_completer()(&[""]);
+    assert_eq!(completion.len(), 1);
+    assert_eq!(completion[0].value, "restored-skill");
 }
 
 /// A proven-empty startup composer adopts its first agent without a full redraw
@@ -3274,6 +3288,7 @@ fn deferred_tool_ownership_routes_later_progress_after_publication() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.handle(&tau_proto::Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: tau_proto::SessionId::parse("session-one").expect("valid session id"),
             agent_id: owner.clone(),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("owner-init")

@@ -748,8 +748,8 @@ fn compaction_replacement_loses_and_retained_suffix_keeps_preview_provenance() {
         agent_id: crate::parse_agent_id("main"),
         transaction_id: tau_proto::CompactionTransactionId::parse("ct-preview-suffix")
             .expect("transaction id"),
-        cut: cut,
-        suffix_end: suffix_end,
+        cut,
+        suffix_end,
         replacement_window: vec![materialized_message("summary")],
     }));
 
@@ -829,6 +829,7 @@ fn prompt_prefix_json_measurements_match_serializing_every_prefix() {
 
 fn discovered_skill(description: &str, add_to_prompt: bool) -> DiscoveredSkill {
     DiscoveredSkill {
+        visibility: Default::default(),
         source_id: crate::test_connection_id("test-extension"),
         description: description.to_owned(),
         source: path_crate_discovery::DiscoveredSkillSource::BuiltIn {
@@ -848,6 +849,7 @@ fn system_prompt_excludes_disable_model_invocation_skills() {
     skills.insert(
         tau_proto::SkillName::new("manual-only"),
         DiscoveredSkill {
+            visibility: Default::default(),
             source_id: crate::test_connection_id("test-extension"),
             description: "Manual only".to_owned(),
             source: path_crate_discovery::DiscoveredSkillSource::BuiltIn {
@@ -2583,8 +2585,8 @@ fn assemble_conversation_preserves_new_compaction_suffix() {
         operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         transaction_id: tau_proto::CompactionTransactionId::parse("ct-1").expect("transaction id"),
-        cut: cut,
-        suffix_end: suffix_end,
+        cut,
+        suffix_end,
         replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
             content: vec![tau_proto::ContentPart::Text {
@@ -2635,8 +2637,8 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             agent_id: agent_id.clone(),
             transaction_id: tau_proto::CompactionTransactionId::parse(transaction)
                 .expect("transaction id"),
-            cut: cut,
-            suffix_end: suffix_end,
+            cut,
+            suffix_end,
             replacement_window: vec![materialized_message(summary)],
         })
     };

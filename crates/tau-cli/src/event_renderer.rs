@@ -2002,6 +2002,7 @@ impl EventRenderer {
         empty_target: selection_intent::UiTarget,
     ) {
         self.selection.current_agent_id = agent_id.clone();
+        self.resources.skill_state.select_agent(agent_id.clone());
         if update_intent && let Ok(mut current) = self.selection.current_agent_state.lock() {
             current.set_target(agent_id.map_or(empty_target, selection_intent::UiTarget::Viewing));
         }
@@ -4980,6 +4981,9 @@ impl EventRenderer {
             self.learn_agent_metadata(&prepared);
         } else {
             self.learn_deferred_routing_metadata(&prepared);
+        }
+        if let Event::HarnessAgentContextInitialized(initialized) = event {
+            self.resources.skill_state.apply_agent_snapshot(initialized);
         }
         if suppress_auto_selection && self.apply_silent_cold_attach_snapshot(event) {
             self.update_agent_in_progress();
@@ -9717,24 +9721,6 @@ impl EventRenderer {
         }
     }
 
-    /// Print one initialization discovery summary into the active transcript.
-    fn print_agent_context_initialized(
-        &mut self,
-        initialized: &tau_proto::HarnessAgentContextInitialized,
-    ) {
-        self.retain_diagnostic_block(
-            "agent-context-initialized",
-            tau_proto::NoticeLevel::Info,
-            DiagnosticProjection::AgentContextInitialized {
-                event: initialized.clone(),
-                unadvertised_count: self
-                    .resources
-                    .skill_state
-                    .unadvertised_count(&initialized.listed_skills),
-            },
-        );
-    }
-
     fn handle_harness_session_dir(&mut self, session_dir: &tau_proto::HarnessSessionDir) {
         self.session.session_dir = Some(session_dir.clone());
         self.render_session_announcement();
@@ -9822,6 +9808,7 @@ impl EventRenderer {
         if let Ok(mut available) = self.role.role_groups_available.lock() {
             *available = roles.groups.clone();
         }
+        self.refresh_skill_prospective_role();
         if let Ok(mut prompts) = self.role.custom_prompts.lock() {
             *prompts = roles.custom_prompts.clone();
         }
@@ -9876,6 +9863,7 @@ impl EventRenderer {
     fn handle_harness_role_selected(&mut self, selected: &tau_proto::HarnessRoleSelected) {
         self.role.current_model = selected.model.clone();
         self.role.current_role = Some(selected.role.clone());
+        self.refresh_skill_prospective_role();
         self.role.baseline_params = selected.baseline_params;
         self.role.model_params = selected.model_params;
         self.role.verbosity_state.store(
@@ -9981,6 +9969,7 @@ mod prompt_projection;
 mod queued_prompt_cancellation;
 pub(crate) mod renderer_state;
 pub(crate) mod selection_intent;
+mod skill_projection;
 mod terminal_tool_calls;
 #[cfg(test)]
 mod terminal_tool_calls_tests;

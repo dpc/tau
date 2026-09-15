@@ -34,6 +34,8 @@ impl DiscoveredSkillSource {
 /// A skill discovered by an extension or bundled into Tau.
 #[derive(Clone)]
 pub(crate) struct DiscoveredSkill {
+    /// Role policy sampled at discovery, never refreshed by a live body read.
+    pub(crate) visibility: tau_proto::ContextVisibility,
     pub(crate) source_id: tau_proto::ConnectionId,
     pub(crate) description: String,
     pub(crate) source: DiscoveredSkillSource,

@@ -1,6 +1,8 @@
 //! Atomic discovery snapshot regressions.
 
 use super::*;
+use crate::harness::{PendingRenderedPreview, PendingRenderedPrompt};
+use crate::internal_tools::InternalToolHost;
 use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 fn skill(
@@ -14,6 +16,7 @@ fn skill(
     )
     .expect("write skill");
     tau_proto::DiscoverySkillCandidate {
+        visibility: Default::default(),
         name: name.into(),
         description: format!("{name} description"),
         file_path: path.to_path_buf(),
@@ -30,11 +33,470 @@ fn snapshot(
     agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
 ) -> tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
     tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+        frontmatter_diagnostics: Vec::new(),
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         skills,
         agents_files,
+    }
+}
+
+/// Role filtering follows collision selection, freezes independently per agent,
+/// and strips only visible AGENTS headers without changing the shared
+/// inventory.
+#[test]
+fn context_role_policy_freezes_winners_and_independent_agents_files() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let role = h.config.selected_role.clone();
+    let other_role = "other-context-role";
+    h.config.available_roles.insert(
+        other_role.to_owned(),
+        h.config.available_roles[&role].clone(),
+    );
+    h.config.available_role_groups = vec![tau_proto::HarnessRoleGroup {
+        name: "actual-context-group".to_owned(),
+        roles: vec![other_role.to_owned()],
+    }];
+    let mut restricted = skill(&tmp.path().join("winner.md"), "same", Some(9));
+    restricted.visibility.only_roles = Some(vec![other_role.to_owned()]);
+    let mut shared = skill(&tmp.path().join("shared.md"), "shared", None);
+    shared.visibility.except_roles = vec![other_role.to_owned()];
+    shared.visibility.only_role_groups = Some(vec![role.clone()]);
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("lower"),
+        snapshot(
+            vec![skill(&tmp.path().join("lower.md"), "same", Some(1))],
+            vec![],
+        ),
+    );
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("winner"),
+        snapshot(
+            vec![restricted, shared],
+            vec![
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: tmp.path().join("AGENTS.md"),
+                    content: "common instructions".to_owned(),
+                },
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: tmp.path().join("AGENTS.other.md"),
+                    content: "---\nonly-role-groups: [actual-context-group]\n---\nother-only instructions".to_owned(),
+                },
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: tmp.path().join("AGENTS.invalid.md"),
+                    content: "---\nonly-roles: invalid\n---\nrecovered instructions".to_owned(),
+                },
+            ],
+        ),
+    );
+    assert!(
+        h.required_skill_unavailable_reason(&"same".into(), &role)
+            .is_some()
+    );
+    assert!(
+        h.required_skill_unavailable_reason(&"same".into(), other_role)
+            .is_none()
+    );
+    let first_cid =
+        h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+    let second_cid =
+        h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), other_role);
+    let first = durable_agent_id_for_conversation(&h, &first_cid);
+    let second = durable_agent_id_for_conversation(&h, &second_cid);
+    h.ensure_loaded_agent_for_agent(&first_cid, &first);
+    h.ensure_loaded_agent_for_agent(&second_cid, &second);
+    let frozen = &h.prompt_coordination.context_discovery.frozen_agents;
+    assert!(!frozen[&first].skills.contains_key("same"));
+    assert!(frozen[&first].skills.contains_key("shared"));
+    assert!(frozen[&second].skills.contains_key("same"));
+    assert!(!frozen[&second].skills.contains_key("shared"));
+    for (agent_id, other_visible) in [(&first, false), (&second, true)] {
+        let context = h
+            .session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("agent")
+            .initialization_context()
+            .expect("frozen context");
+        let body = context.agents_message.as_deref().expect("bootstrap");
+        assert!(body.contains("common instructions"));
+        assert!(body.contains("recovered instructions"));
+        assert_eq!(body.contains("other-only instructions"), other_visible);
+        assert!(!body.contains("only-roles:"));
+        assert!(!body.contains("only-role-groups:"));
+    }
+    assert!(
+        h.prompt_coordination
+            .context_discovery
+            .skills
+            .contains_key("same")
+    );
+    assert!(h.expand_user_skill_command(&first, ":skill same").is_err());
+    let model_skills = InternalToolHost::new(&mut h).discovered_skills(&first_cid);
+    assert!(!model_skills.iter().any(|skill| skill.name == "same"));
+    assert!(model_skills.iter().any(|skill| skill.name == "shared"));
+    std::fs::write(
+        tmp.path().join("shared.md"),
+        "---\nonly-roles: []\n---\nLIVE BODY despite newly hidden policy",
+    )
+    .expect("live policy edit");
+    assert!(
+        h.expand_user_skill_command(&first, ":skill shared")
+            .expect("frozen eligibility")
+            .contains("LIVE BODY")
+    );
+    assert!(
+        InternalToolHost::new(&mut h)
+            .discovered_skills(&first_cid)
+            .iter()
+            .any(|skill| skill.name == "shared")
+    );
+    std::fs::write(
+        tmp.path().join("shared.md"),
+        "---\ninvalid: [\nRAW LIVE BODY",
+    )
+    .expect("malformed live edit");
+    assert!(
+        h.expand_user_skill_command(&first, ":skill shared")
+            .expect("raw recovery")
+            .contains("---\ninvalid: [\nRAW LIVE BODY")
+    );
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(|notice| notice.message.contains("shared.md")
+                && notice.purpose == tau_proto::NoticePurpose::Alert)
+    );
+    let before = h.runtime_io.replayable_harness_notices.len();
+    std::fs::write(
+        tmp.path().join("shared.md"),
+        "---\nname: [bad]\ndescription: live\nuser-invocable: maybe\n---\nSCALAR LIVE BODY",
+    )
+    .expect("malformed scalar edit");
+    assert!(
+        h.expand_user_skill_command(&first, ":skill shared")
+            .expect("scalar recovery")
+            .contains("SCALAR LIVE BODY")
+    );
+    assert!(
+        h.runtime_io.replayable_harness_notices[before..]
+            .iter()
+            .any(|notice| notice.message.contains("shared.md")
+                && notice.message.contains("user-invocable")
+                && notice.purpose == tau_proto::NoticePurpose::Alert)
+    );
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("winner"),
+        snapshot(Vec::new(), Vec::new()),
+    );
+    assert!(
+        !h.prompt_coordination.context_discovery.frozen_agents[&first]
+            .skills
+            .contains_key("same")
+    );
+    assert!(
+        h.prompt_coordination.context_discovery.frozen_agents[&second]
+            .skills
+            .contains_key("same")
+    );
+}
+
+/// Admitted malformed headers must retain Warning+Alert notices, whereas stale
+/// per-agent scans cannot create warnings or mutate a pending initialization.
+#[test]
+fn context_frontmatter_diagnostics_are_alerts_only_for_current_snapshots() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let diagnostic = tau_proto::DiscoveryFrontmatterDiagnostic {
+        file_path: tmp.path().join("bad/SKILL.md"),
+        message: "only-roles must be a list".to_owned(),
+    };
+    let mut declared = snapshot(Vec::new(), Vec::new());
+    declared.frontmatter_diagnostics.push(diagnostic.clone());
+    h.apply_session_discovery_snapshot(&crate::test_connection_id("source"), declared);
+    let notice = h
+        .runtime_io
+        .replayable_harness_notices
+        .last()
+        .expect("retained warning");
+    assert_eq!(notice.level, tau_proto::NoticeLevel::Warning);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Alert);
+    assert!(
+        notice
+            .message
+            .contains(&diagnostic.file_path.display().to_string())
+    );
+    let before = h.runtime_io.replayable_harness_notices.len();
+    h.apply_agent_discovery_snapshot(
+        &crate::test_connection_id("source"),
+        tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+            frontmatter_diagnostics: vec![diagnostic],
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id: tau_proto::AgentId::parse("not-loaded").expect("id"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("stale").expect("id"),
+            skills: Vec::new(),
+            agents_files: Vec::new(),
+        },
+    );
+    assert_eq!(h.runtime_io.replayable_harness_notices.len(), before);
+
+    let sink = connect_test_client(&mut h, "late-frontmatter-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "late-frontmatter-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+        })),
+    )
+    .expect("subscribe");
+    assert!(sink.lock().expect("sink").iter().any(|frame| matches!(
+        peel_inner_event(&frame.frame),
+        Some(Event::HarnessNotice(notice))
+            if notice.purpose == tau_proto::NoticePurpose::Alert
+                && notice.level == tau_proto::NoticeLevel::Warning
+                && notice.message.contains("bad/SKILL.md")
+    )));
+}
+
+/// Preflight must surface a malformed live header even if no agent ever
+/// initializes that role; discovery metadata alone cannot detect later edits.
+#[test]
+fn context_required_skill_preflight_warns_for_live_malformed_header() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let role = h.config.selected_role.clone();
+    let path = tmp.path().join("required.md");
+    let candidate = skill(&path, "required", None);
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("source"),
+        snapshot(vec![candidate], Vec::new()),
+    );
+    std::fs::write(&path, "---\ninvalid: [\nuseful raw instructions").expect("edit");
+    h.config
+        .available_roles
+        .get_mut(&role)
+        .expect("role")
+        .required_skills = vec!["required".into()];
+    h.enforce_required_role_skills().expect("recoverable skill");
+    let before = h.runtime_io.replayable_harness_notices.len();
+    std::fs::write(
+        &path,
+        "---\nname: required\ndescription: live\nadvertise: maybe\n---\nbody",
+    )
+    .expect("malformed boolean edit");
+    h.enforce_required_role_skills()
+        .expect("recoverable scalar");
+    assert!(
+        h.runtime_io.replayable_harness_notices[before..]
+            .iter()
+            .any(|notice| notice.message.contains("advertise")
+                && notice.purpose == tau_proto::NoticePurpose::Alert)
+    );
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(|notice| notice.purpose == tau_proto::NoticePurpose::Alert
+                && notice.message.contains(&path.display().to_string()))
+    );
+}
+
+/// Mandatory diagnostics reserve bounded admission capacity before ordinary or
+/// invalid items, so a full inventory cannot silence a malformed-file warning.
+#[test]
+fn context_frontmatter_diagnostics_cannot_be_starved_by_inventory() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let candidate = skill(&tmp.path().join("ordinary.md"), "ordinary", None);
+    let mut declared = snapshot(
+        vec![candidate; crate::harness::MAX_DISCOVERY_SNAPSHOT_ITEMS + 1],
+        Vec::new(),
+    );
+    declared
+        .frontmatter_diagnostics
+        .push(tau_proto::DiscoveryFrontmatterDiagnostic {
+            file_path: tmp.path().join("bad.md"),
+            message: "reserved mandatory warning".to_owned(),
+        });
+    h.apply_session_discovery_snapshot(&crate::test_connection_id("source"), declared);
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(|notice| notice.message.contains("bad.md")
+                && notice.message.contains("reserved mandatory warning")
+                && notice.purpose == tau_proto::NoticePurpose::Alert)
+    );
+}
+
+/// Agent-specific exclusions cannot pass initialization merely because session
+/// preflight found the required winner in the shared inventory.
+#[test]
+fn context_required_skill_is_validated_against_agent_specific_eligibility() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let role = h.config.selected_role.clone();
+    let candidate = skill(&tmp.path().join("required.md"), "required", None);
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("source"),
+        snapshot(vec![candidate.clone()], Vec::new()),
+    );
+    h.config
+        .available_roles
+        .get_mut(&role)
+        .expect("role")
+        .required_skills = vec!["required".into()];
+    assert!(
+        h.required_skill_unavailable_reason(&"required".into(), &role)
+            .is_none()
+    );
+    let cid = h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let init = tau_proto::AgentInitializationId::parse("agent-specific").expect("id");
+    h.prompt_coordination
+        .context_discovery
+        .pending_agents
+        .insert(
+            agent_id.clone(),
+            PendingAgentDiscovery {
+                initialization_id: init.clone(),
+                skill_candidates: Default::default(),
+                skills: Default::default(),
+                agents_files: Vec::new(),
+                waiting_on: Default::default(),
+            },
+        );
+    let mut hidden = candidate;
+    hidden.visibility.except_roles = vec![role];
+    h.apply_agent_discovery_snapshot(
+        &crate::test_connection_id("source"),
+        tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+            frontmatter_diagnostics: Vec::new(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            agent_initialization_id: init.clone(),
+            skills: vec![hidden],
+            agents_files: Vec::new(),
+        },
+    );
+    let error = h
+        .finalize_agent_discovery(&agent_id)
+        .expect_err("required skill excluded");
+    assert!(error.to_string().contains("required skill(s) unavailable"));
+    assert!(
+        h.prompt_coordination
+            .context_discovery
+            .frozen_agents
+            .get(&agent_id)
+            .is_none_or(|frozen| frozen.initialization_id != init)
+    );
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("agent")
+            .initialization_context()
+            .is_none_or(|context| context.agent_initialization_id != init)
+    );
+}
+
+/// Final ready and disconnect callbacks must reject only the affected agent,
+/// preserve the harness, and release pending initialization/preview ownership.
+#[test]
+fn context_required_skill_callback_failure_is_agent_local() {
+    for disconnect in [false, true] {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+        connect_ready_configured_extension(
+            &mut h,
+            "required-source",
+            "required-source",
+            tau_proto::ClientKind::Tool,
+        );
+        let role = h.config.selected_role.clone();
+        let survivor =
+            h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+        let cid = h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        let init = tau_proto::AgentInitializationId::parse("required-failure").expect("init");
+        h.config
+            .available_roles
+            .get_mut(&role)
+            .expect("role")
+            .required_skills = vec!["unavailable".into()];
+        h.prompt_coordination
+            .context_discovery
+            .pending_agents
+            .insert(
+                agent_id.clone(),
+                PendingAgentDiscovery {
+                    initialization_id: init.clone(),
+                    skill_candidates: Default::default(),
+                    skills: Default::default(),
+                    agents_files: Vec::new(),
+                    waiting_on: [crate::test_connection_id("required-source")]
+                        .into_iter()
+                        .collect(),
+                },
+            );
+        let sink = connect_test_client(&mut h, "failed-preview", tau_proto::ClientKind::Ui);
+        h.prompt_coordination
+            .context_discovery
+            .pending_rendered_prompts
+            .insert(
+                agent_id.clone(),
+                PendingRenderedPreview {
+                    requests: vec![PendingRenderedPrompt::Prompt {
+                        connection_id: crate::test_connection_id("failed-preview"),
+                        request_id: "required-preview".to_owned(),
+                        role: role.clone(),
+                        enable_agents_md: true,
+                    }],
+                    deadline: Instant::now(),
+                },
+            );
+        if disconnect {
+            h.handle_disconnect(&crate::test_connection_id("required-source"));
+        } else {
+            h.handle_extension_event_inner(
+                &crate::test_connection_id("required-source"),
+                Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+                    session_id: h.session_runtime.current_session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    agent_initialization_id: init,
+                }),
+            )
+            .expect("ready rejection must not escape to harness pending_error");
+        }
+        assert!(h.runtime_io.publication.pending_error.is_none());
+        assert!(
+            h.agent_runtime
+                .agent_registry
+                .agents
+                .contains_key(&survivor)
+        );
+        assert!(!h.agent_runtime.agent_registry.agents.contains_key(&cid));
+        assert!(
+            !h.prompt_coordination
+                .context_discovery
+                .pending_agents
+                .contains_key(&agent_id)
+        );
+        assert!(
+            !h.prompt_coordination
+                .context_discovery
+                .pending_rendered_prompts
+                .contains_key(&agent_id)
+        );
+        assert!(sink.lock().expect("sink").iter().any(|frame| matches!(
+            &frame.frame,
+            HarnessOutputMessage::RenderedPromptResult(result)
+                if result.request_id == "required-preview"
+                    && result.error.as_deref().is_some_and(|error| error.contains("required skill"))
+        )));
     }
 }
 
@@ -380,14 +842,24 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
     .expect("intercept");
     let original = tmp.path().join("original.md");
     let replacement = tmp.path().join("replacement.md");
+    let mut original_snapshot = snapshot(vec![skill(&original, "original", None)], vec![]);
+    original_snapshot
+        .frontmatter_diagnostics
+        .push(tau_proto::DiscoveryFrontmatterDiagnostic {
+            file_path: original.clone(),
+            message: "uncommitted malformed header".to_owned(),
+        });
     h.handle_extension_event_inner(
         &crate::test_connection_id("snapshot-owner"),
-        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
-            vec![skill(&original, "original", None)],
-            vec![],
-        )),
+        Event::ExtensionSessionDiscoverySnapshotDeclared(original_snapshot.clone()),
     )
     .expect("park original");
+    assert!(
+        !h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(|notice| notice.message.contains("uncommitted malformed header"))
+    );
     assert!(
         !h.prompt_coordination
             .context_discovery
@@ -421,7 +893,7 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("snapshot-owner"),
-        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(vec![], vec![])),
+        Event::ExtensionSessionDiscoverySnapshotDeclared(original_snapshot),
     )
     .expect("park clear");
     h.handle_extension_event(
@@ -431,6 +903,12 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
         })),
     )
     .expect("drop clear");
+    assert!(
+        !h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(|notice| notice.message.contains("uncommitted malformed header"))
+    );
     assert!(
         h.prompt_coordination
             .context_discovery
@@ -473,6 +951,10 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     let event = |initialization_id| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                frontmatter_diagnostics: vec![tau_proto::DiscoveryFrontmatterDiagnostic {
+                    file_path: path.clone(),
+                    message: "agent-only malformed header".to_owned(),
+                }],
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
@@ -492,6 +974,12 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     )
     .expect("stale");
     assert!(
+        !h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(|notice| notice.message.contains("agent-only malformed header"))
+    );
+    assert!(
         h.prompt_coordination.context_discovery.pending_agents[&agent_id]
             .skills
             .is_empty()
@@ -501,6 +989,15 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
         event(initialization_id),
     )
     .expect("current");
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(
+                |notice| notice.message.contains("agent-only malformed header")
+                    && notice.purpose == tau_proto::NoticePurpose::Alert
+            )
+    );
     assert!(
         h.prompt_coordination.context_discovery.pending_agents[&agent_id]
             .skills
@@ -635,6 +1132,7 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
     let event = |candidate| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                frontmatter_diagnostics: Vec::new(),
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
@@ -786,6 +1284,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                frontmatter_diagnostics: Vec::new(),
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
@@ -964,6 +1463,7 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
                  skills| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                frontmatter_diagnostics: Vec::new(),
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),

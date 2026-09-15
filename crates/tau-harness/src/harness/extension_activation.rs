@@ -430,9 +430,32 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         skills: Vec<tau_proto::DiscoverySkillCandidate>,
         agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
+        frontmatter_diagnostics: Vec<tau_proto::DiscoveryFrontmatterDiagnostic>,
     ) -> Option<ValidatedDiscoverySnapshot> {
         let mut accepted_items = 0usize;
         let mut accepted_bytes = 0usize;
+        // Mandatory warnings reserve their share of the existing bounds before
+        // ordinary (including invalid) items can consume the snapshot budget.
+        for diagnostic in frontmatter_diagnostics {
+            let bytes = diagnostic
+                .file_path
+                .as_os_str()
+                .len()
+                .saturating_add(diagnostic.message.len());
+            if accepted_items == MAX_DISCOVERY_SNAPSHOT_ITEMS
+                || MAX_DISCOVERY_SNAPSHOT_BYTES < accepted_bytes.saturating_add(bytes)
+            {
+                self.emit_info_important(
+                    "frontmatter diagnostics exceed discovery snapshot bounds",
+                );
+                break;
+            }
+            accepted_items += 1;
+            accepted_bytes = accepted_bytes.saturating_add(bytes);
+            if diagnostic.file_path.is_absolute() {
+                self.emit_context_frontmatter_warning(&diagnostic.file_path, &diagnostic.message);
+            }
+        }
         let mut item_limit_reached = false;
         let mut seen_skills = HashSet::new();
         let mut validated_skills = Vec::new();
@@ -452,6 +475,7 @@ impl Harness {
                 .len()
                 .saturating_add(skill.description.len())
                 .saturating_add(skill.file_path.as_os_str().len())
+                .saturating_add(skill.visibility.selector_bytes())
                 .saturating_add(skill.argument_hint.as_deref().map_or(0, str::len));
             if MAX_DISCOVERY_SNAPSHOT_BYTES < accepted_bytes.saturating_add(item_bytes) {
                 self.emit_info_important(&format!(
@@ -496,6 +520,7 @@ impl Harness {
             validated_skills.push((
                 skill.name,
                 DiscoveredSkill {
+                    visibility: skill.visibility,
                     source_id: source_id.clone(),
                     description,
                     source: DiscoveredSkillSource::File(skill.file_path),
@@ -555,6 +580,10 @@ impl Harness {
                 ));
                 continue;
             }
+            let parsed = tau_skills::parse_context_frontmatter(&file.content);
+            if let Some(warning) = parsed.warning {
+                self.emit_context_frontmatter_warning(&path, &warning);
+            }
             validated_files.push(DiscoveredAgentsFile {
                 source_id: source_id.clone(),
                 file_path: path,
@@ -562,6 +591,20 @@ impl Harness {
             });
         }
         Some((validated_skills, validated_files))
+    }
+
+    /// Retain malformed context metadata as an alert even for late UI
+    /// subscribers.
+    pub(crate) fn emit_context_frontmatter_warning(&mut self, path: &Path, warning: &str) {
+        self.emit_notice(
+            tau_proto::notice_kind::HARNESS_NOTICE,
+            tau_proto::NoticeLevel::Warning,
+            tau_proto::NoticePurpose::Alert,
+            &format!(
+                "Malformed context frontmatter in {}: {warning}",
+                path.display()
+            ),
+        );
     }
 
     pub(super) fn apply_session_discovery_snapshot(
@@ -572,9 +615,12 @@ impl Harness {
         if snapshot.session_id != self.session_runtime.current_session_id {
             return;
         }
-        let Some((skills, agents_files)) =
-            self.validate_discovery_snapshot(source_id, snapshot.skills, snapshot.agents_files)
-        else {
+        let Some((skills, agents_files)) = self.validate_discovery_snapshot(
+            source_id,
+            snapshot.skills,
+            snapshot.agents_files,
+            snapshot.frontmatter_diagnostics,
+        ) else {
             return;
         };
         replace_discovery_source(
@@ -607,9 +653,12 @@ impl Harness {
         if pending.initialization_id != snapshot.agent_initialization_id {
             return;
         }
-        let Some((skills, agents_files)) =
-            self.validate_discovery_snapshot(source_id, snapshot.skills, snapshot.agents_files)
-        else {
+        let Some((skills, agents_files)) = self.validate_discovery_snapshot(
+            source_id,
+            snapshot.skills,
+            snapshot.agents_files,
+            snapshot.frontmatter_diagnostics,
+        ) else {
             return;
         };
         let Some(pending) = self

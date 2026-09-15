@@ -677,6 +677,7 @@ fn deferred_initial_discovery_final_uses_atomic_publication_cut() {
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("main"),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("main-init")
@@ -1008,6 +1009,7 @@ fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
     );
     let initialized = |agent: &str, skill: &str, path: &str| {
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            effective_skills: Vec::new(),
             session_id: test_session_id("session-1"),
             agent_id: agent_id(agent),
             agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
@@ -1015,6 +1017,7 @@ fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
             ))
             .expect("test identifier must be valid"),
             listed_skills: vec![tau_proto::DiscoveryEffectiveSkill {
+                visibility: Default::default(),
                 name: skill.into(),
                 description: format!("{skill} description"),
                 source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,

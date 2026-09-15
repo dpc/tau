@@ -8,6 +8,16 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 7.3 adds optional sampled context visibility to discovery candidates
+and effective skills, and optional malformed-frontmatter diagnostics to complete
+session and agent discovery snapshots. Missing metadata remains unrestricted;
+the agent initialization projection also carries the complete frozen eligible
+skill set for completion separately from advertised skills. Older omission of
+that eligible set yields empty selected-agent completion, not session fallback;
+older peers can ignore these fields and continue without role filtering or the
+new warning transport. This is context selection, not an access-control boundary.
+See [SPEC-session-discovery-declarations-and-readiness](SPEC-session-discovery-declarations-and-readiness.md).
+
 Protocol 7.2 adds the transient `ui.agent_effort_select` request and the
 optional `UiCreateAgent.effort_override` field. Older peers can continue all
 other UI behavior but cannot apply the new per-agent effort control, so the
