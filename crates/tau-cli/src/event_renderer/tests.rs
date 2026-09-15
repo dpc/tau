@@ -182,6 +182,119 @@ fn irrelevant_replay_facts_preserve_current_ui_state() {
     }
 }
 
+/// Cancellation drops ordinary queued projections but must retain their hidden
+/// internal ordering slot for a surviving output-length continuation.
+#[test]
+fn cancel_reconciliation_preserves_internal_queued_continuation() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let agent = agent_id("main");
+    let active_prompt_id = tau_proto::AgentPromptId::parse("active").expect("valid prompt id");
+    renderer.selection.current_agent_id = Some(agent.clone());
+    renderer.selection.displayed_agent_id = Some(agent.clone());
+    for (text, message_class) in [
+        ("ordinary before", tau_proto::PromptMessageClass::User),
+        (
+            tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION,
+            tau_proto::PromptMessageClass::Internal,
+        ),
+        ("ordinary after", tau_proto::PromptMessageClass::User),
+    ] {
+        renderer.handle_agent_prompt_queued(&tau_proto::AgentPromptQueued {
+            agent_id: agent.clone(),
+            text: text.to_owned(),
+            message_class,
+        });
+    }
+    renderer
+        .watches
+        .finished_provider_prompts
+        .insert(active_prompt_id.clone());
+
+    renderer.handle(&tau_proto::Event::UiCancelPrompt(
+        tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+            target_agent_id: Some(agent.clone()),
+            agent_prompt_id: Some(active_prompt_id),
+        },
+    ));
+
+    assert_eq!(renderer.transcript.runtime.queued_user_blocks.len(), 1);
+    let queued = &renderer.transcript.runtime.queued_user_blocks[0];
+    assert_eq!(
+        queued.text,
+        tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION
+    );
+    assert_eq!(
+        queued.message_class,
+        tau_proto::PromptMessageClass::Internal
+    );
+    assert!(queued.id.is_none());
+
+    let ordinary_preempted_prompt_id =
+        tau_proto::AgentPromptId::parse("ordinary-preempted").expect("valid prompt id");
+    renderer.handle_agent_prompt_queued(&tau_proto::AgentPromptQueued {
+        agent_id: agent.clone(),
+        text: "discarded by ordinary preemption".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+    });
+    renderer.handle(&tau_proto::Event::AgentPromptTerminated(
+        tau_proto::AgentPromptTerminated {
+            agent_id: agent.clone(),
+            agent_prompt_id: ordinary_preempted_prompt_id.clone(),
+            reason: tau_proto::AgentPromptTerminationReason::Canceled,
+            originator: tau_proto::PromptOriginator::Extension {
+                name: tau_proto::ExtensionName::parse("side-agent").expect("valid extension name"),
+                query_id: "ordinary-preemption".to_owned(),
+            },
+            automatic_compaction_decision: None,
+        },
+    ));
+    renderer.handle(&tau_proto::Event::UiCancelPrompt(
+        tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+            target_agent_id: Some(agent.clone()),
+            agent_prompt_id: Some(ordinary_preempted_prompt_id),
+        },
+    ));
+    assert_eq!(renderer.transcript.runtime.queued_user_blocks.len(), 1);
+
+    let preempted_prompt_id =
+        tau_proto::AgentPromptId::parse("preempted").expect("valid prompt id");
+    renderer.handle_agent_prompt_queued(&tau_proto::AgentPromptQueued {
+        agent_id: agent_id("main"),
+        text: "retained after preemption".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+    });
+    renderer
+        .watches
+        .finished_provider_prompts
+        .insert(preempted_prompt_id.clone());
+    renderer.handle(&tau_proto::Event::AgentPromptTerminated(
+        tau_proto::AgentPromptTerminated {
+            agent_id: agent_id("main"),
+            agent_prompt_id: preempted_prompt_id.clone(),
+            reason: tau_proto::AgentPromptTerminationReason::Canceled,
+            originator: tau_proto::PromptOriginator::Extension {
+                name: tau_proto::ExtensionName::parse("side-agent").expect("valid extension name"),
+                query_id: "marked-preemption".to_owned(),
+            },
+            automatic_compaction_decision: None,
+        },
+    ));
+    renderer.handle(&tau_proto::Event::UiCancelPrompt(
+        tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+            target_agent_id: Some(agent_id("main")),
+            agent_prompt_id: Some(preempted_prompt_id),
+        },
+    ));
+    assert_eq!(renderer.transcript.runtime.queued_user_blocks.len(), 2);
+    assert_eq!(
+        renderer.transcript.runtime.queued_user_blocks[1].text,
+        "retained after preemption"
+    );
+}
+
 /// The borrowed final-text projector must match the removed eager-`String`
 /// semantics for empty, single, multipart, mixed-role, and Unicode inputs while
 /// reporting allocations at the exact concatenation site.

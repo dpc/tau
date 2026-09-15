@@ -149,6 +149,10 @@ pub(super) struct WatchActivityState {
     pub(super) active_agent_prompts: HashMap<tau_proto::AgentId, HashSet<tau_proto::AgentPromptId>>,
     /// Prompt terminals that block stale resurrection.
     pub(super) terminal_agent_prompts: HashSet<tau_proto::AgentPromptId>,
+    /// Prompts with an observed explicit agent-level termination fact.
+    pub(super) terminated_agent_prompts: HashSet<tau_proto::AgentPromptId>,
+    /// Prompts whose provider finish preceded their explicit agent termination.
+    pub(super) provider_finished_before_termination: HashSet<tau_proto::AgentPromptId>,
     /// Provider prompts whose final output was rendered.
     pub(super) finished_provider_prompts: HashSet<tau_proto::AgentPromptId>,
 }

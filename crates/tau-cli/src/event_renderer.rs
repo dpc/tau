@@ -5671,6 +5671,18 @@ impl EventRenderer {
             }
             Event::AgentPromptTerminated(terminated) => {
                 self.mark_agent_live(terminated.agent_id.clone());
+                if self
+                    .watches
+                    .finished_provider_prompts
+                    .contains(&terminated.agent_prompt_id)
+                {
+                    self.watches
+                        .provider_finished_before_termination
+                        .insert(terminated.agent_prompt_id.clone());
+                }
+                self.watches
+                    .terminated_agent_prompts
+                    .insert(terminated.agent_prompt_id.clone());
                 self.mark_agent_prompt_inactive(&terminated.agent_prompt_id);
                 true
             }
@@ -6637,6 +6649,10 @@ impl EventRenderer {
                 self.handle_agent_prompt_queued(queued);
                 true
             }
+            Event::UiCancelPrompt(cancel) => {
+                self.handle_ui_cancel_prompt(cancel);
+                true
+            }
             Event::AgentPromptRecalled(recalled) => {
                 self.handle_agent_prompt_recalled(recalled);
                 true
@@ -6921,7 +6937,10 @@ impl EventRenderer {
 
         use tau_themes::names;
 
-        if self.front_queued_user_prompt_matches(text) {
+        if queued_prompt_cancellation::user_front_matches(
+            &self.transcript.runtime.queued_user_blocks,
+            text,
+        ) {
             let Some(queued) = self.transcript.runtime.queued_user_blocks.pop_front() else {
                 return;
             };
@@ -6994,6 +7013,18 @@ impl EventRenderer {
             });
     }
 
+    /// Removes ordinary queued-prompt projections discarded by cancellation
+    /// while retaining hidden internal continuations that remain queued in
+    /// the harness.
+    fn handle_ui_cancel_prompt(&mut self, cancel: &tau_proto::UiCancelPrompt) {
+        queued_prompt_cancellation::reconcile(
+            cancel,
+            &self.watches,
+            &mut self.transcript.runtime.queued_user_blocks,
+            &self.resources.handle,
+        );
+    }
+
     fn handle_agent_prompt_recalled(&mut self, recalled: &tau_proto::AgentPromptRecalled) {
         if let Some(index) = self
             .transcript
@@ -7063,7 +7094,10 @@ impl EventRenderer {
                 steered.submission_source,
                 tau_proto::PromptSubmissionSource::HumanUi
             )
-            && self.front_queued_user_prompt_matches(&steered.text)
+            && queued_prompt_cancellation::user_front_matches(
+                &self.transcript.runtime.queued_user_blocks,
+                &steered.text,
+            )
         {
             // Queue records lack a submission source. A front-exact match is
             // authoritative only for user prompt provenance; extension and
@@ -7101,28 +7135,6 @@ impl EventRenderer {
             self.submitted_prompt_block(names::USER_PROMPT, &steered.text),
         );
         self.resources.handle.redraw();
-    }
-
-    /// Returns whether `text` can promote the next queued user projection.
-    ///
-    /// Queue records lack provenance, so only their front entry can establish
-    /// that a submitted or steered prompt is the user projection to promote.
-    fn front_queued_user_prompt_matches(&self, text: &str) -> bool {
-        self.front_queued_prompt_matches(text, tau_proto::PromptMessageClass::User)
-    }
-
-    /// Return whether the exact broadcast queue front matches one prompt
-    /// lifecycle event.
-    fn front_queued_prompt_matches(
-        &self,
-        text: &str,
-        message_class: tau_proto::PromptMessageClass,
-    ) -> bool {
-        self.transcript
-            .runtime
-            .queued_user_blocks
-            .front()
-            .is_some_and(|queued| queued.text == text && queued.message_class == message_class)
     }
 
     fn handle_agent_prompt_created(&mut self, prompt: &tau_proto::AgentPromptCreated) {
@@ -9966,6 +9978,7 @@ mod inner_turns;
 mod prepared_renderer_event;
 mod presentation_facts;
 mod prompt_projection;
+mod queued_prompt_cancellation;
 pub(crate) mod renderer_state;
 pub(crate) mod selection_intent;
 mod terminal_tool_calls;

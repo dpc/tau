@@ -21,7 +21,7 @@ use tau_proto::{
     NativeReasoningEffort, OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated,
     ProviderStopReason, ServiceTier, SessionDirStatus, SessionStartReason, SessionStarted,
     ThinkingSummary, ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult,
-    UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
+    UiCancelPrompt, UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
 use super::agent_navigation::AgentNavigationState;

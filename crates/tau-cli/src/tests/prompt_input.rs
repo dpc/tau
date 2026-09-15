@@ -117,6 +117,54 @@ fn prompt_failure_and_rejection_remove_queued_markers_in_fifo_order() {
     assert!(!vt.screen_contains(100, "ordinary B (queued)"));
 }
 
+/// A targeted cancellation must clear only that agent's already-queued ordinary
+/// prompt projections; another agent's queue and prompts queued afterward
+/// remain.
+#[test]
+fn targeted_cancel_reconciles_only_existing_ordinary_queue_for_target_agent() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "main stale A".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "main stale B".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.switch_agent(agent_id("worker"));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "worker unaffected".into(),
+        agent_id: agent_id("worker"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.switch_agent(agent_id("main"));
+
+    let redraw_wakes = handle.redraw_request_count();
+    renderer.handle(&Event::UiCancelPrompt(UiCancelPrompt {
+        session_id: test_session_id("s1"),
+        target_agent_id: Some(agent_id("main")),
+        agent_prompt_id: Some(test_agent_prompt_id("main-active")),
+    }));
+    assert_eq!(handle.redraw_request_count(), redraw_wakes + 1);
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "main stale A"));
+    assert!(!vt.screen_contains(100, "main stale B"));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "main queued later".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "main queued later (queued)"));
+
+    renderer.switch_agent(agent_id("worker"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "worker unaffected (queued)"));
+}
+
 #[test]
 fn dev_print_prompt_accepts_agents_md_toggle() {
     let cli = path_super_cli::Cli::parse_from([
