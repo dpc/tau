@@ -1,5 +1,12 @@
 # Providers
 
+Native Codex standalone compaction shows sampled N/? activity counts from
+validated compacting notifications, not percentages or upstream sequence numbers.
+Only canonical transaction success turns an observed count into N/N. Other
+backends can supply optional current/total counts in consistent units; omission
+retains generic activity. These updates contain no compaction content and are
+not persisted.
+
 ## Declaration-only inspection
 
 `tau dev preview-declarations` collects config-derived declarations from opted-in

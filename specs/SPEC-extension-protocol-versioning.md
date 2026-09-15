@@ -8,6 +8,10 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 7.4 adds independently optional current/total compaction activity counts
+to existing transient updates. Older peers omit or ignore them and retain generic
+compaction presentation; completion and persistence authority are unchanged.
+
 Protocol 7.3 adds optional sampled context visibility to discovery candidates
 and effective skills, and optional malformed-frontmatter diagnostics to complete
 session and agent discovery snapshots. Missing metadata remains unrestricted;

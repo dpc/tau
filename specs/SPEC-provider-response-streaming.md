@@ -14,6 +14,17 @@ field. The first non-empty progress sample may be emitted promptly. Later nonter
 output, status, and stats updates are sampled at most once per second per prompt, with
 one immediate terminal flush permitted before closure.
 
+Compaction activity carries independently optional `current` and `total` counts
+in backend-defined, consistent units. Missing values remain unknown; neither
+counts nor provider `Completed` status establish a standalone transaction's
+success. Native Codex counts validated compacting notifications before sampling,
+not upstream sequence numbers or samples, and leaves the total unknown. A final
+content-free activity flush precedes its successful provider terminal report.
+Only canonical transaction success seals an observed unknown-total count as N/N
+in the current-session UI. Failure/cancellation never seals it; no observed count
+means no invented 0/0. Attempt restarts clear transient counts, and late attachment
+shows generic activity until a fresh update. Counts are not persisted or replayed.
+
 Standalone local-summary attempts keep every semantic progress channel private
 until the built-in provider extension validates the complete terminal shape. Their sampled
 updates may carry the existing bounded content-free byte/timing statistics and

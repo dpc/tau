@@ -1,5 +1,44 @@
 use super::*;
 
+/// Activity counts accepted notifications, not sequence numbers, and saturates.
+#[test]
+fn compacting_counts_validated_updates_only() {
+    let mut shape = CompactStreamShape::default();
+    let added = serde_json::json!({"type":"response.output_item.added","output_index":0,
+        "item":{"type":"compaction","id":"cmp_1"}});
+    let progress = serde_json::json!({"type":"response.compaction.compacting",
+        "output_index":0,"item_id":"cmp_1","sequence_number":3});
+    assert!(shape.validate(&progress).is_err());
+    assert_eq!(shape.progress_updates, 0);
+    shape.validate(&added).expect("valid added item");
+    for count in 1..=2 {
+        shape.validate(&progress).expect("valid progress");
+        assert_eq!(shape.progress_updates, count);
+        assert_eq!(shape.item, CompactItemPhase::Added);
+    }
+    for invalid in [
+        serde_json::json!({"output_index":1,"item_id":"cmp_1"}),
+        serde_json::json!({"output_index":0,"item_id":"other"}),
+        serde_json::json!({"output_index":0}),
+        serde_json::json!({"item_id":"cmp_1"}),
+    ] {
+        let mut event = invalid;
+        event["type"] = "response.compaction.compacting".into();
+        assert!(shape.validate(&event).is_err());
+        assert_eq!(shape.progress_updates, 2);
+    }
+    shape.progress_updates = u64::MAX;
+    shape.validate(&progress).expect("saturating progress");
+    assert_eq!(shape.progress_updates, u64::MAX);
+    shape
+        .validate(
+            &serde_json::json!({"type":"response.output_item.done","output_index":0,
+        "item":{"type":"compaction","id":"cmp_1"}}),
+        )
+        .expect("valid completed item");
+    assert!(shape.validate(&progress).is_err());
+}
+
 /// The native compact parser accepts only one completed slot-zero
 /// compaction item followed by the documented completion terminal.
 #[test]

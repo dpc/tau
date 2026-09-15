@@ -1,5 +1,9 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 7.4 carries optional backend-neutral compaction current/total counts in
+the existing transient update. Omission preserves generic activity; the counts
+confer no completion authority and never become durable replacement metadata.
+
 Protocol 7.3 carries optional sampled role/group visibility and malformed-header
 diagnostics through existing discovery declarations and effective projections.
 Omitted policy is unrestricted; old peers may ignore the metadata.

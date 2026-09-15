@@ -116,6 +116,7 @@ use tau_proto::{
     ProviderStopReason, SecretValue, ServerOffsetMillis, UnixMillis,
 };
 use tau_provider::local_summary_compaction::ConfigError as SummaryCompactionConfigError;
+mod compact_progress;
 mod compact_route;
 use compact_route::{apply_compact_route_downgrades, compact_with_local_fallback};
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
@@ -9105,13 +9106,23 @@ fn handle_compact_prompt<R, S: ProviderReportSink>(
 where
     R: TurnAbort,
 {
-    let outcome = execution.runtime.compact_numbered(
+    let mut progress = compact_progress::CompactProgress::default();
+    let target = ResponseUpdateTarget {
+        agent_prompt_id,
+        agent_id: &prompt.agent_id,
+        originator: &prompt.originator,
+    };
+    let outcome = execution.runtime.compact_numbered_with_progress(
         agent_prompt_id,
         execution.logical_attempt,
         config,
         request,
         retry_ctx,
+        &mut |count| progress.emit(count, &target, writer, Instant::now()),
     );
+    if matches!(outcome, CompactOutcome::Finished { .. }) {
+        progress.flush(&target, writer);
+    }
     let outcome = compact_with_local_fallback(outcome, execution.compact_route_unavailable, || {
         execution.runtime.local_compact_numbered(
             agent_prompt_id,
@@ -9287,6 +9298,7 @@ where
     let mut ws_pool_delta = None;
     let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
     let mut on_update = |update: StreamUpdate<'_>| match update {
+        StreamUpdate::CompactionProgress(_) => {}
         StreamUpdate::Connecting => {
             emit_chatgpt_connecting_update(agent_prompt_id, &prompt.agent_id, &originator, writer);
         }

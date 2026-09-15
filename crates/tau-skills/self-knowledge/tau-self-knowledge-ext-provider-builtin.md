@@ -6,6 +6,13 @@ advertise: false
 
 # Tau provider-builtin extension self-knowledge
 
+Native Codex standalone compaction displays sampled N/? activity counts from
+validated notifications, not a percentage or the provider sequence number.
+Canonical transaction success alone seals an observed count as N/N; failure or
+cancellation never does. No count is invented when attaching after the updates.
+Other backends can populate optional current/total compaction counts; none of
+this transient activity contains or persists compaction output.
+
 ## Image generation
 
 ChatGPT profiles declare ordinary function tool `generate_image` for their exact

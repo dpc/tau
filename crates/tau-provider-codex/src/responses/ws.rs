@@ -1257,6 +1257,8 @@ impl WsConn {
                                 "native compaction response rejected; inspect private received_response capture",
                             );
                         })?;
+                        state.compact_progress_updates = shape.progress_updates;
+                        on_update(&state);
                     }
                     if execution.response_mode == ResponseMode::LocalSummary {
                         crate::local_compaction::validate_event(decoded.value())?;
@@ -1693,6 +1695,8 @@ pub(super) fn run_replay(
             DecodedEvent::decode(&event.raw).map_err(|_| malformed_text_error(event.raw.len()))?;
         if let Some(shape) = compact_shape.as_mut() {
             shape.validate(decoded.value())?;
+            state.compact_progress_updates = shape.progress_updates;
+            on_update(&state);
         }
         if response_mode == ResponseMode::LocalSummary {
             crate::local_compaction::validate_event(decoded.value())?;

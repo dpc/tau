@@ -19,11 +19,12 @@ use tau_cli_term::RendererDeliveryId;
 use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem,
-    ProviderResponseCompactionStatus, ProviderResponseTextDelta, UnixMicros,
+    ProviderResponseTextDelta, UnixMicros,
 };
 
 const MAX_SUBMITTED_PROMPT_CORRELATIONS: usize = 64;
 
+use self::compaction_presentation::{append_compaction_progress, update_compaction_status};
 use self::prepared_renderer_event::{DeferredRendererEvent, PreparedRendererEvent};
 pub(crate) use self::presentation_facts::PresentationFactClass;
 #[cfg(test)]
@@ -822,6 +823,9 @@ struct PromptState {
     /// Whether this is a standalone-compaction provider prompt whose semantic
     /// output remains private to the harness.
     is_standalone_compaction: bool,
+    /// Latest transient backend work counts; canonical success alone seals
+    /// them.
+    standalone_compaction_progress: Option<(Option<u64>, Option<u64>)>,
     /// Model selected for this prompt, when its start fact reached the CLI.
     model: Option<tau_proto::ModelId>,
     /// Exact model controls selected for this prompt, when available.
@@ -988,6 +992,8 @@ struct SelfCompactionTool {
 /// is still unknown.
 #[derive(Clone)]
 struct CompletedCompactionPresentation {
+    /// Transient count retained only for repainting this current-session row.
+    progress: Option<(Option<u64>, Option<u64>)>,
     /// History block repainted when exact continuation usage arrives.
     block_id: Option<tau_cli_term::BlockId>,
     /// Compact request input usage shown on the left side of the reduction.
@@ -1170,22 +1176,6 @@ fn format_progress_bytes(bytes: u64) -> String {
         return format!("{}KB", bytes / 1024);
     }
     format!("{}MB", bytes / 1024 / 1024)
-}
-
-fn update_compaction_status(
-    update: &tau_proto::ProviderResponseUpdated,
-) -> Option<(CompactionStatus, String)> {
-    let compaction = update.compaction.as_ref()?;
-    match compaction.status {
-        ProviderResponseCompactionStatus::Started => Some((
-            CompactionStatus::Progress,
-            EventRenderer::compaction_progress_status(compaction.original_input_tokens),
-        )),
-        ProviderResponseCompactionStatus::Completed => Some((
-            CompactionStatus::Success,
-            EventRenderer::compaction_success_status(compaction.original_input_tokens),
-        )),
-    }
 }
 
 fn reasoning_text_from_output_items<'a>(
@@ -1925,6 +1915,9 @@ impl EventRenderer {
         let (finished, terminal_tool_calls) = prepared
             .finished()
             .expect("deferred provider terminal preserves projection");
+        if self.ignore_standalone_provider_terminal(finished) {
+            return;
+        }
         let is_standalone = self
             .transcript
             .runtime
@@ -3028,60 +3021,6 @@ impl EventRenderer {
 
     fn empty_block() -> tau_cli_term::StyledBlock {
         tau_cli_term::StyledBlock::new(tau_cli_term::StyledText::from(String::new()))
-    }
-
-    fn compaction_token_chip(tokens: u64) -> String {
-        format!("#{}", format_token_count(tokens))
-    }
-
-    fn compaction_progress_status(original_input_tokens: Option<u64>) -> String {
-        original_input_tokens
-            .map(|tokens| {
-                format!(
-                    "{} {}",
-                    Self::compaction_token_chip(tokens),
-                    tau_proto::PROGRESS_INDICATOR_TEXT
-                )
-            })
-            .unwrap_or_else(|| tau_proto::PROGRESS_INDICATOR_TEXT.to_owned())
-    }
-
-    fn compaction_success_status(original_input_tokens: Option<u64>) -> String {
-        original_input_tokens.map_or_else(
-            || "ok".to_owned(),
-            |original| format!("{} → ? ok", Self::compaction_token_chip(original)),
-        )
-    }
-
-    /// Formats one successful standalone compaction from its request input and
-    /// the exact first transaction-owned continuation input, when available.
-    pub(crate) fn standalone_compaction_success_status(
-        original: Option<tau_proto::TokenCount>,
-        after: Option<tau_proto::TokenCount>,
-    ) -> String {
-        match (original, after) {
-            (Some(original), Some(after)) if original.get() != 0 => {
-                let retained = (u128::from(after.get()) * 100 + u128::from(original.get()) / 2)
-                    / u128::from(original.get());
-                format!(
-                    "{} → {} ({retained}%) ok",
-                    Self::compaction_token_chip(original.get()),
-                    Self::compaction_token_chip(after.get()),
-                )
-            }
-            (Some(original), Some(after)) => format!(
-                "{} → {} ok",
-                Self::compaction_token_chip(original.get()),
-                Self::compaction_token_chip(after.get()),
-            ),
-            (Some(original), None) => {
-                format!("{} → ? ok", Self::compaction_token_chip(original.get()))
-            }
-            (None, Some(after)) => {
-                format!("? → {} ok", Self::compaction_token_chip(after.get()))
-            }
-            (None, None) => "ok".to_owned(),
-        }
     }
 
     fn render_tool_history_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
@@ -4822,6 +4761,19 @@ impl EventRenderer {
                 return;
             }
             _ => {}
+        }
+        if let Event::ProviderResponseFinished(finished) = event
+            && self.ignore_standalone_provider_terminal(finished)
+        {
+            return;
+        }
+        if let Event::ProviderResponseUpdated(update) = event
+            && self
+                .watches
+                .finished_provider_prompts
+                .contains(&update.agent_prompt_id)
+        {
+            return;
         }
         let prepared = PreparedRendererEvent::new(event);
         if let Some((_, calls)) = prepared.finished() {
@@ -7573,10 +7525,11 @@ impl EventRenderer {
         else {
             return;
         };
-        let status = Self::standalone_compaction_success_status(
+        let mut status = Self::standalone_compaction_success_status(
             presentation.original_input_tokens,
             Some(after),
         );
+        append_compaction_progress(&mut status, presentation.progress, true);
         if let Some(call_id) = presentation.self_tool_call_id.as_ref() {
             self.update_self_compaction_tool_status(
                 call_id,
@@ -7638,6 +7591,9 @@ impl EventRenderer {
 
     fn handle_provider_response_updated(&mut self, update: &tau_proto::ProviderResponseUpdated) {
         let spid = &update.agent_prompt_id;
+        if self.watches.finished_provider_prompts.contains(spid) {
+            return;
+        }
         self.event_owners
             .prompt_agents
             .entry(update.agent_prompt_id.clone())
@@ -7649,6 +7605,42 @@ impl EventRenderer {
             .get(spid)
             .is_some_and(|state| state.is_standalone_compaction)
         {
+            let state = self
+                .transcript
+                .runtime
+                .prompts
+                .get_mut(spid)
+                .expect("known prompt");
+            if update
+                .status
+                .as_ref()
+                .is_some_and(|status| status.clear_response)
+            {
+                state.standalone_compaction_progress = None;
+            }
+            if let Some(compaction) = &update.compaction {
+                state.standalone_compaction_progress = Some((compaction.current, compaction.total));
+            }
+            let progress = state.standalone_compaction_progress;
+            if update.status.is_some() || update.compaction.is_some() {
+                let mut text = update
+                    .status
+                    .as_ref()
+                    .map_or_else(|| "Compacting…".to_owned(), |status| status.text.clone());
+                append_compaction_progress(&mut text, progress, false);
+                if let Some(call_id) = self.self_compaction_tool_for_prompt(spid) {
+                    self.update_self_compaction_tool_status(
+                        &call_id,
+                        CompactionStatus::Progress,
+                        &text,
+                    );
+                } else {
+                    self.update_live_compaction_block(
+                        spid,
+                        Some((CompactionStatus::Progress, text)),
+                    );
+                }
+            }
             return;
         }
         if self.is_stale_terminal_stats_only_update(update) {
@@ -9599,10 +9591,17 @@ impl EventRenderer {
                     .standalone_compaction_transactions
                     .remove(&compacted.transaction_id);
                 {
-                    let status = Self::standalone_compaction_success_status(
+                    let progress = self
+                        .transcript
+                        .runtime
+                        .prompts
+                        .get(&prompt_id)
+                        .and_then(|state| state.standalone_compaction_progress);
+                    let mut status = Self::standalone_compaction_success_status(
                         compacted.original_input_tokens,
                         None,
                     );
+                    append_compaction_progress(&mut status, progress, true);
                     let self_tool_call_id = self.self_compaction_tool_for_prompt(&prompt_id);
                     let block_id = if let Some(call_id) = self_tool_call_id.as_ref() {
                         let block_id = self
@@ -9632,6 +9631,7 @@ impl EventRenderer {
                     self.transcript.runtime.completed_compactions.insert(
                         compacted.transaction_id.clone(),
                         CompletedCompactionPresentation {
+                            progress,
                             block_id,
                             original_input_tokens: compacted.original_input_tokens,
                             self_tool_call_id,
@@ -9960,6 +9960,7 @@ impl EventRenderer {
 }
 
 mod attach_presentation;
+mod compaction_presentation;
 mod effort_completion;
 mod finished_response_projection;
 mod inner_turns;

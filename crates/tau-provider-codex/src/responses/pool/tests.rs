@@ -1752,6 +1752,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     server.lock_state().fault = Some(MidStreamCloseFault {
         on_conn_index: 0,
         after_turn: 1,
+        events_before_close: &[],
     });
     let mut config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     config.mode = ResponsesMode::LiteCompatibility;
@@ -1858,6 +1859,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     server.lock_state().fault = Some(MidStreamCloseFault {
         on_conn_index: 0,
         after_turn: 1,
+        events_before_close: &[],
     });
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
@@ -2210,7 +2212,9 @@ fn compact_attempt_observation_has_live_replay_parity() {
         observe_attempt_state(
             &mut correlation,
             ResponseMode::Compact,
-            &mut |_| forwarded += 1,
+            &mut |update| {
+                forwarded += usize::from(matches!(update, crate::StreamUpdate::Response(_)))
+            },
             &state,
         );
         let snapshot = correlation.expect("correlation").snapshot();
@@ -2230,6 +2234,18 @@ fn compact_attempt_observation_has_live_replay_parity() {
 fn compact_shared_pool_does_not_forward_semantic_updates() {
     let (addr, server) = spawn_fake_codex_server();
     server.lock_state().scripted_events = Some(vec![
+        serde_json::json!({
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {"type": "compaction", "id": "cmp_private"},
+        }),
+        serde_json::json!({
+            "type": "response.compaction.compacting", "output_index": 0,
+            "item_id": "cmp_private", "sequence_number": 3,
+        }),
+        serde_json::json!({
+            "type": "response.compaction.compacting", "output_index": 0,
+            "item_id": "cmp_private", "sequence_number": 7,
+        }),
         serde_json::json!({
             "type": "response.output_item.done",
             "output_index": 0,
@@ -2260,6 +2276,7 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
         debug_provider_requests: false,
     };
     let mut forwarded_responses = 0;
+    let mut latest_count = 0;
     let mut correlation = AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(7));
     let state = run_compact_through_shared_pool(
         &pool,
@@ -2270,11 +2287,15 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
         &mut NeverAbort,
         &mut |update| {
             forwarded_responses += usize::from(matches!(update, crate::StreamUpdate::Response(_)));
+            if let crate::StreamUpdate::CompactionProgress(count) = update {
+                latest_count = count;
+            }
         },
     )
     .expect("valid compact response");
 
     assert_eq!(forwarded_responses, 0);
+    assert_eq!(latest_count, 2);
     let snapshot = correlation.snapshot();
     assert_eq!(snapshot.logical_attempt(), 7);
     assert_eq!(snapshot.wire_dispatches(), 1);
@@ -2287,6 +2308,101 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
         state.output_items_snapshot().as_slice(),
         [ContextItem::Compaction(_)]
     ));
+}
+
+/// Repair is possible only before Added. Both Added and Done compact output
+/// close the semantic boundary, so counted activity cannot be replayed.
+#[test]
+fn compact_cached_repair_precedes_added_and_never_replays_counted_activity() {
+    for phase in 0..3 {
+        let (addr, server) = spawn_fake_codex_server();
+        let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+        let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("compact-repair").expect("session");
+        let agent = tau_proto::AgentId::parse("agent").expect("agent");
+        let request = PromptPayload {
+            system_prompt: "sys",
+            context: context(&[]),
+            hosted_tools: &[],
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            tool_choice: tau_proto::ToolChoice::default(),
+            compaction: None,
+            originator: &tau_proto::PromptOriginator::User,
+            session_id: &session,
+            agent_id: &agent,
+            debug_provider_requests: false,
+        };
+        run_turn_through_shared_pool(
+            &pool,
+            &config,
+            "ap-warm",
+            &request,
+            None,
+            &mut NeverAbort,
+            &mut |_| {},
+        )
+        .expect("warm cached socket");
+        let prelude: &'static [&'static str] = match phase {
+            0 => &[r#"{"type":"response.in_progress"}"#],
+            2 => &[
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"compaction","id":"cmp"}}"#,
+                r#"{"type":"response.compaction.compacting","output_index":0,"item_id":"cmp"}"#,
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","id":"cmp","encrypted_content":"opaque"}}"#,
+            ],
+            _ => &[
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"compaction","id":"cmp"}}"#,
+                r#"{"type":"response.compaction.compacting","output_index":0,"item_id":"cmp"}"#,
+                r#"{"type":"response.compaction.compacting","output_index":0,"item_id":"cmp"}"#,
+            ],
+        };
+        {
+            let mut state = server.lock_state();
+            state.fault = Some(MidStreamCloseFault {
+                on_conn_index: 0,
+                after_turn: 1,
+                events_before_close: prelude,
+            });
+            state.scripted_events = Some(vec![
+                serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"compaction","id":"fresh"}}),
+                serde_json::json!({"type":"response.compaction.compacting","output_index":0,"item_id":"fresh"}),
+                serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","id":"fresh","encrypted_content":"opaque"}}),
+                serde_json::json!({"type":"response.completed"}),
+            ]);
+        }
+        let mut activity = Vec::new();
+        let result = run_compact_through_shared_pool(
+            &pool,
+            &config,
+            "ap-compact",
+            &request,
+            None,
+            &mut NeverAbort,
+            &mut |update| {
+                if let crate::StreamUpdate::CompactionProgress(count) = update {
+                    if activity.last() != Some(&count) {
+                        activity.push(count);
+                    }
+                }
+            },
+        );
+        if phase != 0 {
+            assert!(result.is_err());
+            assert_eq!(
+                activity,
+                if phase == 1 {
+                    vec![0, 1, 2]
+                } else {
+                    vec![0, 1]
+                }
+            );
+            assert_eq!(server.lock_state().upgrade_count, 1);
+        } else {
+            result.expect("pre-semantic repair succeeds");
+            assert_eq!(activity, vec![0, 1]);
+            assert_eq!(server.lock_state().upgrade_count, 2);
+        }
+    }
 }
 
 // -----------------------------------------------------------------
@@ -2388,8 +2504,12 @@ impl ResponseGate {
 /// arriving turn on that connection is the one that gets killed.
 #[derive(Clone, Copy)]
 struct MidStreamCloseFault {
+    /// Connection selected for the injected close.
     on_conn_index: usize,
+    /// Number of successful turns before closing.
     after_turn: usize,
+    /// Optional original events emitted before the recoverable close.
+    events_before_close: &'static [&'static str],
 }
 
 /// Joined loopback WebSocket server with finite connection and request bounds.
@@ -2558,7 +2678,11 @@ fn respond_to_text_request(
     if let Some(gate) = response_gate {
         gate.arrive_and_wait();
     }
-    if fault_now.is_some() {
+    if let Some(fault) = fault_now {
+        for event in fault.events_before_close {
+            ws.send(Message::Text((*event).into()))
+                .expect("fault prelude");
+        }
         // Mimic the live Codex 1011 WebSocket-control-ping timeout
         // drop: send a close frame and bail without
         // streaming the response body. Client side

@@ -413,7 +413,10 @@ their selected models.
 - **`provider.response_updated`** — Harness-sourced canonical live response update.
   `deltas` carry newly appended displayable assistant/reasoning text. `status`
   carries provider-authored retry/diagnostic status. `compaction` carries
-  provider-side compaction lifecycle. `response_stats` carries public
+   provider-side compaction lifecycle and optional backend-neutral `current`/`total`
+   activity counts. Neither count establishes standalone success: only its
+   canonical transaction terminal may seal an observed unknown total as N/N.
+   `response_stats` carries public
   content-free previous/current response-throughput samples for the current
   provider prompt. Providers count backend response bytes at the transport
   receive boundary before semantic parsing and emit stats at the provider's

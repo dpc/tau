@@ -311,6 +311,8 @@ fn status_and_compaction_are_hard_barriers() {
     };
     compaction_update.deltas.clear();
     compaction_update.compaction = Some(tau_proto::ProviderResponseCompactionUpdate {
+        current: None,
+        total: None,
         status: tau_proto::ProviderResponseCompactionStatus::Started,
         original_input_tokens: None,
         compaction_output_tokens: None,

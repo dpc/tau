@@ -469,6 +469,8 @@ pub struct MessageAccumulator {
 
 /// Accumulated streaming state shared by both backends.
 pub struct StreamState {
+    /// Validated native standalone activity; never semantic or replay output.
+    pub(crate) compact_progress_updates: u64,
     /// Provider-indexed semantic accumulators.
     ///
     /// Production mutation must use this type's indexed helpers so the cached
@@ -868,6 +870,7 @@ impl StreamState {
     /// Construct an empty provider response accumulator.
     pub(crate) fn new() -> Self {
         Self {
+            compact_progress_updates: 0,
             output_items: Vec::new(),
             active_web_searches: BTreeMap::new(),
             web_search_lifecycle: None,
@@ -1433,11 +1436,15 @@ impl StreamState {
         self.output_items.iter().find_map(|item| match item {
             OutputItemAccumulator::Compaction(Some(_)) => Some(ProviderResponseCompactionUpdate {
                 status: ProviderResponseCompactionStatus::Completed,
+                current: None,
+                total: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
             }),
             OutputItemAccumulator::Compaction(None) => Some(ProviderResponseCompactionUpdate {
                 status: ProviderResponseCompactionStatus::Started,
+                current: None,
+                total: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
             }),

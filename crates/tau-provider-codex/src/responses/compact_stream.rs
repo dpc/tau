@@ -25,6 +25,9 @@ pub(super) struct CompactStreamShape {
     item: CompactItemPhase,
     /// Identity observed on the optional added event.
     added_item_id: Option<Option<String>>,
+    /// Validated activity notifications, independent of provider sequence
+    /// numbers.
+    pub(super) progress_updates: u64,
 }
 
 impl CompactStreamShape {
@@ -32,6 +35,18 @@ impl CompactStreamShape {
     pub(super) fn validate(&mut self, event: &serde_json::Value) -> Result<(), LlmError> {
         let event_type = event["type"].as_str().unwrap_or("");
         match event_type {
+            "response.compaction.compacting" => {
+                if self.item != CompactItemPhase::Added
+                    || event["output_index"].as_u64() != Some(0)
+                    || event["item_id"].as_str().is_none()
+                    || self.added_item_id.as_ref().and_then(|id| id.as_deref())
+                        != event["item_id"].as_str()
+                {
+                    return self.reject("invalid_compacting_notification");
+                }
+                self.progress_updates = self.progress_updates.saturating_add(1);
+                Ok(())
+            }
             "response.output_item.added" => {
                 self.validate_compaction_item(event, CompactItemPhase::Added)
             }

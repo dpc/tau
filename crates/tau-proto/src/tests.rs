@@ -4414,7 +4414,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 7, "minor": 3})
+        serde_json::json!({"major": 7, "minor": 4})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4506,7 +4506,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 7, "minor": 3})
+        serde_json::json!({"major": 7, "minor": 4})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -7920,4 +7920,41 @@ fn output_length_continuation_wire_shapes_round_trip() {
             .expect("deserialize watch state CBOR"),
         watch
     );
+}
+/// Additive progress fields round-trip independently while old compact activity
+/// remains decodable and omits absent counts.
+#[test]
+fn compaction_activity_counts_are_optional() {
+    for (current, total) in [
+        (None, None),
+        (Some(2), None),
+        (None, Some(4)),
+        (Some(2), Some(4)),
+    ] {
+        let update = ProviderResponseCompactionUpdate {
+            status: ProviderResponseCompactionStatus::Started,
+            current,
+            total,
+            original_input_tokens: None,
+            compaction_output_tokens: None,
+        };
+        let json = serde_json::to_value(&update).expect("serialize activity");
+        assert_eq!(json.get("current").is_some(), current.is_some());
+        assert_eq!(json.get("total").is_some(), total.is_some());
+        assert_eq!(
+            serde_json::from_value::<ProviderResponseCompactionUpdate>(json)
+                .expect("decode activity"),
+            update
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&update, &mut bytes).expect("encode CBOR activity");
+        assert_eq!(
+            ciborium::from_reader::<ProviderResponseCompactionUpdate, _>(bytes.as_slice())
+                .expect("decode CBOR activity"),
+            update
+        );
+    }
+    let old: ProviderResponseCompactionUpdate =
+        serde_json::from_str(r#"{"status":"started"}"#).expect("old activity");
+    assert_eq!((old.current, old.total), (None, None));
 }

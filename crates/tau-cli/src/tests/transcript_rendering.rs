@@ -2907,6 +2907,20 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
     renderer.handle(&Event::AgentPromptStarted(
         standalone_compaction_prompt_started("ap-failed"),
     ));
+    let mut failed_activity = provider_response_delta_update(
+        test_agent_prompt_id("ap-failed"),
+        "",
+        None,
+        tau_proto::PromptOriginator::User,
+    );
+    failed_activity.compaction = Some(tau_proto::ProviderResponseCompactionUpdate {
+        status: tau_proto::ProviderResponseCompactionStatus::Started,
+        current: Some(3),
+        total: None,
+        original_input_tokens: None,
+        compaction_output_tokens: None,
+    });
+    renderer.handle(&Event::ProviderResponseUpdated(failed_activity.clone()));
     renderer.handle(&Event::AgentStandaloneCompactionFailed(
         AgentStandaloneCompactionFailed {
             agent_id: agent_id("main"),
@@ -2925,10 +2939,18 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!renderer.agent_has_active_prompt_for_test(&agent_id("main")));
     assert!(!renderer.main_agent_turn_active_for_test());
+    renderer.handle(&Event::ProviderResponseUpdated(failed_activity.clone()));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "3/3"));
+    assert!(!vt.screen_contains(100, "3/?"));
+    assert!(!renderer.agent_has_active_prompt_for_test(&agent_id("main")));
+    assert!(!renderer.main_agent_turn_active_for_test());
 
     renderer.handle(&Event::AgentPromptStarted(
         standalone_compaction_prompt_started("ap-terminated"),
     ));
+    failed_activity.agent_prompt_id = test_agent_prompt_id("ap-terminated");
+    renderer.handle(&Event::ProviderResponseUpdated(failed_activity.clone()));
     renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
         automatic_compaction_decision: None,
         agent_id: agent_id("main"),
@@ -2939,6 +2961,10 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
     sync(&handle);
     assert!(vt.screen_contains(100, "compact err: stopped"));
     assert!(!vt.screen_contains(100, "Compacting…"));
+    renderer.handle(&Event::ProviderResponseUpdated(failed_activity));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "3/3"));
+    assert!(!vt.screen_contains(100, "3/?"));
 }
 
 /// Ensures normal inference continues to render provider deltas when an
@@ -2988,6 +3014,8 @@ fn render_provider_compaction_update_as_compact_progress() {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         deltas: Vec::new(),
         compaction: Some(tau_proto::ProviderResponseCompactionUpdate {
+            current: None,
+            total: None,
             status: tau_proto::ProviderResponseCompactionStatus::Started,
             original_input_tokens: Some(226_200),
             compaction_output_tokens: None,
@@ -3031,6 +3059,8 @@ fn render_provider_compaction_progress_after_long_response_in_visible_viewport()
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         deltas: Vec::new(),
         compaction: Some(tau_proto::ProviderResponseCompactionUpdate {
+            current: None,
+            total: None,
             status: tau_proto::ProviderResponseCompactionStatus::Started,
             original_input_tokens: Some(226_200),
             compaction_output_tokens: None,
@@ -4651,27 +4681,34 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert!(editor_context.last_response.is_none());
     drop(editor_context);
 
-    let generation = vt.frame_generation();
-    let standalone_commit_handle = handle.clone();
-    renderer.set_finished_commit_hook(Arc::new(move || {
-        standalone_commit_handle.redraw_sync();
-    }));
+    let mut activity = provider_response_delta_update(
+        test_agent_prompt_id("ap-private"),
+        "private compactor answer",
+        Some("private compactor reasoning".to_owned()),
+        tau_proto::PromptOriginator::User,
+    );
+    activity.compaction = Some(tau_proto::ProviderResponseCompactionUpdate {
+        status: tau_proto::ProviderResponseCompactionStatus::Completed,
+        current: Some(2),
+        total: None,
+        original_input_tokens: None,
+        compaction_output_tokens: None,
+    });
+    renderer.handle(&Event::ProviderResponseUpdated(activity));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Compacting… 2/?"));
+    assert!(!vt.screen_contains(100, "2/2"));
+    assert!(!vt.screen_contains(100, "private compactor"));
+
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "ap-private",
         Vec::new(),
     )));
-    let mut next_generation = generation;
-    let provider_final_frame = loop {
-        let frame = vt.wait_for_frame_after(next_generation).join("\n");
-        next_generation += 1;
-        if !frame.contains("Compacting…") {
-            break frame;
-        }
-        assert!(!frame.contains("private compactor"));
-    };
-    assert!(!provider_final_frame.contains("Compacting…"));
-    assert!(!provider_final_frame.contains("private compactor"));
-    assert!(provider_final_frame.contains("💤 @main"));
+    sync(&handle);
+    assert!(renderer.agent_has_active_prompt_for_test(&agent_id("main")));
+    assert!(renderer.main_agent_turn_active_for_test());
+    assert!(vt.screen_contains(100, "Compacting… 2/?"));
+    assert!(!vt.screen_contains(100, "2/2"));
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
@@ -4688,7 +4725,11 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact #226.2k → ? ok"));
+    assert!(
+        vt.screen_contains(100, "compact #226.2k → ? ok 2/2"),
+        "{:?}",
+        vt.screen_text(100)
+    );
     assert!(!vt.screen_contains(100, "#4.5k"));
     assert!(!vt.screen_contains(100, "compact complete"));
     assert!(!vt.screen_contains(100, "Compacting…"));

@@ -861,6 +861,8 @@ fn response_update_activation_is_idempotent_across_routing_shapes() {
         unreachable!("response update constructor")
     };
     compaction_update.compaction = Some(tau_proto::ProviderResponseCompactionUpdate {
+        current: None,
+        total: None,
         status: tau_proto::ProviderResponseCompactionStatus::Started,
         original_input_tokens: Some(42),
         compaction_output_tokens: None,
@@ -5423,4 +5425,21 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
             .is_none(),
         "unknown tool routing must not synthesize an ownership record"
     );
+}
+/// Optional backend counts remain unknown until canonical success and never
+/// invent a count for an attached UI that missed transient activity.
+#[test]
+fn compaction_count_formatting_preserves_unknowns() {
+    for (progress, success, expected) in [
+        (None, true, "compact"),
+        (Some((None, None)), true, "compact"),
+        (Some((Some(2), None)), false, "compact 2/?"),
+        (Some((Some(2), None)), true, "compact 2/2"),
+        (Some((None, Some(5))), false, "compact ?/5"),
+        (Some((Some(2), Some(5))), false, "compact 2/5"),
+    ] {
+        let mut text = "compact".to_owned();
+        super::append_compaction_progress(&mut text, progress, success);
+        assert_eq!(text, expected);
+    }
 }

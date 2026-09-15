@@ -31,6 +31,10 @@ assistant/editor history, and replacement checkpoint. Its matching compacted,
 failed, or terminated lifecycle outcome replaces or removes the marker and
 forgets the prompt correlation. This local presentation state does not alter
 provider events, journals, replay authority, or compaction replacement facts.
+Fresh typed activity counts render as N/?, N/M, or ?/M, independently of
+provider lifecycle status. Only canonical standalone success may fill an unknown
+total from the last observed current count. No count is invented after late
+attachment; failure, cancellation, and retries clear the transient count.
 
 Live prompt output inside the terminal active area has a stable semantic order:
 thinking, assistant response, provider compaction status, then active tool

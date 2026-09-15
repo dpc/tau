@@ -669,6 +669,10 @@ fn observe_attempt_state(
     }
     if response_mode == ResponseMode::Ordinary {
         on_update(crate::StreamUpdate::Response(state));
+    } else if response_mode == ResponseMode::Compact {
+        on_update(crate::StreamUpdate::CompactionProgress(
+            state.compact_progress_updates,
+        ));
     }
 }
 

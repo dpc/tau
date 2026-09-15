@@ -5110,6 +5110,57 @@ fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {
     frames
 }
 
+/// Native compact sampling exposes only counted activity, preserves cadence,
+/// and starts a fresh count display for the next attempt.
+#[test]
+fn native_compact_progress_is_private_sampled_and_attempt_local() {
+    let prompt = minimal_prompt();
+    let target = ResponseUpdateTarget {
+        agent_prompt_id: &prompt.agent_prompt_id,
+        agent_id: &prompt.agent_id,
+        originator: &prompt.originator,
+    };
+    let mut progress = compact_progress::CompactProgress::default();
+    let now = Instant::now();
+    let mut bytes = Vec::new();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        progress.emit(0, &target, &mut writer, now);
+        progress.emit(1, &target, &mut writer, now);
+        progress.emit(2, &target, &mut writer, now);
+        progress.emit(3, &target, &mut writer, now + Duration::from_secs(1));
+        progress.emit(3, &target, &mut writer, now + Duration::from_secs(2));
+        progress.emit(4, &target, &mut writer, now + Duration::from_millis(1100));
+        progress.flush(&target, &mut writer);
+        let mut next_attempt = compact_progress::CompactProgress::default();
+        next_attempt.emit(1, &target, &mut writer, now + Duration::from_secs(2));
+    }
+    let frames = decode_frames(&bytes);
+    assert_eq!(frames.len(), 4);
+    for (frame, count) in frames.iter().zip([1, 3, 4, 1]) {
+        let tau_proto::HarnessInputMessage::Emit(emit) = frame else {
+            panic!("expected transient report");
+        };
+        let Event::ProviderResponseUpdatedReported(update) = emit.event.as_ref() else {
+            panic!("expected progress");
+        };
+        assert!(!emit.persist);
+        assert!(update.deltas.is_empty());
+        assert!(update.response_stats.is_none());
+        assert_eq!(
+            update.status.as_ref().expect("activity status").text,
+            "Compacting…"
+        );
+        let compaction = update.compaction.as_ref().expect("typed count");
+        assert_eq!(compaction.current, Some(count));
+        assert_eq!(compaction.total, None);
+        assert_eq!(
+            compaction.status,
+            tau_proto::ProviderResponseCompactionStatus::Started
+        );
+    }
+}
+
 /// Ensures the built-in ChatGPT/Codex emission boundary does not suppress
 /// public stats-only streams that have no displayable text or compaction.
 #[test]

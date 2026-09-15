@@ -717,6 +717,9 @@ pub struct CodexDebugCapture {
 
 /// Semantically disjoint live updates from one ChatGPT dispatch.
 pub enum StreamUpdate<'a> {
+    /// Content-free validated native compaction activity count for this
+    /// attempt.
+    CompactionProgress(u64),
     /// A fresh WebSocket upgrade is about to start. This is WebSocket-only and
     /// may occur more than once when a logical turn replaces a failed socket.
     Connecting,
@@ -1251,6 +1254,27 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
+        self.compact_numbered_with_progress(
+            agent_prompt_id,
+            logical_attempt,
+            config,
+            request,
+            abort,
+            &mut |_| {},
+        )
+    }
+
+    /// Runs one compact attempt and observes only its validated activity count.
+    /// Repeated observations permit caller-owned sampling during quiet waits.
+    pub fn compact_numbered_with_progress(
+        &self,
+        agent_prompt_id: &str,
+        logical_attempt: LogicalAttempt,
+        config: &ResolvedConfig,
+        request: &Prompt<'_>,
+        abort: &mut impl TurnAbort,
+        on_progress: &mut impl FnMut(u64),
+    ) -> CompactOutcome {
         if !supports_native_standalone_compaction(&config.wire().model_id) {
             return self.local_compact_numbered(
                 agent_prompt_id,
@@ -1291,6 +1315,7 @@ impl CodexRuntime {
             &mut attempt,
             (metadata_enabled && diagnostic.is_some()).then_some(&mut evidence),
             &mut private_trace,
+            on_progress,
         );
         if let Some(diagnostic) = diagnostic {
             diagnostic.finish_compact(&outcome, evidence, attempt.snapshot(), config.wire());
@@ -1361,6 +1386,7 @@ impl CodexRuntime {
         attempt: &mut ProviderAttemptContext,
         evidence: Option<&mut cache_diagnostic::CompactEvidence>,
         private_trace: &mut Option<private_trace::AttemptTrace>,
+        on_progress: &mut impl FnMut(u64),
     ) -> CompactOutcome {
         let identity = config.inference_identity();
         let probe = match self.acquire_compact_probe(identity, abort) {
@@ -1419,6 +1445,9 @@ impl CodexRuntime {
             &mut |update| {
                 if matches!(update, StreamUpdate::Dispatched(_)) {
                     backend_reached = true;
+                }
+                if let StreamUpdate::CompactionProgress(count) = update {
+                    on_progress(count);
                 }
             },
             private_trace,

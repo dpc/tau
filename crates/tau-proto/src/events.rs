@@ -6056,6 +6056,14 @@ pub enum ProviderResponseTextDelta {
 pub struct ProviderResponseCompactionUpdate {
     /// Current compaction status.
     pub status: ProviderResponseCompactionStatus,
+    /// Completed activity/work units in this attempt, when known. Units are
+    /// backend-defined and must agree with `total`; this is not a percentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<u64>,
+    /// Expected total in the same units as `current`, independently optional.
+    /// Omission means unknown, not zero. Neither field establishes completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
     /// Provider-reported input-token count for the compact request, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_input_tokens: Option<u64>,

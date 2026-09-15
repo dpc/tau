@@ -102,18 +102,10 @@ impl EventRenderer {
             .is_some_and(|state| state.is_standalone_compaction);
         if is_standalone {
             self.transcript.history.turn_stats_predecessor = None;
-            self.finish_standalone_compaction_prompt(&finished.agent_prompt_id, None, false);
-            #[cfg(test)]
-            if let Some(hook) = &self.finished_commit_hook {
-                hook();
-            }
-            if let Some(status_block) = self.staged_finished_status.take() {
-                self.publish_model_status_block(status_block);
-            }
-            #[cfg(test)]
-            if let Some(hook) = &self.finished_published_hook {
-                hook();
-            }
+            // Provider completion is not durable replacement success. Retain
+            // the private marker and counts until the canonical transaction
+            // terminal, even if a provider terminal is delivered separately.
+            self.staged_finished_status = None;
             return;
         }
         let projection = self
