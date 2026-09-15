@@ -13,13 +13,13 @@
       url = "git+https://radicle.dpc.pw/z2HR882B4c4mTdAgdt4SozpdeTuMf.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    tau-ext-rostra.url = "git+https://radicle.dpc.pw/z4LrrRivcgNjJii5wzbjTvA8ttt6o.git?ref=main&rev=cb94a7b0f3b9b2fe57cbb28e3cf23db07e9b84b5";
-    tau-ext-slack.url = "git+https://radicle.dpc.pw/z3NJhEtKWCbHPa28wDQSYJ8eEfBjg.git?ref=master&rev=a6ec42741c413d2e2d11e2b677bbac1517b24176";
-    tau-ext-telegram.url = "git+https://radicle.dpc.pw/z3sPdSePnxtBvP9pTLwUwVgpMU68r.git?ref=main&rev=c145c29cc1b5c21f277cf14a453b53b9e3138044";
-    tau-ext-zulip.url = "git+https://radicle.dpc.pw/z2LFTBWK7VpAwC3Bpxohkh91aqXd.git?ref=main&rev=c7af56c013318303b1e0e79921ff6cfcc9f5ee72";
-    tau-ext-pim.url = "git+https://radicle.dpc.pw/z4FCuiVzFns5iTquhsYCntZyVWCqi.git?ref=main&rev=078a7dc2f42a22a2c52eb1cb0bb1d22a6d54df96";
-    tau-ext-swarm.url = "git+https://radicle.dpc.pw/z38my9x3Rmn6VYtDMiLKgjK3tRv8o.git?ref=master&rev=5e7a8abc5602fb29fc68caf627384e3eb8629729";
-    tau-ext-xmpp.url = "git+https://radicle.dpc.pw/zpN6uwkd6ok9qRAX5yZaF7w8xzDd.git?ref=master&rev=85cee30b779b96ef2ea90164ec61a0883ca3ea04";
+    tau-ext-rostra.url = "git+https://radicle.dpc.pw/z4LrrRivcgNjJii5wzbjTvA8ttt6o.git?ref=main";
+    tau-ext-slack.url = "git+https://radicle.dpc.pw/z3NJhEtKWCbHPa28wDQSYJ8eEfBjg.git?ref=master";
+    tau-ext-telegram.url = "git+https://radicle.dpc.pw/z3sPdSePnxtBvP9pTLwUwVgpMU68r.git?ref=main";
+    tau-ext-zulip.url = "git+https://radicle.dpc.pw/z2LFTBWK7VpAwC3Bpxohkh91aqXd.git?ref=main";
+    tau-ext-pim.url = "git+https://radicle.dpc.pw/z4FCuiVzFns5iTquhsYCntZyVWCqi.git?ref=main";
+    tau-ext-swarm.url = "git+https://radicle.dpc.pw/z38my9x3Rmn6VYtDMiLKgjK3tRv8o.git?ref=master";
+    tau-ext-xmpp.url = "git+https://radicle.dpc.pw/zpN6uwkd6ok9qRAX5yZaF7w8xzDd.git?ref=master";
     selfci = {
       url = "git+https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git";
       inputs.nixpkgs.follows = "nixpkgs";
