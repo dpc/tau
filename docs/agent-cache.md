@@ -167,8 +167,9 @@ establishes actual index one. Later exact responses/failures can carry one.
 These identities never affect provider routing or upstream request bodies.
 Native compaction uses `operation: "standalone_compaction"` and its existing
 finite compact-attempt ordinal. Its exact requests and retry-failure captures
-share that identity; successful raw compact responses remain unretained, so
-`exact_response` is false for this operation. Scalar usage comes from the parsed
+share that identity. Native compact WebSocket responses now retain the original
+received text through the existing private capture path, on success and failure;
+`exact_response` is available for this operation. Scalar usage comes from the parsed
 terminal event before it is dropped. The summary follows the final compact
 outcome after output validation and cancellation, including zero-dispatch
 admission failures; it does not authorize a retry after semantic compact output.

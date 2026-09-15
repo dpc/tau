@@ -419,8 +419,13 @@ request/response captures remain independently default-on for durable activity;
 setting metadata off does not disable them. Ephemeral/memory-only activity
 remains excluded. Scalar records correlate actual dispatches and finite attempts
 and retain bounded raw usage and typed repair/socket facts, not bodies, routes,
-credentials or provider IDs. Native Codex successful raw compact responses
-remain unretained, so that operation reports `exact_response=false`. Public Responses records one
+credentials or provider IDs. Native Codex raw compact responses
+are retained before decoding/validation in private `received_response` captures,
+including failures and the rejected event; that operation reports exact-response
+capability. Inspect `raw_events`, truncation/terminal flags, and private error detail
+rather than confusing these with the separate synthetic
+`provider_response_finished` capture. See `docs/providers.md` for bounds and
+coverage limits. Public Responses records one
 full-replay dispatch at most, with no local repair or connection reuse. Its exact
 request retains a null dispatch index before the final cancellation check; the
 diagnostic dispatch row alone establishes index one. Public local-summary

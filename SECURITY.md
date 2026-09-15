@@ -276,9 +276,12 @@ Default-on Codex, public Responses and Chat Completions inference and
 standalone-compaction scalar cache diagnostics use the same
 private opaque path and retention. Metadata has an independent startup-frozen
 profile opt-out and is forced off with existing nonpersistable capture policy.
-Existing exact captures remain default-on for durable activity; native Codex
-successful raw compact responses remain unretained and advertise
-`exact_response=false`.
+Existing exact captures remain default-on for durable activity. Codex live
+WebSocket response captures retain bounded original text before decoding and
+validation, including native compact successes and failures. These private
+received-prefix records can contain provider payloads and internal error detail;
+they are distinct from synthetic terminal reports and scalar diagnostics.
+Exact-response capability describes availability, not complete or durable capture.
 Scalar records omit payloads, credentials, routes, cache keys, provider IDs and
 error prose, but retain bounded model identities and workload correlation, so
 they remain private rather than public-safe. The metadata budget reserves at

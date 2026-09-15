@@ -141,7 +141,7 @@ impl CacheAttempt {
                     },
                     prompt_id.as_str(),
                     true,
-                    *operation == AttemptOperation::Inference,
+                    true,
                 ),
                 CaptureScope::Warm(id) => (None, None, "cache_refresh", id.as_str(), false, false),
             };
@@ -308,8 +308,8 @@ impl CacheAttempt {
 /// finishes.
 #[derive(Default)]
 pub(crate) struct CompactEvidence {
-    /// Closed scalar projection; the successful raw response remains
-    /// unretained.
+    /// Closed parsed-terminal projection, distinct from the separately retained
+    /// private received-response capture.
     response: Option<Value>,
     /// Typed provider failure, not the scheduler's retry class.
     failure_kind: Option<tau_proto::ProviderFailureKind>,

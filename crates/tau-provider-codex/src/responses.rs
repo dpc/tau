@@ -7,6 +7,7 @@
 mod codex_response_wake_generation;
 mod compact_failure_capture;
 mod compact_stream;
+mod response_capture;
 
 use std::time::{Duration, Instant, SystemTime};
 use std::{

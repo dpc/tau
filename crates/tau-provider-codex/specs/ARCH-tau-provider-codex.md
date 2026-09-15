@@ -336,9 +336,14 @@ and usage presence reports unsupported attribution shape without deriving an
 eligible ceiling. Native compaction uses its own existing finite-attempt ordinal
 and reports the final typed outcome after output validation and cancellation,
 including pre-dispatch admission failures. Its exact requests and retry-failure
-captures share the diagnostic identity. Successful raw compact responses remain
-unretained (`exact_response=false`); scalar usage is projected before the existing
-terminal event is dropped. Entered prewarm/cache-refresh backend calls emit only
+captures share the diagnostic identity. Ordinary and compact WebSocket dispatches
+retain bounded original received text before decoding and validation, including
+the rejection site, through the existing private response-capture FIFO on success,
+failure, and cancellation. Exact-response capability is available for both.
+Received-prefix captures are explicitly distinct from synthetic terminal reports;
+truncation and terminal acceptance do not claim an unseen upstream continuation.
+No capture changes provider outcomes, drains unread data, or authorizes retry.
+Entered prewarm/cache-refresh backend calls emit only
 scalar operation captures: prompt attribution and both attempt ordinals are null,
 and both exact-capture capabilities are false. Explicit refresh preserves its
 existing operation ID; ordinary prewarm receives a random operation-local ID.
@@ -356,11 +361,13 @@ accounting, or the lifecycle in
 [SPEC-provider-cache-refresh-lifecycle](../../../specs/SPEC-provider-cache-refresh-lifecycle.md).
 
 The parser and transport boundaries construct opaque failure evidence before
-the error reaches retry policy. Persistent records retain only closed
+the error reaches retry policy. The separate redacted `responses-attempt-failure`
+projection retains only closed
 classification/transport facts, validated codes and IDs, message/reason
 presence and lengths, and a bounded structural event shape. They never retain
 provider prose, close reasons, raw values, headers, endpoints, proxy/account
-data, request/model output, credentials, or raw library errors. This projection
+data, request/model output, credentials, or raw library errors. Unlike the private
+received-response captures above, this projection
 is bounded and redacted but remains a private, potentially credential-bearing
 artifact. Submission and configurable diagnostic retention reuse the shared
 best-effort writer; cleanup defaults to thirty days and may be disabled.

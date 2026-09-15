@@ -1562,6 +1562,7 @@ fn submit_response_debug_with(
             path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::UnknownResponse,
         );
     let mut metadata = serde_json::json!({
+        "record_kind": "provider_response_finished",
         "session_id": session_id,
         "agent_prompt_id": response.agent_prompt_id,
         "backend": response.backend,

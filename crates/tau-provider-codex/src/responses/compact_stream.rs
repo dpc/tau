@@ -39,7 +39,9 @@ impl CompactStreamShape {
                 self.validate_compaction_item(event, CompactItemPhase::Done)
             }
             "response.completed" if self.item == CompactItemPhase::Done => Ok(()),
-            "response.completed" | "response.done" => Err(invalid_compact_shape()),
+            "response.completed" | "response.done" => {
+                self.reject("terminal_before_completed_item_or_unsupported_done")
+            }
             "response.created" | "response.in_progress"
                 if self.item == CompactItemPhase::Missing =>
             {
@@ -47,7 +49,9 @@ impl CompactStreamShape {
             }
             "codex.rate_limits" => Ok(()),
             "response.incomplete" | "response.failed" | "error" => Ok(()),
-            event_type if event_type.starts_with("response.") => Err(invalid_compact_shape()),
+            event_type if event_type.starts_with("response.") => {
+                self.reject("unexpected_response_event")
+            }
             _ => Ok(()),
         }
     }
@@ -62,7 +66,7 @@ impl CompactStreamShape {
         if event["output_index"].as_u64() != Some(0)
             || event["item"]["type"].as_str() != Some("compaction")
         {
-            return Err(invalid_compact_shape());
+            return self.reject("expected_compaction_item_at_output_index_zero");
         }
         let valid_transition = matches!(
             (self.item, next),
@@ -72,7 +76,7 @@ impl CompactStreamShape {
             ) | (CompactItemPhase::Added, CompactItemPhase::Done)
         );
         if !valid_transition {
-            return Err(invalid_compact_shape());
+            return self.reject("invalid_item_phase_transition");
         }
         let item_id = event["item"]["id"].as_str().map(str::to_owned);
         if next == CompactItemPhase::Added {
@@ -80,16 +84,20 @@ impl CompactStreamShape {
         } else if self.item == CompactItemPhase::Added
             && self.added_item_id.as_ref() != Some(&item_id)
         {
-            return Err(invalid_compact_shape());
+            return self.reject("added_done_item_identity_mismatch");
         }
         self.item = next;
         Ok(())
     }
-}
 
-/// Constructs the fixed compact-shape validation failure.
-fn invalid_compact_shape() -> LlmError {
-    LlmError::InvalidResponse(INVALID_COMPACT_SHAPE.to_owned())
+    /// Preserve the exact local rejection branch without logging provider
+    /// payloads.
+    fn reject(&self, reason: &'static str) -> Result<(), LlmError> {
+        Err(LlmError::InvalidResponse(format!(
+            "{INVALID_COMPACT_SHAPE}: {reason} (phase={:?})",
+            self.item
+        )))
+    }
 }
 
 #[cfg(test)]

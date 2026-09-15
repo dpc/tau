@@ -11,6 +11,7 @@ use crate::common::OutputItemAccumulator;
 
 mod direct_target_canary;
 mod owner_timing;
+mod response_capture;
 mod scripted_tcp_server;
 mod test_ca;
 mod test_server;
@@ -583,7 +584,7 @@ fn websocket_response_callback_cancellation_preserves_capture_without_enqueue() 
     let mut abort = FlagAbort {
         aborted: Arc::clone(&aborted),
     };
-    let mut capture = None;
+    let mut captures = Vec::new();
     let dispatch_count = Arc::new(AtomicUsize::new(0));
 
     let error = match conn.run_response_with_capture_submit(
@@ -599,7 +600,7 @@ fn websocket_response_callback_cancellation_preserves_capture_without_enqueue() 
             aborted.store(true, Ordering::SeqCst);
         },
         &mut |_| {},
-        |submitted| capture = Some(submitted),
+        |submitted| captures.push(submitted),
     ) {
         Ok(_) => panic!("callback cancellation must prevent enqueue"),
         Err(error) => error,
@@ -612,11 +613,19 @@ fn websocket_response_callback_cancellation_preserves_capture_without_enqueue() 
         outbound_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
-    let capture = capture.expect("unsent exact request evidence is retained");
+    assert_eq!(captures.len(), 2);
+    let capture = &captures[0];
     let metadata: serde_json::Value =
         serde_json::from_slice(capture.json()).expect("capture metadata");
     assert_eq!(metadata["logical_attempt"], 7);
     assert!(metadata["wire_dispatch_index"].is_null());
+    let response: serde_json::Value =
+        serde_json::from_slice(captures[1].json()).expect("received response");
+    assert_eq!(response["record_kind"], "received_response");
+    assert_eq!(response["outcome"], "canceled");
+    assert_eq!(response["capture_complete"], false);
+    assert_eq!(response["received_events"], 0);
+    assert!(response["wire_dispatch_index"].is_null());
 }
 
 /// The approved dispatch boundary observes attempted enqueue, not acceptance:
@@ -646,7 +655,7 @@ fn closed_writer_capture(compact: bool) {
         path_crate_attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(1));
     correlation.diagnostic = Some(Arc::clone(&diagnostic));
     let dispatch = correlation.next_dispatch();
-    let mut raw = None;
+    let mut raw = Vec::new();
     let (result, rows) = cache_capture_tests::capture(|| {
         conn.run_response_with_capture_submit(
             &config,
@@ -662,7 +671,7 @@ fn closed_writer_capture(compact: bool) {
             &mut NeverAbort,
             &mut |_| {},
             &mut |_| {},
-            |capture| raw = Some(capture),
+            |capture| raw.push(capture),
         )
     });
     let error = match result {
@@ -677,7 +686,8 @@ fn closed_writer_capture(compact: bool) {
     assert_eq!(diagnostic.dispatch_count(), 1);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["wire_dispatch_index"], 1);
-    let raw = raw.expect("exact attempted request capture");
+    assert_eq!(raw.len(), 2);
+    let raw = &raw[0];
     let raw: serde_json::Value = serde_json::from_slice(raw.json()).expect("raw metadata");
     assert_eq!(raw["wire_dispatch_index"], 1);
     assert_eq!(raw["attempt_id"], rows[0]["attempt_id"]);
@@ -747,7 +757,7 @@ fn websocket_response_live_path_preserves_capture_enqueue_bytes_and_order() {
     events.borrow_mut().push("enqueue");
     assert_eq!(
         events.into_inner(),
-        ["dispatch", "capture", "enqueue"],
+        ["dispatch", "capture", "capture", "enqueue"],
         "exact capture follows attempted enqueue; dispatch notification still precedes enqueue"
     );
 }
@@ -1911,6 +1921,7 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
             on_transport_dispatch: None,
             after_transport_dispatch: None,
             recording_stream: None,
+            response_capture: None,
             evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
                 idle: Duration::from_millis(20),
@@ -2018,6 +2029,7 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
             on_transport_dispatch: None,
             after_transport_dispatch: None,
             recording_stream: None,
+            response_capture: None,
             evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
                 idle: Duration::from_millis(50),
@@ -2076,6 +2088,7 @@ fn ws_metadata_only_frames_then_silence_returns_nonsemantic_idle_timeout() {
             on_transport_dispatch: None,
             after_transport_dispatch: None,
             recording_stream: None,
+            response_capture: None,
             evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
                 idle: Duration::from_secs(1),
@@ -2172,6 +2185,7 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
             on_transport_dispatch: None,
             after_transport_dispatch: None,
             recording_stream: None,
+            response_capture: None,
             evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
                 idle: Duration::from_secs(1),

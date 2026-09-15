@@ -58,6 +58,7 @@ use tungstenite::{
 };
 
 use super::compact_stream::CompactStreamShape;
+use super::response_capture::ResponseCapture;
 use super::{
     CachedResponseAnchor, DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ParsedEventApplication,
     ParsedEventDisposition, ProviderRawEventStream, ResponsesConfig, apply_parsed_json_event,
@@ -186,6 +187,9 @@ struct EnvelopeExecution<'a> {
     after_transport_dispatch: Option<&'a mut dyn FnMut(&super::WsResponseCreate)>,
     /// VCR stream receiving accepted provider frames.
     recording_stream: Option<&'a mut ProviderRawEventStream>,
+    /// Best-effort private received-text evidence, independent of VCR
+    /// acceptance.
+    response_capture: Option<&'a mut ResponseCapture>,
     /// Parser work allowed for failure evidence.
     evidence_mode: crate::attempt_failure::ProviderEvidenceMode,
     /// Idle and absolute response deadlines.
@@ -736,7 +740,7 @@ impl WsConn {
         abort: &mut impl TurnAbort,
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
-        capture_submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+        capture_submit: impl FnMut(tau_provider::debug_capture_writer::ProviderDebugCapture),
     ) -> Result<WsTurnResult, LlmError> {
         self.run_response_with_capture_submit_observed(
             config,
@@ -771,7 +775,7 @@ impl WsConn {
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
         private_trace: &mut Option<private_trace::AttemptTrace>,
-        capture_submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+        mut capture_submit: impl FnMut(tau_provider::debug_capture_writer::ProviderDebugCapture),
     ) -> Result<WsTurnResult, LlmError> {
         let lowering_started = private_trace::started(private_trace);
         let anchor_was_available =
@@ -816,13 +820,15 @@ impl WsConn {
                 ),
             })
         });
-        let mut capture_submit = Some(capture_submit);
+        let mut request_captured = false;
+        let mut response_capture = ResponseCapture::selected(request.debug_provider_requests);
         let mut on_transport_dispatch = |bytes| {
             if let Some(diagnostic) = &diagnostic {
                 diagnostic.dispatched(bytes);
             }
         };
         let mut after_transport_dispatch = |envelope: &super::WsResponseCreate| {
+            request_captured = true;
             super::maybe_debug_submit_provider_request_with(
                 agent_prompt_id,
                 config,
@@ -830,9 +836,7 @@ impl WsConn {
                 tau_proto::ProviderBackendTransport::Websocket,
                 correlation.clone(),
                 envelope,
-                capture_submit
-                    .take()
-                    .expect("one actual dispatch per envelope"),
+                &mut capture_submit,
             );
         };
         let result = self.run_envelope_with_timeouts(
@@ -842,6 +846,7 @@ impl WsConn {
                 on_transport_dispatch: Some(&mut on_transport_dispatch),
                 after_transport_dispatch: Some(&mut after_transport_dispatch),
                 recording_stream,
+                response_capture: response_capture.as_mut(),
                 evidence_mode: if request.debug_provider_requests {
                     path_crate_attempt_failure::ProviderEvidenceMode::Persistent
                 } else {
@@ -859,15 +864,34 @@ impl WsConn {
             private_trace,
         );
         // Preserve exact unsent-request evidence without inventing a dispatch.
-        if let Some(capture_submit) = capture_submit.take() {
+        if !request_captured {
             super::maybe_debug_submit_provider_request_with(
                 agent_prompt_id,
                 config,
                 request,
                 tau_proto::ProviderBackendTransport::Websocket,
-                correlation.map(path_crate_attempt_failure::DispatchCorrelation::undispatched),
+                correlation
+                    .clone()
+                    .map(path_crate_attempt_failure::DispatchCorrelation::undispatched),
                 &envelope,
-                capture_submit,
+                &mut capture_submit,
+            );
+        }
+        if let Some(capture) = response_capture {
+            let correlation = correlation.map(|correlation| {
+                if request_captured {
+                    correlation
+                } else {
+                    correlation.undispatched()
+                }
+            });
+            capture.submit(
+                agent_prompt_id,
+                request,
+                correlation.as_ref(),
+                response_mode,
+                &result,
+                &mut capture_submit,
             );
         }
         let mut state = result?;
@@ -967,6 +991,7 @@ impl WsConn {
                 on_transport_dispatch: Some(&mut on_dispatch),
                 after_transport_dispatch: None,
                 recording_stream: None,
+                response_capture: None,
                 evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
                 timeouts: EnvelopeTimeouts {
                     idle: response_timeout,
@@ -1167,6 +1192,9 @@ impl WsConn {
             };
             match event {
                 InboundEvent::Event { text, read } => {
+                    if let Some(capture) = execution.response_capture.as_mut() {
+                        capture.record(text.as_ref());
+                    }
                     let read_at = read_timing.as_ref().and_then(|timing| timing.read_at(read));
                     if let Some(trace) = private_trace.as_mut() {
                         if let Some(read_at) = read_at {
@@ -1195,13 +1223,23 @@ impl WsConn {
                     let decode_started = private_trace::started(private_trace);
                     let decoded = match DecodedEvent::decode(text.as_ref()) {
                         Ok(decoded) => decoded,
-                        Err(_) => {
+                        Err(error) => {
+                            if let Some(capture) = execution.response_capture.as_mut() {
+                                capture.decode_failed(&error);
+                            }
                             if let (Some(trace), Some(started)) =
                                 (private_trace.as_mut(), decode_started)
                             {
                                 trace.decoded(started, false);
                             }
                             diagnostics.set_outcome(Outcome::MalformedText);
+                            tracing::warn!(
+                                target: crate::LOG_TARGET,
+                                agent_prompt_id,
+                                stage = "decode",
+                                error = %error,
+                                "provider text decoding failed; inspect private received_response capture",
+                            );
                             return Err(malformed_text_error(text.len()));
                         }
                     };
@@ -1210,7 +1248,15 @@ impl WsConn {
                         trace.decoded_payload();
                     }
                     if let Some(shape) = compact_shape.as_mut() {
-                        shape.validate(decoded.value())?;
+                        shape.validate(decoded.value()).inspect_err(|error| {
+                            tracing::warn!(
+                                target: crate::LOG_TARGET,
+                                agent_prompt_id,
+                                stage = "compact_shape_validation",
+                                error = %error,
+                                "native compaction response rejected; inspect private received_response capture",
+                            );
+                        })?;
                     }
                     if execution.response_mode == ResponseMode::LocalSummary {
                         crate::local_compaction::validate_event(decoded.value())?;

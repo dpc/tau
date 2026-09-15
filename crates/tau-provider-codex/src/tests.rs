@@ -2023,7 +2023,7 @@ fn cache_diagnostics_compact_outcomes_preserve_dispatch_and_progress() {
         assert_eq!(end["repair_used"], repair);
         assert_eq!(end["semantic_progress"], progress);
         assert_eq!(end["capabilities"]["exact_request"], true);
-        assert_eq!(end["capabilities"]["exact_response"], false);
+        assert_eq!(end["capabilities"]["exact_response"], true);
         assert_eq!(end["capabilities"]["raw_attribution"], false);
         assert_eq!(
             end["outcome"],

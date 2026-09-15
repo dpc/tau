@@ -30,7 +30,7 @@ Tau follows the XDG directories:
   - `meta.json` — canonical durable-session existence manifest with canonical creation time and a derived last-touched ordering/retention hint.
   - `lock` — flock used while the daemon has the session loaded for writing.
   - `events.jsonl` — best-effort debug runtime event log. It is an ordered subsequence of attempted observations, not authoritative replay state; a missing row does not prove an event was absent.
-  - `debug/provider-requests/<provider-instance>/*.json.zst` — zstd-compressed provider request, successful-response, and `responses-attempt-failure` captures written best-effort for an attributed durable session whose directory still exists. Request/response records can contain full prompt, tool, model, and provider-controlled content. Failure records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
+  - `debug/provider-requests/<provider-instance>/*.json.zst` — zstd-compressed provider request, response, and `responses-attempt-failure` captures written best-effort for an attributed durable session whose directory still exists. Request/response records can contain full prompt, tool, model, and provider-controlled content, including failed Codex received streams. The separate `responses-attempt-failure` records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
   - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
   - `logs/<extension>.log` — stderr for each spawned extension.
 - Agents: `~/.local/state/tau/agents/<agent_id>/`
@@ -167,7 +167,10 @@ ls -lah ~/.local/state/tau/sessions/<session_id>/logs
 find ~/.local/state/tau/sessions/<session_id>/debug/provider-requests -maxdepth 2 -type f -print
 # Responses-backend request/response fields.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-request.json.zst | jq 'select(.backend == "responses") | .body.previous_response_id, .body.input'
-zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-response.json.zst | jq 'select(.backend.kind == "responses" or .backend == "responses") | .provider_response_id, .usage, .provider_response_finished.output_items, .provider_terminal_event'
+# Synthetic terminal projection; absent record_kind admits older terminal records.
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-response.json.zst | jq 'select(.record_kind == "provider_response_finished" or .record_kind == null) | select(.backend == "responses" or .backend.kind? == "responses") | .provider_response_id, .usage, .provider_response_finished.output_items, .provider_terminal_event'
+# Exact Codex received text, including rejected events; do not mistake it for a terminal report.
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-websocket-response.json.zst | jq 'select(.record_kind == "received_response") | {logical_attempt, wire_dispatch_index, attempt_id, raw_events, prefix_truncated, last_received_event, last_received_event_index, last_event_truncated, accepted_terminal, capture_complete, error, error_truncated, decode_error}'
 # Failed Responses attempt: content-free class/transport facts and bounded shape.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-responses-attempt-failure.json.zst | jq '{logical_attempt, wire_dispatch_index, classification, wire, provider, transport, truncation}'
 
@@ -239,6 +242,19 @@ grep -RniE 'error|warn|panic|cache|token' ~/.local/state/tau/sessions/<session_i
 ```
 
 ## Debug watcher-visible provider status
+
+For Codex native-compaction or ordinary stream failures, inspect
+`*-websocket-response.json.zst` with `record_kind == "received_response"`.
+`raw_events` preserves exact text before decoding and validation, including the
+rejected event; `error` retains bounded internal detail and `decode_error` retains
+the original JSON error. These differ from synthetic `provider_response_finished`
+captures. Match prompt, logical attempt, wire-dispatch index and optional attempt
+ID. After the 1-MiB / 4,096-event prefix fills, `prefix_truncated` marks the gap and
+`last_received_event` retains the latest message with a one-based index and its
+own truncation flag. Failure/cancellation never claims complete unseen output;
+`accepted_terminal` describes parser acceptance, not durable compaction success.
+Capture is best effort and cannot recover bytes lost by an older running build.
+See `docs/providers.md` for transport exclusions and privacy.
 
 `agent_watch` reports only sanitized retry/work categories, saturating attempts,
 and approximate delays. Enabling or re-enabling shows the current snapshot rather

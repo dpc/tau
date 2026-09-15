@@ -652,8 +652,11 @@ admission/loss and in-flight budget tests live in
 dispatch, replacement-upgrade failure, cancellation and immutable opt-out are
 covered by deterministic loopback tests in `tau-provider-codex`.
 Native compact coverage additionally pins admission rejection, final-outcome
-validation/cancellation, compact-attempt ordinals, and absent exact-response
-capability without retaining raw compact output. The closed-writer oracle
+validation/cancellation, compact-attempt ordinals, and available exact-response
+capability. Isolated response-owner tests retain exact success and rejected text
+before decode, shape validation, and event application; they verify private error
+detail, attempt/dispatch correlation, opt-out, and bounded prefix/latest-event
+truncation without changing provider results. The closed-writer oracle
 asserts identical attempted-enqueue correlation in exact and scalar request
 captures for both inference and compaction.
 Operation-capture protocol tests reject malformed IDs and raw-class pairing;

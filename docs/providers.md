@@ -30,6 +30,39 @@ and does not alter prompts, provider traffic, retries or accounting. Other
 adapters and per-item attribution are not yet supported. See
 [Private runtime metadata](agent-cache.md#private-runtime-metadata).
 
+## Exact Codex response diagnostics
+
+Codex WebSocket attempts, including native standalone compaction, retain received
+text **before** JSON decoding and compact-shape validation. Look in the existing
+private `debug/provider-requests/<provider-instance>/*-websocket-response.json.zst`
+files for `record_kind: "received_response"`. The separate
+`provider_response_finished` record describes Tau's terminal projection; it is not
+the original received stream. Match the prompt, `logical_attempt`,
+`wire_dispatch_index`, and optional `attempt_id` to the request and scalar records.
+
+`raw_events` holds original text messages, not reserialized JSON. Each dispatch
+retains up to 1 MiB / 4,096 whole prefix messages. Once that prefix fills,
+`prefix_truncated` marks the gap and `last_received_event` retains the latest
+message (up to 1 MiB), including the event rejected by decoding or validation.
+Its one-based `last_received_event_index` and `last_event_truncated` disambiguate
+that evidence. Internal error detail is bounded to 16 KiB and marks truncation.
+`decode_error` retains the original JSON parser error.
+
+`accepted_terminal` describes this transport parser's result, not harness
+publication or successful compaction installation. `capture_complete` requires
+an accepted terminal and no truncated prefix. Failed/canceled attempts retain only
+the text actually consumed before returning: Tau does not drain unseen backend
+output for diagnostics. Upgrade failures, rejected binary/oversized frames, and
+unread queued messages have no raw text here. Prewarm and VCR replay do not acquire
+this live-response capture.
+
+These files can contain full provider payloads and must stay private. They use
+the existing exact-capture setting, owner-only storage and diagnostic retention.
+Overflow, queue pressure, write failure, timestamp collision or process exit can
+omit evidence without changing the provider result. Nothing here retries or fixes
+an incompatible backend response. Extension warnings identify JSON-decode errors
+and the precise native compact validation branch; raw payloads stay in captures.
+
 ## Provider attempt timing diagnostics
 
 Eligible durable prompts produce one bounded scalar timing record for each
