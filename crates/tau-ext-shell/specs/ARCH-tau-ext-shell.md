@@ -13,29 +13,9 @@ Verified originals waiting for or executing temp-file writes share a separate
 16 MiB admission budget; cancellation and shutdown remain visible to the writer
 so an unreported retained temp file is removed.
 
-`read_image` uses the same remembered-cwd and bounded regular-file authority as
-`read`. It reads one opened file once and accepts sniffed PNG, JPEG, or WebP
-only. Source and normalized bytes are each capped at 8 MiB; pre-decode sides are
-at most 8192 pixels and decoded area at most 16,777,216 pixels. Decoder-reported
-output is capped at 64 MiB before allocation and one extension-wide permit
-bounds concurrent decoded memory. WebP uses a stricter 4,194,304-pixel and
-32-MiB decoded-output cap because its decoder has additional workspace
-allocations. Crop and resize may temporarily hold the decoder's bounded raster
-and one equally bounded transformed raster (at most 128 MiB combined); the
-single extension-wide decode permit covers this whole preparation interval.
-Animated inputs are rejected. EXIF orientation is applied before
-an optional half-open oriented-source region crop. Metadata is stripped through
-same-format re-encoding. Bare and explicit `high` output retains the
-2048-pixel-side and 2,500-patch bounds; experimental `overview` uses 1024-side
-and 600-patch bounds. Both are provider high-detail content because overview is
-a local transform. The typed transformed image is provider/transcript data and
-therefore drives request/context accounting; generic display metadata contains
-safe source/oriented/region/output geometry, profile, patches, format, and byte
-count without bytes.
-Terminal producers measure the actual transient emit envelope against
-tau-client's shared 8 MiB outbound-frame limit. A typed image whose complete
-terminal envelope does not fit becomes a local byte-free tool error; it is never
-converted to base64 or generic text.
+Image inspection is not shell-owned. `std-utils` consumes stored originals by
+artifact key, so no-shell roles can inspect an already-permitted artifact
+without inheriting workdir, import, or local filesystem authority.
 
 ## Per-agent instance workdir metadata
 

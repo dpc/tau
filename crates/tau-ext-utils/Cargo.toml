@@ -18,12 +18,17 @@ name = "tau_ext_utils"
 workspace = true
 
 [dependencies]
+image.workspace = true
 jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tau-client.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+
 [[bin]]
 name = "tau-ext-utils"
 path = "src/main.rs"

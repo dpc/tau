@@ -21,7 +21,8 @@ probe entitlement, switch accounts, or fall back to an API key.
 Artifact availability is checked before generation. Success returns
 `{"key":"blake3:...","size":123,"mime_type":"image/png"}` for the original PNG,
 up to 16 MiB with alpha/metadata intact. Use `import(key)` for a private path on
-the shell host, then `read_image` where supported. Shared originals outlive
+the shell host for filesystem use, or pass its key directly to `read_image`
+where supported. Shared originals outlive
 sessions, including ephemeral transcripts. No inline image or store path is
 returned. Ordinary background/wait/cancel applies; failed or uncertain
 generation is never retried. Cancellation during publication may orphan the

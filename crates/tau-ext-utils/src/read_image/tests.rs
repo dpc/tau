@@ -2,6 +2,55 @@
 
 use super::*;
 
+/// Ensures the artifact-facing wrapper retains source identity and original
+/// size as safe metadata while placing pixels only in typed provider content.
+#[test]
+fn artifact_request_prepares_typed_content_without_path_authority() {
+    let source = DynamicImage::new_rgb8(4, 3);
+    let mut bytes = Cursor::new(Vec::new());
+    source
+        .write_to(&mut bytes, ImageFormat::Png)
+        .expect("encode fixture");
+    let key = ArtifactKey::parse(format!("blake3:{}", "0".repeat(64))).expect("artifact key");
+    let request = ReadImageRequest::from_arguments(&CborValue::Map(vec![(
+        CborValue::Text("key".to_owned()),
+        CborValue::Text(key.to_string()),
+    )]))
+    .expect("request");
+    let output = request
+        .prepare(bytes.get_ref(), bytes.get_ref().len() as u64)
+        .expect("prepare");
+    assert_eq!(output.provider_content.len(), 1);
+    assert!(matches!(
+        output.provider_content.as_slice(),
+        [ToolResultContentPart::Image(_)]
+    ));
+    assert_eq!(
+        tau_proto::cbor_text_field(&output.result, "key"),
+        Some(key.to_string())
+    );
+    assert_eq!(
+        tau_proto::cbor_int_field(&output.result, "original_bytes"),
+        Some(bytes.get_ref().len() as i128)
+    );
+}
+
+/// Ensures the new public boundary accepts only canonical artifact keys and
+/// does not retain the retired filesystem path union.
+#[test]
+fn artifact_request_rejects_path_and_noncanonical_key() {
+    let path_only = CborValue::Map(vec![(
+        CborValue::Text("path".to_owned()),
+        CborValue::Text("fixture.png".to_owned()),
+    )]);
+    assert!(ReadImageRequest::from_arguments(&path_only).is_err());
+    let invalid = CborValue::Map(vec![(
+        CborValue::Text("key".to_owned()),
+        CborValue::Text("not-a-key".to_owned()),
+    )]);
+    assert!(ReadImageRequest::from_arguments(&invalid).is_err());
+}
+
 /// Ensures every v1 format is decoded and deterministically re-encoded as
 /// the same closed media type while retaining truthful dimensions.
 #[test]

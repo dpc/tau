@@ -14,8 +14,9 @@ Use when asked to verify Tau tool behavior or Tau tool-verification skills.
 Tau exposes different tool sets depending on configuration, provider/model
 capabilities, and extension setup. Common sets include:
 
-* ext-shell's `read`, `read_image`, `export`, `import`, `edit`, and `shell` tools, plus related
-  tools such as `dir_lock`; `read_image` appears only on explicitly
+* ext-shell's `read`, `export`, `import`, `edit`, and `shell` tools, plus related
+  tools such as `dir_lock`, and std-utils' artifact-backed `read_image`;
+  `read_image` appears only on explicitly
   image-capable provider routes;
 * provider/native tools such as `apply_patch` and `shell_command`.
 
@@ -34,7 +35,8 @@ available.
 When `export` and `import` are exposed, verify a small original round trip:
 export a local regular file, import the returned `blake3:` key, compare the
 imported local file byte-for-byte, and confirm its private non-executable
-permissions. For an image original, pass the imported path to `read_image`.
+permissions. For an image original, pass the artifact key directly to
+`read_image`; import is needed only for filesystem tools.
 Do not inspect harness State paths or treat the digest as provenance or safety.
 
 ## Goal

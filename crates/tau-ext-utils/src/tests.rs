@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -283,9 +283,11 @@ fn runtime_with_timezone_provider(
         reported_timer_agents: HashSet::new(),
         timer_tool_name: None,
         papercut_tool_name: None,
+        read_image_tool_name: None,
         bound_session_id: None,
         session_active: false,
         papercut_storage: None,
+        artifact_images: None,
     }
 }
 
@@ -1426,7 +1428,7 @@ fn papercut_config_defaults_on_and_gates_visibility_and_prompt() {
     assert!(default.papercut.enable);
     assert!(!disabled.papercut.enable);
     assert!(enabled.papercut.enable);
-    assert_eq!(tool_registrations(false).len(), 1);
+    assert_eq!(tool_registrations(false).len(), 2);
     let registrations = tool_registrations(true);
     let papercut = registrations
         .iter()
@@ -1458,12 +1460,15 @@ fn papercut_runtime_startup_defaults_on_and_honors_false_override() {
 
     assert_eq!(
         declared_tool_names(&default),
-        ["work_timer", "work_papercut"]
+        ["work_timer", "work_read_image", "work_papercut"]
     );
-    assert_eq!(declared_tool_names(&disabled), ["work_timer"]);
+    assert_eq!(
+        declared_tool_names(&disabled),
+        ["work_timer", "work_read_image"]
+    );
     assert_eq!(
         declared_tool_names(&enabled),
-        ["work_timer", "work_papercut"]
+        ["work_timer", "work_read_image", "work_papercut"]
     );
     for frames in [&disabled, &enabled] {
         let ready = frames
@@ -1486,6 +1491,530 @@ fn papercut_runtime_startup_defaults_on_and_honors_false_override() {
             })
             .expect("tool declaration");
         assert!(last_declaration < ready);
+    }
+}
+
+/// Locks the artifact-key schema, independent policy tag, and foreground-only
+/// typed-image declaration at the utility ownership boundary.
+#[test]
+fn read_image_registration_uses_artifact_key_and_image_route_gating() {
+    let tool = read_image_tool_spec();
+    assert_eq!(tool.provider_scope, None);
+    assert_eq!(
+        tool.background_support,
+        Some(tau_proto::BackgroundSupport::Never)
+    );
+    assert_eq!(
+        tool.tags.iter().map(|tag| tag.as_str()).collect::<Vec<_>>(),
+        [
+            "artifact:read:image",
+            "provider-content:image",
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        ]
+    );
+    let parameters = tool.parameters.expect("parameters");
+    assert_eq!(parameters["required"], serde_json::json!(["key"]));
+    assert!(parameters["properties"].get("path").is_none());
+    assert_eq!(
+        parameters["properties"]["mode"]["enum"],
+        serde_json::json!(["high", "overview"])
+    );
+}
+
+/// Exercises the real utility protocol loop from artifact-key invocation
+/// through verified download, bounded preparation, and one typed terminal.
+#[cfg(unix)]
+#[test]
+fn read_image_downloads_verified_artifact_and_reports_typed_image() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+
+    let source = image::DynamicImage::new_rgb8(4, 3);
+    let mut encoded = Cursor::new(Vec::new());
+    source
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode PNG");
+    let bytes = encoded.into_inner();
+    let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+        .expect("artifact key");
+    let descriptor =
+        tau_proto::ArtifactDescriptor::new(key.clone(), bytes.len() as u64).expect("descriptor");
+
+    let (harness, extension) = UnixStream::pair().expect("socket pair");
+    let extension_reader = extension.try_clone().expect("clone extension socket");
+    let done =
+        thread::spawn(move || run(extension_reader, extension).map_err(|error| error.to_string()));
+    let harness_reader = harness.try_clone().expect("clone harness socket");
+    let mut reader = HarnessInputReader::new(BufReader::new(harness_reader));
+    let mut writer = HarnessOutputWriter::new(harness);
+
+    writer
+        .write_message(&HarnessOutputMessage::Configure(Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
+            tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+            instance_name: tau_proto::ExtensionName::parse("std-utils").expect("instance"),
+            config: cbor_map(vec![(
+                "papercut",
+                cbor_map(vec![("enable", CborValue::Bool(false))]),
+            )]),
+            state_dir: None,
+            secrets: BTreeMap::new(),
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    writer.flush().expect("flush configure");
+    loop {
+        let frame = reader
+            .read_message()
+            .expect("startup frame")
+            .expect("startup");
+        if matches!(frame, HarnessInputMessage::Ready(_)) {
+            break;
+        }
+    }
+
+    let session_id = tau_proto::SessionId::parse("session-image").expect("session");
+    writer
+        .write_message(&HarnessOutputMessage::Deliver(
+            tau_proto::EventDelivery::live(
+                UnixMicros::new(1),
+                Event::SessionStarted(tau_proto::SessionStarted {
+                    session_id: session_id.clone(),
+                    reason: tau_proto::SessionStartReason::Initial,
+                }),
+            ),
+        ))
+        .expect("session");
+    writer
+        .write_message(&HarnessOutputMessage::Deliver(
+            tau_proto::EventDelivery::live(
+                UnixMicros::new(2),
+                Event::ToolStarted(ToolStarted {
+                    invocation_policy: Default::default(),
+                    call_id: ToolCallId::new("image-call"),
+                    tool_name: tau_proto::ToolName::new("work_read_image"),
+                    arguments: cbor_map(vec![("key", CborValue::Text(key.to_string()))]),
+                    agent_id: AgentId::parse("agent-image").expect("agent"),
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            ),
+        ))
+        .expect("tool start");
+    writer.flush().expect("flush start");
+
+    let open = loop {
+        let frame = reader
+            .read_message()
+            .expect("request")
+            .expect("request frame");
+        if let HarnessInputMessage::ArtifactRequest(request) = frame {
+            break request;
+        }
+    };
+    assert_eq!(open.expected_session_id, session_id);
+    assert!(matches!(open.op, tau_proto::ArtifactOp::Open { .. }));
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: open.request_id,
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("read-image").expect("read id"),
+                    descriptor,
+                }),
+            },
+        )))
+        .expect("open result");
+    writer.flush().expect("flush open");
+
+    let read = loop {
+        let frame = reader.read_message().expect("read request").expect("frame");
+        if let HarnessInputMessage::ArtifactRequest(request) = frame {
+            break request;
+        }
+    };
+    assert!(matches!(
+        read.op,
+        tau_proto::ArtifactOp::Read { offset: 0, .. }
+    ));
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: read.request_id,
+                result: Ok(tau_proto::ArtifactValue::Chunk {
+                    offset: 0,
+                    bytes: bytes.clone(),
+                    eof: true,
+                }),
+            },
+        )))
+        .expect("read result");
+    writer.flush().expect("flush read");
+
+    let close = loop {
+        let frame = reader
+            .read_message()
+            .expect("close request")
+            .expect("frame");
+        if let HarnessInputMessage::ArtifactRequest(request) = frame {
+            break request;
+        }
+    };
+    assert!(matches!(close.op, tau_proto::ArtifactOp::Close { .. }));
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: close.request_id,
+                result: Ok(tau_proto::ArtifactValue::Done),
+            },
+        )))
+        .expect("close result");
+    writer.flush().expect("flush close");
+
+    let result = loop {
+        let frame = reader.read_message().expect("terminal").expect("frame");
+        let HarnessInputMessage::Emit(emit) = frame else {
+            continue;
+        };
+        if let Event::ToolResultReported(result) = *emit.event {
+            break result;
+        }
+    };
+    assert_eq!(result.call_id.as_str(), "image-call");
+    assert!(matches!(
+        result.provider_content.as_slice(),
+        [tau_proto::ToolResultContentPart::Image(_)]
+    ));
+
+    for index in 0..=crate::artifact_image::MAX_ACTIVE_READS {
+        send_read_image_start(
+            &mut writer,
+            &key,
+            &format!("bounded-{index}"),
+            10 + index as u64,
+        );
+    }
+    writer.flush().expect("flush bounded starts");
+    let mut bounded_opens = Vec::new();
+    let mut saw_busy = false;
+    while bounded_opens.len() < crate::artifact_image::MAX_ACTIVE_READS || !saw_busy {
+        match reader
+            .read_message()
+            .expect("bounded output")
+            .expect("frame")
+        {
+            HarnessInputMessage::ArtifactRequest(request) => bounded_opens.push(request),
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ToolErrorReported(error) = *emit.event
+                    && error.call_id.as_str() == "bounded-8"
+                {
+                    assert_eq!(error.message, "too many active image reads");
+                    saw_busy = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    for index in 0..crate::artifact_image::MAX_ACTIVE_READS {
+        send_read_image_cancel(&mut writer, &format!("bounded-{index}"), 30 + index as u64);
+    }
+    writer.flush().expect("flush bounded cancellations");
+    let mut cancelled = 0;
+    while cancelled < crate::artifact_image::MAX_ACTIVE_READS {
+        let frame = reader
+            .read_message()
+            .expect("bounded cancellation")
+            .expect("frame");
+        if matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(*emit.event, Event::ToolCancelledReported(_))
+        ) {
+            cancelled += 1;
+        }
+    }
+
+    send_read_image_start(&mut writer, &key, "oversized", 50);
+    writer.flush().expect("flush oversized start");
+    let oversized_open = next_artifact_request(&mut reader);
+    let oversized_descriptor = tau_proto::ArtifactDescriptor::new(
+        key.clone(),
+        (crate::read_image::MAX_SOURCE_BYTES + 1) as u64,
+    )
+    .expect("oversized descriptor within Artifact limit");
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: tau_proto::ArtifactRequestId::parse("stale-response")
+                    .expect("request id"),
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("stale-read").expect("read id"),
+                    descriptor: oversized_descriptor.clone(),
+                }),
+            },
+        )))
+        .expect("stale response");
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: oversized_open.request_id,
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("oversized-read").expect("read id"),
+                    descriptor: oversized_descriptor,
+                }),
+            },
+        )))
+        .expect("oversized response");
+    writer.flush().expect("flush oversized response");
+    let mut saw_close = false;
+    let mut saw_oversized_error = false;
+    while !saw_close || !saw_oversized_error {
+        match reader
+            .read_message()
+            .expect("oversized output")
+            .expect("frame")
+        {
+            HarnessInputMessage::ArtifactRequest(request) => {
+                assert!(
+                    matches!(request.op, tau_proto::ArtifactOp::Close { .. }),
+                    "oversized descriptor must not issue Read"
+                );
+                saw_close = true;
+            }
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ToolErrorReported(error) = *emit.event
+                    && error.call_id.as_str() == "oversized"
+                {
+                    assert!(error.message.contains("inspection limit"));
+                    saw_oversized_error = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    send_read_image_start(&mut writer, &key, "cancel-open", 55);
+    writer.flush().expect("flush cancellable start");
+    let cancellable_open = next_artifact_request(&mut reader);
+    let cancellable_descriptor =
+        tau_proto::ArtifactDescriptor::new(key.clone(), bytes.len() as u64).expect("descriptor");
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: cancellable_open.request_id,
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("cancellable-read").expect("read id"),
+                    descriptor: cancellable_descriptor,
+                }),
+            },
+        )))
+        .expect("cancellable open");
+    writer.flush().expect("flush cancellable open");
+    let stale_read = next_artifact_request(&mut reader);
+    send_read_image_cancel(&mut writer, "cancel-open", 56);
+    writer.flush().expect("flush open cancellation");
+    let mut saw_cancel_close = false;
+    let mut saw_cancel_terminal = false;
+    while !saw_cancel_close || !saw_cancel_terminal {
+        match reader
+            .read_message()
+            .expect("open cancellation output")
+            .expect("frame")
+        {
+            HarnessInputMessage::ArtifactRequest(request) => {
+                assert!(matches!(request.op, tau_proto::ArtifactOp::Close { .. }));
+                saw_cancel_close = true;
+            }
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ToolCancelledReported(cancelled) = *emit.event
+                    && cancelled.call_id.as_str() == "cancel-open"
+                {
+                    saw_cancel_terminal = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: stale_read.request_id,
+                result: Ok(tau_proto::ArtifactValue::Chunk {
+                    offset: 0,
+                    bytes: bytes.clone(),
+                    eof: true,
+                }),
+            },
+        )))
+        .expect("stale read response");
+
+    send_read_image_start(&mut writer, &key, "cancel-race", 60);
+    writer.flush().expect("flush race start");
+    let race_open = next_artifact_request(&mut reader);
+    let race_descriptor =
+        tau_proto::ArtifactDescriptor::new(key.clone(), bytes.len() as u64).expect("descriptor");
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: race_open.request_id,
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("race-read").expect("read id"),
+                    descriptor: race_descriptor,
+                }),
+            },
+        )))
+        .expect("race open");
+    writer.flush().expect("flush race open");
+    let race_read = next_artifact_request(&mut reader);
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: race_read.request_id,
+                result: Ok(tau_proto::ArtifactValue::Chunk {
+                    offset: 0,
+                    bytes: bytes.clone(),
+                    eof: true,
+                }),
+            },
+        )))
+        .expect("race read");
+    writer.flush().expect("flush race read");
+    let race_close = next_artifact_request(&mut reader);
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: race_close.request_id,
+                result: Ok(tau_proto::ArtifactValue::Done),
+            },
+        )))
+        .expect("race close");
+    send_read_image_cancel(&mut writer, "cancel-race", 61);
+    writer
+        .flush()
+        .expect("flush race completion and cancellation");
+    loop {
+        let frame = reader
+            .read_message()
+            .expect("race terminal")
+            .expect("frame");
+        let HarnessInputMessage::Emit(emit) = frame else {
+            continue;
+        };
+        match *emit.event {
+            Event::ToolCancelledReported(cancelled)
+                if cancelled.call_id.as_str() == "cancel-race" =>
+            {
+                break;
+            }
+            Event::ToolResultReported(result) if result.call_id.as_str() == "cancel-race" => {
+                panic!("queued cancellation lost to unreported decoder completion");
+            }
+            _ => {}
+        }
+    }
+
+    send_read_image_start(&mut writer, &key, "shutdown-open", 70);
+    writer.flush().expect("flush shutdown start");
+    let shutdown_open = next_artifact_request(&mut reader);
+    let shutdown_descriptor =
+        tau_proto::ArtifactDescriptor::new(key.clone(), bytes.len() as u64).expect("descriptor");
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: shutdown_open.request_id,
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("shutdown-read").expect("read id"),
+                    descriptor: shutdown_descriptor,
+                }),
+            },
+        )))
+        .expect("shutdown open");
+    writer.flush().expect("flush shutdown open");
+    let _shutdown_read = next_artifact_request(&mut reader);
+    writer
+        .write_message(&HarnessOutputMessage::Deliver(
+            tau_proto::EventDelivery::live(
+                UnixMicros::new(71),
+                Event::SessionShutdown(tau_proto::SessionShutdown { session_id }),
+            ),
+        ))
+        .expect("session shutdown");
+    writer.flush().expect("flush shutdown");
+    let shutdown_close = next_artifact_request(&mut reader);
+    assert!(matches!(
+        shutdown_close.op,
+        tau_proto::ArtifactOp::Close { .. }
+    ));
+
+    writer
+        .write_message(&HarnessOutputMessage::Disconnect(
+            tau_proto::Disconnect::default(),
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush disconnect");
+    done.join()
+        .expect("extension thread")
+        .expect("extension completes");
+}
+
+#[cfg(unix)]
+fn send_read_image_start<W: Write>(
+    writer: &mut HarnessOutputWriter<W>,
+    key: &tau_proto::ArtifactKey,
+    call_id: &str,
+    timestamp: u64,
+) {
+    writer
+        .write_message(&HarnessOutputMessage::Deliver(
+            tau_proto::EventDelivery::live(
+                UnixMicros::new(timestamp),
+                Event::ToolStarted(ToolStarted {
+                    invocation_policy: Default::default(),
+                    call_id: ToolCallId::new(call_id),
+                    tool_name: tau_proto::ToolName::new("work_read_image"),
+                    arguments: cbor_map(vec![("key", CborValue::Text(key.to_string()))]),
+                    agent_id: AgentId::parse("agent-image").expect("agent"),
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            ),
+        ))
+        .expect("tool start");
+}
+
+#[cfg(unix)]
+fn send_read_image_cancel<W: Write>(
+    writer: &mut HarnessOutputWriter<W>,
+    call_id: &str,
+    timestamp: u64,
+) {
+    writer
+        .write_message(&HarnessOutputMessage::Deliver(
+            tau_proto::EventDelivery::live(
+                UnixMicros::new(timestamp),
+                Event::ToolCancelled(tau_proto::ToolCancelled {
+                    call_id: ToolCallId::new(call_id),
+                    tool_name: tau_proto::ToolName::new("work_read_image"),
+                    tool_type: ToolType::Function,
+                    presentation: Default::default(),
+                    display: None,
+                }),
+            ),
+        ))
+        .expect("tool cancellation");
+}
+
+#[cfg(unix)]
+fn next_artifact_request<R: Read>(
+    reader: &mut HarnessInputReader<R>,
+) -> tau_proto::ArtifactRequest {
+    loop {
+        let frame = reader
+            .read_message()
+            .expect("artifact request")
+            .expect("frame");
+        if let HarnessInputMessage::ArtifactRequest(request) = frame {
+            return request;
+        }
     }
 }
 

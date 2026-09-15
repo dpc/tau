@@ -3,16 +3,7 @@
 This document owns the evolving test catalog for shell tools. Behavioral authority
 remains in the applicable Linked Specs.
 
-## Images, protocol, and UI
-
-Image tests use deterministic PNG/JPEG/WebP fixtures to cover sniffing, animation
-rejection, allocation and workspace budgets, geometry, EXIF orientation before
-crop, and crop failures. They distinguish provider content from display metadata.
-The opt-in real-provider oracle is documented in
-[`read_image` visual-fidelity oracle](../../docs/read-image-fidelity-oracle.md).
-Cross-crate provider tests own Responses wire shape, Lite detail omission,
-fail-closed routing, request-wide raw and data-URL budgets, and digest-preserving
-data-URL redaction.
+## Protocol and UI
 
 Registration tests assert model-visible schemas and validate provider-owned
 examples with `tau_core::validate_tool_examples`; custom/freeform examples receive
@@ -33,11 +24,10 @@ escaped paths, and partial failures. CLI rendering tests require exactly one
 path header per changed file before its hunks.
 Complete-terminal frame tests measure the exact transient emit envelope at the
 shared 8 MiB boundary, including producer output after local-to-wire tool-name
-scoping. They also require oversized typed images to become byte-free local
-errors and require singular edit/replace and path-labelled apply-patch UI diffs
-to become explicit truncation markers while success, partial-failure details,
-display facts, and changed paths remain intact. A focused duplicated-path-label
-case requires the rewritten final frame itself to fit.
+scoping. They require singular edit/replace and path-labelled apply-patch UI
+diffs to become explicit truncation markers while success, partial-failure
+details, display facts, and changed paths remain intact. A focused
+duplicated-path-label case requires the rewritten final frame itself to fit.
 
 Workdir coverage includes initialization, replay precedence, malformed state,
 setter admission/commit/cancellation, concurrent rejection, and call-local
@@ -54,7 +44,8 @@ post-completion-commit transcript injection.
 Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
 Artifact coverage drives fake correlated export and import RPC responses, proves
 original-byte equality and private imported-file permissions, and passes the
-returned path through the existing typed `read_image` surface.
+returned path as an ordinary filesystem artifact; image inspection consumes
+the stored key directly through `std-utils`.
 the removed GPT `cwd` spelling appears only in an explicitly named legacy
 compatibility test.
 Allowlist coverage distinguishes absent from empty configuration, validates

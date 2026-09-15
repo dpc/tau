@@ -2623,7 +2623,6 @@ impl Harness {
                     matches!(
                         tag.as_str(),
                         "shell:edit:apply_patch"
-                            | "shell:read:image"
                             | "shell:exec:shell_command"
                             | "shell:workdir"
                             | "shell:lock"

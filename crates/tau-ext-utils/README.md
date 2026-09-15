@@ -1,7 +1,13 @@
 # std-utils
 
-`std-utils` provides the normal `timer` tool and a default-enabled best-effort
-`papercut` reporter. Its model-visible guidance says: “Use this tool only if you
+`std-utils` provides the normal `timer` and artifact-backed `read_image` tools,
+plus a default-enabled best-effort `papercut` reporter. `read_image(key)` verifies
+one immutable original through Artifact RPC, then applies the existing bounded
+PNG/JPEG/WebP preparation profiles and returns one typed image tool result. It
+does not grant filesystem or shell authority, and Artifact reads do not renew
+original retention age.
+
+The reporter's model-visible guidance says: “Use this tool only if you
 encounter an incidental Tau harness, tooling, environment, confusing, or suspicious
 problem. Record one concise, best-effort report, then continue the primary task. Do
 not call it merely to state that no problem occurred, and do not retry.”

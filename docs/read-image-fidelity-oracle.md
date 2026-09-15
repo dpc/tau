@@ -35,8 +35,10 @@ Replay verifies ordinary VCR integration but the oracle intentionally refuses
 it because replay is not new live-fidelity evidence. Preserve each unique trial
 directory with its dated trial id and record the command, candidate change id,
 model route, and three isolated outcomes. Each profile uses an independent
-provider turn, and the test checks byte-free terminal transform metadata so a
-wrong mode or crop cannot borrow answers from a retained high image.
+provider turn that exports the fixture to Artifact storage before passing its
+returned key to `read_image`. The test checks byte-free terminal transform
+metadata so a wrong mode or crop cannot borrow answers from a retained high
+image.
 
 Before changing the default or normative guidance, run at least ten fresh live
 trials on each supported Sol/Terra/Luna route. The fixed smoke fixture must pass

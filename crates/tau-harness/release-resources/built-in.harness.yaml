@@ -40,7 +40,7 @@ tool_policy:
         - shell:*
       enable_tool_tags:
         - shell:edit:apply_patch
-        - shell:read:image
+        - artifact:read:image
         - shell:exec:shell_command
         - shell:workdir
         - shell:lock

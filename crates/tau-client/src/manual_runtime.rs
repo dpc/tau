@@ -677,6 +677,15 @@ impl<State> ManualExtensionRuntime<State> {
         let _ = self.wake_receiver.recv();
     }
 
+    /// Blocks until harness input, caller-owned work, or the timeout wakes this
+    /// runtime.
+    ///
+    /// A timeout is only a wakeup hint. Callers must drain all ready inputs and
+    /// side channels after this returns, just as with [`Self::wait_for_wake`].
+    pub fn wait_for_wake_timeout(&self, timeout: Duration) {
+        let _ = self.wake_receiver.recv_timeout(timeout);
+    }
+
     /// Sends one extension-data request and waits for its correlated response.
     ///
     /// This call has no timeout and may wait indefinitely if the harness never

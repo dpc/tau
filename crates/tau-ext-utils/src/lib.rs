@@ -5,8 +5,10 @@
 //! tool and prompt facts; papercuts append independent diagnostic JSONL records
 //! through harness-managed per-instance storage.
 
+mod artifact_image;
 mod daily_schedule;
 mod host_timezone;
+mod read_image;
 #[cfg(test)]
 mod tests;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +36,8 @@ pub const EXTENSION_NAME: &str = "tau-ext-utils";
 pub const TIMER_TOOL_NAME: &str = "timer";
 /// Model-visible best-effort diagnostic reporting tool name.
 pub const PAPERCUT_TOOL_NAME: &str = "papercut";
+/// Model-visible artifact image inspection tool name.
+pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
 const PAPERCUT_MODEL_GUIDANCE: &str = "Use this tool only if you encounter an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Record one concise, best-effort report, then continue the primary task. Do not call it merely to state that no problem occurred, and do not retry.";
 
 /// Canonical JSONL filename owned by the standard papercut reporter.
@@ -53,6 +57,7 @@ const MAX_LIST_TIMERS: usize = 64;
 /// Maximum wait also bounding live host-timezone polling cadence.
 const MAX_TIMER_WAIT: Duration = Duration::from_secs(60);
 const HOST_TIMEZONE_REFRESH_SECONDS: u64 = 60;
+const MAX_INPUT_BATCH: usize = 64;
 
 /// Run the extension on stdin/stdout.
 ///
@@ -176,6 +181,8 @@ struct TimerRuntime {
     /// Configured wire name for papercut calls after optional tool-prefix
     /// scoping.
     papercut_tool_name: Option<tau_proto::ToolName>,
+    /// Configured wire name for artifact image reads.
+    read_image_tool_name: Option<tau_proto::ToolName>,
     /// Harness-authoritative immutable session identifier for papercut
     /// attribution.
     bound_session_id: Option<tau_proto::SessionId>,
@@ -184,6 +191,8 @@ struct TimerRuntime {
     /// Optional per-instance User-scope append service enabled by extension
     /// configuration.
     papercut_storage: Option<Box<dyn PapercutStorage>>,
+    /// Artifact-backed image reads and bounded decoder lifecycle.
+    artifact_images: Option<artifact_image::ArtifactImageManager>,
 }
 
 /// Closed operator configuration for this extension instance.
@@ -566,7 +575,7 @@ impl FireRecord {
 impl TimerRuntime {
     fn new(handle: ClientHandle) -> Self {
         Self {
-            handle: Some(handle),
+            handle: Some(handle.clone()),
             timers: HashMap::new(),
             timezone_provider: Box::new(SystemHostTimezoneProvider),
             local_timezone: None,
@@ -576,41 +585,76 @@ impl TimerRuntime {
             reported_timer_agents: HashSet::new(),
             timer_tool_name: None,
             papercut_tool_name: None,
+            read_image_tool_name: None,
             bound_session_id: None,
             session_active: false,
             papercut_storage: None,
+            artifact_images: Some(artifact_image::ArtifactImageManager::new(handle)),
         }
     }
 
+    fn is_read_image_tool(&self, tool_name: &tau_proto::ToolName) -> bool {
+        self.read_image_tool_name.as_ref() == Some(tool_name)
+    }
+
     fn run(mut runtime: ManualExtensionRuntime<Self>) -> ClientResult<()> {
+        let waker = runtime.waker();
+        runtime
+            .state_mut()
+            .artifact_images
+            .as_mut()
+            .expect("production image manager")
+            .install_waker(waker);
         loop {
-            let input = match recv_next(&mut runtime) {
-                Ok(input) => input,
-                Err(error) => return finish_with_error(runtime, error),
-            };
-            match input {
-                LoopInput::Message(message) => {
-                    if matches!(message, tau_proto::HarnessOutputMessage::Disconnect(_)) {
-                        let _state = runtime.finish_detached();
+            let mut input_empty = false;
+            for _ in 0..MAX_INPUT_BATCH {
+                let input = match runtime.try_recv() {
+                    Ok(input) => input,
+                    Err(error) => return finish_with_error(runtime, error),
+                };
+                match input {
+                    tau_client::ManualRuntimePoll::Message(message) => {
+                        if matches!(message, tau_proto::HarnessOutputMessage::Disconnect(_)) {
+                            if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
+                                images.shutdown();
+                            }
+                            let _state = runtime.finish_detached();
+                            return Ok(());
+                        }
+                        if let tau_proto::HarnessOutputMessage::ArtifactResult(result) = message {
+                            if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
+                                images.handle_result(*result);
+                            }
+                        } else if let Err(error) = handle_delivery(&mut runtime, message) {
+                            return finish_with_error(runtime, error);
+                        }
+                    }
+                    tau_client::ManualRuntimePoll::InputClosed => {
+                        if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
+                            images.shutdown();
+                        }
+                        let _state = runtime.finish()?;
                         return Ok(());
                     }
-                    if let Err(error) = handle_delivery(&mut runtime, message) {
-                        return finish_with_error(runtime, error);
-                    }
-                    if let Err(error) = runtime.state_mut().fire_due_now() {
-                        return finish_with_error(runtime, error);
+                    tau_client::ManualRuntimePoll::Empty => {
+                        input_empty = true;
+                        break;
                     }
                 }
-                LoopInput::Timeout => {
-                    if let Err(error) = runtime.state_mut().fire_due_now() {
-                        return finish_with_error(runtime, error);
-                    }
+            }
+            if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
+                images.drain();
+                if let Some(error) = images.take_output_error() {
+                    return finish_with_error(runtime, error);
                 }
-                LoopInput::InputClosed => break,
+            }
+            if let Err(error) = runtime.state_mut().fire_due_now() {
+                return finish_with_error(runtime, error);
+            }
+            if input_empty {
+                runtime.wait_for_wake_timeout(runtime.state().next_deadline_duration());
             }
         }
-        let _state = runtime.finish()?;
-        Ok(())
     }
 
     fn next_deadline_duration(&self) -> Duration {
@@ -1249,20 +1293,6 @@ fn finish_with_error(
     }
 }
 
-enum LoopInput {
-    Message(tau_proto::HarnessOutputMessage),
-    Timeout,
-    InputClosed,
-}
-
-fn recv_next(runtime: &mut ManualExtensionRuntime<TimerRuntime>) -> ClientResult<LoopInput> {
-    match runtime.recv_timeout(runtime.state().next_deadline_duration())? {
-        ManualRuntimeInput::Message(message) => Ok(LoopInput::Message(message)),
-        ManualRuntimeInput::Timeout => Ok(LoopInput::Timeout),
-        ManualRuntimeInput::InputClosed => Ok(LoopInput::InputClosed),
-    }
-}
-
 fn read_initial_config(
     runtime: &mut ManualExtensionRuntime<TimerRuntime>,
 ) -> ClientResult<Option<tau_proto::Configure>> {
@@ -1288,10 +1318,12 @@ fn send_startup(
     let handle = runtime.handle();
     let scope = handle.tool_name_scope()?;
     let timer_tool_name = scope.wire_tool(TIMER_TOOL_NAME)?;
+    let read_image_tool_name = scope.wire_tool(READ_IMAGE_TOOL_NAME)?;
     let papercut_tool_name = papercut_enabled
         .then(|| scope.wire_tool(PAPERCUT_TOOL_NAME))
         .transpose()?;
     runtime.state_mut().timer_tool_name = Some(timer_tool_name);
+    runtime.state_mut().read_image_tool_name = Some(read_image_tool_name);
     runtime.state_mut().papercut_tool_name = papercut_tool_name;
     runtime.startup_subscribe_split(
         [
@@ -1309,6 +1341,7 @@ fn send_startup(
             EventSelector::Exact(EventName::SESSION_STARTED),
             EventSelector::Exact(EventName::SESSION_SHUTDOWN),
             EventSelector::Exact(EventName::SESSION_AGENT_UNLOADED),
+            EventSelector::Exact(EventName::TOOL_CANCELLED),
         ],
     )?;
     for registration in tool_registrations(papercut_enabled) {
@@ -1318,11 +1351,22 @@ fn send_startup(
 }
 
 fn tool_registrations(papercut_enabled: bool) -> Vec<tau_proto::ToolRegistrationDeclared> {
-    let mut registrations = vec![timer_registration()];
+    let mut registrations = vec![timer_registration(), read_image_registration()];
     if papercut_enabled {
         registrations.push(papercut_registration());
     }
     registrations
+}
+
+fn read_image_registration() -> tau_proto::ToolRegistrationDeclared {
+    tau_proto::ToolRegistrationDeclared {
+        tool: read_image_tool_spec(),
+        tool_group: Some(tau_proto::ToolGroup {
+            name: tau_proto::ToolGroupName::new("artifact"),
+            prompt_fragment: None,
+        }),
+        prompt_fragment: None,
+    }
 }
 
 fn timer_registration() -> tau_proto::ToolRegistrationDeclared {
@@ -1395,6 +1439,16 @@ fn handle_delivery(
         Event::ToolStarted(invoke) if runtime.state().is_papercut_tool(&invoke.tool_name) => {
             report_papercut_tool(runtime.state(), runtime.handle(), invoke)?;
         }
+        Event::ToolStarted(invoke) if runtime.state().is_read_image_tool(&invoke.tool_name) => {
+            if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
+                images.start(invoke.clone());
+            }
+        }
+        Event::ToolCancelled(cancelled) => {
+            if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
+                images.cancel(cancelled);
+            }
+        }
         Event::AgentReplayComplete(event) => runtime.state_mut().complete_agent_replay(event)?,
         Event::SessionStarted(event) => match runtime.state().bound_session_id.as_ref() {
             Some(current) if current != &event.session_id => {
@@ -1408,6 +1462,12 @@ fn handle_delivery(
                 runtime.state_mut().clear_session_state();
                 runtime.state_mut().bound_session_id = Some(event.session_id.clone());
                 runtime.state_mut().session_active = true;
+                runtime
+                    .state_mut()
+                    .artifact_images
+                    .as_mut()
+                    .expect("production image manager")
+                    .bind_session(event.session_id.clone());
             }
         },
         Event::SessionShutdown(shutdown) => {
@@ -1417,6 +1477,9 @@ fn handle_delivery(
                 ));
             }
             runtime.state_mut().clear_session_state();
+            if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
+                images.shutdown();
+            }
         }
         Event::SessionAgentUnloaded(event) => {
             runtime.state_mut().unload_agent(&event.agent_id);
@@ -1694,6 +1757,58 @@ fn papercut_tool_spec() -> ToolSpec {
         )],
         enabled_by_default: true,
         background_support: None,
+        examples: vec![],
+    }
+}
+
+fn read_image_tool_spec() -> ToolSpec {
+    ToolSpec {
+        provider_scope: None,
+        name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Read one stored artifact image for visual inspection. The artifact must already exist \
+             in configured persistent storage."
+                .to_owned(),
+        ),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Canonical BLAKE3 artifact key for one PNG, JPEG, or WebP image"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["high", "overview"],
+                    "default": "high",
+                    "description": "Local preparation profile. `high` (the default) preserves the existing 2048-side/2500-patch bounds. `overview` is experimental, intended only for coarse inspection, and is bounded to 1024 pixels on a side and 600 32px patches."
+                },
+                "region": {
+                    "type": "object",
+                    "description": "Optional crop in pixels of the EXIF-oriented source raster, before mode resizing. Uses a top-left origin and half-open extents.",
+                    "properties": {
+                        "x": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
+                        "y": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
+                        "width": {"type": "integer", "minimum": 1, "maximum": u32::MAX},
+                        "height": {"type": "integer", "minimum": 1, "maximum": u32::MAX}
+                    },
+                    "required": ["x", "y", "width", "height"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["key"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: vec![
+            tau_proto::ToolTag::new("artifact:read:image"),
+            tau_proto::ToolTag::new("provider-content:image"),
+            tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG),
+        ],
+        enabled_by_default: true,
+        background_support: Some(tau_proto::BackgroundSupport::Never),
         examples: vec![],
     }
 }

@@ -18,9 +18,10 @@ ordered typed image content as canonical encoded bytes, closed MIME type,
 dimensions, and high provider detail. Provider adapters lower that semantic
 content only on explicitly audited routes.
 
-The first surface is `tau-ext-shell`'s one-image `read_image(path)` tool. It
-inherits the extension's ordinary filesystem authority and session lifecycle.
-It accepts PNG, JPEG, and WebP, reads an opened regular file once, enforces
+The provider-independent surface is `tau-ext-utils`'s one-image
+`read_image(key)` tool. It verifies immutable original bytes through the
+existing directed Artifact RPC without granting shell, workdir, import, or
+provider-account authority. It accepts PNG, JPEG, and WebP and enforces
 source, decoded-allocation, dimension, pixel, output, record, and provider
 request bounds, rejects animation, applies orientation, strips metadata by
 re-encoding, and prepares pixels with a named local profile. Bare calls use the
@@ -30,8 +31,8 @@ for coarse inspection. An optional half-open region selects pixels from the
 EXIF-oriented source before profile resizing. Both profiles remain provider
 high detail: overview is a local raster transform, not provider low detail.
 Original detail, equality suppression, GIF, caches, thumbnails, attachments,
-multiple images, provider uploads, and image storage indirection are outside
-this version.
+multiple images, and provider uploads are outside this version. Artifact reads
+do not renew original retention age.
 
 Safe result metadata reports pre-orientation source dimensions, full oriented
 dimensions, the selected oriented-source region, prepared dimensions, patch
@@ -80,12 +81,12 @@ ephemeral agents. Encoded agent records are also rejected on write above the
 same 64 MiB bound enforced by the loader. These retained-data bounds complement,
 rather than replace, the per-image and per-provider-request bounds above.
 
-The shell tool is foreground-only: it declares `BackgroundSupport::Never`
+The utility tool is foreground-only: it declares `BackgroundSupport::Never`
 because background completion events cannot carry typed provider content. Both
 the extension and core independently check decoder-reported output bytes before
 allocation; WebP receives a stricter 4,194,304-pixel/32-MiB decoded-output bound
 because its decoder has additional workspace allocations, and only one image
-decode may run concurrently in the shell extension.
+decode may run concurrently in the utility extension.
 
 The native typed-result choice is recorded by
 [GATE-typed-image-tool-results](GATE-typed-image-tool-results.md).
@@ -96,4 +97,4 @@ and is implemented at the component boundaries described by
 [SPEC-tau-harness-prompt-dispatch](../crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md),
 [ARCH-tau-provider-codex](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md),
 [ARCH-tau-provider-chat-completions](../crates/tau-provider-chat-completions/specs/ARCH-tau-provider-chat-completions.md),
-and [ARCH-tau-ext-shell](../crates/tau-ext-shell/specs/ARCH-tau-ext-shell.md).
+and [ARCH-tau-ext-utils](../crates/tau-ext-utils/specs/ARCH-tau-ext-utils.md).

@@ -49,10 +49,12 @@ fn declaration_cli_inspects_utils_without_state_or_agent_context() {
     let tools = value["extensions"][0]["inventory"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     assert_eq!(tools[0]["tool"]["name"], "work_timer");
-    assert_eq!(tools[1]["tool"]["name"], "work_papercut");
-    assert!(tools[1]["prompt_fragment"].is_object());
+    assert_eq!(tools[1]["tool"]["name"], "work_read_image");
+    assert_eq!(tools[1]["tool"]["parameters"]["required"][0], "key");
+    assert_eq!(tools[2]["tool"]["name"], "work_papercut");
+    assert!(tools[2]["prompt_fragment"].is_object());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("CONTEXT_DISCOVERY_CANARY"));
     assert!(!root.path().join("state").exists());
     assert!(!root.path().join("runtime").exists());

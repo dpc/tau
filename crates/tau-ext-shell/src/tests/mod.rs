@@ -33,14 +33,13 @@ use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
 use crate::tools::read::{format_read_range, read_file as read_file_with_world, slice_lines};
-use crate::tools::read_image::read_image as read_image_with_world;
 use crate::tools::shell::{
     CommandDetails, CommandOutcome, command_details_value, run_command_live,
 };
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
-    READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
-    shell as path_crate_tools_shell, world as path_crate_tools_world,
+    READ_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME, shell as path_crate_tools_shell,
+    world as path_crate_tools_world,
 };
 use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
@@ -198,27 +197,6 @@ fn edit_file(
 ) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
     let mut world = path_crate_tools_world::ShellWorld::real();
     edit_file_with_world(arguments, &mut world)
-}
-
-fn read_image(
-    arguments: &CborValue,
-) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
-    let mut world = path_crate_tools_world::ShellWorld::real();
-    read_image_with_world(arguments, &mut world)
-}
-
-fn cbor_map_value<'a>(map: &'a CborValue, name: &str) -> Option<&'a CborValue> {
-    let CborValue::Map(entries) = map else {
-        return None;
-    };
-    entries.iter().find_map(|(key, value)| {
-        matches!(key, CborValue::Text(key) if key == name).then_some(value)
-    })
-}
-
-fn provider_image(output: &crate::display::ToolOutput) -> &tau_proto::ImageContent {
-    let tau_proto::ToolResultContentPart::Image(image) = &output.provider_content[0];
-    image
 }
 
 type TestExtensionReader = EventReader<BufReader<UnixStream>>;
@@ -590,7 +568,6 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
     for expected in [
         EventName::TOOL_REGISTRATION_DECLARED,                  // echo
         EventName::TOOL_REGISTRATION_DECLARED,                  // read
-        EventName::TOOL_REGISTRATION_DECLARED,                  // read_image
         EventName::TOOL_REGISTRATION_DECLARED,                  // export
         EventName::TOOL_REGISTRATION_DECLARED,                  // import
         EventName::TOOL_REGISTRATION_DECLARED,                  // edit

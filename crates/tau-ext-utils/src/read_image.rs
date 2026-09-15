@@ -1,7 +1,6 @@
 //! Bounded local raster decoding for the `read_image` tool.
 
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, OnceLock};
 
 use image::{
@@ -9,14 +8,11 @@ use image::{
     imageops as path_image_imageops,
 };
 use tau_proto::{
-    CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart, ToolUseStats,
+    ArtifactKey, CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart,
+    ToolUseState, ToolUseStats, ToolUseStatus,
 };
 
-use crate::argument::{argument_text, optional_argument_text};
-use crate::display::{ToolFailure, ToolOutput, ok_display};
-use crate::tools::world::ShellWorld;
-
-const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SOURCE_SIDE: u32 = 8192;
 const MAX_SOURCE_PIXELS: u64 = 16_777_216;
@@ -33,7 +29,7 @@ static DECODE_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 
 /// Named local image-preparation profile selected by the caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ImageMode {
+pub(crate) enum ImageMode {
     /// Compatibility profile with the existing 2048-side/2,500-patch limits.
     High,
     /// Experimental coarse-inspection profile with tighter 1024/600 limits.
@@ -109,7 +105,7 @@ struct ResizePlan {
 
 /// Half-open crop rectangle in pixels of the EXIF-oriented source raster.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ImageRegion {
+pub(crate) struct ImageRegion {
     /// Left edge in oriented-source pixels.
     x: u32,
     /// Top edge in oriented-source pixels.
@@ -249,112 +245,181 @@ impl Drop for DecodePermit {
     }
 }
 
-/// Read, validate, normalize, and return one local raster image.
-pub(crate) fn read_image(
-    arguments: &CborValue,
-    world: &mut ShellWorld,
-) -> Result<ToolOutput, ToolFailure> {
-    let mode = ImageMode::from_arguments(arguments).map_err(ToolFailure::from)?;
-    let requested_region = ImageRegion::from_arguments(arguments).map_err(ToolFailure::from)?;
-    let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
-    let path = PathBuf::from(path);
-    let display_path = path.display().to_string();
-    let bytes = world
-        .read_file_limited(&path, MAX_SOURCE_BYTES)
-        .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_path.clone()))?;
+/// Parsed immutable artifact request for one image inspection.
+pub(crate) struct ReadImageRequest {
+    /// Canonical original-byte identity requested by the caller.
+    pub(crate) key: ArtifactKey,
+    /// Local image-preparation profile.
+    mode: ImageMode,
+    /// Optional crop in oriented-source coordinates.
+    requested_region: Option<ImageRegion>,
+}
 
-    let _permit = DecodePermit::acquire();
-    let prepared = prepare_image(&bytes, mode, requested_region)
-        .map_err(|message| ToolFailure::from(message).with_args(display_path.clone()))?;
-    let image = prepared.content;
-    let format = image.media_type.mime_type();
-    let byte_count = image.data.len();
-    let patches = patch_count(image.width, image.height);
-    let summary = format!(
-        "{format} image, {}x{}, {patches} patches, {byte_count} bytes, {} mode",
-        image.width,
-        image.height,
-        mode.as_str()
-    );
-    let result = CborValue::Map(vec![
-        (
-            CborValue::Text("output".to_owned()),
-            CborValue::Text(summary),
-        ),
-        (
-            CborValue::Text("media_type".to_owned()),
-            CborValue::Text(format.to_owned()),
-        ),
-        (
-            CborValue::Text("width".to_owned()),
-            CborValue::Integer(i64::from(image.width).into()),
-        ),
-        (
-            CborValue::Text("height".to_owned()),
-            CborValue::Integer(i64::from(image.height).into()),
-        ),
-        (
-            CborValue::Text("bytes".to_owned()),
-            CborValue::Integer(i64::try_from(byte_count).unwrap_or(i64::MAX).into()),
-        ),
-        (
-            CborValue::Text("patches".to_owned()),
-            CborValue::Integer(i64::try_from(patches).unwrap_or(i64::MAX).into()),
-        ),
-        (
-            CborValue::Text("detail".to_owned()),
-            CborValue::Text("high".to_owned()),
-        ),
-        (
-            CborValue::Text("mode".to_owned()),
-            CborValue::Text(mode.as_str().to_owned()),
-        ),
-        (
-            CborValue::Text("source_width".to_owned()),
-            CborValue::Integer(i64::from(prepared.source_width).into()),
-        ),
-        (
-            CborValue::Text("source_height".to_owned()),
-            CborValue::Integer(i64::from(prepared.source_height).into()),
-        ),
-        (
-            CborValue::Text("oriented_width".to_owned()),
-            CborValue::Integer(i64::from(prepared.oriented_width).into()),
-        ),
-        (
-            CborValue::Text("oriented_height".to_owned()),
-            CborValue::Integer(i64::from(prepared.oriented_height).into()),
-        ),
-        (
-            CborValue::Text("region".to_owned()),
-            prepared.region.into_value(),
-        ),
-    ]);
-    let display_args = format!(
-        "{display_path}  {format}  mode={}  source={}x{}  oriented={}x{}  \
+impl ReadImageRequest {
+    /// Parse the strict model-visible read-image arguments.
+    pub(crate) fn from_arguments(arguments: &CborValue) -> Result<Self, String> {
+        let key = argument_text(arguments, "key")?
+            .parse()
+            .map_err(|_| "argument `key` must be a canonical artifact key".to_owned())?;
+        Ok(Self {
+            key,
+            mode: ImageMode::from_arguments(arguments)?,
+            requested_region: ImageRegion::from_arguments(arguments)?,
+        })
+    }
+
+    /// Decode and normalize verified original bytes into one typed tool result.
+    pub(crate) fn prepare(
+        self,
+        bytes: &[u8],
+        original_size: u64,
+    ) -> Result<ReadImageOutput, String> {
+        if MAX_SOURCE_BYTES < bytes.len() {
+            return Err(format!(
+                "image source exceeds the {} byte inspection limit",
+                MAX_SOURCE_BYTES
+            ));
+        }
+        let display_key = self.key.to_string();
+        let mode = self.mode;
+        let requested_region = self.requested_region;
+        let _permit = DecodePermit::acquire();
+        let prepared = prepare_image(bytes, mode, requested_region)
+            .map_err(|message| format!("{display_key}: {message}"))?;
+        let image = prepared.content;
+        let format = image.media_type.mime_type();
+        let byte_count = image.data.len();
+        let patches = patch_count(image.width, image.height);
+        let summary = format!(
+            "{format} image, {}x{}, {patches} patches, {byte_count} bytes, {} mode",
+            image.width,
+            image.height,
+            mode.as_str()
+        );
+        let result = CborValue::Map(vec![
+            (
+                CborValue::Text("key".to_owned()),
+                CborValue::Text(display_key.clone()),
+            ),
+            (
+                CborValue::Text("original_bytes".to_owned()),
+                CborValue::Integer(i64::try_from(original_size).unwrap_or(i64::MAX).into()),
+            ),
+            (
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(summary),
+            ),
+            (
+                CborValue::Text("media_type".to_owned()),
+                CborValue::Text(format.to_owned()),
+            ),
+            (
+                CborValue::Text("width".to_owned()),
+                CborValue::Integer(i64::from(image.width).into()),
+            ),
+            (
+                CborValue::Text("height".to_owned()),
+                CborValue::Integer(i64::from(image.height).into()),
+            ),
+            (
+                CborValue::Text("bytes".to_owned()),
+                CborValue::Integer(i64::try_from(byte_count).unwrap_or(i64::MAX).into()),
+            ),
+            (
+                CborValue::Text("patches".to_owned()),
+                CborValue::Integer(i64::try_from(patches).unwrap_or(i64::MAX).into()),
+            ),
+            (
+                CborValue::Text("detail".to_owned()),
+                CborValue::Text("high".to_owned()),
+            ),
+            (
+                CborValue::Text("mode".to_owned()),
+                CborValue::Text(mode.as_str().to_owned()),
+            ),
+            (
+                CborValue::Text("source_width".to_owned()),
+                CborValue::Integer(i64::from(prepared.source_width).into()),
+            ),
+            (
+                CborValue::Text("source_height".to_owned()),
+                CborValue::Integer(i64::from(prepared.source_height).into()),
+            ),
+            (
+                CborValue::Text("oriented_width".to_owned()),
+                CborValue::Integer(i64::from(prepared.oriented_width).into()),
+            ),
+            (
+                CborValue::Text("oriented_height".to_owned()),
+                CborValue::Integer(i64::from(prepared.oriented_height).into()),
+            ),
+            (
+                CborValue::Text("region".to_owned()),
+                prepared.region.into_value(),
+            ),
+        ]);
+        let display_args = format!(
+            "{display_key}  {format}  mode={}  source={}x{}  oriented={}x{}  \
          region={},{} {}x{}  output={}x{}  {patches} patches  {byte_count} bytes",
-        mode.as_str(),
-        prepared.source_width,
-        prepared.source_height,
-        prepared.oriented_width,
-        prepared.oriented_height,
-        prepared.region.x,
-        prepared.region.y,
-        prepared.region.width,
-        prepared.region.height,
-        image.width,
-        image.height
-    );
-    let mut display = ok_display(display_args);
-    display.stats = ToolUseStats {
-        bytes: Some(byte_count as u64),
-        ..ToolUseStats::default()
-    };
-    Ok(ToolOutput {
-        result,
-        provider_content: vec![ToolResultContentPart::Image(image)],
-        display,
-    })
+            mode.as_str(),
+            prepared.source_width,
+            prepared.source_height,
+            prepared.oriented_width,
+            prepared.oriented_height,
+            prepared.region.x,
+            prepared.region.y,
+            prepared.region.width,
+            prepared.region.height,
+            image.width,
+            image.height
+        );
+        let mut display = ToolUseState {
+            args: display_args,
+            status: ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        };
+        display.stats = ToolUseStats {
+            bytes: Some(byte_count as u64),
+            ..ToolUseStats::default()
+        };
+        Ok(ReadImageOutput {
+            result,
+            provider_content: vec![ToolResultContentPart::Image(image)],
+            display,
+        })
+    }
+}
+
+/// Prepared result returned to the main extension loop.
+pub(crate) struct ReadImageOutput {
+    /// Safe structured result normalized to provider text.
+    pub(crate) result: CborValue,
+    /// Canonical typed image content for audited provider routes.
+    pub(crate) provider_content: Vec<ToolResultContentPart>,
+    /// Metadata-only UI presentation.
+    pub(crate) display: ToolUseState,
+}
+
+fn argument_text(arguments: &CborValue, key: &str) -> Result<String, String> {
+    optional_argument_text(arguments, key)?.ok_or_else(|| format!("missing string argument: {key}"))
+}
+
+fn optional_argument_text(arguments: &CborValue, key: &str) -> Result<Option<String>, String> {
+    match arguments {
+        CborValue::Map(entries) => entries
+            .iter()
+            .find_map(|(candidate, value)| {
+                matches!(candidate, CborValue::Text(candidate) if candidate == key).then(|| {
+                    match value {
+                        CborValue::Text(value) => Ok(Some(value.clone())),
+                        _ => Err(format!("argument `{key}` must be a string")),
+                    }
+                })
+            })
+            .unwrap_or(Ok(None)),
+        _ => Ok(None),
+    }
 }
 
 fn prepare_image(

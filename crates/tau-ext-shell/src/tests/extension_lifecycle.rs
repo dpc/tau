@@ -30,10 +30,9 @@ fn send_artifact_result(
 }
 
 /// Ensures export preserves original bytes and import produces a private local
-/// file that the existing read_image tool can inspect without a new preview
-/// path.
+/// file for ordinary filesystem consumers.
 #[test]
-fn artifact_export_import_round_trip_preserves_original_and_read_image_path() {
+fn artifact_export_import_round_trip_preserves_original_and_private_path() {
     let tempdir = TempDir::new().expect("tempdir");
     let source = tempdir.path().join("original.png");
     image::DynamicImage::new_rgba8(2, 2)
@@ -152,24 +151,6 @@ fn artifact_export_import_round_trip_preserves_original_and_read_image_path() {
         );
     }
 
-    let path_text = path.display().to_string();
-    writer
-        .write_event(&tool_started(
-            "inspect-call",
-            READ_IMAGE_TOOL_NAME,
-            cbor_text_map(vec![("path", path_text.as_str())]),
-            "agent-artifact",
-        ))
-        .expect("read image");
-    writer.flush().expect("flush read image");
-    let inspected = reader.read_event().expect("image result").expect("event");
-    let Event::ToolResult(inspected) = inspected else {
-        panic!("expected image result");
-    };
-    assert!(matches!(
-        inspected.provider_content.as_slice(),
-        [tau_proto::ToolResultContentPart::Image(_)]
-    ));
     fs::remove_file(path).expect("remove imported temp");
     writer
         .write_frame(&disconnect_frame(None))
@@ -279,7 +260,6 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
     for expected_tool in [
         ECHO_TOOL_NAME,
         READ_TOOL_NAME,
-        READ_IMAGE_TOOL_NAME,
         EXPORT_TOOL_NAME,
         IMPORT_TOOL_NAME,
         EDIT_TOOL_NAME,
@@ -1504,7 +1484,7 @@ fn startup_registers_schema_valid_tool_examples() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut checked = Vec::new();
-    for _ in 0..15 {
+    for _ in 0..14 {
         let event = reader
             .read_event()
             .expect("read")
@@ -1854,10 +1834,9 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
     let mut found_echo_disabled = false;
     let mut found_gpt_shell_visible_name = false;
     let mut found_read_schema = false;
-    let mut found_read_image_foreground_only = false;
     let mut found_edit_schema = false;
     let mut found_write = false;
-    for _ in 0..15 {
+    for _ in 0..14 {
         let event = reader
             .read_event()
             .expect("read")
@@ -1909,17 +1888,6 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
             );
             found_read_schema = true;
         }
-        if register.tool.name == READ_IMAGE_TOOL_NAME {
-            assert_eq!(
-                register.tool.description.as_deref(),
-                Some("Read one local image for visual inspection.")
-            );
-            assert_eq!(
-                register.tool.background_support,
-                Some(tau_proto::BackgroundSupport::Never)
-            );
-            found_read_image_foreground_only = true;
-        }
         if register.tool.name == EDIT_TOOL_NAME {
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let edit_item = &parameters["properties"]["edits"]["items"];
@@ -1958,10 +1926,6 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
         "expected gpt_shell tool registration"
     );
     assert!(found_read_schema, "expected multi-range read schema");
-    assert!(
-        found_read_image_foreground_only,
-        "expected foreground-only read_image registration"
-    );
     assert!(found_edit_schema, "expected line-oriented edit schema");
     assert!(!found_write, "write tool should not be registered");
 

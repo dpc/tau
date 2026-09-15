@@ -1,8 +1,18 @@
 # ARCH-tau-ext-utils: tau-ext-utils architecture
 
 `tau-ext-utils` is a first-party utility extension. It owns the model-visible
-`timer` tool in the `timer` group and a default-enabled `papercut` diagnostic
-reporter. The reporter is declared unless its configured instance sets
+`timer` tool in the `timer` group, the provider-independent artifact consumer
+`read_image(key)`, and a default-enabled `papercut` diagnostic reporter.
+`read_image` drives the existing directed Artifact download state machine on
+the main loop, rejects descriptors above its separate 8 MiB image-source
+limit before collecting bytes, verifies complete size and digest, and performs
+one bounded raster decode off-loop. At most eight reads are active and only one
+decode runs at a time. Cancellation and shutdown close downloads best effort.
+Successful reads preserve the existing typed image terminal and provider-route
+gating; this ownership/API migration does not change its current transcript
+retention or replay semantics.
+
+The reporter is declared unless its configured instance sets
 `papercut.enable: false`; ordinary global and role tool policy still controls
 its effective visibility.
 

@@ -15,7 +15,6 @@ pub(crate) mod find;
 pub(crate) mod grep;
 pub(crate) mod ls;
 pub(crate) mod read;
-pub(crate) mod read_image;
 pub(crate) mod replace;
 pub(crate) mod shell;
 pub(crate) mod workdir;
@@ -24,7 +23,6 @@ pub(crate) mod world;
 #[cfg(any(test, feature = "echo-agent"))]
 pub const ECHO_TOOL_NAME: &str = "echo";
 pub const READ_TOOL_NAME: &str = "read";
-pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
 pub const EXPORT_TOOL_NAME: &str = "export";
 pub const IMPORT_TOOL_NAME: &str = "import";
 pub const EDIT_TOOL_NAME: &str = "edit";
@@ -93,9 +91,6 @@ pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWo
 
     if invoke.tool_name == READ_TOOL_NAME {
         return wrap_pure(invoke, world, read::read_file);
-    }
-    if invoke.tool_name == READ_IMAGE_TOOL_NAME {
-        return wrap_pure(invoke, world, read_image::read_image);
     }
     if invoke.tool_name == EDIT_TOOL_NAME {
         return wrap_pure(invoke, world, edit::edit_file);
@@ -246,9 +241,7 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
                 .unwrap_or_else(|| format_requested_read_line_range(&invoke.arguments));
             format!("{path} {ranges}")
         }
-        READ_IMAGE_TOOL_NAME | EXPORT_TOOL_NAME => {
-            cbor_text_field(&invoke.arguments, "path").unwrap_or_default()
-        }
+        EXPORT_TOOL_NAME => cbor_text_field(&invoke.arguments, "path").unwrap_or_default(),
         IMPORT_TOOL_NAME => cbor_text_field(&invoke.arguments, "key").unwrap_or_default(),
         EDIT_TOOL_NAME | REPLACE_TOOL_NAME | APPLY_PATCH_TOOL_NAME => {
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();

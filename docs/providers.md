@@ -1522,9 +1522,10 @@ Before generation, the provider checks that shared artifact storage is
 available. Success returns `{"key":"blake3:...","size":123,"mime_type":"image/png"}`.
 The complete original PNG (up to 16 MiB, preserving alpha and metadata) lives
 in the harness-wide [artifact store](artifacts.md), independently of session
-lifetime. Use shell `import(key)` to obtain a private local path on the shell
-host, then `read_image` if the model supports it. No inline image or host storage
-path is returned by generation.
+lifetime. Pass the returned key directly to `read_image` if the model supports
+image tool results. Use shell `import(key)` only when another filesystem tool
+needs a private local copy. No inline image or host storage path is returned by
+generation.
 
 Generation has a five-minute network deadline and a seven-minute overall
 availability/generation/publication deadline. It uses ordinary automatic

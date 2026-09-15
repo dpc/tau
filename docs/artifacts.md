@@ -7,8 +7,11 @@ remembered workdir authority, uploads at most 16 MiB of original bytes, and
 returns the descriptor plus a bounded filename hint. Import validates the key,
 downloads and verifies the complete original, and writes it to a private
 unpredictable mode-0600 temporary file on the shell execution host; that local
-path can be passed to `read_image`. Neither tool exposes store paths, inline
-original bytes, execution, or archive extraction.
+path can be passed to filesystem tools. The provider-independent
+`read_image(key)` tool instead consumes a verified original directly from
+Artifact storage without granting shell or workdir authority. None of these
+tools exposes store paths, inline original bytes, execution, or archive
+extraction.
 
 ## Consumer API
 
@@ -27,8 +30,9 @@ size during construction and decoding; use `descriptor.size.get()` for bytes.
   is cloneable and does not borrow runtime input.
 - `ArtifactUpload::new(original_bytes)`, `next_op()`, `accept(value)`,
   `descriptor()`, and `abort_op()`: Begin, bounded writes, then Finalize.
-- `ArtifactDownload::new(key)`, `next_op()`, `accept(value)`, `close_op()`, and
-  `into_bytes()`: Open, bounded ranges, verified exact size/digest, then Close.
+- `ArtifactDownload::new(key)`, `next_op()`, `accept(value)`, `descriptor()`,
+  `close_op()`, and `into_bytes()`: Open, bounded ranges, verified exact
+  size/digest, then Close.
   Construction is infallible after parsing an `ArtifactKey`. Upload `Begin`
   takes an `ArtifactSize`, validated before sending rather than by storage.
 

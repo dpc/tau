@@ -62,6 +62,12 @@ impl ArtifactDownload {
         })
     }
 
+    /// Returns the immutable descriptor after the open response is accepted.
+    #[must_use]
+    pub fn descriptor(&self) -> Option<&ArtifactDescriptor> {
+        self.descriptor.as_ref()
+    }
+
     /// Accepts one correlated response and validates exact ranges and final
     /// digest.
     ///

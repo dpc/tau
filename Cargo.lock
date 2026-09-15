@@ -1029,8 +1029,10 @@ dependencies = [
 name = "dpc-tau-ext-utils"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "dpc-tau-client",
  "dpc-tau-proto",
+ "image",
  "jiff",
  "serde",
  "serde_json",

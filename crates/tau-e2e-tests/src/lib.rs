@@ -220,7 +220,7 @@ impl VcrFixture {
                     "      roles:\n",
                     "        vcr-e2e:\n",
                     "          model: {model}\n",
-                    "          tools: [shell]\n",
+                    "          tools: [shell, artifact]\n",
                     "extensions:\n",
                     "  provider-builtin:\n",
                     "    command: [{tau_bin}]\n",

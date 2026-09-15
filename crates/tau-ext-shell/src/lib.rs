@@ -69,8 +69,8 @@ use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::shell::{ShellAccessMode, ShellCommandMode};
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, EXPORT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
-    GREP_TOOL_NAME, IMPORT_TOOL_NAME, LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME,
-    REPLACE_TOOL_NAME, SHELL_TOOL_NAME, WORKDIR_TOOL_NAME, execute_tool,
+    GREP_TOOL_NAME, IMPORT_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, REPLACE_TOOL_NAME,
+    SHELL_TOOL_NAME, WORKDIR_TOOL_NAME, execute_tool,
 };
 use crate::ui_shell_shutdown_generation::{
     UiShellShutdownGeneration, UiShellShutdownGenerationCounter,
@@ -507,74 +507,6 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             subcommand: None,
         }],
     };
-    let read_image_tool = ToolSpec {
-        provider_scope: None,
-        name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
-        model_visible_name: None,
-        description: Some("Read one local image for visual inspection.".to_owned()),
-        tool_type: tau_proto::ToolType::Function,
-        parameters: Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to one local PNG, JPEG, or WebP image"
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["high", "overview"],
-                    "default": "high",
-                    "description": "Local preparation profile. `high` (the default) preserves the existing 2048-side/2500-patch bounds. `overview` is experimental, intended only for coarse inspection, and is bounded to 1024 pixels on a side and 600 32px patches."
-                },
-                "region": {
-                    "type": "object",
-                    "description": "Optional crop in pixels of the EXIF-oriented source raster, before mode resizing. Uses a top-left origin and half-open extents.",
-                    "properties": {
-                        "x": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": u32::MAX
-                        },
-                        "y": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": u32::MAX
-                        },
-                        "width": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": u32::MAX
-                        },
-                        "height": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": u32::MAX
-                        }
-                    },
-                    "required": ["x", "y", "width", "height"],
-                    "additionalProperties": false
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })),
-        format: None,
-        tags: tool_tags(&[
-            "shell:read",
-            "shell:read:image",
-            "provider-content:image",
-            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
-        ]),
-        enabled_by_default: true,
-        background_support: Some(tau_proto::BackgroundSupport::Never),
-        examples: vec![ToolExample {
-            id: "read-image".to_owned(),
-            title: Some("Inspect a screenshot".to_owned()),
-            arguments: CborValue::Map(vec![example_field("path", example_text("screenshot.png"))]),
-            note: None,
-            subcommand: None,
-        }],
-    };
     let export_tool = ToolSpec {
         provider_scope: None,
         name: tau_proto::ToolName::new(EXPORT_TOOL_NAME),
@@ -618,7 +550,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         description: Some(
             "Import one artifact key to a private, unpredictable, non-executable temporary file \
              on this shell host. Size and digest are verified before success. Import does not \
-             renew retention age; pass the returned local path to read_image or filesystem tools."
+             renew retention age; pass the returned local path to filesystem tools."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -1107,7 +1039,6 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     };
     let builtin_tools = [
         read_tool,
-        read_image_tool,
         export_tool,
         import_tool,
         edit_tool,
@@ -1505,8 +1436,8 @@ fn rewrite_invoke_for_cwd(
     let field = match invoke.tool_name.as_str() {
         SHELL_TOOL_NAME => path_crate_tools::ShellSurface::Generic.directory_argument(),
         GPT_SHELL_TOOL_NAME => path_crate_tools::ShellSurface::ChatGpt.directory_argument(),
-        READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EXPORT_TOOL_NAME | EDIT_TOOL_NAME
-        | REPLACE_TOOL_NAME | FIND_TOOL_NAME | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
+        READ_TOOL_NAME | EXPORT_TOOL_NAME | EDIT_TOOL_NAME | REPLACE_TOOL_NAME | FIND_TOOL_NAME
+        | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
         DIR_LOCK_TOOL_NAME => "directory",
         _ => return invoke,
     };
@@ -2778,7 +2709,6 @@ fn is_shell_tool(name: &str) -> bool {
     matches!(
         name,
         READ_TOOL_NAME
-            | READ_IMAGE_TOOL_NAME
             | EXPORT_TOOL_NAME
             | IMPORT_TOOL_NAME
             | EDIT_TOOL_NAME

@@ -1200,7 +1200,7 @@ fn startup_publishes_shell_dir_force_unlock_action() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_schema = false;
-    for _ in 0..19 {
+    for _ in 0..18 {
         let event = reader
             .read_event()
             .expect("read")
@@ -3002,7 +3002,7 @@ fn startup_registers_surface_specific_shell_workdir_schemas() {
 
     let mut found_shell = false;
     let mut found_gpt_shell = false;
-    for _ in 0..15 {
+    for _ in 0..14 {
         let event = reader
             .read_event()
             .expect("read")
@@ -3103,7 +3103,7 @@ fn startup_registers_shell_workdir_prompt_fragment() {
     let mut found_context_provider = false;
     let mut found_fragment = false;
     let mut saw_tool_fragment = false;
-    for _ in 0..18 {
+    for _ in 0..17 {
         let event = reader
             .read_event()
             .expect("read")
