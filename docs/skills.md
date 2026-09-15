@@ -46,6 +46,28 @@ The frontmatter fields Tau reads are:
 Tau ignores `allowed-tools` and other provider-specific permission fields; skill frontmatter does not grant or restrict Tau tool permissions.
 Project-scoped skills default to advertised. User-scoped skills default to hidden until searched. `advertise:` overrides the scope default.
 
+## Inspecting effective skills
+
+`tau dev print-skills` initializes a fresh ephemeral agent through the ordinary
+discovery lifecycle and prints the collision-resolved, readable skills available
+to its role. It uses the configured startup role unless `--role ROLE` is set.
+The default Markdown document includes each skill's name, source path (or
+`built-in`), and description:
+
+```sh
+tau --role engineer dev print-skills
+```
+
+Use JSON for scripts. Built-in skills have a `null` path:
+
+```sh
+tau --role engineer dev print-skills --format json
+```
+
+Like `print-prompt` and `print-tools`, this developer command starts configured
+extensions and may therefore have their ordinary persistent-state side effects.
+It does not call a model provider.
+
 
 ## Prompt advertisement
 

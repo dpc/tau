@@ -500,17 +500,19 @@ distributed WAL, or cross-journal transaction. See
 
 ## Agent journals and summary checkpoints
 
-`tau dev print-prompt` and `print-tools` keep session and preview-agent semantic
-state, journals, transcripts, debug artifacts, and retention state process-local
-or omit them, so they create no resumable session or agent and do not create or
-open the durable agent store. They configure ordinary extensions and therefore
-preserve User, Cache, Secret, direct-state, filesystem, network, and
-external-service reads and writes. They load one fresh ephemeral agent through
-bounded context readiness, resolve an effective model/tool snapshot, and never
-call a provider. `print-system-prompt` retains the separate immutable MemoryOnly
-storage policy. Each preview's unique runtime socket and discovery metadata may
-exist only while its owned daemon runs; handled diagnostic exits remove that
-exact pair after child reap, including forced-exit fallback.
+`tau dev print-prompt`, `print-tools`, and `print-skills` keep session and
+preview-agent semantic state, journals, transcripts, debug artifacts, and
+retention state process-local or omit them, so they create no resumable session
+or agent and do not create or open the durable agent store. They configure
+ordinary extensions and therefore preserve User, Cache, Secret, direct-state,
+filesystem, network, and external-service reads and writes. They load one fresh
+ephemeral agent through bounded context readiness; the prompt/tool previews
+resolve an effective model/tool snapshot, while `print-skills` projects the
+agent's frozen effective skill snapshot. None calls a provider.
+`print-system-prompt` retains the separate immutable MemoryOnly storage policy.
+Each preview's unique runtime socket and discovery metadata may exist only while
+its owned daemon runs; handled diagnostic exits remove that exact pair after
+child reap, including forced-exit fallback.
 
 Per-agent `events.cbor` journals are authoritative durable identity and
 transcript state. Their `meta.json` files are content-minimized, atomically

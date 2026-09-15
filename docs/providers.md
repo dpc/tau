@@ -22,8 +22,8 @@ extensions without constructing a harness, reading extension state or resolving
 credentials. The built-in provider returns candidate model metadata from
 config-owned profiles only; state-owned profiles are explicitly omitted and
 runtime availability remains unverified. Provider results are therefore partial
-and produce a nonzero exit. Existing effective `print-tools` and `print-prompt`
-commands retain their ordinary initialization and side effects.
+and produce a nonzero exit. Existing effective `print-tools`, `print-prompt`, and
+`print-skills` commands retain their ordinary initialization and side effects.
 
 Canonical context-window rejection is reported as a typed terminal provider
 failure. The harness, not the adapter, decides whether an ordinary no-output

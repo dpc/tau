@@ -26,6 +26,7 @@ mod papercut;
 mod peer_exit;
 mod preview_declarations;
 mod print_prompt;
+mod print_skills;
 mod print_tools;
 mod prompt_history;
 mod prompt_stdin;
@@ -709,6 +710,7 @@ fn consumes_harness_settings(command: &DispatchCommand) -> bool {
                 cli::DevCommand::DumpInitialPrompt { .. }
                 | cli::DevCommand::PrintPrompt { .. }
                 | cli::DevCommand::PrintSystemPrompt
+                | cli::DevCommand::PrintSkills { .. }
                 | cli::DevCommand::PrintTools
                 | cli::DevCommand::PreviewDeclarations,
         }) => true,
@@ -889,6 +891,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 command:
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
+                    | cli::DevCommand::PrintSkills { .. }
                     | cli::DevCommand::PrintTools
                     | cli::DevCommand::PreviewDeclarations
                     | cli::DevCommand::Tmux { .. },
@@ -917,6 +920,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 command:
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
+                    | cli::DevCommand::PrintSkills { .. }
                     | cli::DevCommand::PrintTools
                     | cli::DevCommand::PreviewDeclarations,
             }) => {}
@@ -1273,6 +1277,15 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         &harness_config_overrides,
                     )
                 }
+                cli::DevCommand::PrintSkills { format } => print_skills::run_print_skills(
+                    harness.role.as_deref(),
+                    format,
+                    selected_profile.as_ref(),
+                    &role_cli_overrides,
+                    &extension_cli_overrides,
+                    &environment_extension_names,
+                    &harness_config_overrides,
+                ),
                 cli::DevCommand::PrintTools => print_tools::run_print_tools(
                     harness.role.as_deref(),
                     selected_profile.as_ref(),

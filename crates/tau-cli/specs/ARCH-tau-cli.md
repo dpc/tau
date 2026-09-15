@@ -512,18 +512,20 @@ Future event kinds that carry agent prompts, provider output, tool payloads, or
 extension-observed content must update the durable debug-log suppression rules
 and regression tests before they are emitted for ephemeral agents.
 
-`tau dev print-prompt` and `print-tools` launch a session-ephemeral harness,
-configure ordinary extensions, and load one ephemeral preview agent through
-bounded context readiness. Session, preview-agent, journal, transcript, debug,
-and retention semantics remain process-local or omitted, so the commands create
-no resumable session or agent and do not create or open the durable agent store.
+`tau dev print-prompt`, `print-tools`, and `print-skills` launch a
+session-ephemeral harness, configure ordinary extensions, and load one ephemeral
+preview agent through bounded context readiness. Session, preview-agent, journal,
+transcript, debug, and retention semantics remain process-local or omitted, so
+the commands create no resumable session or agent and do not create or open the
+durable agent store.
 Extensions retain ordinary User, Cache, Secret, direct-state, filesystem,
 network, and external-service reads and writes.
-Both commands resolve one effective model/tool snapshot and do not call a
-provider. `print-system-prompt` retains the separate harness-wide MemoryOnly
-policy. Each owned preview runtime socket/discovery pair exists only while the
-child runs; the parent removes its exact pair after child reap, including handled
-forced-exit fallback.
+The prompt/tool previews resolve one effective model/tool snapshot;
+`print-skills` projects the preview agent's frozen effective skill snapshot. None
+calls a provider. `print-system-prompt` retains the separate harness-wide
+MemoryOnly policy. Each owned preview runtime socket/discovery pair exists only
+while the child runs; the parent removes its exact pair after child reap,
+including handled forced-exit fallback.
 
 `print-tools` applies the same logical-web compilation as live prompt
 materialization. Provider-native entries are marked `execution:

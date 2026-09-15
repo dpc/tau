@@ -672,6 +672,18 @@ pub enum DevCommand {
     /// `--role` uses the configured startup role.
     PrintTools,
 
+    /// Print the effective skills available to a role.
+    ///
+    /// Uses the same fresh ephemeral-agent lifecycle and effective context
+    /// snapshot as `print-prompt`, without calling a provider. Extensions
+    /// retain ordinary persistent state access and side effects. Omitting
+    /// `--role` uses the configured startup role.
+    PrintSkills {
+        /// Output encoding for the effective skill list.
+        #[arg(long, value_enum, default_value_t)]
+        format: SkillOutputFormat,
+    },
+
     /// Preview config-derived declarations from explicitly opted-in extensions.
     ///
     /// Does not start a harness, read extension state or credentials, or
@@ -692,6 +704,16 @@ pub enum DevCommand {
         #[command(subcommand)]
         command: DevTmuxCommand,
     },
+}
+
+/// Encodings supported by `tau dev print-skills`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum SkillOutputFormat {
+    /// Human-readable Markdown document.
+    #[default]
+    Markdown,
+    /// Machine-readable JSON array.
+    Json,
 }
 
 /// Commands that inspect or clear the standard papercut reporter's records.

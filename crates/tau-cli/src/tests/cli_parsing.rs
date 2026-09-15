@@ -668,6 +668,33 @@ fn global_harness_flags_parse_before_dev_print_prompt() {
     ));
 }
 
+/// Ensures the skill diagnostic defaults to Markdown and accepts JSON without
+/// changing the global role selection surface.
+#[test]
+fn dev_print_skills_parses_output_format() {
+    let markdown =
+        path_super_cli::Cli::parse_from(["tau", "--role", "manager", "dev", "print-skills"]);
+    assert!(matches!(
+        markdown.command,
+        Some(super::super::cli::Command::Dev {
+            command: super::super::cli::DevCommand::PrintSkills {
+                format: super::super::cli::SkillOutputFormat::Markdown,
+            },
+        })
+    ));
+    assert_eq!(markdown.harness.role.as_deref(), Some("manager"));
+
+    let json = path_super_cli::Cli::parse_from(["tau", "dev", "print-skills", "--format", "json"]);
+    assert!(matches!(
+        json.command,
+        Some(super::super::cli::Command::Dev {
+            command: super::super::cli::DevCommand::PrintSkills {
+                format: super::super::cli::SkillOutputFormat::Json,
+            },
+        })
+    ));
+}
+
 #[test]
 fn role_cli_flags_accept_repeated_and_mixed_options() {
     let cli = path_super_cli::Cli::parse_from([

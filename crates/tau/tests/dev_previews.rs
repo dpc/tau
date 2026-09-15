@@ -372,6 +372,13 @@ fn print_tools_runs_unflagged_without_writable_agent_store() {
     assert_preview_runs_unflagged_without_writable_agent_store("print-tools");
 }
 
+/// `print-skills` must remain output-identical without writable durable state.
+#[cfg(unix)]
+#[test]
+fn print_skills_runs_unflagged_without_writable_agent_store() {
+    assert_preview_runs_unflagged_without_writable_agent_store("print-skills");
+}
+
 /// `print-system-prompt` must remain output-identical without writable state.
 #[cfg(unix)]
 #[test]
@@ -400,7 +407,12 @@ fn previews_omit_durable_session_artifacts_across_success_failure_and_concurrenc
     std::fs::create_dir_all(home.path().join(".config")).expect("config root");
     std::fs::create_dir_all(home.path().join(".data")).expect("data root");
     std::fs::create_dir_all(home.path().join("work")).expect("work root");
-    for command in ["print-prompt", "print-tools", "print-system-prompt"] {
+    for command in [
+        "print-prompt",
+        "print-skills",
+        "print-tools",
+        "print-system-prompt",
+    ] {
         let output = preview(&home, None, &["--role", "engineer", "dev", command]);
         assert!(output.status.success(), "{:?}", output.stderr);
         assert_no_durable_preview_artifacts(home.path());
@@ -671,6 +683,135 @@ fn previews_use_configured_default_role_unless_overridden() {
     };
     assert_eq!(tool_names(&default_tools), ["read"]);
     assert_eq!(tool_names(&explicit_tools), ["grep"]);
+}
+
+/// Ensures skill previews use the initialized agent's role-filtered snapshot
+/// and provide both the human and machine-readable projections.
+#[test]
+fn print_skills_lists_only_effective_role_skills_in_markdown_and_json() {
+    let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
+    let skills_dir = home.path().join(".config/agents/skills");
+    std::fs::create_dir_all(&config_dir).expect("create config directory");
+    std::fs::create_dir_all(skills_dir.join("default-only")).expect("create default skill");
+    std::fs::create_dir_all(skills_dir.join("explicit-only")).expect("create explicit skill");
+    std::fs::create_dir_all(home.path().join("work")).expect("create work directory");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"agents:
+  default_role: preview-default
+  role_groups:
+    preview:
+      roles:
+        preview-default: {}
+        preview-explicit: {}
+"#,
+    )
+    .expect("write harness config");
+    let default_path = skills_dir.join("default-only/SKILL.md");
+    std::fs::write(
+        &default_path,
+        "---\nname: default-only\ndescription: Default role skill.\nonly-roles: [preview-default]\n---\n",
+    )
+    .expect("write default role skill");
+    let explicit_path = skills_dir.join("explicit-only/SKILL.md");
+    std::fs::write(
+        &explicit_path,
+        "---\nname: explicit-only\ndescription: Explicit role skill.\nonly-roles: [preview-explicit]\n---\n",
+    )
+    .expect("write explicit role skill");
+
+    let markdown = preview(&home, None, &["dev", "print-skills"]);
+    assert!(markdown.status.success(), "{:?}", markdown.stderr);
+    let markdown = String::from_utf8(markdown.stdout).expect("UTF-8 Markdown");
+    assert!(markdown.starts_with("# Available skills\n"));
+    assert!(markdown.contains("## `default-only`"));
+    assert!(markdown.contains(&format!("**Path:** `{}`", default_path.display())));
+    assert!(markdown.contains("Default role skill."));
+    assert!(!markdown.contains("explicit-only"));
+
+    let json = preview(
+        &home,
+        None,
+        &[
+            "--role",
+            "preview-explicit",
+            "dev",
+            "print-skills",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(json.status.success(), "{:?}", json.stderr);
+    let skills =
+        serde_json::from_slice::<Vec<serde_json::Value>>(&json.stdout).expect("skill preview JSON");
+    let explicit = skills
+        .iter()
+        .find(|skill| skill["name"] == "explicit-only")
+        .expect("explicit role skill");
+    assert_eq!(
+        explicit,
+        &serde_json::json!({
+            "name": "explicit-only",
+            "path": explicit_path,
+            "description": "Explicit role skill."
+        })
+    );
+    assert!(skills.iter().all(|skill| skill["name"] != "default-only"));
+}
+
+/// Skill listing depends on completed context discovery, not on the prompt
+/// template used only to trigger that lifecycle.
+#[test]
+fn print_skills_survives_prompt_materialization_failure_after_discovery() {
+    let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
+    let skill_dir = home.path().join(".config/agents/skills/available");
+    std::fs::create_dir_all(config_dir.join("prompts")).expect("create prompts directory");
+    std::fs::create_dir_all(&skill_dir).expect("create skill directory");
+    std::fs::create_dir_all(home.path().join("work")).expect("create work directory");
+    std::fs::write(
+        config_dir.join("prompts/broken.hbs"),
+        "{{unknown_helper \"value\"}}\n",
+    )
+    .expect("write prompt template");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        "agents:\n  role_groups:\n    preview:\n      roles:\n        preview:\n          prompt_override: broken\n",
+    )
+    .expect("write harness config");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: available\ndescription: Available after discovery.\n---\n",
+    )
+    .expect("write skill");
+
+    let prompt = preview(&home, None, &["--role", "preview", "dev", "print-prompt"]);
+    assert!(
+        !prompt.status.success(),
+        "fixture prompt unexpectedly rendered: {:?}",
+        prompt.stdout
+    );
+
+    let skills = preview(
+        &home,
+        None,
+        &[
+            "--role",
+            "preview",
+            "dev",
+            "print-skills",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(skills.status.success(), "{:?}", skills.stderr);
+    let skills =
+        serde_json::from_slice::<Vec<serde_json::Value>>(&skills.stdout).expect("skill JSON");
+    assert!(
+        skills.iter().any(|skill| skill["name"] == "available"),
+        "{skills:?}"
+    );
 }
 
 /// Proves previews report exact-route uncertainty instead of inferring a

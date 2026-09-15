@@ -16,9 +16,29 @@ pub(crate) fn request_rendered_value<T>(
     client_name: &'static str,
     request_id_prefix: &str,
     build_request: impl FnOnce(String) -> HarnessInputMessage,
-    handle_result: impl Fn(HarnessOutputMessage, &str) -> RenderResponse<T>,
+    handle_result: impl FnMut(HarnessOutputMessage, &str) -> RenderResponse<T>,
 ) -> Result<T, CliError> {
-    let (mut reader, mut writer) = connect_render_client(daemon, client_name)?;
+    request_rendered_value_with_selectors(
+        daemon,
+        client_name,
+        request_id_prefix,
+        Vec::new(),
+        build_request,
+        handle_result,
+    )
+}
+
+/// Runs one rendered preview while subscribing to additional snapshot events.
+pub(crate) fn request_rendered_value_with_selectors<T>(
+    daemon: &mut DaemonHandle,
+    client_name: &'static str,
+    request_id_prefix: &str,
+    additional_selectors: Vec<EventSelector>,
+    build_request: impl FnOnce(String) -> HarnessInputMessage,
+    mut handle_result: impl FnMut(HarnessOutputMessage, &str) -> RenderResponse<T>,
+) -> Result<T, CliError> {
+    let (mut reader, mut writer) =
+        connect_render_client(daemon, client_name, additional_selectors)?;
     let result = (|| {
         wait_for_preview_session(&mut reader)?;
         let request_id = crate::ui_client::next_request_id(request_id_prefix);
@@ -56,13 +76,12 @@ pub(crate) fn request_rendered_value<T>(
 fn connect_render_client(
     daemon: &mut DaemonHandle,
     client_name: &'static str,
+    mut additional_selectors: Vec<EventSelector>,
 ) -> Result<(UiInputReader, UiOutputWriter), CliError> {
     let (reader, mut writer) =
         crate::ui_client::connect_daemon_ui_client(daemon, client_name, None)?;
-    crate::ui_client::subscribe(
-        &mut writer,
-        vec![EventSelector::Exact(EventName::SESSION_REPLAY_COMPLETE)],
-    )?;
+    additional_selectors.push(EventSelector::Exact(EventName::SESSION_REPLAY_COMPLETE));
+    crate::ui_client::subscribe(&mut writer, additional_selectors)?;
     Ok((reader, writer))
 }
 

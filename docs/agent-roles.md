@@ -70,14 +70,15 @@ Apply these instructions outside the excluded project.
 {{/if}}
 ```
 
-`tau dev print-prompt` and `tau dev print-tools` use the role that normal startup
-would select when `--role` is omitted, including profile and configured-default
-resolution. Use `tau --role NAME dev print-prompt` or
-`tau --role NAME dev print-tools` to preview that explicit role instead.
-Both commands start a temporary harness, configure ordinary extensions, load one
-fresh ephemeral agent, wait boundedly for its per-agent context, and resolve one
-model/tool snapshot. They do not call a provider or create a resumable session,
-but they are not side-effect-free: extensions retain their ordinary User, Cache,
+`tau dev print-prompt`, `tau dev print-tools`, and `tau dev print-skills` use the
+role that normal startup would select when `--role` is omitted, including profile
+and configured-default resolution. Prefix any command with
+`tau --role NAME dev ...` to preview that explicit role instead. All three start
+a temporary harness, configure ordinary extensions, load one fresh ephemeral
+agent, and wait boundedly for its per-agent context. The prompt/tool previews
+resolve one model/tool snapshot; the skill preview reports the frozen effective
+skill snapshot. They do not call a provider or create a resumable session, but
+they are not side-effect-free: extensions retain their ordinary User, Cache,
 Secret, direct-state, filesystem, network, and external-service semantics and
 may write state or produce other startup side effects. This is fresh-agent
 parity, not a view of a restored or currently running agent.
