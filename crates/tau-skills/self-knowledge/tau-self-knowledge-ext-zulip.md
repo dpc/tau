@@ -164,6 +164,32 @@ separate effects, so failure or cancellation can leave an orphan upload or an
 uncertain sent message. Do not retry an uncertain send automatically; inspect
 the conversation first. Send-only mode remains text-only.
 
+A separately attachment-read-capable extension revision adds
+`zulip_list_attachments` and `zulip_download_attachment` in ordinary
+receive mode. An `std-zulip` instance exposes them only when its installed
+`tau-ext-zulip` implements that read contract. They share the
+`zulip:attachments:read` tag and have no tool group, so a role must grant each
+scoped tool explicitly. After listener registration, an agent can list at most
+16 standard Markdown attachment links from one message delivered to that same
+agent by passing the delivery's opaque `message_ref`. Listing returns bounded
+untrusted display names and source-bound opaque `attachment_ref` values, never
+private Zulip paths or native message IDs.
+
+`zulip_download_attachment` takes that same `message_ref` and one returned
+`attachment_ref`. Listing and download each refetch the exact current source
+message under the bot's configured access and receive policy. Download also
+rechecks listener registration, source ownership, and selected attachment
+around remote I/O before importing the exact bytes into Tau's shared Artifact
+namespace. Its result includes the untrusted name, verified size, and canonical
+`blake3:<64 lowercase hex>` Artifact key. That key is directly compatible with
+`zulip_send_attachment`; the core-shell `import` tool can also materialize it
+for filesystem reading or other local work. It grants byte lookup, not Zulip
+reply, recipient, sender, or route authority. Neither read tool scans message
+history. Accepted edits replace the selection; moves, access loss, deletion,
+failed refresh or attachment-budget pressure, owner eviction, registration or
+configuration retirement, and restart can retire it. The 16 MiB Artifact limit
+applies.
+
 The extension emits generic message reports for creates, edits, deletes,
 reactions, and successful sends. Edits, reactions, and deletes with a supplied
 actor require a top-level numeric actor in the union of `allowed_user_ids` and
@@ -180,8 +206,7 @@ delivered fact returns on the post-persistence downpath. First use establishes
 the current baseline without replay. Offline edits, deletes, and reactions are
 not recovered; filter changes do not rescan before the checkpoint. Crash
 recovery is at-least-once and can duplicate messages. Runtime reply/reaction
-references disappear on restart. The bridge does not download inbound files.
-Admitted Zulip Markdown remains exact through canonical facts, replay, and
+references disappear on restart. Admitted Zulip Markdown remains exact through canonical facts, replay, and
 provider context, including a leading addressed bot mention.
 
 A successfully completed ordinary-mode `zulip_register {"enabled":true}`
