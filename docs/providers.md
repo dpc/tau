@@ -7,6 +7,14 @@ backends can supply optional current/total counts in consistent units; omission
 retains generic activity. These updates contain no compaction content and are
 not persisted.
 
+Native Codex compaction tolerates unknown identity/ordering-only notifications
+in compaction/notification namespaces. Unsupported output, payload-bearing
+events, errors, and ambiguous lifecycle changes still fail closed. Normal
+provider logs record bounded sanitized unknown types, phase, and disposition
+under `compact_shape_validation`; repeated kinds are suppressed and distinct
+kinds are capped per wire dispatch. Exact material remains in opted-in private
+`received_response` captures, not normal logs or UI.
+
 ## Declaration-only inspection
 
 `tau dev preview-declarations` collects config-derived declarations from opted-in

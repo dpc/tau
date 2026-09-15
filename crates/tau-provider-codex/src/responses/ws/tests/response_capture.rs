@@ -130,7 +130,7 @@ fn successful_compact_response_retains_exact_terminal() {
 #[test]
 fn capture_truncation_does_not_change_compact_outcome() {
     let padding = format!(
-        r#"{{"type":"unknown","padding":"{}"}}"#,
+        r#"{{"type":"codex.response.metadata","padding":"{}"}}"#,
         "x".repeat(600_000)
     );
     let events = [

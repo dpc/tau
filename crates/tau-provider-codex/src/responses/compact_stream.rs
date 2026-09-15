@@ -2,6 +2,8 @@
 
 use crate::common::LlmError;
 
+mod unknown_diagnostics;
+
 const INVALID_COMPACT_SHAPE: &str =
     "compaction response did not contain exactly one completed compaction item";
 
@@ -28,9 +30,101 @@ pub(super) struct CompactStreamShape {
     /// Validated activity notifications, independent of provider sequence
     /// numbers.
     pub(super) progress_updates: u64,
+    /// Per-attempt bounded compatibility observations, never output state.
+    unknown: unknown_diagnostics::UnknownDiagnostics,
 }
 
 impl CompactStreamShape {
+    /// Validates live input and reports unknown presence without logging
+    /// payloads.
+    pub(super) fn validate_observed(
+        &mut self,
+        event: &serde_json::Value,
+        prompt: &str,
+    ) -> Result<(), LlmError> {
+        let kind = event["type"].as_str().unwrap_or("");
+        if matches!(
+            kind,
+            "response.output_item.added" | "response.output_item.done"
+        ) {
+            if event["item"]["type"].as_str() != Some("compaction") {
+                self.unknown.observe(
+                    prompt,
+                    self.item,
+                    "output_item_type",
+                    event["item"]["type"].as_str(),
+                    "rejected_output_item",
+                );
+            }
+        } else if !matches!(
+            kind,
+            "response.compaction.compacting"
+                | "response.created"
+                | "response.in_progress"
+                | "response.completed"
+                | "response.done"
+                | "response.incomplete"
+                | "response.failed"
+                | "error"
+                | "codex.rate_limits"
+                | "codex.response.metadata"
+        ) {
+            let disposition = if self.is_ignored_notification(event) {
+                "ignored_informational"
+            } else {
+                "rejected_unknown_shape"
+            };
+            self.unknown.observe(
+                prompt,
+                self.item,
+                "event_type",
+                event["type"].as_str(),
+                disposition,
+            );
+        }
+        self.validate(event)
+    }
+
+    /// Only notification namespaces with identity/ordering-only fields are safe
+    /// to discard. Unknown output and ambiguous semantic families remain
+    /// errors.
+    pub(super) fn is_ignored_notification(&self, event: &serde_json::Value) -> bool {
+        let Some(fields) = event.as_object() else {
+            return false;
+        };
+        let Some(kind) = event["type"].as_str() else {
+            return false;
+        };
+        if unknown_diagnostics::safe_label(Some(kind)) != kind
+            || !(kind.starts_with("response.compaction.")
+                || kind.starts_with("response.notification.")
+                || kind.starts_with("codex.notification."))
+            || kind == "response.compaction.compacting"
+            || has_lifecycle_suffix(kind)
+            || fields.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "type" | "sequence_number" | "output_index" | "item_id"
+                )
+            })
+            || fields
+                .get("sequence_number")
+                .is_some_and(|n| n.as_u64().is_none())
+        {
+            return false;
+        }
+        match (fields.get("output_index"), fields.get("item_id")) {
+            (None, None) => true,
+            (Some(index), Some(id)) => {
+                self.item == CompactItemPhase::Added
+                    && index.as_u64() == Some(0)
+                    && id.as_str().is_some()
+                    && self.added_item_id.as_ref().and_then(|id| id.as_deref()) == id.as_str()
+            }
+            _ => false,
+        }
+    }
+
     /// Validates one original provider event in arrival order.
     pub(super) fn validate(&mut self, event: &serde_json::Value) -> Result<(), LlmError> {
         let event_type = event["type"].as_str().unwrap_or("");
@@ -62,12 +156,10 @@ impl CompactStreamShape {
             {
                 Ok(())
             }
-            "codex.rate_limits" => Ok(()),
+            "codex.rate_limits" | "codex.response.metadata" => Ok(()),
             "response.incomplete" | "response.failed" | "error" => Ok(()),
-            event_type if event_type.starts_with("response.") => {
-                self.reject("unexpected_response_event")
-            }
-            _ => Ok(()),
+            _ if self.is_ignored_notification(event) => Ok(()),
+            _ => self.reject("unexpected_response_event"),
         }
     }
 
@@ -113,6 +205,28 @@ impl CompactStreamShape {
             self.item
         )))
     }
+}
+
+/// Unknown lifecycle/control or output-delta events cannot be discarded merely
+/// because their object carries only identity fields.
+fn has_lifecycle_suffix(kind: &str) -> bool {
+    matches!(
+        kind.rsplit('.').next(),
+        Some(
+            "added"
+                | "done"
+                | "delta"
+                | "created"
+                | "in_progress"
+                | "started"
+                | "completed"
+                | "failed"
+                | "incomplete"
+                | "error"
+                | "canceled"
+                | "cancelled"
+        )
+    )
 }
 
 #[cfg(test)]

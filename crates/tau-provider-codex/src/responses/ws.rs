@@ -796,6 +796,15 @@ impl WsConn {
             trace.lowering_finished_from(started);
         }
         let request_body = recorded_request_body(&envelope, recording_stream.is_some())?;
+        let _compact_diagnostic_span = (response_mode == ResponseMode::Compact).then(|| {
+            tracing::info_span!(
+                target: crate::LOG_TARGET,
+                "native_compact_envelope",
+                logical_attempt = correlation.as_ref().map(|c| c.logical_attempt()),
+                wire_dispatch_index = correlation.as_ref().map(|c| c.wire_dispatch_index()),
+            )
+            .entered()
+        });
         let diagnostic = correlation.as_ref().and_then(|correlation| {
             let attempt = correlation.diagnostic.clone()?;
             if self.diagnostic_epoch.is_none() {
@@ -1248,7 +1257,7 @@ impl WsConn {
                         trace.decoded_payload();
                     }
                     if let Some(shape) = compact_shape.as_mut() {
-                        shape.validate(decoded.value()).inspect_err(|error| {
+                        shape.validate_observed(decoded.value(), agent_prompt_id).inspect_err(|error| {
                             tracing::warn!(
                                 target: crate::LOG_TARGET,
                                 agent_prompt_id,
@@ -1259,6 +1268,10 @@ impl WsConn {
                         })?;
                         state.compact_progress_updates = shape.progress_updates;
                         on_update(&state);
+                        if shape.is_ignored_notification(decoded.value()) {
+                            diagnostics.record_disposition(super::ParsedEventDisposition::Unknown);
+                            continue;
+                        }
                     }
                     if execution.response_mode == ResponseMode::LocalSummary {
                         crate::local_compaction::validate_event(decoded.value())?;
@@ -1697,6 +1710,9 @@ pub(super) fn run_replay(
             shape.validate(decoded.value())?;
             state.compact_progress_updates = shape.progress_updates;
             on_update(&state);
+            if shape.is_ignored_notification(decoded.value()) {
+                continue;
+            }
         }
         if response_mode == ResponseMode::LocalSummary {
             crate::local_compaction::validate_event(decoded.value())?;

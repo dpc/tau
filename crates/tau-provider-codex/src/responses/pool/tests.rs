@@ -2235,12 +2235,19 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
     let (addr, server) = spawn_fake_codex_server();
     server.lock_state().scripted_events = Some(vec![
         serde_json::json!({
+            "type": "response.notification.future_notice", "sequence_number": 0,
+        }),
+        serde_json::json!({
             "type": "response.output_item.added", "output_index": 0,
             "item": {"type": "compaction", "id": "cmp_private"},
         }),
         serde_json::json!({
             "type": "response.compaction.compacting", "output_index": 0,
             "item_id": "cmp_private", "sequence_number": 3,
+        }),
+        serde_json::json!({
+            "type": "response.compaction.future_notice", "output_index": 0,
+            "item_id": "cmp_private", "sequence_number": 5,
         }),
         serde_json::json!({
             "type": "response.compaction.compacting", "output_index": 0,

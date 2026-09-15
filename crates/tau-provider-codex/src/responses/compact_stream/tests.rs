@@ -168,3 +168,75 @@ fn assert_rejected(events: &[&str]) {
         Err(LlmError::InvalidResponse(_))
     ));
 }
+
+/// Only identity/ordering-only notices in informational namespaces may be
+/// ignored; they never count as compacting or alter the output lifecycle.
+#[test]
+fn unknown_informational_notifications_preserve_compact_state() {
+    let mut shape = CompactStreamShape::default();
+    let global =
+        serde_json::json!({"type":"response.notification.future_notice","sequence_number":1});
+    assert!(shape.is_ignored_notification(&global));
+    shape.validate(&global).expect("global notification");
+    assert_eq!(shape.item, CompactItemPhase::Missing);
+    assert_eq!(shape.progress_updates, 0);
+    shape
+        .validate(
+            &serde_json::json!({"type":"response.output_item.added","output_index":0,
+        "item":{"type":"compaction","id":"cmp_1"}}),
+        )
+        .expect("valid added item");
+    let local = serde_json::json!({"type":"response.compaction.future_notice",
+        "output_index":0,"item_id":"cmp_1","sequence_number":99});
+    assert!(shape.is_ignored_notification(&local));
+    shape.validate(&local).expect("local notification");
+    assert_eq!(shape.item, CompactItemPhase::Added);
+    assert_eq!(shape.progress_updates, 0);
+    assert!(
+        shape
+            .validate(&serde_json::json!({"type":"response.completed"}))
+            .is_err()
+    );
+    for event in [
+        serde_json::json!({"type":"response.notification.future_notice","payload":"private"}),
+        serde_json::json!({"type":"response.compaction.future_notice","output_index":1,"item_id":"cmp_1"}),
+        serde_json::json!({"type":"response.compaction.future_notice","output_index":0,"item_id":"other"}),
+        serde_json::json!({"type":"response.compaction.future_notice","output_index":0}),
+        serde_json::json!({"type":"response.compaction.future_notice","sequence_number":-1}),
+        serde_json::json!({"type":"response.compaction.delta"}),
+        serde_json::json!({"type":"response.output_text.delta"}),
+        serde_json::json!({"type":"response.future_tool.added"}),
+        serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"unknown"}}),
+    ] {
+        assert!(!shape.is_ignored_notification(&event));
+        assert!(shape.validate(&event).is_err());
+        assert_eq!(shape.item, CompactItemPhase::Added);
+        assert_eq!(shape.progress_updates, 0);
+    }
+    for kind in ["error", "response.failed", "response.incomplete"] {
+        // The real parser, not notification tolerance, still owns these errors.
+        let event = serde_json::json!({"type":kind});
+        assert!(!shape.is_ignored_notification(&event));
+        shape
+            .validate(&event)
+            .expect("error passes to semantic parser");
+    }
+    for suffix in [
+        "added",
+        "done",
+        "delta",
+        "created",
+        "in_progress",
+        "started",
+        "completed",
+        "failed",
+        "incomplete",
+        "error",
+        "canceled",
+        "cancelled",
+    ] {
+        let event = serde_json::json!({"type":format!("response.compaction.{suffix}")});
+        assert!(!shape.is_ignored_notification(&event));
+        assert!(shape.validate(&event).is_err());
+    }
+}
