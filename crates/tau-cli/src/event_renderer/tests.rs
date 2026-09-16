@@ -4415,11 +4415,11 @@ fn role_details_prefer_structured_fields_over_description_text() {
     );
 }
 
-/// `:role` omits both compaction domains along with the other non-selection
-/// metadata, while the detailed `:new` completion retains them and the compact
-/// row retains the model and effort that help select a role.
+/// `:new` completion omits verbosity, thinking-summary, and verbose compaction
+/// policies while retaining the inference-compaction setting that can affect
+/// agent creation.
 #[test]
-fn role_completion_hides_compaction_policies() {
+fn new_agent_completion_hides_verbose_role_settings() {
     let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
         name: "deferred".to_owned(),
         description: String::new(),
@@ -4441,7 +4441,7 @@ fn role_completion_hides_compaction_policies() {
     );
     assert_eq!(
         details.completion_description(true),
-        "provider/model e=provider_default v=low ts=off inference-compaction=disabled compactions=eager=160000@outer_turn_finished[done],fallback=provider_default@before_inference[*]"
+        "provider/model e=provider_default inference-compaction=disabled"
     );
 }
 

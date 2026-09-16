@@ -2660,8 +2660,8 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
 }
 
 /// `:role` candidates keep only their model and effort beside the role name,
-/// while `:new` and subsequent role-setting completions retain the metadata
-/// needed to inspect and edit the configured policy.
+/// while `:new` retains useful service and tool settings without crowding the
+/// candidate with verbosity, thinking-summary, or compaction-policy details.
 #[test]
 fn role_completion_labels_stay_compact_without_hiding_role_settings() {
     let (_term, handle, _vt) = setup(80, 24);
@@ -2673,8 +2673,8 @@ fn role_completion_labels_stay_compact_without_hiding_role_settings() {
             description: "unused structured details".to_owned(),
             role_description: Some("production implementation".to_owned()),
             details: Some(tau_proto::HarnessRoleDetails {
-                inference_compaction: None,
-                compactions: Vec::new(),
+                inference_compaction: Some("disabled".to_owned()),
+                compactions: vec!["eager=160000@outer_turn_finished[done]".to_owned()],
                 model: Some("provider/model".into()),
                 params: tau_proto::ModelParams {
                     effort: tau_proto::ReasoningSelection::native(NativeReasoningEffort::High),
@@ -2719,7 +2719,7 @@ fn role_completion_labels_stay_compact_without_hiding_role_settings() {
     assert_eq!(new_role_candidates.len(), 1);
     assert_eq!(
         new_role_candidates[0].description,
-        "provider/model e=0.75→high v=low ts=concise st=fast tools=read etg=pim dtg=shell et=web_search dt=shell — production implementation"
+        "provider/model e=0.75→high st=fast inference-compaction=disabled tools=read etg=pim dtg=shell et=web_search dt=shell — production implementation"
     );
 
     let tool_setting_candidates = tau_cli_term::completion::build_candidates(

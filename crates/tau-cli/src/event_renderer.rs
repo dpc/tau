@@ -582,20 +582,11 @@ impl RoleCompletionDetails {
         // Terminal completion rows have a strict horizontal budget; do not add
         // unrelated role metadata before this branch's compact `:role` fields.
         if include_tool_details {
-            if let Some(verbosity) = self.verbosity.as_deref() {
-                parts.push(format!("v={verbosity}"));
-            }
-            if let Some(thinking_summary) = self.thinking_summary.as_deref() {
-                parts.push(format!("ts={thinking_summary}"));
-            }
             if let Some(service_tier) = self.service_tier.as_deref() {
                 parts.push(format!("st={service_tier}"));
             }
             if let Some(inference_compaction) = self.inference_compaction.as_deref() {
                 parts.push(format!("inference-compaction={inference_compaction}"));
-            }
-            if let Some(compactions) = self.compactions.as_deref() {
-                parts.push(format!("compactions={compactions}"));
             }
             if let Some(tools) = self.tools.as_deref() {
                 parts.push(format!("tools={tools}"));
