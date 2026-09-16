@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-zulip
-description: Use for Tau std-zulip setup, event queues, stream/topic and DM routing, tools, security, mutations, or troubleshooting.
+description: Use when configuring, operating, or troubleshooting Tau std-zulip, including event queues, stream/topic and DM routing, tools, security, or mutations.
 ---
 
 # Tau std-zulip extension self-knowledge

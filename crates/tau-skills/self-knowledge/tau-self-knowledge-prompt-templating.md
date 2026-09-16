@@ -1,9 +1,6 @@
 ---
 name: tau-self-knowledge-prompt-templating
-description: >
-  Use this skill when the user asks about Tau prompt templates, prompt fragments,
-  Handlebars variables, prompt fragment priorities, role prompt customization,
-  project-specific prompt conditionals, or system prompt template overrides.
+description: Use when customizing Tau prompt templates or fragments, including Handlebars variables, prompt fragment priorities, role prompt customization, project-specific prompt conditionals, or system prompt template overrides.
 advertise: false
 ---
 

@@ -1,9 +1,6 @@
 ---
 name: tau-self-knowledge-community
-description: >
-  Use this skill when the user asks where to get Tau help, ask questions, report
-  issues, discuss ideas, contact the community, or understand whether pull
-  requests are welcome for dpc's Tau coding agent.
+description: Use when finding Tau help, reporting issues, discussing ideas, contacting the community, or determining whether contributions and pull requests are welcome.
 advertise: false
 ---
 

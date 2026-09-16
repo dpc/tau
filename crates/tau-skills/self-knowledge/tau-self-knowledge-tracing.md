@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-tracing
-description: Audit Tau agent execution, performance, orchestration, and durable semantic traces.
+description: Use when auditing Tau agent execution, performance, orchestration, or durable semantic traces.
 ---
 
 # Durable agent tracing

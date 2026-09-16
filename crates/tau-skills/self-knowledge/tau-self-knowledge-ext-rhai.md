@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-rhai
-description: Use this extension skill when the user asks about Tau's disabled std-rhai scripting extension, Rhai event hooks, script config, subscriptions, interceptions, host functions, or scripting limitations.
+description: Use when configuring or developing Tau std-rhai scripts, including its disabled-by-default status, event hooks, script config, subscriptions, interceptions, host functions, or scripting limitations.
 advertise: false
 ---
 

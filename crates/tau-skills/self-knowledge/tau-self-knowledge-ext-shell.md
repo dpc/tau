@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-shell
-description: Use this extension skill when the user asks about Tau's core-shell extension, filesystem tools, shell command execution, file editing, directory locks, AGENTS.md discovery, shell configuration, or read-only tool isolation.
+description: Use when using or configuring Tau core-shell filesystem and shell tools, including command execution, file editing, directory locks, AGENTS.md discovery, shell configuration, or read-only tool isolation.
 advertise: false
 ---
 

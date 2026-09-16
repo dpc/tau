@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-pim
-description: Use this extension skill when the user asks how to configure Tau's std-pim extension, split email/calendar tools, Google Calendar OAuth, ICS calendars, PIM actions, approval workflow, audit logs, or PIM security policy.
+description: Use when configuring or operating Tau std-pim, including split email/calendar tools, Google Calendar OAuth, ICS calendars, PIM actions, approval workflow, audit logs, or PIM security policy.
 advertise: false
 ---
 

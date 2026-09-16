@@ -1,9 +1,6 @@
 ---
 name: tau-self-knowledge-secrets
-description: >
-  Use this skill when the user asks how Tau handles extension secrets, including
-  declarations, TAU_SECRET sources, provider credentials, Secret RPC, redaction,
-  persistence, rotation, or their security limits.
+description: Use when configuring or auditing Tau extension secrets, including declarations, TAU_SECRET sources, provider credentials, Secret RPC, redaction, persistence, rotation, or security limits.
 advertise: false
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-rostra
-description: Use this extension skill when the user asks how to configure Tau's std-rostra extension, use its Rostra tools or notifications, manage its mnemonic and state, or troubleshoot Rostra synchronization.
+description: Use when configuring or troubleshooting Tau std-rostra, including Rostra tools or notifications, mnemonic and state management, or Rostra synchronization.
 advertise: false
 ---
 

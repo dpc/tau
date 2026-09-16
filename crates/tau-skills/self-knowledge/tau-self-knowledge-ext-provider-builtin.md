@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-provider-builtin
-description: Use this extension skill when the user asks about Tau's provider-builtin extension, built-in model providers, ChatGPT/Codex OAuth, OpenAI-compatible Chat Completions, OpenRouter, providers, model publication, or tau provider commands.
+description: Use when configuring or troubleshooting Tau provider-builtin, including built-in model providers, ChatGPT/Codex OAuth, OpenAI-compatible Chat Completions, OpenRouter, provider setup, model publication, or tau provider commands.
 advertise: false
 ---
 

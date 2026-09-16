@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-e2e-testing
-description: Use this skill when the user asks about Tau E2E testing, the dev tmux helper, scratch Tau state, testing.yaml, or opt-in provider access for testing agents.
+description: Use when running or explaining Tau end-to-end tests with dev tmux, scratch state, testing.yaml, or opt-in provider access.
 advertise: false
 ---
 

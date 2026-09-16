@@ -1,9 +1,6 @@
 ---
 name: tau-self-knowledge-architecture
-description: >
-  Use this skill when the user asks how Tau is architected, including the harness
-  daemon, UI clients, Unix socket connections, sessions, event flow, model
-  orchestration, tool routing, or extension processes.
+description: Use when inspecting or explaining Tau architecture, including the harness daemon, UI clients, Unix socket connections, sessions, event flow, model orchestration, tool routing, or extension processes.
 advertise: false
 ---
 

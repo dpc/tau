@@ -1,10 +1,6 @@
 ---
 name: tau-self-knowledge-harness
-description: >
-  Use this skill when the user asks about the Tau harness daemon, including how
-  it starts, accepts UI clients, uses Unix sockets, handles activation modes,
-  socket activation, readiness signaling, attach behavior, or embedded harness
-  runs.
+description: Use when operating or explaining the Tau harness daemon, including startup, UI clients, Unix sockets, activation modes, socket activation, readiness signaling, attach behavior, or embedded harness runs.
 advertise: false
 ---
 

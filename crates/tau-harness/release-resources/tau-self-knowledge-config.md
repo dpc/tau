@@ -1,9 +1,6 @@
 ---
 name: tau-self-knowledge-config
-description: >
-  Use this skill when the user asks how to configure Tau, where Tau stores config,
-  state, sessions, runtime files, policies, credentials, or provider setup, or how
-  to use tau init and tau provider commands.
+description: Use when configuring Tau or locating its config, state, sessions, runtime files, policies, credentials, or provider setup.
 advertise: false
 ---
 

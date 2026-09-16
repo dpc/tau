@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-std-notifications
-description: Use this extension skill when the user asks about Tau's std-notifications extension, prompt/response sounds, idle notifications, OSC 1337 user vars, terminal bells, idle summaries, or notification commands.
+description: Use when configuring or troubleshooting Tau std-notifications, including prompt/response sounds, idle notifications, OSC 1337 user vars, terminal bells, idle summaries, or notification commands.
 advertise: false
 ---
 

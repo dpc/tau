@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-test-dummy
-description: Use this extension skill when the user asks about Tau's test-dummy extension, restart_test_dummy, test-only extension restart behavior, prompt interception tests, or deterministic dummy extension configuration.
+description: Use when testing Tau test-dummy, including restart_test_dummy, test-only extension restart behavior, prompt interception tests, or deterministic dummy extension configuration.
 advertise: false
 ---
 

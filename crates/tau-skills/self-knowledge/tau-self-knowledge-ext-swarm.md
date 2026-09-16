@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-swarm
-description: Use this extension skill for Tau std-swarm setup, Iroh endpoint pinning, worker credentials, task metadata, blockers, updates, reconnects, or process-memory lifetime.
+description: Use when configuring, operating, or troubleshooting Tau std-swarm, including Iroh endpoint pinning, worker credentials, task metadata, blockers, updates, reconnects, or process-memory lifetime.
 advertise: false
 ---
 

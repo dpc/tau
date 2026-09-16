@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-telegram
-description: Use for Tau std-telegram setup, routing, tools, gateway-client mode, security, or troubleshooting.
+description: Use when configuring, operating, or troubleshooting Tau std-telegram, including routing, tools, gateway-client mode, or security.
 ---
 
 # Tau std-telegram extension self-knowledge

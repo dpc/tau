@@ -1,8 +1,6 @@
 ---
 name: tau-self-knowledge-debugging-extensions
-description: >
-  Use this skill to debug a supervised Tau extension's startup, crash,
-  reconnection, stderr logs, tracing filter, or diagnostic privacy boundary.
+description: Use when debugging a supervised Tau extension’s startup, crash, reconnection, stderr logs, tracing filter, or diagnostic privacy boundary.
 advertise: false
 ---
 

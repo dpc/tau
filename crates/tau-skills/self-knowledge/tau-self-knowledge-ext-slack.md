@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-slack
-description: Use this extension skill for Tau std-slack setup, conversation policies, Slack Socket Mode scopes/events, tools, routing, security, edits, reactions, dynamic DMs, or troubleshooting.
+description: Use when configuring, operating, or troubleshooting Tau std-slack, including conversation policies, Slack Socket Mode scopes/events, tools, routing, security, edits, reactions, or dynamic DMs.
 advertise: false
 ---
 

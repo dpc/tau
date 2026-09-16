@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-ext-websearch
-description: Use this extension skill when the user asks about Tau's std-websearch extension, hosted web_search/web_fetch providers, failover, endpoints, credentials, or web search configuration.
+description: Use when configuring or troubleshooting Tau std-websearch, including hosted web_search/web_fetch providers, failover, endpoints, credentials, or web search configuration.
 advertise: false
 ---
 

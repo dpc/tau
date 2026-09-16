@@ -1,8 +1,6 @@
 ---
 name: tau-self-knowledge-cli-ui
-description: >
-  Use this skill when the user asks about Tau's terminal CLI UI, prompt input,
-  commands, prompt history, key bindings, or prompt completions.
+description: Use when using or configuring Tau terminal CLI UI, including prompt input, commands, prompt history, key bindings, or prompt completions.
 advertise: false
 ---
 

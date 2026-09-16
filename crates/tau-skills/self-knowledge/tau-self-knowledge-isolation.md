@@ -1,9 +1,6 @@
 ---
 name: tau-self-knowledge-isolation
-description: >
-  Use this skill when the user asks how Tau hardens or isolates supervised
-  extensions, including tau_state_access, Linux namespaces, state mounts,
-  provider exceptions, filesystem visibility, or the trust boundary.
+description: Use when assessing Tau extension isolation or hardening, including tau_state_access, Linux namespaces, state mounts, provider exceptions, filesystem visibility, or the trust boundary.
 advertise: false
 ---
 

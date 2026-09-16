@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-email
-description: Use this skill when the user asks how to configure Tau's standard PIM/email extension, std-pim/tau-ext-pim, mail accounts, IMAP/SMTP, email approvals, incoming authentication, DKIM, Authentication-Results, or email security policy.
+description: Use when configuring or troubleshooting Tau std-pim email, including mail accounts, IMAP/SMTP, email approvals, incoming authentication, DKIM, Authentication-Results, or email security policy.
 advertise: false
 ---
 
