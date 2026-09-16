@@ -1476,3 +1476,35 @@ fn runtime_directories_are_private_and_reject_symlink_authority() {
         io::ErrorKind::PermissionDenied
     );
 }
+
+/// Runtime setup failures must identify the failed operation and exact path
+/// while retaining the underlying operating-system error in the source chain.
+#[test]
+fn runtime_directory_failures_retain_path_and_source_context() {
+    use std::error::Error as _;
+
+    let root = bounded_runtime_root();
+    let blocked_parent = root.path().join("not-a-directory");
+    std::fs::write(&blocked_parent, b"block runtime creation").expect("create blocking file");
+    let _override = override_runtime_dir(&blocked_parent);
+
+    let error = prepare_harnesses_dir().expect_err("runtime creation below a file must fail");
+    let runtime_root = blocked_parent.join("tau");
+    let diagnostic = error.to_string();
+    assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    assert!(
+        diagnostic.contains("failed to create runtime directory"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&runtime_root.display().to_string()),
+        "{diagnostic}"
+    );
+    let source = error
+        .source()
+        .expect("operating-system source")
+        .downcast_ref::<io::Error>()
+        .expect("source remains an I/O error");
+    assert_eq!(source.kind(), io::ErrorKind::NotADirectory);
+    assert_eq!(source.raw_os_error(), Some(libc::ENOTDIR));
+}

@@ -20,6 +20,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
+use std::{error, fmt};
 
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -43,6 +44,46 @@ const MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_DISCOVERY_CALLS: usize = 8;
 const MAX_DISCOVERY_PROBES: usize = 8;
 const MAX_TARGET_CAPTURE_JOBS: usize = 64;
+
+/// Filesystem operation context retained around one runtime-path I/O failure.
+#[derive(Debug)]
+struct RuntimePathIoError {
+    /// Operation that failed.
+    operation: &'static str,
+    /// Runtime path involved in the operation.
+    path: PathBuf,
+    /// Underlying operating-system error.
+    source: io::Error,
+}
+
+impl fmt::Display for RuntimePathIoError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "failed to {} `{}`: {}",
+            self.operation,
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl error::Error for RuntimePathIoError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn runtime_path_io_error(operation: &'static str, path: &Path, source: io::Error) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        RuntimePathIoError {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        },
+    )
+}
 
 /// Maximum number of sessions returned by one peer-discovery request.
 pub const SESSION_DISCOVERY_MAX_RESULTS: usize = 50;
@@ -457,7 +498,9 @@ pub(crate) fn prepare_harnesses_dir() -> io::Result<PathBuf> {
     ensure_private_runtime_dir(&harnesses)?;
     ensure_private_runtime_dir(&harnesses.join(CLAIMS_DIR))?;
     ensure_private_runtime_dir(&harnesses.join(SOCKETS_DIR))?;
-    std::fs::canonicalize(harnesses)
+    std::fs::canonicalize(&harnesses).map_err(|source| {
+        runtime_path_io_error("canonicalize runtime directory", &harnesses, source)
+    })
 }
 
 fn session_key(session_id: &tau_proto::SessionId) -> String {
@@ -500,10 +543,16 @@ pub fn claim_session(
         .create(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let file = options.open(&claim_path)?;
+    let file = options
+        .open(&claim_path)
+        .map_err(|source| runtime_path_io_error("open session claim", &claim_path, source))?;
     validate_claim_file(&file, &claim_path)?;
-    fs2::FileExt::try_lock_exclusive(&file)?;
-    let identity = FileIdentity::from_metadata(&file.metadata()?);
+    fs2::FileExt::try_lock_exclusive(&file)
+        .map_err(|source| runtime_path_io_error("lock session claim", &claim_path, source))?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| runtime_path_io_error("inspect session claim", &claim_path, source))?;
+    let identity = FileIdentity::from_metadata(&metadata);
     validate_path_identity(&claim_path, identity)?;
     Ok(SessionClaim {
         file,
@@ -545,21 +594,25 @@ fn validate_socket_path(path: &Path) -> io::Result<()> {
 }
 
 fn verify_runtime_lock_support() -> io::Result<()> {
-    reject_known_network_filesystem(&claims_dir())?;
-    let path = claims_dir().join(format!(".flock-test-{:016x}", rand::random::<u64>()));
+    let claims_dir = claims_dir();
+    reject_known_network_filesystem(&claims_dir)?;
+    let path = claims_dir.join(format!(".flock-test-{:016x}", rand::random::<u64>()));
     let first = OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)?;
+        .open(&path)
+        .map_err(|source| runtime_path_io_error("create runtime lock probe", &path, source))?;
     let second = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)?;
-    fs2::FileExt::try_lock_exclusive(&first)?;
+        .open(&path)
+        .map_err(|source| runtime_path_io_error("open runtime lock probe", &path, source))?;
+    fs2::FileExt::try_lock_exclusive(&first)
+        .map_err(|source| runtime_path_io_error("lock runtime lock probe", &path, source))?;
     let result = fs2::FileExt::try_lock_exclusive(&second);
     let _ = std::fs::remove_file(&path);
     match result {
@@ -567,7 +620,11 @@ fn verify_runtime_lock_support() -> io::Result<()> {
         Ok(()) => Err(io::Error::other(
             "runtime filesystem does not enforce independent-open flock exclusion",
         )),
-        Err(error) => Err(error),
+        Err(source) => Err(runtime_path_io_error(
+            "verify runtime lock exclusion",
+            &path,
+            source,
+        )),
     }
 }
 
@@ -582,7 +639,11 @@ fn reject_known_network_filesystem(path: &Path) -> io::Result<()> {
     // SAFETY: `encoded` is NUL terminated and `stats` points to writable
     // storage.
     if unsafe { libc::statfs(encoded.as_ptr(), stats.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(runtime_path_io_error(
+            "inspect runtime filesystem",
+            path,
+            io::Error::last_os_error(),
+        ));
     }
     // SAFETY: successful `statfs` initialized the output structure.
     let kind = unsafe { stats.assume_init() }.f_type as u64;
@@ -609,7 +670,9 @@ fn reject_known_network_filesystem(_path: &Path) -> io::Result<()> {
 }
 
 fn validate_claim_file(file: &File, path: &Path) -> io::Result<()> {
-    let metadata = file.metadata()?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| runtime_path_io_error("inspect session claim", path, source))?;
     if !metadata.file_type().is_file()
         || metadata.uid() != current_euid()
         || metadata.nlink() != 1
@@ -624,7 +687,8 @@ fn validate_claim_file(file: &File, path: &Path) -> io::Result<()> {
 }
 
 fn validate_path_identity(path: &Path, expected: FileIdentity) -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|source| runtime_path_io_error("inspect session claim path", path, source))?;
     if metadata.file_type().is_symlink() || FileIdentity::from_metadata(&metadata) != expected {
         return Err(io::Error::other("runtime claim pathname changed"));
     }
@@ -1843,8 +1907,10 @@ pub(crate) fn register_test_permitted_session_harness(
 }
 
 fn ensure_private_runtime_dir(path: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
+    std::fs::create_dir_all(path)
+        .map_err(|source| runtime_path_io_error("create runtime directory", path, source))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|source| runtime_path_io_error("inspect runtime directory", path, source))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.uid() != current_euid() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -1852,7 +1918,9 @@ fn ensure_private_runtime_dir(path: &Path) -> io::Result<()> {
         ));
     }
     if metadata.permissions().mode() & 0o777 != 0o700 {
-        std::fs::set_permissions(path, Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(path, Permissions::from_mode(0o700)).map_err(|source| {
+            runtime_path_io_error("set runtime directory permissions", path, source)
+        })?;
     }
     Ok(())
 }
