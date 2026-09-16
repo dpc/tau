@@ -63,6 +63,47 @@ fn accepts_direct_completed_compaction_item() {
     .expect("direct completed compaction");
 }
 
+/// ChatGPT's transport-timing telemetry may follow a completed compact item;
+/// it carries no compact output and must not invalidate or advance the shape.
+#[test]
+fn accepts_websocket_timing_telemetry_without_changing_compact_state() {
+    let mut shape = CompactStreamShape::default();
+    let timing = serde_json::json!({
+        "type": "responsesapi.websocket_timing",
+        "timing_metrics": {
+            "response_id": "provider-private",
+            "total_turn_time_s": 1.25,
+            "critical_path": {"kind": "provider-private"}
+        }
+    });
+    shape
+        .validate_observed(&timing, "ap-test")
+        .expect("pre-output timing telemetry");
+    assert_eq!(shape.item, CompactItemPhase::Missing);
+    shape
+        .validate(
+            &serde_json::json!({"type":"response.output_item.done","output_index":0,
+                "item":{"type":"compaction","id":"cmp_1"}}),
+        )
+        .expect("completed compaction");
+    shape
+        .validate_observed(&timing, "ap-test")
+        .expect("post-output timing telemetry");
+    assert_eq!(shape.item, CompactItemPhase::Done);
+    assert_eq!(shape.progress_updates, 0);
+    assert!(
+        shape
+            .validate(&serde_json::json!({
+                "type": "responsesapi.websocket_timing.extra",
+                "timing_metrics": {}
+            }))
+            .is_err(),
+        "near-match telemetry kinds must remain fail-closed"
+    );
+    assert_eq!(shape.item, CompactItemPhase::Done);
+    assert_eq!(shape.progress_updates, 0);
+}
+
 /// Same-index type replacement must fail before the ordinary accumulator
 /// can overwrite the earlier slot and hide the original event history.
 #[test]

@@ -68,6 +68,7 @@ impl CompactStreamShape {
                 | "error"
                 | "codex.rate_limits"
                 | "codex.response.metadata"
+                | "responsesapi.websocket_timing"
         ) {
             let disposition = if self.is_ignored_notification(event) {
                 "ignored_informational"
@@ -156,7 +157,9 @@ impl CompactStreamShape {
             {
                 Ok(())
             }
-            "codex.rate_limits" | "codex.response.metadata" => Ok(()),
+            "codex.rate_limits" | "codex.response.metadata" | "responsesapi.websocket_timing" => {
+                Ok(())
+            }
             "response.incomplete" | "response.failed" | "error" => Ok(()),
             _ if self.is_ignored_notification(event) => Ok(()),
             _ => self.reject("unexpected_response_event"),
