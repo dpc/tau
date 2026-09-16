@@ -261,6 +261,53 @@ fn contended_unreachable_claim_is_incomplete() {
     ));
 }
 
+/// Strict claim scanning tolerates the short locked-but-unpublished startup
+/// interval, then validates the complete record without weakening ownership.
+#[test]
+fn contended_claim_scan_waits_for_initial_publication() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-publishing");
+    let mut claim = claim_session(root.path(), &id).expect("claim session");
+    let barriers = Arc::new((Barrier::new(2), Barrier::new(2)));
+    *TEST_CLAIM_READ_RETRY_BARRIERS
+        .lock()
+        .expect("claim retry barriers lock poisoned") = Some(Arc::clone(&barriers));
+    let publisher = std::thread::spawn(move || {
+        barriers.0.wait();
+        claim.publish(false).expect("publish diagnostics");
+        barriers.1.wait();
+        claim
+    });
+
+    let records = list_running_claim_records().expect("scan publishing claim");
+    let claim = publisher.join().expect("publisher thread");
+    *TEST_CLAIM_READ_RETRY_BARRIERS
+        .lock()
+        .expect("claim retry barriers lock poisoned") = None;
+
+    assert_eq!(records, vec![claim.record.clone()]);
+}
+
+/// A permanently malformed live claim still fails strict discovery after the
+/// bounded publication grace instead of being omitted or accepted.
+#[test]
+fn contended_claim_scan_rejects_permanently_malformed_record() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("session-malformed");
+    let mut claim = claim_session(root.path(), &id).expect("claim session");
+    claim.file.write_all(b"{").expect("write malformed record");
+    claim.file.flush().expect("flush malformed record");
+
+    assert_eq!(
+        list_running_claim_records().expect_err("malformed claim must fail"),
+        ClaimScanFailure::ReadClaim(io::ErrorKind::Other)
+    );
+}
+
 /// Only the lock winner may reclaim a same-owner stale socket, while a
 /// non-socket path at the deterministic address fails closed.
 #[test]

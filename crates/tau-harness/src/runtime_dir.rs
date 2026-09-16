@@ -38,6 +38,8 @@ const CLAIM_VERSION: u32 = 0;
 const MAX_CLAIM_BYTES: u64 = 16 * 1024;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const CLAIM_PUBLICATION_GRACE: Duration = Duration::from_millis(100);
+const CLAIM_READ_RETRY_DELAY: Duration = Duration::from_millis(5);
 const MESSAGE_DELIVERY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MESSAGE_DELIVERY_CANCELLATION_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_DIRECTORY_ENTRIES: usize = 4_096;
@@ -97,6 +99,11 @@ static TEST_DISCOVERY_SCAN_DELAY: LazyLock<Mutex<Option<(PathBuf, u64)>>> =
     LazyLock::new(|| Mutex::new(None));
 #[cfg(test)]
 static TEST_CANCEL_AFTER_CLAIM_READ: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+type TestClaimReadRetryBarriers = Arc<(std::sync::Barrier, std::sync::Barrier)>;
+#[cfg(test)]
+static TEST_CLAIM_READ_RETRY_BARRIERS: LazyLock<Mutex<Option<TestClaimReadRetryBarriers>>> =
+    LazyLock::new(|| Mutex::new(None));
 #[cfg(test)]
 static TEST_TARGET_CAPTURE_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
@@ -719,6 +726,44 @@ fn read_claim(file: &mut File) -> io::Result<ClaimRecord> {
         ));
     }
     Ok(record)
+}
+
+fn read_contended_claim_until(
+    file: &mut File,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<ClaimRecord, ClaimScanFailure> {
+    let retry_deadline = deadline.min(Instant::now() + CLAIM_PUBLICATION_GRACE);
+    loop {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(ClaimScanFailure::DeadlineExpired);
+        }
+        match read_claim(file) {
+            Ok(record) => return Ok(record),
+            Err(error) if is_claim_decode_error(&error) && Instant::now() < retry_deadline => {
+                #[cfg(test)]
+                if let Some(barriers) = TEST_CLAIM_READ_RETRY_BARRIERS
+                    .lock()
+                    .expect("claim retry barriers lock poisoned")
+                    .clone()
+                {
+                    barriers.0.wait();
+                    barriers.1.wait();
+                }
+                std::thread::sleep(
+                    CLAIM_READ_RETRY_DELAY
+                        .min(retry_deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(ClaimScanFailure::ReadClaim(error.kind())),
+        }
+    }
+}
+
+fn is_claim_decode_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.downcast_ref::<serde_json::Error>().is_some())
 }
 
 /// Resolves one exact running session to its deterministic socket stem.
@@ -1734,8 +1779,7 @@ fn list_running_claim_records_until(
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             return Err(ClaimScanFailure::DeadlineExpired);
         }
-        let record =
-            read_claim(&mut file).map_err(|error| ClaimScanFailure::ReadClaim(error.kind()))?;
+        let record = read_contended_claim_until(&mut file, deadline, cancelled)?;
         let expected_name = format!("{}.{}", session_key(&record.session_id), CLAIM_EXTENSION);
         if path.file_name().and_then(|value| value.to_str()) != Some(expected_name.as_str()) {
             return Err(ClaimScanFailure::ClaimKeyMismatch);
