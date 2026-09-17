@@ -26,8 +26,13 @@ filter = "package(dpc-tau) & binary(detach_attach_cli)"
 threads-required = 8
 
 [[profile.default.overrides]]
+# Deterministic-provider fixtures own a harness plus supervised provider and
+# tool-extension subprocesses, and several cases replace the full stack during
+# cold resume. Model that scheduler load so the poisoned-ambient CI lane does
+# not start all process stacks at once.
 filter = "package(dpc-tau-e2e-tests) & binary(deterministic_provider)"
 slow-timeout = { period = "60s", terminate-after = 1 }
+threads-required = 8
 
 [[profile.default.overrides]]
 # Resume fixtures own nested CLI/harness, provider, extension, PTY, and observer
