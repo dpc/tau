@@ -152,7 +152,6 @@ impl PromptRuntimeState {
         }
     }
 
-    /// Clears every tool snapshot and call backreference at session teardown.
     /// Returns whether no tool call retains a prompt snapshot in tests.
     #[cfg(test)]
     pub(super) fn tool_call_prompts_is_empty(&self) -> bool {

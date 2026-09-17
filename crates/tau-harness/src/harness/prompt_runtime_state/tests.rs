@@ -6,9 +6,9 @@ fn prompt_id(index: usize) -> AgentPromptId {
     AgentPromptId::parse(format!("prompt-{index}")).expect("test prompt id")
 }
 
-/// Prompt snapshots must survive every removal before the last actual call,
-/// retire on that last call, and clear all reverse links without
-/// cross-prompt scans.
+/// Prompt snapshots, including their backing connections, must survive every
+/// removal before the last actual call, retire on that last call, and clear all
+/// reverse links without cross-prompt scans.
 #[test]
 fn many_prompt_snapshots_follow_exact_call_membership() {
     const PROMPTS: usize = 64;
@@ -18,6 +18,9 @@ fn many_prompt_snapshots_follow_exact_call_membership() {
     for prompt_index in 0..PROMPTS {
         let prompt_id = prompt_id(prompt_index);
         state.tool_specs.insert(prompt_id.clone(), Vec::new());
+        state
+            .backing_tool_connections
+            .insert(prompt_id.clone(), Default::default());
         state
             .tool_invocation_policies
             .insert(prompt_id.clone(), Default::default());
@@ -49,6 +52,10 @@ fn many_prompt_snapshots_follow_exact_call_membership() {
             remaining[prompt_index] != 0
         );
         assert_eq!(
+            state.backing_tool_connections.contains_key(&prompt_id),
+            remaining[prompt_index] != 0
+        );
+        assert_eq!(
             state.tool_invocation_policies.contains_key(&prompt_id),
             remaining[prompt_index] != 0
         );
@@ -65,6 +72,9 @@ fn many_prompt_snapshots_follow_exact_call_membership() {
     for prompt_id in [&first, &second] {
         state.tool_specs.insert(prompt_id.clone(), Vec::new());
         state
+            .backing_tool_connections
+            .insert(prompt_id.clone(), Default::default());
+        state
             .tool_invocation_policies
             .insert(prompt_id.clone(), Default::default());
     }
@@ -74,6 +84,8 @@ fn many_prompt_snapshots_follow_exact_call_membership() {
     state.record_tool_call_prompt(replaced.clone(), second.clone());
     assert!(state.tool_specs.contains_key(&first));
     assert!(state.tool_specs.contains_key(&second));
+    assert!(state.backing_tool_connections.contains_key(&first));
+    assert!(state.backing_tool_connections.contains_key(&second));
     assert_eq!(state.tool_call_prompt(&first_survivor), Some(&first));
     assert_eq!(state.tool_call_prompt(&replaced), Some(&second));
 
@@ -85,11 +97,14 @@ fn many_prompt_snapshots_follow_exact_call_membership() {
     assert_eq!(state.tool_call_index_work() - work_before_clear, 130);
     assert_eq!(state.tool_call_prompt(&first_survivor), Some(&first));
     assert!(state.tool_specs.contains_key(&first));
+    assert!(state.backing_tool_connections.contains_key(&first));
     assert!(state.tool_invocation_policies.contains_key(&first));
     assert!(!state.tool_specs.contains_key(&second));
+    assert!(!state.backing_tool_connections.contains_key(&second));
     assert!(!state.tool_invocation_policies.contains_key(&second));
 
     state.clear_prompt_tool_snapshot(&first);
+    assert!(!state.backing_tool_connections.contains_key(&first));
     assert!(state.tool_call_prompts.is_empty());
     assert!(state.tool_calls_by_prompt.is_empty());
 }
