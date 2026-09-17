@@ -1311,6 +1311,7 @@ fn cold_restart_rejects_off_branch_checkpoint_as_startup_completion() {
 fn cold_restart_restores_checkpointed_start_without_coordinator() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("checkpointed");
+    let sessions_dir = tau_config::settings::sessions_dir_of(&state);
     let agent_id = {
         let mut h = quiet_provider_harness(&state).expect("harness");
         h.handle_start_agent_request(
@@ -1342,7 +1343,13 @@ fn cold_restart_restores_checkpointed_start_without_coordinator() {
                 .operations
                 .is_empty()
         );
+        h.shutdown().expect("shutdown checkpointed-start harness");
         drop(h);
+        assert!(
+            !tau_core::session_is_locked(&sessions_dir, "s1")
+                .expect("probe released checkpointed-start session lock"),
+            "graceful shutdown must release the session lock before cold restart"
+        );
         accepted.agent_id
     };
 
