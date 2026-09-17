@@ -1,6 +1,8 @@
 use std::os::unix as path_std_os_unix;
+use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -661,6 +663,92 @@ fn store_rejects_nonregular_final_paths() {
         store.get_side("side", &kind, ByteLimit::new(16)),
         Err(VcrError::UnsafePath { .. })
     ));
+}
+
+/// A writerless FIFO must reach descriptor validation without blocking in
+/// `open`, and the watchdog must retain ownership of a regressed child until it
+/// has been killed and reaped.
+#[test]
+fn store_rejects_writerless_fifo_cassette_path_without_blocking() {
+    const CHILD_MARKER: &str = "TAU_VCR_WRITERLESS_FIFO_CHILD";
+    const ROOT_ENV: &str = "TAU_VCR_WRITERLESS_FIFO_ROOT";
+    const TEST_NAME: &str = "tests::store_rejects_writerless_fifo_cassette_path_without_blocking";
+
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("child cassette root"));
+        let expected_path = root.join("writerless.yaml");
+        let error = VcrStore::new(root)
+            .get::<serde_json::Value>("writerless")
+            .expect_err("writerless FIFO must be rejected");
+        assert!(
+            matches!(error, VcrError::UnsafePath { ref path } if path == &expected_path),
+            "unexpected FIFO read error: {error:?}"
+        );
+        return;
+    }
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let fifo_path = tempdir.path().join("writerless.yaml");
+    let mkfifo = Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(&fifo_path)
+        .status()
+        .expect("run mkfifo");
+    assert!(mkfifo.success(), "mkfifo failed: {mkfifo}");
+
+    let executable = std::env::current_exe().expect("current test executable");
+    let mut child = FifoAssertionChild::new(
+        Command::new(executable)
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_MARKER, "1")
+            .env(ROOT_ENV, tempdir.path())
+            .spawn()
+            .expect("spawn isolated FIFO assertion"),
+    );
+    let status = child
+        .wait_until(Instant::now() + Duration::from_secs(10))
+        .expect("poll isolated FIFO assertion")
+        .expect("isolated FIFO assertion timed out");
+    assert!(status.success(), "isolated FIFO assertion failed: {status}");
+}
+
+/// Owns the isolated FIFO assertion until it exits or has been killed and
+/// reaped during failure cleanup.
+struct FifoAssertionChild {
+    /// Child process that may still require termination and reaping.
+    child: Option<Child>,
+}
+
+impl FifoAssertionChild {
+    /// Takes immediate cleanup ownership of a newly spawned assertion child.
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    /// Waits through `deadline`, returning `None` while retaining a timed-out
+    /// child for mandatory cleanup in [`Drop`].
+    fn wait_until(&mut self, deadline: Instant) -> std::io::Result<Option<ExitStatus>> {
+        loop {
+            let child = self.child.as_mut().expect("child remains owned");
+            if let Some(status) = child.try_wait()? {
+                self.child = None;
+                return Ok(Some(status));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for FifoAssertionChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 fn yaml_string_at_limit(limit: usize) -> String {
