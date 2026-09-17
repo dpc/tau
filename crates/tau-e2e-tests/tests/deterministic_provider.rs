@@ -160,7 +160,7 @@ fn deterministic_exact_saved_agent_unload_command() -> Result<(), Box<dyn std::e
         .join("tau/harnesses/sockets")
         .join(blake3::hash(b"tau-zulip-bot").to_hex().to_string())
         .with_extension("sock");
-    let daemon = spawn_daemon_for_cli_unload(&fixture, &socket);
+    let mut daemon = spawn_daemon_for_cli_unload(&fixture, &socket);
     let mut ui = connect_ui(&socket)?;
     create_agent_in_session(&mut ui, "tau-zulip-bot", "seed", "seed idle agent")?;
     let mut saw_finished = false;
@@ -182,8 +182,8 @@ fn deterministic_exact_saved_agent_unload_command() -> Result<(), Box<dyn std::e
             _ => {}
         }
     }
-    disconnect_ui(&mut ui)?;
-    drop(ui);
+    // Keep the seed UI attached so its detach transition cannot contend with
+    // the unload command's short exact-session discovery handshake.
     let output = Command::new(E2E_CLI)
         .env_clear()
         .env("HOME", fixture.root().join("home"))
@@ -194,12 +194,17 @@ fn deterministic_exact_saved_agent_unload_command() -> Result<(), Box<dyn std::e
         .env("LANG", "C.UTF-8")
         .args(["agent", "unload", "tau-zulip-bot", "zulip-bot-ngMK"])
         .output()?;
+    let daemon_diagnostic = daemon
+        .poll_exit_diagnostic()?
+        .unwrap_or_else(|| "daemon still running".to_owned());
     assert!(
         output.status.success(),
-        "exact unload failed: stdout={:?} stderr={:?}",
+        "exact unload failed: stdout={:?} stderr={:?}; {daemon_diagnostic}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    disconnect_ui(&mut ui)?;
+    drop(ui);
     daemon.finish()?;
     fixture.assert_consumed()?;
     Ok(())
