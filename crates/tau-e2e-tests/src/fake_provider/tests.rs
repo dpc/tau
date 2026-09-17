@@ -8,6 +8,132 @@ use tau_proto::ProviderFailureKind;
 use super::*;
 use crate::ScenarioLaneV2;
 
+/// Builds the existing five-action core-shell cold-resume fixture grammar.
+fn core_shell_cold_resume_scenario() -> ScenarioV2 {
+    ScenarioV2::new(
+        "core-shell-cold-resume-validation",
+        vec![ScenarioLaneV2 {
+            ctx_id: "core-shell-lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::CoreShellWorkdirCall {
+                    user_text: "prepare".to_owned(),
+                    call_id: "workdir".into(),
+                },
+                ScenarioActionV2::CoreShellWorkdirResult {
+                    user_text: "prepare".to_owned(),
+                    call_id: "workdir".into(),
+                    edit_call_id: "create".into(),
+                    nonce: "nonce".to_owned(),
+                },
+                ScenarioActionV2::CoreShellCreateResult {
+                    user_text: "prepare".to_owned(),
+                    call_id: "create".into(),
+                    response: "created".to_owned(),
+                },
+                ScenarioActionV2::CoreShellResumeEditCall {
+                    user_text: "resume".to_owned(),
+                    call_id: "resume-edit".into(),
+                    nonce: "nonce".to_owned(),
+                },
+                ScenarioActionV2::CoreShellResumeEditResult {
+                    user_text: "resume".to_owned(),
+                    call_id: "resume-edit".into(),
+                    response: "updated".to_owned(),
+                },
+            ],
+        }],
+    )
+}
+
+/// Accepts the existing cold-resume fixture and does not narrow the lane to
+/// exactly five actions.
+#[test]
+fn core_shell_cold_resume_continuations_accept_the_existing_fixture() {
+    let mut scenario = core_shell_cold_resume_scenario();
+    validation::validate_v2(&scenario).expect("existing cold-resume fixture is valid");
+
+    scenario.lanes[0].actions.push(ScenarioActionV2::Text {
+        user_text: "follow up".to_owned(),
+        response: "done".to_owned(),
+    });
+    validation::validate_v2(&scenario).expect("a later unrelated action remains valid");
+}
+
+/// Rejects each tool-emitting cold-resume action when its required immediate
+/// successor is absent.
+#[test]
+fn core_shell_cold_resume_continuations_reject_missing_successors() {
+    for emitter_index in [0, 1, 3] {
+        let mut scenario = core_shell_cold_resume_scenario();
+        scenario.lanes[0].actions.truncate(emitter_index + 1);
+        assert!(
+            validation::validate_v2(&scenario).is_err(),
+            "emitter at index {emitter_index} must require its successor"
+        );
+    }
+}
+
+/// Rejects each cold-resume successor when its correlation ID does not match
+/// the immediately preceding tool-emitting action.
+#[test]
+fn core_shell_cold_resume_continuations_reject_wrong_ids() {
+    for successor_index in [1, 2, 4] {
+        let mut scenario = core_shell_cold_resume_scenario();
+        match &mut scenario.lanes[0].actions[successor_index] {
+            ScenarioActionV2::CoreShellWorkdirResult { call_id, .. }
+            | ScenarioActionV2::CoreShellCreateResult { call_id, .. }
+            | ScenarioActionV2::CoreShellResumeEditResult { call_id, .. } => {
+                *call_id = format!("wrong-{successor_index}").into();
+            }
+            action => panic!("unexpected successor action: {action:?}"),
+        }
+        assert!(
+            validation::validate_v2(&scenario).is_err(),
+            "successor at index {successor_index} must match its emitter"
+        );
+    }
+}
+
+/// Rejects unrelated actions interposed between any cold-resume emitter and
+/// its required immediate successor.
+#[test]
+fn core_shell_cold_resume_continuations_reject_interposed_successors() {
+    for successor_index in [1, 2, 4] {
+        let mut scenario = core_shell_cold_resume_scenario();
+        scenario.lanes[0].actions.insert(
+            successor_index,
+            ScenarioActionV2::Text {
+                user_text: "interposed".to_owned(),
+                response: "interposed".to_owned(),
+            },
+        );
+        assert!(
+            validation::validate_v2(&scenario).is_err(),
+            "successor at index {successor_index} must remain immediate"
+        );
+    }
+}
+
+/// Rejects each cold-resume successor when it is reordered after another
+/// otherwise valid action.
+#[test]
+fn core_shell_cold_resume_continuations_reject_reordered_successors() {
+    for successor_index in [1, 2, 4] {
+        let mut scenario = core_shell_cold_resume_scenario();
+        scenario.lanes[0].actions.push(ScenarioActionV2::Text {
+            user_text: "later".to_owned(),
+            response: "later".to_owned(),
+        });
+        scenario.lanes[0]
+            .actions
+            .swap(successor_index, successor_index + 1);
+        assert!(
+            validation::validate_v2(&scenario).is_err(),
+            "successor at index {successor_index} must not be reordered"
+        );
+    }
+}
+
 /// Proves both special watch handlers commit cursor, flushed trace, and
 /// terminal in causal order rather than exposing the terminal before trace
 /// publication.

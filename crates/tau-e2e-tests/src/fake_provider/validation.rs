@@ -1121,6 +1121,32 @@ fn validate_v2_core_action(
                 "core-shell call ids must be unique and bounded",
             ));
         }
+        ScenarioActionV2::CoreShellWorkdirCall { call_id, .. }
+            if !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::CoreShellWorkdirResult {
+                    call_id: result_id,
+                    ..
+                }) if result_id == call_id
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "workdir call must precede its matching result",
+            ));
+        }
+        ScenarioActionV2::CoreShellResumeEditCall { call_id, .. }
+            if !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::CoreShellResumeEditResult {
+                    call_id: result_id,
+                    ..
+                }) if result_id == call_id
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "resume edit call must precede its matching result",
+            ));
+        }
         ScenarioActionV2::CoreShellWorkdirResult {
             call_id,
             edit_call_id,
@@ -1135,6 +1161,19 @@ fn validate_v2_core_action(
             || nonce.len() > 128 =>
         {
             return Err(ClientError::handler("workdir result must follow its call"));
+        }
+        ScenarioActionV2::CoreShellWorkdirResult { edit_call_id, .. }
+            if !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::CoreShellCreateResult {
+                    call_id: result_id,
+                    ..
+                }) if result_id == edit_call_id
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "workdir result must precede its matching create result",
+            ));
         }
         ScenarioActionV2::CoreShellCreateResult { call_id, .. }
             if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
