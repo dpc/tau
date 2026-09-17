@@ -793,7 +793,7 @@ fn response_update_activation_is_idempotent_across_routing_shapes() {
     let agent_a = agent_id("agent-a");
     let agent_b = agent_id("agent-b");
     let agent_c = agent_id("agent-c");
-    let prompt_id = tau_proto::AgentPromptId::parse("prompt-activation").expect("valid prompt id");
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-agent-b-42").expect("valid prompt id");
     let response_update = |agent_id: tau_proto::AgentId| {
         tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
             agent_prompt_id: prompt_id.clone(),

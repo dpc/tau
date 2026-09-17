@@ -154,7 +154,7 @@ pub(super) struct WatchActivityState {
     /// Prompts whose provider finish preceded their explicit agent termination.
     pub(super) provider_finished_before_termination: HashSet<tau_proto::AgentPromptId>,
     /// Provider prompts whose final output was rendered.
-    pub(super) finished_provider_prompts: HashSet<tau_proto::AgentPromptId>,
+    pub(super) finished_provider_prompts: CompletedPromptIds,
 }
 
 /// State that moves atomically with one rendered transcript.

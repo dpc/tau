@@ -25,6 +25,7 @@ use tau_proto::{
 const MAX_SUBMITTED_PROMPT_CORRELATIONS: usize = 64;
 
 use self::compaction_presentation::{append_compaction_progress, update_compaction_status};
+use self::completed_prompt_ids::CompletedPromptIds;
 use self::prepared_renderer_event::{DeferredRendererEvent, PreparedRendererEvent};
 pub(crate) use self::presentation_facts::PresentationFactClass;
 #[cfg(test)]
@@ -9952,6 +9953,7 @@ impl EventRenderer {
 
 mod attach_presentation;
 mod compaction_presentation;
+mod completed_prompt_ids;
 mod effort_completion;
 mod finished_response_projection;
 mod inner_turns;
