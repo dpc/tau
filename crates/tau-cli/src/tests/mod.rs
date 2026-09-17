@@ -5,7 +5,7 @@ use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
-use std::{ffi as path_std_ffi, fs as path_std_fs, sync as path_std_sync, time as path_std_time};
+use std::{ffi as path_std_ffi, sync as path_std_sync, time as path_std_time};
 
 use clap::{CommandFactory as _, Parser};
 use tau_cli_term::TermHandle;

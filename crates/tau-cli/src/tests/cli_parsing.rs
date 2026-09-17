@@ -176,35 +176,32 @@ fn session_list_rejects_invalid_directories_during_parsing() {
     }
 }
 
-/// An inaccessible directory is an invalid filter rather than an apparent
-/// successful absence result.
+/// An unresolvable directory filter fails canonicalization rather than becoming
+/// an apparent successful absence result. The self-referential symlink avoids
+/// depending on the runner's directory-access privileges.
 #[test]
-fn session_list_rejects_inaccessible_directory_during_parsing() {
-    use std::os::unix::fs::PermissionsExt as _;
-
+fn session_list_rejects_unresolvable_directory_during_parsing() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let private = temp.path().join("private");
-    let directory = private.join("project");
-    std::fs::create_dir_all(&directory).expect("private project");
-    std::fs::set_permissions(&private, path_std_fs::Permissions::from_mode(0o000))
-        .expect("remove directory access");
+    let directory = temp.path().join("loop");
+    path_std_os_unix::fs::symlink(&directory, &directory).expect("self-referential symlink");
+    assert_eq!(
+        std::fs::read_link(&directory).expect("read self-referential symlink"),
+        directory
+    );
 
-    let result = path_super_cli::Cli::try_parse_from([
+    let error = match path_super_cli::Cli::try_parse_from([
         path_std_ffi::OsStr::new("tau"),
         path_std_ffi::OsStr::new("session"),
         path_std_ffi::OsStr::new("list"),
         path_std_ffi::OsStr::new("--dir"),
         directory.as_os_str(),
-    ]);
-
-    std::fs::set_permissions(&private, path_std_fs::Permissions::from_mode(0o700))
-        .expect("restore directory access");
-    let error = match result {
-        Ok(_) => panic!("inaccessible directory should be rejected"),
+    ]) {
+        Ok(_) => panic!("unresolvable directory should be rejected"),
         Err(error) => error,
     };
     assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("cannot access directory"));
 }
 
 /// The legacy `--config` flag must not be silently ignored because that makes
