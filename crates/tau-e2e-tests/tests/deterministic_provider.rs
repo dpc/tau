@@ -163,13 +163,23 @@ fn deterministic_exact_saved_agent_unload_command() -> Result<(), Box<dyn std::e
     let daemon = spawn_daemon_for_cli_unload(&fixture, &socket);
     let mut ui = connect_ui(&socket)?;
     create_agent_in_session(&mut ui, "tau-zulip-bot", "seed", "seed idle agent")?;
+    let mut saw_finished = false;
     loop {
-        if matches!(
-            recv_event(&mut ui)?,
+        match recv_event(&mut ui)? {
             Event::ProviderResponseFinished(finished)
-                if finished.agent_id.as_str() == "zulip-bot-ngMK"
-        ) {
-            break;
+                if finished.agent_id.as_str() == "zulip-bot-ngMK" =>
+            {
+                saw_finished = true;
+            }
+            Event::AgentStatsUpdated(stats)
+                if saw_finished
+                    && stats.agent_id.as_str() == "zulip-bot-ngMK"
+                    && stats.runtime_state == AgentRuntimeState::Idle
+                    && stats.tools.in_flight == 0 =>
+            {
+                break;
+            }
+            _ => {}
         }
     }
     disconnect_ui(&mut ui)?;
