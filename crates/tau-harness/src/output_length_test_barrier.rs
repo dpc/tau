@@ -114,11 +114,11 @@ pub(crate) fn wait_and_reach(
     wait: impl FnOnce(Duration) -> tau_core::DurabilityBarrierOutcome,
     failure_message: &str,
 ) {
-    let (producer, outcome) = wait_and_report(cut, wait);
+    let Some((producer, outcome)) = wait_and_report(cut, wait) else {
+        return;
+    };
     assert_durable(outcome, failure_message);
-    if let Some(producer) = producer {
-        producer.block();
-    }
+    producer.block();
 }
 
 /// Runs the typed durability wait and sends its outcome before assertion or
@@ -126,19 +126,17 @@ pub(crate) fn wait_and_reach(
 fn wait_and_report(
     cut: OutputLengthCommitCut,
     wait: impl FnOnce(Duration) -> tau_core::DurabilityBarrierOutcome,
-) -> (
-    Option<PersistenceBarrierProducer>,
+) -> Option<(
+    PersistenceBarrierProducer,
     tau_core::DurabilityBarrierOutcome,
-) {
-    let mut producer = begin(cut);
+)> {
+    let mut producer = begin(cut)?;
     let started = Instant::now();
     let outcome = wait(PERSISTENCE_BARRIER_DURABILITY_TIMEOUT);
-    if let Some(producer) = producer.as_mut() {
-        producer
-            .report(outcome, started.elapsed())
-            .expect("report persistence crash-barrier producer outcome");
-    }
-    (producer, outcome)
+    producer
+        .report(outcome, started.elapsed())
+        .expect("report persistence crash-barrier producer outcome");
+    Some((producer, outcome))
 }
 
 /// Applies the preserved producer durability assertion after its report.

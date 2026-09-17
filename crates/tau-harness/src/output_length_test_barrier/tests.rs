@@ -48,7 +48,8 @@ fn persistence_barrier_producer_reports_every_typed_outcome_before_assertion() {
         let listener = UnixListener::bind(&path).expect("bind observer");
         install(OutputLengthCommitCut::AfterPlannedResponse, path).expect("install barrier");
         let (producer, reported) =
-            wait_and_report(OutputLengthCommitCut::AfterPlannedResponse, |_| outcome);
+            wait_and_report(OutputLengthCommitCut::AfterPlannedResponse, |_| outcome)
+                .expect("installed barrier");
         let (stream, _) = listener.accept().expect("accept producer");
         let mut lines = BufReader::new(stream).lines();
         let hook = lines.next().expect("hook line").expect("read hook");
@@ -70,4 +71,17 @@ fn persistence_barrier_producer_reports_every_typed_outcome_before_assertion() {
         assert_eq!(assertion.is_err(), assertion_fails);
         drop(producer);
     }
+}
+
+/// Keeps ordinary feature-enabled harness tests independent from durability
+/// waits when no deterministic crash barrier was installed.
+#[test]
+fn missing_persistence_barrier_skips_durability_wait() {
+    let mut waited = false;
+    let report = wait_and_report(OutputLengthCommitCut::AfterContinuationSteer, |_| {
+        waited = true;
+        DurabilityBarrierOutcome::UnavailableOrFailed
+    });
+    assert!(report.is_none(), "missing barrier produced a report");
+    assert!(!waited, "missing barrier waited for persistence");
 }
