@@ -177,7 +177,7 @@ fn provider_builtin_qwen_text_tool_continuation_is_exact() -> Result<(), Box<dyn
     let mut lifecycle = Lifecycle::default();
 
     create_qwen_prompt(&mut peer)?;
-    let _prompt = wait_for_created(&mut peer, &mut lifecycle, "qwen")?;
+    let prompt = wait_for_created(&mut peer, &mut lifecycle, "qwen")?;
     let request1 = fixture.recv_request()?;
     assert_qwen_common_request(&request1)?;
     assert_one_user_turn(&request1, "exercise qwen tools")?;
@@ -189,10 +189,12 @@ fn provider_builtin_qwen_text_tool_continuation_is_exact() -> Result<(), Box<dyn
     let request3 = fixture.recv_request()?;
     assert_qwen_common_request(&request3)?;
     assert_qwen_round_three(&request1, &request3)?;
-    wait_for_qwen_finished(&mut peer, &mut lifecycle)?;
+    let terminal_ids = wait_for_qwen_finished(&mut peer, &mut lifecycle)?;
 
     disconnect_ui(&mut peer)?;
     daemon.finish()?;
+    let durable = DurableSnapshot::load(fixture.harness_state_dir(), &session_id())?;
+    assert_durable_qwen_terminals(&durable, &prompt.agent_prompt_id, &terminal_ids)?;
     fixture.finish()?;
     Ok(())
 }
@@ -369,10 +371,13 @@ fn run_compaction_recovery(continue_summary: bool) -> Result<(), Box<dyn std::er
     assert!(!resumed_wire.contains("thinking"));
     assert!(!resumed_wire.contains("discarded-"));
 
-    wait_for_any_finished_text(&mut peer, &mut lifecycle, "recovered completion")?;
+    let recovery_prompt_id =
+        wait_for_any_finished_text(&mut peer, &mut lifecycle, "recovered completion")?;
 
     disconnect_ui(&mut peer)?;
     daemon.finish()?;
+    let durable = DurableSnapshot::load(fixture.harness_state_dir(), &session_id())?;
+    assert_durable_recovered_completion(&durable, &recovery_prompt_id)?;
     fixture.finish()?;
     Ok(())
 }
@@ -383,7 +388,7 @@ fn wait_for_any_finished_text(
     peer: &mut SocketPeer,
     lifecycle: &mut Lifecycle,
     expected_text: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<tau_proto::AgentPromptId, Box<dyn std::error::Error>> {
     loop {
         let event = recv_live(peer)?;
         reject_terminated(&event)?;
@@ -393,7 +398,7 @@ fn wait_for_any_finished_text(
             && finished.error.is_none()
             && has_exact_assistant_text(&finished.output_items, expected_text)
         {
-            return Ok(());
+            return Ok(finished.agent_prompt_id);
         }
     }
 }
@@ -403,8 +408,9 @@ fn wait_for_any_finished_text(
 fn wait_for_qwen_finished(
     peer: &mut SocketPeer,
     lifecycle: &mut Lifecycle,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<[tau_proto::AgentPromptId; 3], Box<dyn std::error::Error>> {
     let mut terminals = 0;
+    let mut terminal_ids = Vec::with_capacity(3);
     loop {
         let event = recv_live(peer)?;
         reject_terminated(&event)?;
@@ -413,6 +419,7 @@ fn wait_for_qwen_finished(
             continue;
         };
         terminals += 1;
+        terminal_ids.push(finished.agent_prompt_id.clone());
         match terminals {
             1 => {
                 assert_eq!(
@@ -452,9 +459,11 @@ fn wait_for_qwen_finished(
                     .ok_or("Qwen terminal omitted usage")?;
                 assert_eq!(usage.prompt_sent_tokens, 101);
                 assert_eq!(usage.response_received_tokens, 17);
-                return Ok(());
+                return terminal_ids.try_into().map_err(|_| {
+                    "Qwen fixture did not emit exactly three provider terminals".into()
+                });
             }
-            _ => return Err("Qwen fixture emitted more than three provider terminals".into()),
+            _ => unreachable!("the third Qwen terminal returns immediately"),
         }
     }
 }
@@ -1054,6 +1063,203 @@ fn assert_durable_turns(
         .into());
     }
     Ok(())
+}
+
+/// Minimal durable terminal projection used by the finite script oracles.
+#[derive(Debug)]
+struct DurableTerminalFact {
+    /// Prompt identity owning the canonical terminal.
+    prompt_id: tau_proto::AgentPromptId,
+    /// Canonical provider stop reason.
+    stop_reason: tau_proto::ProviderStopReason,
+    /// Whether the canonical terminal reports no provider/runtime error.
+    successful: bool,
+    /// Whether this is the successful exact compaction-recovery completion.
+    recovered_completion: bool,
+}
+
+/// Projects every durable canonical provider terminal in journal order.
+fn durable_terminal_facts(durable: &DurableSnapshot) -> Vec<DurableTerminalFact> {
+    durable
+        .agent_events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(finished) => Some(DurableTerminalFact {
+                prompt_id: finished.agent_prompt_id.clone(),
+                stop_reason: finished.stop_reason,
+                successful: finished.error.is_none(),
+                recovered_completion: finished.error.is_none()
+                    && finished.stop_reason == tau_proto::ProviderStopReason::EndTurn
+                    && has_exact_assistant_text(&finished.output_items, "recovered completion"),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Requires the Qwen script's complete durable terminal sequence and ownership.
+fn assert_durable_qwen_terminals(
+    durable: &DurableSnapshot,
+    initial_prompt_id: &tau_proto::AgentPromptId,
+    live_terminal_ids: &[tau_proto::AgentPromptId; 3],
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_qwen_terminal_facts(
+        &durable_terminal_facts(durable),
+        initial_prompt_id,
+        live_terminal_ids,
+    )
+}
+
+/// Checks the Qwen terminal sequence without depending on snapshot
+/// construction.
+fn assert_qwen_terminal_facts(
+    terminals: &[DurableTerminalFact],
+    initial_prompt_id: &tau_proto::AgentPromptId,
+    live_terminal_ids: &[tau_proto::AgentPromptId; 3],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identities_are_exact = live_terminal_ids[0] == *initial_prompt_id
+        && live_terminal_ids[0] != live_terminal_ids[1]
+        && live_terminal_ids[0] != live_terminal_ids[2]
+        && live_terminal_ids[1] != live_terminal_ids[2];
+    let expected_stops = [
+        tau_proto::ProviderStopReason::ToolCalls,
+        tau_proto::ProviderStopReason::ToolCalls,
+        tau_proto::ProviderStopReason::EndTurn,
+    ];
+    let durable_sequence_is_exact = terminals.len() == 3
+        && terminals
+            .iter()
+            .zip(live_terminal_ids.iter().zip(expected_stops))
+            .all(|(terminal, (expected_id, expected_stop))| {
+                terminal.prompt_id == *expected_id
+                    && terminal.stop_reason == expected_stop
+                    && terminal.successful
+            });
+    if !identities_are_exact || !durable_sequence_is_exact {
+        return Err(format!(
+            "unexpected durable Qwen terminals: initial={initial_prompt_id}, \
+             live_ids={live_terminal_ids:?}, durable={terminals:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Requires one terminal for the captured recovery identity and one successful
+/// exact recovered-completion terminal across the durable snapshot.
+fn assert_durable_recovered_completion(
+    durable: &DurableSnapshot,
+    recovery_prompt_id: &tau_proto::AgentPromptId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_recovered_completion_facts(&durable_terminal_facts(durable), recovery_prompt_id)
+}
+
+/// Checks the narrow recovered-completion cardinalities without freezing the
+/// compaction script's intermediate terminal matrix.
+fn assert_recovered_completion_facts(
+    terminals: &[DurableTerminalFact],
+    recovery_prompt_id: &tau_proto::AgentPromptId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity_terminals = terminals
+        .iter()
+        .filter(|terminal| terminal.prompt_id == *recovery_prompt_id)
+        .collect::<Vec<_>>();
+    let recovered = terminals
+        .iter()
+        .filter(|terminal| terminal.recovered_completion)
+        .collect::<Vec<_>>();
+    if !matches!(identity_terminals.as_slice(), [terminal] if terminal.recovered_completion)
+        || !matches!(recovered.as_slice(), [terminal] if terminal.prompt_id == *recovery_prompt_id)
+    {
+        return Err(format!(
+            "unexpected durable recovery terminals for {recovery_prompt_id}: {terminals:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Ensures an appended fourth durable Qwen terminal fails the finite script
+/// oracle rather than escaping after the live waiter returns.
+#[test]
+fn qwen_durable_oracle_rejects_appended_fourth_terminal() {
+    let initial = tau_proto::AgentPromptId::parse("qwen-initial").expect("valid prompt id");
+    let continuation_one =
+        tau_proto::AgentPromptId::parse("qwen-continuation-one").expect("valid prompt id");
+    let continuation_two =
+        tau_proto::AgentPromptId::parse("qwen-continuation-two").expect("valid prompt id");
+    let live_ids = [
+        initial.clone(),
+        continuation_one.clone(),
+        continuation_two.clone(),
+    ];
+    let mut terminals = vec![
+        terminal_fact(
+            initial.clone(),
+            tau_proto::ProviderStopReason::ToolCalls,
+            false,
+        ),
+        terminal_fact(
+            continuation_one,
+            tau_proto::ProviderStopReason::ToolCalls,
+            false,
+        ),
+        terminal_fact(
+            continuation_two.clone(),
+            tau_proto::ProviderStopReason::EndTurn,
+            false,
+        ),
+    ];
+    assert_qwen_terminal_facts(&terminals, &initial, &live_ids)
+        .expect("the exact three-terminal sequence must pass");
+
+    terminals.push(terminal_fact(
+        continuation_two,
+        tau_proto::ProviderStopReason::EndTurn,
+        false,
+    ));
+    assert!(
+        assert_qwen_terminal_facts(&terminals, &initial, &live_ids).is_err(),
+        "a fourth durable Qwen terminal must fail the oracle"
+    );
+}
+
+/// Ensures duplicate durable recovered-completion terminals fail even when the
+/// live waiter captured the expected recovery identity.
+#[test]
+fn compaction_durable_oracle_rejects_duplicate_recovered_completion() {
+    let recovery = tau_proto::AgentPromptId::parse("compaction-recovery").expect("valid prompt id");
+    let mut terminals = vec![terminal_fact(
+        recovery.clone(),
+        tau_proto::ProviderStopReason::EndTurn,
+        true,
+    )];
+    assert_recovered_completion_facts(&terminals, &recovery)
+        .expect("one recovered completion must pass");
+
+    terminals.push(terminal_fact(
+        recovery.clone(),
+        tau_proto::ProviderStopReason::EndTurn,
+        true,
+    ));
+    assert!(
+        assert_recovered_completion_facts(&terminals, &recovery).is_err(),
+        "a duplicate recovered completion must fail the oracle"
+    );
+}
+
+/// Builds one synthetic terminal projection for negative oracle tests.
+fn terminal_fact(
+    prompt_id: tau_proto::AgentPromptId,
+    stop_reason: tau_proto::ProviderStopReason,
+    recovered_completion: bool,
+) -> DurableTerminalFact {
+    DurableTerminalFact {
+        prompt_id,
+        stop_reason,
+        successful: true,
+        recovered_completion,
+    }
 }
 
 /// Requires the complete terminal output to be one exact assistant text
