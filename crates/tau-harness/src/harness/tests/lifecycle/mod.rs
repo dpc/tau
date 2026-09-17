@@ -832,5 +832,6 @@ mod compaction_lifecycle;
 mod cost_accounting;
 mod debug_observability;
 mod extension_lifecycle;
+mod provider_field_preparation;
 mod provider_lifecycle;
 mod session_lifecycle;

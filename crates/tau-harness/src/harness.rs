@@ -1597,6 +1597,8 @@ mod ordinary_no_tool_terminal_reducer;
 mod output_length_continuation_reducer;
 mod peer_messaging;
 mod peer_reports;
+mod prepared_automatic_compaction_decision;
+mod prepared_output_length_continuation;
 mod prepared_provider_cost;
 mod prompt_acceptance_timing;
 mod prompt_coordination_state;

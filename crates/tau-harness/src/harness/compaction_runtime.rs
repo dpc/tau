@@ -1352,7 +1352,47 @@ impl Harness {
         provider_prompt_id: Option<tau_proto::AgentPromptId>,
         policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
     ) -> Option<tau_proto::AutomaticCompactionDecision> {
-        let conv = self.agent_runtime.agent_registry.agents.get(cid)?;
+        let prepared = self.prepare_automatic_compaction_decision(
+            cid,
+            model,
+            reported_input,
+            provider_prompt_id,
+            policies,
+        );
+        if let Some(diagnostic) = prepared.diagnostic {
+            tracing::debug!(
+                target: "tau_harness",
+                agent = %cid,
+                policies = %diagnostic.names,
+                threshold = %diagnostic.threshold,
+                "coalesced outer-turn-finished automatic compaction policies"
+            );
+        }
+        if prepared.decision.is_some()
+            && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
+        {
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
+        }
+        prepared.decision
+    }
+
+    /// Projects eager-compaction authority and diagnostics without consuming a
+    /// prompt identity, emitting diagnostics, or scheduling provider work.
+    pub(super) fn prepare_automatic_compaction_decision(
+        &self,
+        cid: &AgentId,
+        model: ModelId,
+        reported_input: Option<tau_proto::TokenCount>,
+        provider_prompt_id: Option<tau_proto::AgentPromptId>,
+        policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
+    ) -> prepared_automatic_compaction_decision::PreparedAutomaticCompactionDecision {
+        use prepared_automatic_compaction_decision::{
+            MatchedCompactionPolicies, PreparedAutomaticCompactionDecision,
+        };
+        let mut prepared = PreparedAutomaticCompactionDecision::default();
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return prepared;
+        };
         if self
             .prompt_coordination
             .compaction_runtime
@@ -1364,19 +1404,26 @@ impl Harness {
                         == conv.identity.agent_id.as_deref().unwrap_or_default()
             })
         {
-            return None;
+            return prepared;
         }
-        let reported_input = reported_input?;
+        let Some(reported_input) = reported_input else {
+            return prepared;
+        };
         let historical_evidence = provider_prompt_id.is_none();
-        let provider_prompt_id =
-            provider_prompt_id.or_else(|| conv.execution.context_usage_prompt_id.clone())?;
-        let agent_id = conv.identity.agent_id.as_deref()?;
+        let Some(provider_prompt_id) =
+            provider_prompt_id.or_else(|| conv.execution.context_usage_prompt_id.clone())
+        else {
+            return prepared;
+        };
+        let Some(agent_id) = conv.identity.agent_id.as_deref() else {
+            return prepared;
+        };
         let selected_head = conv
             .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         if self.durable_recovery_blocks_automatic(agent_id, &model, selected_head) {
-            return None;
+            return prepared;
         }
         let logical_status = Self::finalizing_outer_turn_policy_status(
             conv.turn.terminal_status_was_available,
@@ -1407,20 +1454,18 @@ impl Harness {
                 (threshold <= reported_input).then_some((name.as_str(), threshold))
             })
             .collect::<Vec<_>>();
-        let threshold = matches.iter().map(|(_, threshold)| *threshold).min()?;
+        let Some(threshold) = matches.iter().map(|(_, threshold)| *threshold).min() else {
+            return prepared;
+        };
         let matched_policy_names = matches
             .iter()
             .map(|(name, _)| *name)
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let matched_names = matched_policy_names.join(",");
-        tracing::debug!(
-            target: "tau_harness",
-            agent = %cid,
-            policies = %matched_names,
-            threshold = %threshold,
-            "coalesced outer-turn-finished automatic compaction policies"
-        );
+        prepared.diagnostic = Some(MatchedCompactionPolicies {
+            names: matched_policy_names.join(","),
+            threshold,
+        });
         let evidence = tau_proto::ProactiveCompactionEvidence {
             provider_prompt_id,
             provider_input_tokens: reported_input,
@@ -1436,24 +1481,24 @@ impl Harness {
                 .agent(agent_id)
                 .is_some_and(|tree| tree.historical_proactive_evidence_is_valid(&evidence, &model))
         {
-            return None;
+            return prepared;
         }
-        let outer_turn_id = conv.turn.outer_turn.owned_id().cloned()?;
+        let Some(outer_turn_id) = conv.turn.outer_turn.owned_id().cloned() else {
+            return prepared;
+        };
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!(
             "ct-{}",
             conv.dispatch.next_prompt_index
         ))
         .expect("generated compaction transaction id is valid");
-        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
-        }
-        Some(tau_proto::AutomaticCompactionDecision {
+        prepared.decision = Some(tau_proto::AutomaticCompactionDecision {
             transaction_id,
             outer_turn_id,
             model,
             threshold,
             evidence: Some(evidence),
-        })
+        });
+        prepared
     }
 
     /// Derive the policy-only status at a settled terminal without mutating the

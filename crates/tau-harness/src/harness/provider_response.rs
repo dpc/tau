@@ -3633,6 +3633,31 @@ impl Harness {
         tool_calls_with_non_tool_stop: bool,
         declaration: tau_proto::ObservationId,
     ) -> NormalizedFinishedToolCalls {
+        let prepared = self.prepare_finished_response_tool_calls(
+            response,
+            tool_calls,
+            is_non_tool_ext_query,
+            tool_calls_with_non_tool_stop,
+            declaration,
+        );
+        for entry in &prepared.calls {
+            self.prompt_coordination
+                .prompt_runtime
+                .record_tool_call_prompt(entry.call.id.clone(), response.agent_prompt_id.clone());
+        }
+        prepared
+    }
+
+    /// Normalizes the supplied candidate and call list without registering tool
+    /// ownership or changing the harness. Declaration identity is caller-owned.
+    pub(super) fn prepare_finished_response_tool_calls(
+        &self,
+        response: &mut ProviderResponseFinished,
+        tool_calls: &mut Vec<AgentToolCall>,
+        is_non_tool_ext_query: bool,
+        tool_calls_with_non_tool_stop: bool,
+        declaration: tau_proto::ObservationId,
+    ) -> NormalizedFinishedToolCalls {
         let mut normalization = FinishedToolCallNormalization::new(
             response,
             self.known_tool_call_ids(),
@@ -3643,12 +3668,7 @@ impl Harness {
             .iter()
             .enumerate()
             .map(|(index, call)| {
-                self.normalize_finished_response_tool_call(
-                    response,
-                    index,
-                    call,
-                    &mut normalization,
-                )
+                self.prepare_finished_response_tool_call(response, index, call, &mut normalization)
             })
             .collect::<Vec<_>>();
         Self::rewrite_finished_response_tool_call_items(response, &mut calls, declaration);
@@ -3659,8 +3679,10 @@ impl Harness {
         }
     }
 
-    pub(super) fn normalize_finished_response_tool_call(
-        &mut self,
+    /// Freezes one normalized call's routing policy without registering its
+    /// prompt ownership.
+    fn prepare_finished_response_tool_call(
+        &self,
         response: &ProviderResponseFinished,
         index: usize,
         call: &AgentToolCall,
@@ -3668,9 +3690,6 @@ impl Harness {
     ) -> NormalizedFinishedToolCall {
         let mut call = call.clone();
         normalization.normalize_call_id(index, &mut call);
-        self.prompt_coordination
-            .prompt_runtime
-            .record_tool_call_prompt(call.id.clone(), response.agent_prompt_id.clone());
         let background_support = self.resolve_tool_background_support(call.name.as_str());
         let turn_categories = self
             .resolve_enabled_tool_spec_for_prompt(&call.name, &response.agent_prompt_id)
@@ -4206,7 +4225,31 @@ impl Harness {
         operation: tau_proto::PromptOperation,
         requested_tool_calls: bool,
     ) {
-        response.output_length_disposition = tau_proto::OutputLengthDisposition::None;
+        let prepared =
+            self.prepare_output_length_continuation(cid, response, operation, requested_tool_calls);
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+            if let Some(next_prompt_index) = prepared.next_prompt_index {
+                agent.dispatch.next_prompt_index = next_prompt_index;
+            }
+            if let Some(plan) = prepared.plan {
+                agent.turn.output_length_continuation =
+                    path_crate_agent::OutputLengthContinuationState::Planned(plan);
+            }
+        }
+        response.output_length_disposition = prepared.disposition;
+    }
+
+    /// Projects canonical output-length fields without reserving identities or
+    /// installing continuation ownership.
+    pub(super) fn prepare_output_length_continuation(
+        &self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        operation: tau_proto::PromptOperation,
+        requested_tool_calls: bool,
+    ) -> prepared_output_length_continuation::PreparedOutputLengthContinuation {
+        let mut prepared =
+            prepared_output_length_continuation::PreparedOutputLengthContinuation::default();
         let lineage_owner =
             self.agent_runtime
                 .agent_registry
@@ -4243,19 +4286,18 @@ impl Harness {
             } else {
                 tau_proto::OutputLengthContinuationOutcome::Completed
             };
-            response.output_length_disposition =
-                tau_proto::OutputLengthDisposition::ContinuationTerminal {
-                    outer_turn_id: owner.outer_turn_id,
-                    source_agent_prompt_id: owner.source_agent_prompt_id,
-                    ordinal: owner.ordinal,
-                    outcome,
-                    // The finish bit must reflect the actual post-suppression
-                    // tool continuation. A ToolCalls stop with zero calls is
-                    // reconciled to end_turn and owes its finish; an EndTurn
-                    // with calls dispatches them and owes none.
-                    outer_turn_finish_owed: !requested_tool_calls,
-                };
-            return;
+            prepared.disposition = tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                outer_turn_id: owner.outer_turn_id,
+                source_agent_prompt_id: owner.source_agent_prompt_id,
+                ordinal: owner.ordinal,
+                outcome,
+                // The finish bit must reflect the actual post-suppression
+                // tool continuation. A ToolCalls stop with zero calls is
+                // reconciled to end_turn and owes its finish; an EndTurn
+                // with calls dispatches them and owes none.
+                outer_turn_finish_owed: !requested_tool_calls,
+            };
+            return prepared;
         }
         let replay_safe_adapter = response.backend.as_ref().is_some_and(|backend| {
             matches!(
@@ -4279,26 +4321,26 @@ impl Harness {
             || requested_tool_calls
             || !response.has_replay_safe_reasoning_only_output()
         {
-            return;
+            return prepared;
         }
-        let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
-            return;
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return prepared;
         };
         let Some(outer_turn_id) = agent.turn.outer_turn.active_id().cloned() else {
-            return;
+            return prepared;
         };
         if agent.turn.output_length_continuation.outer_turn_id() == Some(&outer_turn_id) {
-            return;
+            return prepared;
         }
         let Some(agent_id) = agent.identity.agent_id.as_deref() else {
-            return;
+            return prepared;
         };
         let successor_agent_prompt_id = tau_proto::AgentPromptId::parse(format!(
             "ap-{agent_id}-{}",
             agent.dispatch.next_prompt_index
         ))
         .expect("known-safe AgentPromptId must be valid");
-        agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
+        prepared.next_prompt_index = Some(agent.dispatch.next_prompt_index.saturating_add(1));
         let owner = tau_proto::OutputLengthContinuationOwner {
             source_agent_prompt_id: response.agent_prompt_id.clone(),
             outer_turn_id: outer_turn_id.clone(),
@@ -4311,27 +4353,24 @@ impl Harness {
             .and_then(|tree| tree.marked_inference_checkpoint(&response.agent_prompt_id))
             .cloned();
         let Some(source_checkpoint) = source_checkpoint else {
-            return;
+            return prepared;
         };
-        agent.turn.output_length_continuation =
-            path_crate_agent::OutputLengthContinuationState::Planned(
-                path_crate_agent::OutputLengthContinuationPlan {
-                    agent_prompt_id: successor_agent_prompt_id.clone(),
-                    owner,
-                    dispatch: path_crate_agent::InferenceDispatchOwnership {
-                        model: source_checkpoint.model,
-                        operation: source_checkpoint.operation,
-                        activation_cut: source_checkpoint.activation_cut,
-                    },
-                },
-            );
-        response.output_length_disposition =
-            tau_proto::OutputLengthDisposition::ContinuationPlanned {
-                outer_turn_id,
-                successor_agent_prompt_id,
-                ordinal: 1,
-                limit: 1,
-            };
+        prepared.plan = Some(path_crate_agent::OutputLengthContinuationPlan {
+            agent_prompt_id: successor_agent_prompt_id.clone(),
+            owner,
+            dispatch: path_crate_agent::InferenceDispatchOwnership {
+                model: source_checkpoint.model,
+                operation: source_checkpoint.operation,
+                activation_cut: source_checkpoint.activation_cut,
+            },
+        });
+        prepared.disposition = tau_proto::OutputLengthDisposition::ContinuationPlanned {
+            outer_turn_id,
+            successor_agent_prompt_id,
+            ordinal: 1,
+            limit: 1,
+        };
+        prepared
     }
 
     pub(super) fn complete_finished_response_without_tool_calls(
