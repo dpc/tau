@@ -66,8 +66,6 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) user_interaction_order: HashMap<String, u64>,
     /// Next process-local visible interaction ordinal.
     pub(crate) next_user_interaction_order: u64,
-    /// Interaction facts journal-appended before central delivery.
-    pub(crate) precommitted_user_interactions: HashMap<String, u64>,
     /// Current session initialization turn state.
     pub(crate) turn_state: TurnState,
     /// Session-owned working state cleared during terminal shutdown.

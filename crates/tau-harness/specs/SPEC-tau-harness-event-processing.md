@@ -402,16 +402,27 @@ you do not trust.
 The event loop consumes `ui.set_agent_navigation_mode` only from UI intake and
 serializes accepted absolute writes, so the last accepted write wins. It also
 authenticates visible human `ui.prompt_submitted` intake and, after target/skill
-validation and durable `agent.user_interaction_recorded` append, applies an
-implicit absolute `active` write and enqueues fresh complete stats before queue
-or dispatch. The implicit write emits no explicit-navigation result.
+validation and ordinary `agent.user_interaction_recorded` publication commits,
+advances interaction ordering and applies an implicit absolute `active` write
+with fresh complete stats before queue or dispatch. A newer accepted explicit
+navigation write suppresses that delayed implicit write. The implicit write
+emits no explicit-navigation result.
+
+Parked interaction publication leaves navigation and prompt admission pending.
+Publication rejection leaves them unapplied and sends the existing UI failure.
+Accepted cancellation of active work rejects every still-unaccepted input for
+that agent with requester-directed failure; other agents are unaffected. Idle
+cancellation retains its no-active-turn rejection. Agent teardown and session
+shutdown reject associated pending inputs, never execute them during draining.
+After interaction commit, prompt processing retains its separate ordinary
+lifecycle. Replay cannot execute the runtime-only admission owner.
 After durable creation and current-session membership setup, the internal
 authenticated bare peer-entrypoint auto-start path likewise writes `active` and
 publishes complete stats for only its newly created endpoint.
 
 Rejected, internal, extension-originated, stale, unloaded, unavailable, or
-terminating targets do not mutate navigation. Later queue dispatch, steering,
-interception completion, and replay do not reapply the write. Extensions cannot
+terminating targets do not mutate navigation. Later prompt queue dispatch,
+steering, prompt interception completion, and replay do not reapply the write. Extensions cannot
 mutate this state. Harness-authored `agent.stats_updated` snapshots are must-pass
 and immutable because they carry the complete shared classification.
 

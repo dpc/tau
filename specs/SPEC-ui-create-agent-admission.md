@@ -24,6 +24,13 @@ once the created agent is durable and the prompt has entered harness-owned
 preprocessing. This result does not claim that preprocessing, canonical
 submission, or provider execution succeeded.
 
+Visible human initial input additionally waits for ordinary committed
+`agent.user_interaction_recorded` publication before entering preprocessing or
+reporting `Queued`. Parked publication leaves that admission pending. Rejection
+reports `InitialPromptFailed` with the already-created agent id and does not
+admit the prompt. Interaction acceptance remains a separate single-event
+publication, not a transaction with creation or prompt execution.
+
 Later prompt processing remains a separate lifecycle. Preprocessing, submission,
 cancellation, or lifecycle teardown before provider materialization publishes a
 transient `agent.prompt_failed` terminal carrying the create request id, created

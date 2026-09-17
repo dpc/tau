@@ -3124,8 +3124,13 @@ fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
             Event::AgentUserInteractionRecorded(interaction) if interaction.agent_id == agent_id
         )
     });
-    h.record_accepted_visible_user_interaction(agent_id.as_str())
-        .expect("record first visible interaction");
+    h.publish_event_for_agent(
+        &cid,
+        None,
+        Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+            agent_id: agent_id.clone(),
+        }),
+    );
     assert_eq!(
         h.submit_prompt_to_agent(
             h.session_runtime.current_session_id.clone(),
@@ -3194,8 +3199,13 @@ fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
         ["classified", "terminal", "settled", "steered", "checkpoint"]
     );
 
-    h.record_accepted_visible_user_interaction(agent_id.as_str())
-        .expect("record second visible interaction");
+    h.publish_event_for_agent(
+        &cid,
+        None,
+        Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+            agent_id: agent_id.clone(),
+        }),
+    );
     assert_eq!(
         h.submit_prompt_to_agent(
             h.session_runtime.current_session_id.clone(),
@@ -3328,8 +3338,13 @@ fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
                 Event::AgentInferenceDispatchStarted(started) if started.agent_id == agent_id
             )
         });
-        h.record_accepted_visible_user_interaction(agent_id.as_str())
-            .expect("record first visible interaction");
+        h.publish_event_for_agent(
+            &cid,
+            None,
+            Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+                agent_id: agent_id.clone(),
+            }),
+        );
         assert_eq!(
             h.submit_prompt_to_agent(
                 h.session_runtime.current_session_id.clone(),

@@ -644,8 +644,11 @@ watches, execution, or model behavior.
 
 The event loop applies both authenticated explicit UI writes and the implicit
 `active` write caused by admitting a visible human prompt to an existing loaded
-target. The accepted-interaction append precedes the mode/stats publication,
-which precedes queue or dispatch. Complete harness stats are the only UI
+target. Ordinary interaction publication must commit before runtime acceptance
+ordering advances or the dependent mode/stats publication and prompt admission
+can run. Interception leaves those dependencies pending; rejected publication
+rejects the UI input. A newer explicit navigation write suppresses the delayed
+implicit write. Complete harness stats are the only UI
 projection authority; CLIs and transcript replay must not infer a mode change.
 The authenticated bare peer-entrypoint auto-start path applies the same
 runtime-only mode/stat flow only to its newly created recipient after durable

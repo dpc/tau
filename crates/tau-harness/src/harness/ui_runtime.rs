@@ -4,6 +4,7 @@
 //! Human UI authority remains distinct from configured extensions and peers.
 
 use super::start_coordinator::StartPhase;
+use super::ui_interaction::UiInteractionAdmission;
 use super::*;
 
 /// Runtime-only state for attached clients and human-UI command routes.
@@ -17,6 +18,9 @@ use super::*;
 /// explicitly close a socket writer; the lifecycle owns no join handle or drop
 /// side effect. This state does not own the generic event bus.
 pub(crate) struct UiRuntimeState {
+    /// Monotonic explicit navigation writes; delayed implicit writes cannot
+    /// override them.
+    pub(super) explicit_navigation_epoch: u64,
     /// Harness-authorized bootstrap request ids awaiting ordinary UI admission.
     pub(super) pending_bootstrap_creates: HashMap<String, String>,
     /// Cause carried by the command that stopped the central event loop.
@@ -75,6 +79,7 @@ pub(crate) struct UiRuntimeState {
 impl Default for UiRuntimeState {
     fn default() -> Self {
         Self {
+            explicit_navigation_epoch: 0,
             pending_bootstrap_creates: HashMap::new(),
             shutdown_cause: None,
             ui_shell_route_rng: StdRng::from_entropy(),
@@ -666,6 +671,7 @@ impl Harness {
         conv.dispatch
             .pending_prompts
             .retain(PendingPrompt::is_output_length_continuation);
+        self.cancel_ui_interactions_for_agent(&cid, "pending UI input was canceled by user");
 
         if let Some(prompt_id) = prompt_id {
             self.publish_event(
@@ -678,6 +684,8 @@ impl Harness {
             );
         }
         self.apply_pending_cancel_for_agent(&cid);
+        self.drain_deferred_publishes();
+        self.drain_publish_idle_dispatches();
     }
 
     pub(super) fn handle_retry_prompt(
@@ -2206,18 +2214,14 @@ impl Harness {
             return Ok(true);
         }
         if will_accept && is_user_interaction {
-            self.record_accepted_visible_user_interaction(agent_id.as_str())?;
-            if self
-                .write_loaded_agent_navigation_mode(
-                    &prompt.agent_id,
-                    tau_proto::AgentNavigationMode::Active,
-                )
-                .is_err()
-            {
-                return Err(HarnessError::Participant(format!(
-                    "accepted UI prompt target `{agent_id}` lost its navigation mode"
-                )));
-            }
+            let cid = self.agent_runtime.agent_registry.agent_routes[agent_id.as_str()].clone();
+            self.enqueue_ui_interaction(
+                client_id,
+                cid,
+                prompt.agent_id,
+                UiInteractionAdmission::Prompt(Box::new(pending)),
+            );
+            return Ok(true);
         }
         let submission =
             self.submit_prompt_to_agent(prompt.session_id, agent_id.as_str(), pending)?;
@@ -2247,63 +2251,6 @@ impl Harness {
             PendingPrompt::human_ui(text)
         };
         pending.with_ctx_id(ctx_id)
-    }
-
-    /// Record one accepted visible UI interaction without retaining its
-    /// content.
-    pub(super) fn record_accepted_visible_user_interaction(
-        &mut self,
-        agent_id: &str,
-    ) -> Result<(), HarnessError> {
-        let event = Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
-            agent_id: crate::parse_agent_id(agent_id),
-        });
-        let parent = self
-            .agent_runtime
-            .agent_registry
-            .agent_routes
-            .get(agent_id)
-            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-            .and_then(|agent| agent.identity.head)
-            .map_or(
-                tau_core::AgentEventParent::Root,
-                tau_core::AgentEventParent::Under,
-            );
-        self.append_direct_agent_semantic_event(agent_id, parent, event.clone())?;
-        *self
-            .session_runtime
-            .precommitted_user_interactions
-            .entry(agent_id.to_owned())
-            .or_default() += 1;
-        self.session_runtime.user_interaction_order.insert(
-            agent_id.to_owned(),
-            self.session_runtime.next_user_interaction_order,
-        );
-        self.session_runtime.next_user_interaction_order = self
-            .session_runtime
-            .next_user_interaction_order
-            .saturating_add(1);
-        self.enqueue_publish(
-            None,
-            event,
-            true,
-            true,
-            self.agent_runtime
-                .agent_registry
-                .agent_routes
-                .get(agent_id)
-                .cloned()
-                .map(|cid| ConversationHeadSync {
-                    cid,
-                    agent_id: Some(crate::parse_agent_id(agent_id)),
-                    session_generation: self.session_runtime.current_session_generation,
-                    fold_parent: None,
-                    suppress_activation_dispatch: false,
-                    continuation: None,
-                    notify_watchers: false,
-                }),
-        );
-        Ok(())
     }
 
     pub(super) fn expand_user_skill_command(

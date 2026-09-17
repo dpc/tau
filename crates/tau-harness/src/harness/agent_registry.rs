@@ -1531,6 +1531,8 @@ impl Harness {
         let outcome = if let Err(reason) = write {
             tau_proto::UiSetAgentNavigationModeOutcome::Rejected { reason }
         } else {
+            self.ui_runtime.explicit_navigation_epoch =
+                self.ui_runtime.explicit_navigation_epoch.saturating_add(1);
             tau_proto::UiSetAgentNavigationModeOutcome::Applied
         };
         let _ = self.runtime_io.bus.send_to(
@@ -1626,6 +1628,20 @@ impl Harness {
     }
 
     pub(super) fn remove_agent(&mut self, cid: &AgentId) {
+        // Reject unaccepted input before terminal/accounting obligations can
+        // defer retirement behind that input's own parked publication.
+        let removed_pending =
+            self.cancel_ui_interactions_for_agent(cid, "agent teardown canceled pending UI input");
+        self.remove_agent_after_interaction_rejection(cid);
+        if removed_pending {
+            self.drain_deferred_publishes();
+            self.drain_publish_idle_dispatches();
+        }
+    }
+
+    /// Preserve terminal and accounting obligations after rejecting unaccepted
+    /// input.
+    fn remove_agent_after_interaction_rejection(&mut self, cid: &AgentId) {
         let active_start = self
             .agent_runtime
             .agent_registry

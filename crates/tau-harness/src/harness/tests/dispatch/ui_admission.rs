@@ -1939,7 +1939,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
         .agent_registry
         .navigation_modes
         .insert(target_id.clone(), tau_proto::AgentNavigationMode::Suspended);
-    connect_test_client_with_origin(
+    let requester = connect_test_client_with_origin(
         &mut h,
         "append-failure-ui",
         tau_proto::ClientKind::Ui,
@@ -1973,7 +1973,20 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
         }),
     );
 
-    assert!(matches!(result, Err(HarnessError::AgentStore(_))));
+    assert!(matches!(result, Ok(true)));
+    assert_eq!(
+        requester
+            .lock()
+            .expect("requester frames")
+            .iter()
+            .filter(|frame| matches!(
+                peel_inner_event(&frame.frame), Some(Event::HarnessNotice(notice))
+                    if notice.kind == tau_proto::notice_kind::UI_COMMAND_ERROR
+            ))
+            .count(),
+        1,
+        "publication rejection must report exactly one failure to the requesting UI"
+    );
     assert_eq!(
         h.agent_runtime
             .agent_registry

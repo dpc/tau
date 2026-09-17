@@ -856,6 +856,7 @@ impl Harness {
                     false,
                     None,
                     PublicationOutcomeOwners {
+                        ui_interaction: None,
                         prompt_acceptance: None,
                         start: Some(terminal.owner),
                     },

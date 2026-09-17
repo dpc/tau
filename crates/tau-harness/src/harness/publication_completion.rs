@@ -4681,21 +4681,6 @@ impl Harness {
         {
             return Ok(None);
         }
-        if let Event::AgentUserInteractionRecorded(interaction) = event
-            && let Some(count) = self
-                .session_runtime
-                .precommitted_user_interactions
-                .get_mut(interaction.agent_id.as_str())
-            && *count != 0
-        {
-            *count -= 1;
-            if *count == 0 {
-                self.session_runtime
-                    .precommitted_user_interactions
-                    .remove(interaction.agent_id.as_str());
-            }
-            return Ok(None);
-        }
         if let Some(call_id) = match event {
             Event::ProviderToolResult(result) => Some(&result.call_id),
             Event::ProviderToolError(error) => Some(&error.call_id),
@@ -5233,6 +5218,7 @@ impl Harness {
     pub(super) fn agent_id_for_event(&self, event: &Event) -> Option<tau_proto::AgentId> {
         match event {
             Event::AgentStarted(started) => Some(started.agent_id.clone()),
+            Event::AgentUserInteractionRecorded(interaction) => Some(interaction.agent_id.clone()),
             Event::AgentDisplayNameSet(name) => Some(name.agent_id.clone()),
             Event::AgentInitializationContextSet(context) => Some(context.agent_id.clone()),
             Event::AgentMetadataSet(set) => Some(set.agent_id.clone()),

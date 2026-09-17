@@ -2140,9 +2140,20 @@ impl Harness {
         owners: interception::PublicationOutcomeOwners,
     ) {
         let interception::PublicationOutcomeOwners {
+            mut ui_interaction,
             mut prompt_acceptance,
             start: mut start_owner,
         } = owners;
+        if ui_interaction
+            .as_ref()
+            .is_some_and(|owner| !self.ui_interaction_is_current(owner, &event))
+        {
+            self.reject_ui_interaction(
+                *ui_interaction.take().expect("checked UI interaction"),
+                "visible UI input lost its agent or session before acceptance",
+            );
+            return;
+        }
         let mut event = event;
         self.arbitrate_prompt_terminal_cancellation(&mut event, &mut sync_head_for);
         let watch_retirement = sync_head_for
@@ -2411,6 +2422,9 @@ impl Harness {
         let append_outcome = match append_result {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
+                if let Some(owner) = ui_interaction.take() {
+                    self.reject_ui_interaction(*owner, "failed to record visible UI interaction");
+                }
                 let rejected_operator_unload = matches!(&event, Event::SessionAgentUnloaded(unloaded)
                         if self.agent_runtime.agent_registry.pending_operator_unloads
                             .contains_key(&unloaded.agent_id));
@@ -3088,6 +3102,9 @@ impl Harness {
             }
         }
         self.complete_pending_external_receive(&event);
+        if let Some(owner) = ui_interaction.take() {
+            self.commit_ui_interaction(*owner);
+        }
         commit_timing.post_commit = post_commit_started.elapsed();
         commit_timing.result = CommitEventTimingResult::Ok;
     }

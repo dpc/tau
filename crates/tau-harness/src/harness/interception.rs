@@ -315,6 +315,8 @@ pub(crate) struct PeerPublicationContext {
 /// Inputs that survive setup until the generic publish dispatcher takes
 /// ownership.
 struct EnqueuePublishOptions {
+    /// One visible UI input awaiting this interaction's commit.
+    ui_interaction: Option<Box<super::ui_interaction::PendingUiInteraction>>,
     /// Whether ordinary eligible semantic persistence was requested.
     persist: bool,
     /// Whether an interceptor drop must preserve the original event.
@@ -333,6 +335,8 @@ struct EnqueuePublishOptions {
 
 /// Source envelope retained through generic interception and commit.
 struct PublicationSource {
+    /// One visible UI input awaiting this interaction's commit.
+    ui_interaction: Option<Box<super::ui_interaction::PendingUiInteraction>>,
     /// Original connection for persistence and bus delivery metadata.
     connection_id: Option<tau_proto::ConnectionId>,
     /// Immutable authenticated identity captured at admission.
@@ -345,6 +349,8 @@ struct PublicationSource {
 
 /// Independent one-shot owners consumed by a canonical publication outcome.
 pub(crate) struct PublicationOutcomeOwners {
+    /// One visible UI input awaiting this interaction's commit.
+    pub(super) ui_interaction: Option<Box<super::ui_interaction::PendingUiInteraction>>,
     /// Optional UI prompt latency accounting.
     pub(crate) prompt_acceptance: Option<PromptAcceptanceTiming>,
     /// Optional startup phase transition owner.
@@ -1463,6 +1469,8 @@ impl Harness {
     /// agent, suspend an in-flight responder, and resume unrelated FIFO
     /// work.
     pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
+        let canceled_interaction =
+            self.cancel_ui_interactions_for_agent(cid, "agent teardown canceled pending UI input");
         self.prompt_coordination
             .prompt_runtime
             .pending_uncertain_supersessions
@@ -1567,7 +1575,7 @@ impl Harness {
         for completion in &canceled_watch_retirements {
             self.finish_watch_retirement_delivery(completion, false);
         }
-        if removed_pending {
+        if removed_pending || canceled_interaction {
             // Canceling one agent's intercepted completion unblocks the global
             // FIFO. Preserve and resume every publication not owned by that
             // completion; another agent's durable work must not disappear with
@@ -1799,7 +1807,10 @@ impl Harness {
             .publication
             .pending_intercept
             .as_ref()
-            .is_some_and(|pending| pending.source.prompt_acceptance.is_some())
+            .is_some_and(|pending| {
+                pending.source.prompt_acceptance.is_some()
+                    || pending.source.ui_interaction.is_some()
+            })
         {
             let pending = self
                 .runtime_io
@@ -1822,7 +1833,9 @@ impl Harness {
         }
         let mut retained = VecDeque::with_capacity(self.runtime_io.publication.deferred.len());
         while let Some(deferred) = self.runtime_io.publication.deferred.pop_front() {
-            if deferred.source.prompt_acceptance.is_some() {
+            if deferred.source.prompt_acceptance.is_some()
+                || deferred.source.ui_interaction.is_some()
+            {
                 self.rollback_rejected_activation_successor(&deferred.event);
                 self.discard_deferred_publish(
                     deferred,
@@ -1833,6 +1846,76 @@ impl Harness {
             }
         }
         self.runtime_io.publication.deferred = retained;
+    }
+
+    /// Reject every unaccepted visible input for one agent, without admitting
+    /// unrelated deferred work until the caller finishes its cancellation.
+    pub(super) fn cancel_ui_interactions_for_agent(&mut self, cid: &AgentId, reason: &str) -> bool {
+        self.cancel_ui_interactions_matching(|owner| &owner.cid == cid, reason)
+    }
+
+    /// Reject all unaccepted inputs before shutdown can wait on durable
+    /// accounting.
+    pub(super) fn cancel_ui_interactions_for_shutdown(&mut self) {
+        self.cancel_ui_interactions_matching(
+            |_| true,
+            "harness shutdown canceled pending UI input",
+        );
+    }
+
+    /// Remove matching interaction envelopes while preserving the unrelated
+    /// FIFO.
+    fn cancel_ui_interactions_matching(
+        &mut self,
+        matches: impl Fn(&super::ui_interaction::PendingUiInteraction) -> bool,
+        reason: &str,
+    ) -> bool {
+        let removed_pending = self
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| {
+                pending
+                    .source
+                    .ui_interaction
+                    .as_ref()
+                    .is_some_and(|owner| matches(owner))
+            });
+        if removed_pending {
+            let pending = self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .take()
+                .expect("matched UI interaction");
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+            self.discard_deferred_publish(
+                DeferredPublish {
+                    source: pending.source,
+                    event: pending.event,
+                    persist: pending.persist,
+                    must_pass: pending.must_pass,
+                    sync_head_for: pending.sync_head_for,
+                },
+                reason,
+            );
+        }
+        let mut retained = VecDeque::with_capacity(self.runtime_io.publication.deferred.len());
+        while let Some(publish) = self.runtime_io.publication.deferred.pop_front() {
+            if publish
+                .source
+                .ui_interaction
+                .as_ref()
+                .is_some_and(|owner| matches(owner))
+            {
+                self.discard_deferred_publish(publish, reason);
+            } else {
+                retained.push_back(publish);
+            }
+        }
+        self.runtime_io.publication.deferred = retained;
+        removed_pending
     }
 
     /// Commit an already interceptor-approved retry event without restarting
@@ -1910,6 +1993,7 @@ impl Harness {
                 notify_watchers,
             }),
             PublicationOutcomeOwners {
+                ui_interaction: None,
                 prompt_acceptance: None,
                 start: None,
             },
@@ -2044,6 +2128,9 @@ impl Harness {
             self.discard_uncommitted_shell_canonical_marker(&progress.command_id);
         }
         self.discard_peer_activation_reservation(&source.peer_context);
+        if let Some(owner) = source.ui_interaction.take() {
+            self.reject_ui_interaction(*owner, reason);
+        }
         source.start_owner.take()
     }
 
@@ -2545,6 +2632,7 @@ impl Harness {
             source,
             event,
             EnqueuePublishOptions {
+                ui_interaction: None,
                 persist,
                 must_pass,
                 sync_head_for,
@@ -2569,6 +2657,7 @@ impl Harness {
             Some(crate::harness::harness_connection_id()),
             event,
             EnqueuePublishOptions {
+                ui_interaction: None,
                 persist,
                 must_pass,
                 sync_head_for: None,
@@ -2594,6 +2683,7 @@ impl Harness {
             source,
             event,
             EnqueuePublishOptions {
+                ui_interaction: None,
                 persist,
                 must_pass,
                 sync_head_for,
@@ -2619,6 +2709,7 @@ impl Harness {
             source,
             event,
             EnqueuePublishOptions {
+                ui_interaction: None,
                 persist,
                 must_pass,
                 sync_head_for,
@@ -2659,6 +2750,7 @@ impl Harness {
             source,
             event,
             EnqueuePublishOptions {
+                ui_interaction: None,
                 persist,
                 must_pass,
                 sync_head_for,
@@ -2684,10 +2776,35 @@ impl Harness {
             source,
             event,
             EnqueuePublishOptions {
+                ui_interaction: None,
                 persist,
                 must_pass,
                 sync_head_for,
                 admission: Some(admission),
+                prompt_acceptance: None,
+                debug_sensitivity: DebugEventSensitivity::Ordinary,
+                start_owner: None,
+            },
+        );
+    }
+
+    /// Publish the ordinary interaction fact with its one-shot UI admission
+    /// owner.
+    pub(super) fn enqueue_publish_with_ui_interaction(
+        &mut self,
+        event: Event,
+        sync: ConversationHeadSync,
+        owner: super::ui_interaction::PendingUiInteraction,
+    ) {
+        self.enqueue_publish_inner(
+            None,
+            event,
+            EnqueuePublishOptions {
+                ui_interaction: Some(Box::new(owner)),
+                persist: true,
+                must_pass: true,
+                sync_head_for: Some(sync),
+                admission: None,
                 prompt_acceptance: None,
                 debug_sensitivity: DebugEventSensitivity::Ordinary,
                 start_owner: None,
@@ -2702,6 +2819,7 @@ impl Harness {
         options: EnqueuePublishOptions,
     ) {
         let EnqueuePublishOptions {
+            ui_interaction,
             persist,
             must_pass,
             sync_head_for,
@@ -2781,6 +2899,7 @@ impl Harness {
             debug_sensitivity,
         };
         let mut source = PublicationSource {
+            ui_interaction,
             connection_id: source.cloned(),
             peer_context,
             prompt_acceptance,
@@ -2853,6 +2972,7 @@ impl Harness {
                     persist,
                     sync_head_for,
                     PublicationOutcomeOwners {
+                        ui_interaction: source.ui_interaction.take(),
                         prompt_acceptance: source.prompt_acceptance.take(),
                         start: source.start_owner.take(),
                     },
@@ -3197,6 +3317,12 @@ impl Harness {
                 self.discard_uncommitted_shell_canonical_marker(command_id);
             }
             self.discard_peer_activation_reservation(&source.peer_context);
+            if let Some(owner) = source.ui_interaction.take() {
+                self.reject_ui_interaction(
+                    *owner,
+                    "visible UI interaction publication was rejected",
+                );
+            }
             if let Some(owner) = source.start_owner.take() {
                 self.reject_start_phase(owner, tau_proto::AgentStartFailure::InterceptionDropped);
             }

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use tau_proto::{AgentId, AgentPromptQueued, Event, HarnessOutputMessage};
 
+use super::ui_interaction::UiInteractionAdmission;
 use super::{Harness, user_skill_invocation};
 use crate::agent::{InitialPromptCorrelation, PendingPrompt};
 use crate::debug_log::DebugEventSensitivity;
@@ -19,13 +20,13 @@ struct ValidatedCreateAdmission {
 }
 
 /// Initial-prompt data retained after the new agent commits.
-struct CreatedInitialPrompt {
+pub(super) struct CreatedInitialPrompt {
     /// Create request correlation returned to the requester.
-    request_id: String,
+    pub(super) request_id: String,
     /// Session that owns the created agent.
-    session_id: tau_proto::SessionId,
+    pub(super) session_id: tau_proto::SessionId,
     /// Durable identity returned by successful creation.
-    agent_id: tau_proto::AgentId,
+    pub(super) agent_id: tau_proto::AgentId,
     /// Exact initial-prompt correlation.
     ctx_id: String,
     /// Initial prompt text.
@@ -173,44 +174,35 @@ impl Harness {
             .target_agent_id_for_agent(&cid)
             .expect("new UI agent has a durable id");
         let bootstrap_prompt = bootstrap_id.is_some();
-        if is_user_initial_prompt
-            && let Some(agent_id) = self.target_agent_id_for_agent(&cid)
-            && let Err(error) = self.record_accepted_visible_user_interaction(&agent_id)
-        {
-            self.emit_harness_failure(&format!(
-                "failed to record visible interaction for created UI agent: {error}"
-            ));
-            self.send_ui_create_agent_rejection(
-                client_id,
-                request_id,
-                session_id,
-                tau_proto::UiCreateAgentRejection::InitialPromptFailed,
-                "failed to admit initial prompt".to_owned(),
-                Some(created_agent_id),
-            );
-            return Ok(true);
-        }
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-            conv.dispatch.next_ctx_id = prompt_ctx_id.clone();
+            if initial_prompt.is_none() {
+                conv.dispatch.next_ctx_id = prompt_ctx_id.clone();
+            }
             conv.identity.model_override = req.model_override;
             conv.identity.effort_override = req.effort_override;
         }
         if let Some(text) = initial_prompt {
-            self.admit_created_initial_prompt(
-                client_id,
-                &cid,
-                CreatedInitialPrompt {
-                    request_id,
-                    session_id,
-                    agent_id: created_agent_id,
-                    ctx_id: prompt_ctx_id.expect("validated initial prompt correlation id"),
-                    text,
-                    message_class: req.message_class,
-                    originator: req.originator,
-                    defer_skill_expansion: defer_initial_skill_expansion,
-                    bootstrap_prompt,
-                },
-            );
+            let admission = CreatedInitialPrompt {
+                request_id,
+                session_id,
+                agent_id: created_agent_id,
+                ctx_id: prompt_ctx_id.expect("validated initial prompt correlation id"),
+                text,
+                message_class: req.message_class,
+                originator: req.originator,
+                defer_skill_expansion: defer_initial_skill_expansion,
+                bootstrap_prompt,
+            };
+            if is_user_initial_prompt {
+                self.enqueue_ui_interaction(
+                    client_id,
+                    cid,
+                    admission.agent_id.clone(),
+                    UiInteractionAdmission::Created(admission),
+                );
+            } else {
+                self.admit_created_initial_prompt(client_id, &cid, admission);
+            }
         } else {
             self.send_ui_create_agent_created(
                 client_id,
@@ -224,7 +216,7 @@ impl Harness {
     }
 
     /// Admit and dispatch the initial prompt after its agent commits.
-    fn admit_created_initial_prompt(
+    pub(super) fn admit_created_initial_prompt(
         &mut self,
         client_id: &tau_proto::ConnectionId,
         cid: &AgentId,
@@ -241,6 +233,9 @@ impl Harness {
             defer_skill_expansion,
             bootstrap_prompt,
         } = admission;
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+            agent.dispatch.next_ctx_id = Some(ctx_id.clone());
+        }
         if !message_class.is_internal() {
             self.preempt_blocking_ext_side_agents(&session_id);
         }
@@ -567,7 +562,7 @@ impl Harness {
         );
     }
 
-    fn send_ui_create_agent_rejection(
+    pub(super) fn send_ui_create_agent_rejection(
         &mut self,
         client_id: &tau_proto::ConnectionId,
         request_id: String,

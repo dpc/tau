@@ -533,8 +533,8 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
     }
 }
 
-/// Authenticated HumanUI prompts queue before one exact retained Stale,
-/// coalesce while interception is parked, and dispatch under a fresh prompt id
+/// Authenticated HumanUI input waits for interaction acceptance behind one
+/// exact retained Stale, then coalesces and dispatches under a fresh prompt id
 /// after an admission-rejected terminal retries without another input.
 #[test]
 fn provider_loss_human_ui_supersession_coalesces_and_retries_exact_stale() {
@@ -597,8 +597,21 @@ fn provider_loss_human_ui_supersession_coalesces_and_retries_exact_stale() {
             .dispatch
             .pending_prompts
             .len(),
-        3,
-        "every accepted prompt remains FIFO-owned"
+        1,
+        "only the first interaction has committed while the terminal is parked"
+    );
+    assert_eq!(
+        h.runtime_io
+            .publication
+            .deferred
+            .iter()
+            .filter(|publish| matches!(
+                publish.event(), Event::AgentUserInteractionRecorded(interaction)
+                    if interaction.agent_id == durable_agent_id
+            ))
+            .count(),
+        2,
+        "later inputs remain owned by their ordinary interaction publications"
     );
     assert_eq!(
         h.prompt_coordination
@@ -623,6 +636,14 @@ fn provider_loss_human_ui_supersession_coalesces_and_retries_exact_stale() {
         })),
     )
     .expect("reject exact Stale admission");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .len(),
+        3,
+        "all three accepted interactions now retain FIFO prompt ownership"
+    );
     assert!(matches!(
         h.prompt_coordination
             .prompt_runtime

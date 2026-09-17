@@ -1661,6 +1661,7 @@ mod replay;
 mod semantic_event_router;
 mod subagents_tool;
 mod ui_create_agent;
+mod ui_interaction;
 pub(crate) use subagents_tool::PeerIoPermit;
 pub use subagents_tool::normalized_wait_timeout_minutes;
 mod gated_final;
@@ -2701,6 +2702,7 @@ impl Harness {
         &mut self,
         in_process_cleanup_grace: Duration,
     ) -> Result<(), HarnessError> {
+        self.cancel_ui_interactions_for_shutdown();
         let active_standalone_prompts = self
             .prompt_coordination
             .standalone_accounting

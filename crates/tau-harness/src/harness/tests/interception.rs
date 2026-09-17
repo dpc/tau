@@ -17,6 +17,7 @@ mod tool_lifecycle;
 mod tool_progress;
 mod tool_request;
 mod tool_terminal;
+mod ui_interaction;
 mod ui_liveness;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
@@ -5445,7 +5446,7 @@ fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
 /// Visible UI acceptance durably records its content-free timestamp before the
 /// corresponding prompt can remain parked in interception.
 #[test]
-fn parked_ui_prompt_has_precommitted_interaction_fact() {
+fn parked_ui_prompt_has_committed_interaction_fact() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);

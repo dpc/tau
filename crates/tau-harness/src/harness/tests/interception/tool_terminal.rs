@@ -840,7 +840,13 @@ fn direct_append_fault_discards_deferred_terminal() {
     reject_semantic_admissions(&harness, 2);
     assert!(
         harness
-            .record_accepted_visible_user_interaction(&agent_id)
+            .append_direct_agent_semantic_event(
+                &agent_id,
+                tau_core::AgentEventParent::InheritHead,
+                Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+                    agent_id: crate::parse_agent_id(&agent_id),
+                }),
+            )
             .is_err()
     );
 
