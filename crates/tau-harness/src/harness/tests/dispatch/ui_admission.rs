@@ -1541,15 +1541,20 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(
-            !target_stats.is_empty(),
-            "{case}: same-value writes must also publish"
-        );
+        let matching_pre_dispatch = target_stats
+            .iter()
+            .filter(|stats| {
+                stats.navigation_mode == tau_proto::AgentNavigationMode::Active
+                    && stats.runtime_state == expected_runtime
+            })
+            .count();
         assert_eq!(
-            (
-                target_stats[0].navigation_mode,
-                target_stats[0].runtime_state
-            ),
+            matching_pre_dispatch, 1,
+            "{case}: the navigation write must be the only snapshot of the pre-dispatch state"
+        );
+        let target_stats = target_stats.first().expect("navigation stats observation");
+        assert_eq!(
+            (target_stats.navigation_mode, target_stats.runtime_state),
             (tau_proto::AgentNavigationMode::Active, expected_runtime),
             "{case}: the implicit write snapshot must precede dispatch changes"
         );

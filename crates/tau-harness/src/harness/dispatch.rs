@@ -169,7 +169,7 @@ impl Harness {
         .then(|| self.clone_prompt_text_for_watch_notification(&prompt.text));
         let event = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
             inference_activation,
-            agent_id: target_agent_id,
+            agent_id: target_agent_id.clone(),
             text: prompt.text,
             trusted_internal_spans: prompt.trusted_internal_spans,
             message_class: prompt.message_class,
@@ -208,11 +208,8 @@ impl Harness {
                 defers_notification && notify_watchers,
             );
         }
-        if !defers_notification
-            && let Some(text) = notification_text
-            && let Some(public_agent_id) = self.ensure_agent_id_for_agent(agent_id)
-        {
-            self.notify_agent_watchers_about_user_prompt(&public_agent_id, &text);
+        if !defers_notification && let Some(text) = notification_text {
+            self.notify_agent_watchers_about_user_prompt(&target_agent_id, &text);
         }
         Ok(())
     }

@@ -2900,6 +2900,20 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
+    let observer = connect_test_client(&mut h, "watched-prompt-stats", tau_proto::ClientKind::Ui);
+    h.runtime_io
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("watched-prompt-stats"),
+            Vec::new(),
+            vec![
+                EventSelector::Exact(tau_proto::EventName::AGENT_STATS_UPDATED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_STATE),
+            ],
+        )
+        .expect("observer subscription");
+    observer.lock().expect("observer frames").clear();
 
     h.reset_watch_prompt_text_clone_count_for_test();
     h.handle_authenticated_ui_prompt_submitted(
@@ -2930,6 +2944,44 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchPrompt);
     assert_eq!(received[0].sender_id, crate::parse_agent_id(&watched_id));
     assert_eq!(received[0].recipient_id, crate::parse_agent_id(&watcher_id));
+    let watched_id = crate::parse_agent_id(&watched_id);
+    let observed = observer
+        .lock()
+        .expect("observer frames")
+        .iter()
+        .filter_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::AgentStatsUpdated(stats)) if stats.agent_id == watched_id => Some("stats"),
+            Some(Event::AgentPromptSubmitted(prompt)) if prompt.agent_id == watched_id => {
+                Some("prompt")
+            }
+            Some(Event::AgentState(state)) if state.agent_id == watched_id => Some("state"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prompt_index = observed
+        .iter()
+        .position(|kind| *kind == "prompt")
+        .expect("prompt observation");
+    let state_index = observed
+        .iter()
+        .position(|kind| *kind == "state")
+        .expect("runtime-state mutation observation");
+    assert_eq!(
+        &observed[..=prompt_index],
+        &["stats", "prompt"],
+        "only the navigation snapshot may precede the watched prompt"
+    );
+    assert!(
+        observed[prompt_index + 1..state_index]
+            .iter()
+            .all(|kind| *kind != "stats"),
+        "watch notification must reuse the resolved id without another stats snapshot"
+    );
+    assert_eq!(
+        observed.get(state_index + 1),
+        Some(&"stats"),
+        "the actual runtime-state mutation must retain its stats snapshot"
+    );
 
     let watcher = h
         .agent_runtime

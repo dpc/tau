@@ -5520,18 +5520,22 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
             .get(&parsed_agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
-    assert!(
-        observer
-            .lock()
-            .expect("observer frames")
-            .iter()
-            .any(|frame| matches!(
+    let active_stats = observer
+        .lock()
+        .expect("observer frames")
+        .iter()
+        .filter(|frame| {
+            matches!(
                 peel_inner_event(&frame.frame),
                 Some(Event::AgentStatsUpdated(stats))
                     if stats.agent_id == parsed_agent_id
                         && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
-            )),
-        "the Active snapshot must publish before prompt content can remain parked"
+            )
+        })
+        .count();
+    assert_eq!(
+        active_stats, 1,
+        "only the navigation snapshot may publish before prompt content remains parked"
     );
 }
 

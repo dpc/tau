@@ -10,10 +10,26 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
+    let observer = connect_test_client(&mut h, "stats-observer", tau_proto::ClientKind::Ui);
+    h.runtime_io
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("stats-observer"),
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("observer subscription");
+    observer.lock().expect("observer frames").clear();
 
     let first = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     let second = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     assert_eq!(first, second);
+    assert!(
+        drain_stats_updated(&observer).is_empty(),
+        "already-loaded public-id lookups must be stats-silent"
+    );
     assert_role_hex_agent_id(&first, "engineer");
     assert_eq!(
         h.agent_runtime
@@ -31,6 +47,107 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
             .contains_key(first.as_str())
     );
 
+    h.shutdown().expect("shutdown");
+}
+
+/// First public-id assignment still publishes the newly loaded agent's initial
+/// complete stats snapshot.
+#[test]
+fn first_agent_id_mint_publishes_initial_stats() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    let cid = crate::parse_agent_id("unidentified-runtime");
+    let mut agent = Agent::new(
+        cid.clone(),
+        1,
+        h.session_runtime.current_session_id.clone(),
+        tau_proto::PromptOriginator::User,
+        None,
+        None,
+    );
+    agent.identity.role = Some(h.config.selected_role.clone());
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .insert(cid.clone(), agent);
+    let observer = connect_test_client(&mut h, "mint-stats-observer", tau_proto::ClientKind::Ui);
+    h.runtime_io
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("mint-stats-observer"),
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("observer subscription");
+    observer.lock().expect("observer frames").clear();
+
+    let public_id = h.ensure_agent_id_for_agent(&cid).expect("mint agent id");
+
+    let stats = drain_stats_updated(&observer);
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].agent_id, public_id);
+    h.shutdown().expect("shutdown");
+}
+
+/// Resolving an existing public id while introducing its runtime to the
+/// current session still publishes the first loaded stats snapshot.
+#[test]
+fn first_existing_agent_id_load_publishes_initial_stats() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    let public_id = tau_proto::AgentId::parse("existing-runtime").expect("agent id");
+    h.append_direct_agent_semantic_event(
+        public_id.as_str(),
+        tau_core::AgentEventParent::InheritHead,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+            agent_id: public_id.clone(),
+            parent_agent: None,
+            role: h.config.selected_role.clone(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    )
+    .expect("seed existing identity");
+    let cid = crate::parse_agent_id(public_id.as_str());
+    let mut agent = Agent::new(
+        cid.clone(),
+        1,
+        h.session_runtime.current_session_id.clone(),
+        tau_proto::PromptOriginator::User,
+        None,
+        None,
+    );
+    agent.identity.agent_id = Some(public_id.clone());
+    agent.identity.role = Some(h.config.selected_role.clone());
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .insert(cid.clone(), agent);
+    let observer = connect_test_client(&mut h, "load-stats-observer", tau_proto::ClientKind::Ui);
+    h.runtime_io
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("load-stats-observer"),
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("observer subscription");
+    observer.lock().expect("observer frames").clear();
+
+    let resolved = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("resolve existing agent id");
+
+    assert_eq!(resolved, public_id);
+    let stats = drain_stats_updated(&observer);
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].agent_id, public_id);
     h.shutdown().expect("shutdown");
 }
 

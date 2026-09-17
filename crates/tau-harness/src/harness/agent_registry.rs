@@ -2224,11 +2224,24 @@ impl Harness {
             .agent_id
             .clone()
         {
+            let was_loaded = self
+                .agent_runtime
+                .agent_registry
+                .session_loaded
+                .contains(&agent_id);
             self.ensure_loaded_agent_for_agent(cid, &agent_id);
             if !self.agent_runtime.agent_registry.agents.contains_key(cid) {
                 return None;
             }
-            self.emit_agent_stats_updated(cid);
+            if !was_loaded
+                && self
+                    .agent_runtime
+                    .agent_registry
+                    .session_loaded
+                    .contains(&agent_id)
+            {
+                self.emit_agent_stats_updated(cid);
+            }
             return Some(agent_id);
         }
         let role = self
