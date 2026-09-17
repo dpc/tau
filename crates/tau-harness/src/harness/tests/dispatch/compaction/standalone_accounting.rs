@@ -575,6 +575,157 @@ fn manual_standalone_compact_installs_one_boundary() {
     resumed.shutdown().expect("shutdown resumed harness");
 }
 
+/// A recovered semantic-persistence capacity wake must republish one retained
+/// manual start with its original identity and dispatch provider work once.
+#[test]
+fn manual_compact_capacity_recovery_retries_retained_start_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let model = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    model.supports_compaction = false;
+    model.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    connect_test_tool(&mut h, "manual-start-interceptor");
+    h.handle_extension_event(
+        "manual-start-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register manual start interceptor");
+
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(target_agent_id.as_str()),
+    );
+    let retained = h
+        .runtime_io
+        .publication
+        .pending_intercept
+        .as_ref()
+        .map(|pending| pending.event.clone())
+        .expect("manual start parked before semantic admission");
+    let Event::AgentStandaloneCompactionStarted(retained) = retained else {
+        panic!("intercepted UI owner must be the exact standalone start");
+    };
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "manual-start-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release manual start into semantic admission Full");
+    h.handle_disconnect(&crate::test_connection_id("manual-start-interceptor"));
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .rejected_ui_starts
+            .contains_key(&cid),
+        "manual start retained after semantic admission Full"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+            ))
+            .count(),
+        0,
+        "provider work cannot dispatch before the start commits"
+    );
+
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("persistence owner")
+        .signal_capacity_ready_for_test();
+    let mut served_clients = 0;
+    h.handle_runtime_event(
+        HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+        &mut served_clients,
+    )
+    .expect("capacity recovery retries retained manual start");
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .rejected_ui_starts
+            .is_empty(),
+        "the capacity wake consumes the retained manual start"
+    );
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent_events(target_agent_id.as_str())
+            .expect("durable agent events")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if started.transaction_id == retained.transaction_id
+                        && started.compact_prompt_id == retained.compact_prompt_id
+            ))
+            .count(),
+        1,
+        "the semantic progress wake commits the exact retained start"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.agent_prompt_id == retained.compact_prompt_id
+            ))
+            .count(),
+        1,
+        "the semantic progress wake dispatches provider work once"
+    );
+
+    h.handle_publication_capacity_ready();
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent_events(target_agent_id.as_str())
+            .expect("durable agent events")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if started.transaction_id == retained.transaction_id
+                        && started.compact_prompt_id == retained.compact_prompt_id
+            ))
+            .count(),
+        1,
+        "the exact retained start commits once across duplicate wakes"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.agent_prompt_id == retained.compact_prompt_id
+            ))
+            .count(),
+        1,
+        "a duplicate capacity wake does not dispatch provider work again"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Accounting and compaction outcomes retain independent exact publications
 /// when both semantic admissions reject, then each commits once after recovery.
 #[test]
@@ -618,7 +769,48 @@ fn standalone_accounting_and_outcome_append_rejections_recover_independently() {
         "the independent outcome retains its existing agent slot"
     );
 
-    h.retry_pending_agent_publications();
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("persistence owner")
+        .signal_capacity_ready_for_test();
+    let mut served_clients = 0;
+    h.handle_runtime_event(
+        HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+        &mut served_clients,
+    )
+    .expect("capacity recovery retries retained accounting and outcome");
+    assert!(
+        h.prompt_coordination
+            .standalone_accounting
+            .retained
+            .is_empty()
+            && h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .is_empty(),
+        "the semantic progress wake consumes both retained owners"
+    );
+    let recovered_events = event_log_events(&h);
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentCompacted(_)))
+            .count(),
+        1
+    );
+    h.handle_publication_capacity_ready();
     let events = event_log_events(&h);
     assert_eq!(
         events
@@ -726,7 +918,45 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
         1
     );
 
-    h.retry_pending_agent_publications();
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("persistence owner")
+        .signal_capacity_ready_for_test();
+    let mut served_clients = 0;
+    h.handle_runtime_event(
+        HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+        &mut served_clients,
+    )
+    .expect("capacity recovery retries accounting before its correction");
+    let recovered_events = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent events after capacity recovery");
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                    if corrected.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
+    h.handle_publication_capacity_ready();
     let events = h
         .session_runtime
         .agent_store
@@ -753,6 +983,28 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
         })
         .expect("committed correction");
     assert!(initial < correction);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                    if corrected.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
     assert_eq!(
         h.session_runtime
             .current_session_state

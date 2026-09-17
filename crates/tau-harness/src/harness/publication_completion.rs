@@ -144,6 +144,7 @@ impl Harness {
             self.retry_capacity_rejected_activations();
         }
         self.retry_retained_start_terminals();
+        self.retry_retained_ui_compaction_starts();
         let pending_cancels = self
             .agent_runtime
             .agent_registry
@@ -164,6 +165,7 @@ impl Harness {
         for cid in retained {
             self.retry_pending_agent_publish_completion(&cid);
         }
+        self.retry_pending_standalone_accounting_publications();
     }
 
     /// Terminalize only starts owned by the exact failed persistence scope.
@@ -1395,15 +1397,7 @@ impl Harness {
     /// proves that the harness is making progress again.
     pub(super) fn retry_pending_agent_publications(&mut self) {
         self.retry_retained_start_terminals();
-        let rejected_ui_starts = std::mem::take(
-            &mut self
-                .prompt_coordination
-                .compaction_runtime
-                .rejected_ui_starts,
-        );
-        for (cid, event) in rejected_ui_starts {
-            self.publish_for_agent(&cid, event);
-        }
+        self.retry_retained_ui_compaction_starts();
         let pending = self
             .prompt_coordination
             .prompt_runtime
@@ -1438,6 +1432,20 @@ impl Harness {
             .is_empty()
         {
             self.retry_capacity_rejected_activations();
+        }
+    }
+
+    /// Retry exact append-rejected manual compaction starts without deriving a
+    /// replacement transaction or dispatching provider work twice.
+    fn retry_retained_ui_compaction_starts(&mut self) {
+        let rejected_ui_starts = std::mem::take(
+            &mut self
+                .prompt_coordination
+                .compaction_runtime
+                .rejected_ui_starts,
+        );
+        for (cid, event) in rejected_ui_starts {
+            self.publish_for_agent(&cid, event);
         }
     }
 
